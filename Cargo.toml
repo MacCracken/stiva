@@ -28,31 +28,25 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
-anyhow = "1"
 bytes = "1"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "io-util", "process", "sync", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-async-trait = "0.1"
 futures = "0.3"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Crypto
 sha2 = "0.10"
-
-# OCI spec
-oci-spec = "0.7"
+hex = "0.4"
 
 # Sandbox (kavach provides isolation)
 kavach = { version = "0.21.3", features = ["process", "oci"] }
 
 # Queue / scheduling (majra provides fleet primitives)
 majra = { version = "0.21.3", features = ["queue", "heartbeat"] }
-hex = "0.4.3"
 
 # Linux-specific
 [target.'cfg(target_os = "linux")'.dependencies]

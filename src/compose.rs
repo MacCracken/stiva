@@ -47,8 +47,7 @@ pub struct VolumeDef {
 
 /// Parse a compose file from TOML.
 pub fn parse_compose(toml_str: &str) -> Result<ComposeFile, StivaError> {
-    toml::from_str(toml_str)
-        .map_err(|e| StivaError::Runtime(format!("invalid compose file: {e}")))
+    toml::from_str(toml_str).map_err(|e| StivaError::Compose(format!("invalid compose file: {e}")))
 }
 
 #[cfg(test)]
@@ -78,5 +77,88 @@ env = { POSTGRES_PASSWORD = "secret" }
         assert_eq!(compose.services.len(), 3);
         assert_eq!(compose.services["api"].depends_on, vec!["db"]);
         assert!(compose.volumes.contains_key("pgdata"));
+    }
+
+    #[test]
+    fn parse_compose_invalid_toml() {
+        let result = parse_compose("not a [valid toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_compose_missing_services() {
+        let result = parse_compose("[networks.default]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_compose_minimal() {
+        let toml = r#"
+[services.app]
+image = "alpine"
+"#;
+        let compose = parse_compose(toml).unwrap();
+        assert_eq!(compose.services.len(), 1);
+        assert!(compose.services["app"].command.is_empty());
+        assert!(compose.services["app"].depends_on.is_empty());
+        assert!(compose.networks.is_empty());
+        assert!(compose.volumes.is_empty());
+    }
+
+    #[test]
+    fn parse_compose_with_networks() {
+        let toml = r#"
+[services.app]
+image = "alpine"
+
+[networks.frontend]
+driver = "bridge"
+subnet = "10.0.0.0/24"
+"#;
+        let compose = parse_compose(toml).unwrap();
+        assert_eq!(compose.networks.len(), 1);
+        assert_eq!(
+            compose.networks["frontend"].driver.as_deref(),
+            Some("bridge")
+        );
+        assert_eq!(
+            compose.networks["frontend"].subnet.as_deref(),
+            Some("10.0.0.0/24")
+        );
+    }
+
+    #[test]
+    fn parse_compose_replicas() {
+        let toml = r#"
+[services.worker]
+image = "worker:latest"
+replicas = 3
+"#;
+        let compose = parse_compose(toml).unwrap();
+        assert_eq!(compose.services["worker"].replicas, Some(3));
+    }
+
+    #[test]
+    fn compose_file_serde_round_trip() {
+        let compose = ComposeFile {
+            services: HashMap::from([(
+                "web".to_string(),
+                ServiceDef {
+                    image: "nginx".to_string(),
+                    command: vec![],
+                    env: HashMap::new(),
+                    ports: vec!["80:80".to_string()],
+                    volumes: vec![],
+                    depends_on: vec![],
+                    replicas: None,
+                },
+            )]),
+            networks: HashMap::new(),
+            volumes: HashMap::new(),
+        };
+        let json = serde_json::to_string(&compose).unwrap();
+        let back: ComposeFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.services.len(), 1);
+        assert_eq!(back.services["web"].image, "nginx");
     }
 }

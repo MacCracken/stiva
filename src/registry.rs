@@ -156,9 +156,7 @@ impl RegistryClient {
         ]
         .join(", ");
 
-        let response = self
-            .authenticated_get(image, &url, Some(&accept))
-            .await?;
+        let response = self.authenticated_get(image, &url, Some(&accept)).await?;
 
         let content_type = response
             .headers()
@@ -291,9 +289,7 @@ impl RegistryClient {
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                StivaError::AuthFailed("401 without WWW-Authenticate header".into())
-            })?
+            .ok_or_else(|| StivaError::AuthFailed("401 without WWW-Authenticate header".into()))?
             .to_string();
 
         let token = self.acquire_token(&www_auth, &scope).await?;
@@ -353,9 +349,10 @@ impl RegistryClient {
             )));
         }
 
-        let body: serde_json::Value = resp.json().await.map_err(|e| {
-            StivaError::AuthFailed(format!("invalid token response: {e}"))
-        })?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| StivaError::AuthFailed(format!("invalid token response: {e}")))?;
 
         // Docker Hub uses "token", some registries use "access_token".
         body.get("token")
@@ -490,14 +487,8 @@ mod tests {
     fn parse_www_authenticate_bearer() {
         let header = r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/nginx:pull""#;
         let params = parse_www_authenticate(header);
-        assert_eq!(
-            params.get("realm").unwrap(),
-            "https://auth.docker.io/token"
-        );
-        assert_eq!(
-            params.get("service").unwrap(),
-            "registry.docker.io"
-        );
+        assert_eq!(params.get("realm").unwrap(), "https://auth.docker.io/token");
+        assert_eq!(params.get("service").unwrap(), "registry.docker.io");
         assert_eq!(
             params.get("scope").unwrap(),
             "repository:library/nginx:pull"
@@ -604,6 +595,112 @@ mod tests {
         let manifest: OciManifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.schema_version, 2);
         assert_eq!(manifest.layers.len(), 1);
+    }
+
+    #[test]
+    fn registry_client_default() {
+        let _client = RegistryClient::default();
+    }
+
+    #[test]
+    fn registry_client_with_config() {
+        let config = RegistryConfig {
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+        };
+        let _client = RegistryClient::with_config(config);
+    }
+
+    #[test]
+    fn parse_www_authenticate_no_prefix() {
+        let header = r#"realm="https://auth.example.com/token",service="registry""#;
+        let params = parse_www_authenticate(header);
+        assert_eq!(
+            params.get("realm").unwrap(),
+            "https://auth.example.com/token"
+        );
+    }
+
+    #[test]
+    fn normalize_all_arch_values() {
+        assert_eq!(normalize_arch("x86_64"), "amd64");
+        assert_eq!(normalize_arch("aarch64"), "arm64");
+        assert_eq!(normalize_arch("arm"), "arm");
+        assert_eq!(normalize_arch("s390x"), "s390x");
+        assert_eq!(normalize_arch("powerpc64"), "ppc64le");
+        assert_eq!(normalize_arch("riscv64"), "riscv64"); // passthrough
+    }
+
+    #[test]
+    fn current_platform_is_valid() {
+        let p = current_platform();
+        assert!(!p.os.is_empty());
+        assert!(!p.architecture.is_empty());
+    }
+
+    #[test]
+    fn platform_selection_with_variant_match() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![
+                PlatformManifest {
+                    media_type: MEDIA_MANIFEST_V2.to_string(),
+                    digest: "sha256:v7".to_string(),
+                    size: 1024,
+                    platform: Some(Platform {
+                        os: "linux".to_string(),
+                        architecture: "arm".to_string(),
+                        variant: Some("v7".to_string()),
+                        os_version: None,
+                    }),
+                },
+                PlatformManifest {
+                    media_type: MEDIA_MANIFEST_V2.to_string(),
+                    digest: "sha256:v6".to_string(),
+                    size: 1024,
+                    platform: Some(Platform {
+                        os: "linux".to_string(),
+                        architecture: "arm".to_string(),
+                        variant: Some("v6".to_string()),
+                        os_version: None,
+                    }),
+                },
+            ],
+        };
+
+        let target = Platform {
+            os: "linux".to_string(),
+            architecture: "arm".to_string(),
+            variant: Some("v7".to_string()),
+            os_version: None,
+        };
+        let selected = select_platform(&index, &target).unwrap();
+        assert_eq!(selected.digest, "sha256:v7");
+    }
+
+    #[test]
+    fn manifest_response_variants() {
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: None,
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: "sha256:abc".into(),
+                size: 100,
+            },
+            layers: vec![],
+        };
+        let resp = ManifestResponse::Manifest(manifest);
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![],
+        };
+        let resp = ManifestResponse::Index(index);
+        assert!(matches!(resp, ManifestResponse::Index(_)));
     }
 
     #[test]

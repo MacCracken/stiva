@@ -47,9 +47,7 @@ pub async fn setup_container_network(
 }
 
 /// Tear down container networking.
-pub async fn teardown_container_network(
-    _container_id: &str,
-) -> Result<(), StivaError> {
+pub async fn teardown_container_network(_container_id: &str) -> Result<(), StivaError> {
     // TODO: Remove veth pair, release IP
     Ok(())
 }
@@ -72,5 +70,47 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let back: NetworkMode = serde_json::from_str(&json).unwrap();
         assert_eq!(mode, back);
+    }
+
+    #[test]
+    fn network_mode_all_variants_serde() {
+        let modes = vec![
+            NetworkMode::Bridge,
+            NetworkMode::Host,
+            NetworkMode::None,
+            NetworkMode::Container("abc".into()),
+            NetworkMode::Custom("my-net".into()),
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: NetworkMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    #[test]
+    fn network_struct_serde() {
+        let net = Network {
+            name: "stiva-bridge0".to_string(),
+            subnet: "172.17.0.0/16".to_string(),
+            gateway: "172.17.0.1".to_string(),
+            driver: NetworkDriver::Bridge,
+        };
+        let json = serde_json::to_string(&net).unwrap();
+        let back: Network = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "stiva-bridge0");
+        assert_eq!(back.subnet, "172.17.0.0/16");
+    }
+
+    #[test]
+    fn network_driver_variants() {
+        for driver in [
+            NetworkDriver::Bridge,
+            NetworkDriver::Overlay,
+            NetworkDriver::Macvlan,
+        ] {
+            let json = serde_json::to_string(&driver).unwrap();
+            let _back: NetworkDriver = serde_json::from_str(&json).unwrap();
+        }
     }
 }

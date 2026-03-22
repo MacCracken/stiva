@@ -38,7 +38,9 @@ pub async fn setup_overlay(
     // TODO: Create lower/upper/work/merged dirs
     // TODO: Mount overlayfs via nix::mount
     // TODO: Return merged rootfs path
-    Err(StivaError::Storage("overlay setup not yet implemented".into()))
+    Err(StivaError::Storage(
+        "overlay setup not yet implemented".into(),
+    ))
 }
 
 /// Tear down overlay filesystem.
@@ -69,5 +71,30 @@ mod tests {
     #[test]
     fn parse_volume_invalid() {
         assert!(parse_volume("nocolon").is_err());
+    }
+
+    #[test]
+    fn parse_volume_too_many_parts() {
+        assert!(parse_volume("/a:/b:ro:extra").is_err());
+    }
+
+    #[test]
+    fn parse_volume_rw_explicit() {
+        let vol = parse_volume("/src:/dst:rw").unwrap();
+        // "rw" != "ro", so read_only should be false.
+        assert!(!vol.read_only);
+    }
+
+    #[test]
+    fn volume_mount_serde() {
+        let vol = VolumeMount {
+            source: PathBuf::from("/host/data"),
+            target: PathBuf::from("/container/data"),
+            read_only: true,
+        };
+        let json = serde_json::to_string(&vol).unwrap();
+        let back: VolumeMount = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source, PathBuf::from("/host/data"));
+        assert!(back.read_only);
     }
 }

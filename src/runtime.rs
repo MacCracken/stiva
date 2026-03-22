@@ -58,7 +58,9 @@ pub async fn exec_container(_spec: &RuntimeSpec) -> Result<u32, StivaError> {
     // TODO: Convert RuntimeSpec -> kavach::SandboxConfig
     // TODO: Create kavach::Sandbox with OCI backend
     // TODO: Exec and return PID
-    Err(StivaError::Runtime("runtime execution not yet implemented".into()))
+    Err(StivaError::Runtime(
+        "runtime execution not yet implemented".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -66,9 +68,8 @@ mod tests {
     use super::*;
     use crate::container::ContainerConfig;
 
-    #[test]
-    fn generate_spec_defaults() {
-        let container = Container {
+    fn test_container(config: ContainerConfig) -> Container {
+        Container {
             id: "test".to_string(),
             name: None,
             image_id: "img".to_string(),
@@ -77,11 +78,55 @@ mod tests {
             pid: None,
             created_at: chrono::Utc::now(),
             started_at: None,
-            config: ContainerConfig::default(),
-        };
+            config,
+        }
+    }
 
+    #[test]
+    fn generate_spec_defaults() {
+        let container = test_container(ContainerConfig::default());
         let spec = generate_spec(&container, std::path::Path::new("/tmp/rootfs")).unwrap();
         assert_eq!(spec.command, vec!["/bin/sh"]);
         assert_eq!(spec.namespaces.len(), 5);
+        assert_eq!(spec.rootfs, std::path::PathBuf::from("/tmp/rootfs"));
+        assert!(spec.env.is_empty());
+    }
+
+    #[test]
+    fn generate_spec_with_command() {
+        let config = ContainerConfig {
+            command: vec!["nginx".into(), "-g".into(), "daemon off;".into()],
+            ..Default::default()
+        };
+        let container = test_container(config);
+        let spec = generate_spec(&container, std::path::Path::new("/rootfs")).unwrap();
+        assert_eq!(spec.command, vec!["nginx", "-g", "daemon off;"]);
+    }
+
+    #[test]
+    fn generate_spec_with_env() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("PORT".to_string(), "8080".to_string());
+        env.insert("DEBUG".to_string(), "1".to_string());
+        let config = ContainerConfig {
+            env,
+            ..Default::default()
+        };
+        let container = test_container(config);
+        let spec = generate_spec(&container, std::path::Path::new("/rootfs")).unwrap();
+        assert_eq!(spec.env.len(), 2);
+        assert!(spec.env.contains(&"PORT=8080".to_string()));
+        assert!(spec.env.contains(&"DEBUG=1".to_string()));
+    }
+
+    #[test]
+    fn namespaces_are_correct() {
+        let container = test_container(ContainerConfig::default());
+        let spec = generate_spec(&container, std::path::Path::new("/rootfs")).unwrap();
+        assert!(matches!(spec.namespaces[0], Namespace::Pid));
+        assert!(matches!(spec.namespaces[1], Namespace::Net));
+        assert!(matches!(spec.namespaces[2], Namespace::Mount));
+        assert!(matches!(spec.namespaces[3], Namespace::Uts));
+        assert!(matches!(spec.namespaces[4], Namespace::Ipc));
     }
 }

@@ -147,7 +147,9 @@ impl ContainerManager {
             .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
 
         if container.state == ContainerState::Running {
-            return Err(StivaError::AlreadyRunning(id.to_string()));
+            return Err(StivaError::InvalidState(format!(
+                "cannot remove running container {id} — stop it first"
+            )));
         }
 
         // Clean up filesystem
@@ -214,8 +216,134 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        let c = manager.create(&image, ContainerConfig::default()).await.unwrap();
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
         manager.start(&c.id).await.unwrap();
         assert!(manager.start(&c.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+        assert!(manager.stop("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remove_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+        assert!(manager.remove("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cannot_remove_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "test".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        manager.start(&c.id).await.unwrap();
+
+        let err = manager.remove(&c.id).await.unwrap_err();
+        assert!(matches!(err, crate::StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn create_sets_name_and_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "img".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        // Auto-generated name.
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        assert!(c.name.is_some());
+        assert_eq!(c.name.as_deref().unwrap().len(), 12);
+        assert!(c.started_at.is_none());
+
+        // Explicit name.
+        let config = ContainerConfig {
+            name: Some("web-server".to_string()),
+            ..Default::default()
+        };
+        let c2 = manager.create(&image, config).await.unwrap();
+        assert_eq!(c2.name.as_deref(), Some("web-server"));
+    }
+
+    #[tokio::test]
+    async fn start_sets_started_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "img".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        manager.start(&c.id).await.unwrap();
+
+        let listed = manager.list().await.unwrap();
+        assert!(listed[0].started_at.is_some());
+    }
+
+    #[test]
+    fn container_state_serde() {
+        let states = [
+            ContainerState::Created,
+            ContainerState::Running,
+            ContainerState::Paused,
+            ContainerState::Stopped,
+            ContainerState::Removing,
+        ];
+        for state in states {
+            let json = serde_json::to_string(&state).unwrap();
+            let back: ContainerState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, back);
+        }
+    }
+
+    #[test]
+    fn container_config_serde() {
+        let config = ContainerConfig {
+            name: Some("test".to_string()),
+            command: vec!["/bin/sh".to_string()],
+            env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            ports: vec!["8080:80".to_string()],
+            memory_limit: 512 * 1024 * 1024,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: ContainerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, Some("test".to_string()));
+        assert_eq!(back.memory_limit, 512 * 1024 * 1024);
     }
 }

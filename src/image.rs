@@ -19,7 +19,15 @@ pub struct ImageRef {
 
 impl ImageRef {
     /// Parse an image reference string.
+    ///
+    /// Supports: `nginx`, `nginx:1.25`, `user/repo:tag`, `ghcr.io/user/repo:tag`,
+    /// `localhost:5000/repo:tag`, `repo@sha256:...`.
     pub fn parse(reference: &str) -> Result<Self, StivaError> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return Err(StivaError::InvalidReference("empty image reference".into()));
+        }
+
         // Handle digest references (repo@sha256:...)
         let (ref_without_digest, digest) = if let Some((r, d)) = reference.split_once('@') {
             (r, Some(d.to_string()))
@@ -27,37 +35,47 @@ impl ImageRef {
             (reference, None)
         };
 
-        // Split tag
-        let (ref_without_tag, tag) = if let Some((r, t)) = ref_without_digest.rsplit_once(':') {
-            // Make sure this isn't a port number
-            if r.contains('/') || !t.chars().all(|c| c.is_ascii_digit()) {
-                (r, t.to_string())
+        // Split tag — but only if the colon comes after the last slash
+        // (to avoid confusing a port like localhost:5000 with a tag).
+        let (ref_without_tag, tag) = if let Some(slash_pos) = ref_without_digest.rfind('/') {
+            let after_slash = &ref_without_digest[slash_pos + 1..];
+            if let Some((name, tag)) = after_slash.rsplit_once(':') {
+                let before = &ref_without_digest[..slash_pos + 1];
+                (format!("{before}{name}"), tag.to_string())
             } else {
-                (ref_without_digest, "latest".to_string())
+                (ref_without_digest.to_string(), "latest".to_string())
             }
         } else {
-            (ref_without_digest, "latest".to_string())
+            // No slash at all — simple name or name:tag.
+            if let Some((name, tag)) = ref_without_digest.rsplit_once(':') {
+                (name.to_string(), tag.to_string())
+            } else {
+                (ref_without_digest.to_string(), "latest".to_string())
+            }
         };
 
-        // Split registry from repository
-        let (registry, repository) =
-            if ref_without_tag.contains('.') || ref_without_tag.contains(':') {
-                if let Some((reg, repo)) = ref_without_tag.split_once('/') {
-                    (reg.to_string(), repo.to_string())
-                } else {
-                    (
-                        "docker.io".to_string(),
-                        format!("library/{ref_without_tag}"),
-                    )
-                }
-            } else if ref_without_tag.contains('/') {
-                ("docker.io".to_string(), ref_without_tag.to_string())
+        // Split registry from repository.
+        // A first component is a registry if it contains a dot or colon (port).
+        let (registry, repository) = if let Some((first, rest)) = ref_without_tag.split_once('/') {
+            if first.contains('.') || first.contains(':') {
+                (first.to_string(), rest.to_string())
             } else {
-                (
-                    "docker.io".to_string(),
-                    format!("library/{ref_without_tag}"),
-                )
-            };
+                // No dot/colon in first segment → Docker Hub user/repo.
+                ("docker.io".to_string(), ref_without_tag.to_string())
+            }
+        } else {
+            // Bare name like "nginx" → docker.io/library/nginx.
+            (
+                "docker.io".to_string(),
+                format!("library/{ref_without_tag}"),
+            )
+        };
+
+        if repository.is_empty() {
+            return Err(StivaError::InvalidReference(format!(
+                "empty repository in reference: {reference}"
+            )));
+        }
 
         Ok(Self {
             registry,
@@ -132,7 +150,9 @@ impl ImageStore {
         // 3. Download config blob.
         info!(digest = %manifest.config.digest, "pulling config");
         if !self.has_blob(&manifest.config.digest) {
-            let config_data = client.fetch_blob(reference, &manifest.config.digest).await?;
+            let config_data = client
+                .fetch_blob(reference, &manifest.config.digest)
+                .await?;
             self.store_blob(&manifest.config.digest, &config_data)?;
         }
 
@@ -175,7 +195,7 @@ impl ImageStore {
             .iter()
             .map(|d| Layer {
                 digest: d.digest.clone(),
-                size_bytes: d.size,  // Descriptor::size → Layer::size_bytes
+                size_bytes: d.size, // Descriptor::size → Layer::size_bytes
                 media_type: d.media_type.clone(),
             })
             .collect();
@@ -235,11 +255,7 @@ impl ImageStore {
     /// Check whether a blob exists locally.
     pub fn has_blob(&self, digest: &str) -> bool {
         let hex = digest_hex(digest);
-        self.root
-            .join("blobs")
-            .join("sha256")
-            .join(hex)
-            .exists()
+        self.root.join("blobs").join("sha256").join(hex).exists()
     }
 
     /// Read a blob from the store.
@@ -270,7 +286,9 @@ impl ImageStore {
             .join(&reference.repository);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", reference.tag));
-        std::fs::write(path, manifest_bytes)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, manifest_bytes)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 
@@ -367,10 +385,7 @@ fn sha256_digest(data: &[u8]) -> String {
 
 /// Extract the hex portion from a `sha256:{hex}` digest.
 fn digest_hex(digest: &str) -> String {
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest)
-        .to_string()
+    digest.strip_prefix("sha256:").unwrap_or(digest).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +471,8 @@ mod tests {
         let store = ImageStore::new(dir.path()).unwrap();
 
         let data = b"actual data";
-        let wrong_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let wrong_digest =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
         let result = store.store_blob(wrong_digest, data);
         assert!(result.is_err());
@@ -544,6 +560,129 @@ mod tests {
 
         // Blob should be cleaned up since no images reference it.
         assert!(!store.has_blob(&digest));
+    }
+
+    // -- ImageRef parser edge cases --
+
+    #[test]
+    fn parse_empty_ref() {
+        assert!(ImageRef::parse("").is_err());
+        assert!(ImageRef::parse("   ").is_err());
+    }
+
+    #[test]
+    fn parse_digest_ref() {
+        let r = ImageRef::parse("nginx@sha256:abcdef1234567890").unwrap();
+        assert_eq!(r.repository, "library/nginx");
+        assert_eq!(r.tag, "latest");
+        assert_eq!(r.digest.as_deref(), Some("sha256:abcdef1234567890"));
+    }
+
+    #[test]
+    fn parse_registry_with_port() {
+        let r = ImageRef::parse("localhost:5000/myimage:v1").unwrap();
+        assert_eq!(r.registry, "localhost:5000");
+        assert_eq!(r.repository, "myimage");
+        assert_eq!(r.tag, "v1");
+    }
+
+    #[test]
+    fn parse_registry_with_port_no_tag() {
+        let r = ImageRef::parse("localhost:5000/myimage").unwrap();
+        assert_eq!(r.registry, "localhost:5000");
+        assert_eq!(r.repository, "myimage");
+        assert_eq!(r.tag, "latest");
+    }
+
+    #[test]
+    fn parse_deep_repo_path() {
+        let r = ImageRef::parse("ghcr.io/org/sub/repo:v2").unwrap();
+        assert_eq!(r.registry, "ghcr.io");
+        assert_eq!(r.repository, "org/sub/repo");
+        assert_eq!(r.tag, "v2");
+    }
+
+    #[test]
+    fn full_ref_format() {
+        let r = ImageRef::parse("ghcr.io/user/repo:v1").unwrap();
+        assert_eq!(r.full_ref(), "ghcr.io/user/repo:v1");
+    }
+
+    #[test]
+    fn parse_tagged_digest_ref() {
+        let r = ImageRef::parse("nginx:1.25@sha256:abc123").unwrap();
+        assert_eq!(r.tag, "1.25");
+        assert_eq!(r.digest.as_deref(), Some("sha256:abc123"));
+    }
+
+    // -- Digest helpers --
+
+    #[test]
+    fn sha256_digest_deterministic() {
+        let d1 = sha256_digest(b"test");
+        let d2 = sha256_digest(b"test");
+        assert_eq!(d1, d2);
+        assert!(d1.starts_with("sha256:"));
+        assert_eq!(d1.len(), 7 + 64); // "sha256:" + 64 hex chars
+    }
+
+    #[test]
+    fn digest_hex_strips_prefix() {
+        assert_eq!(digest_hex("sha256:abcdef"), "abcdef");
+        assert_eq!(digest_hex("abcdef"), "abcdef");
+    }
+
+    // -- Image remove edge cases --
+
+    #[test]
+    fn remove_nonexistent_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+        assert!(store.remove("sha256:doesnotexist").is_err());
+    }
+
+    #[test]
+    fn remove_preserves_shared_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        let shared_data = b"shared layer";
+        let shared_digest = sha256_digest(shared_data);
+        store.store_blob(&shared_digest, shared_data).unwrap();
+
+        let img1 = Image {
+            id: "sha256:img1".into(),
+            reference: ImageRef::parse("app:v1").unwrap(),
+            size_bytes: 12,
+            layers: vec![Layer {
+                digest: shared_digest.clone(),
+                size_bytes: 12,
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+            }],
+            created_at: chrono::Utc::now(),
+        };
+        let img2 = Image {
+            id: "sha256:img2".into(),
+            reference: ImageRef::parse("app:v2").unwrap(),
+            size_bytes: 12,
+            layers: vec![Layer {
+                digest: shared_digest.clone(),
+                size_bytes: 12,
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+            }],
+            created_at: chrono::Utc::now(),
+        };
+
+        store.add_to_index(&img1).unwrap();
+        store.add_to_index(&img2).unwrap();
+
+        // Remove img1 — shared blob should survive because img2 still needs it.
+        store.remove("sha256:img1").unwrap();
+        assert!(store.has_blob(&shared_digest));
+
+        // Remove img2 — now the blob is unreferenced and should be cleaned up.
+        store.remove("sha256:img2").unwrap();
+        assert!(!store.has_blob(&shared_digest));
     }
 
     #[test]

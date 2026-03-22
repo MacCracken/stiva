@@ -23,14 +23,14 @@
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
 
-pub mod image;
-pub mod container;
-pub mod runtime;
-pub mod network;
-pub mod storage;
-pub mod registry;
 #[cfg(feature = "compose")]
 pub mod compose;
+pub mod container;
+pub mod image;
+pub mod network;
+pub mod registry;
+pub mod runtime;
+pub mod storage;
 
 mod error;
 pub use error::StivaError;
@@ -157,6 +157,46 @@ mod tests {
             config.root_path,
             std::path::PathBuf::from("/var/lib/agnos/containers")
         );
+        assert_eq!(
+            config.image_path,
+            std::path::PathBuf::from("/var/lib/agnos/images")
+        );
         assert_eq!(config.max_containers, 64);
+        assert_eq!(config.default_network, network::NetworkMode::Bridge);
+    }
+
+    #[test]
+    fn config_serde_round_trip() {
+        let config = StivaConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let back: StivaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.root_path, config.root_path);
+        assert_eq!(back.max_containers, config.max_containers);
+    }
+
+    #[tokio::test]
+    async fn stiva_new_creates_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let _stiva = Stiva::new(config).await.unwrap();
+        assert!(dir.path().join("containers").exists());
+        assert!(dir.path().join("images").exists());
+    }
+
+    #[tokio::test]
+    async fn stiva_images_empty_on_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let stiva = Stiva::new(config).await.unwrap();
+        assert!(stiva.images().await.unwrap().is_empty());
+        assert!(stiva.ps().await.unwrap().is_empty());
     }
 }
