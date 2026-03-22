@@ -868,4 +868,283 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "sha256:v2");
     }
+
+    #[test]
+    fn read_blob_io_error_not_notfound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        // Create a directory where the blob file should be — causes IsADirectory error.
+        let hex = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let blob_path = dir.path().join("blobs").join("sha256").join(hex);
+        std::fs::create_dir_all(&blob_path).unwrap();
+
+        let err = store.read_blob(&format!("sha256:{hex}")).unwrap_err();
+        assert!(matches!(err, StivaError::Io(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Wiremock integration: full pull pipeline
+    // -----------------------------------------------------------------------
+
+    use crate::registry::{Descriptor, MEDIA_OCI_MANIFEST, OciManifest, RegistryClient};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Compute digest for test data (re-export of private fn for test use).
+    fn test_digest(data: &[u8]) -> String {
+        sha256_digest(data)
+    }
+
+    #[tokio::test]
+    async fn pull_full_pipeline() {
+        let server = MockServer::start().await;
+
+        let config_data = br#"{"architecture":"amd64","os":"linux"}"#;
+        let config_digest = test_digest(config_data);
+
+        let layer_data = b"fake-tar-gz-layer-content-here";
+        let layer_digest = test_digest(layer_data);
+
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_MANIFEST.into()),
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: config_digest.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: vec![Descriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                digest: layer_digest.clone(),
+                size: layer_data.len() as u64,
+            }],
+        };
+
+        // Manifest endpoint.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(&manifest)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        // Config blob endpoint.
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{config_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(config_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        // Layer blob endpoint.
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{layer_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(layer_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+        let client = RegistryClient::with_base_url(&server.uri());
+
+        let reference = ImageRef {
+            registry: server.address().to_string(),
+            repository: "library/alpine".into(),
+            tag: "latest".into(),
+            digest: None,
+        };
+
+        let image = store.pull(&reference, &client).await.unwrap();
+
+        // Verify image record.
+        assert_eq!(image.id, config_digest);
+        assert_eq!(image.layers.len(), 1);
+        assert_eq!(image.layers[0].digest, layer_digest);
+        assert_eq!(image.size_bytes, layer_data.len() as u64);
+
+        // Verify blobs on disk.
+        assert!(store.has_blob(&config_digest));
+        assert!(store.has_blob(&layer_digest));
+
+        // Verify config content.
+        let read_config = store.read_blob(&config_digest).unwrap();
+        assert_eq!(read_config, config_data);
+
+        // Verify layer content.
+        let read_layer = store.read_blob(&layer_digest).unwrap();
+        assert_eq!(read_layer, layer_data);
+
+        // Verify manifest stored at manifests/{registry}/{repo}/{tag}.json.
+        let manifest_path = dir
+            .path()
+            .join("manifests")
+            .join(reference.registry)
+            .join("library/alpine")
+            .join("latest.json");
+        assert!(manifest_path.exists());
+
+        // Verify image index.
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, config_digest);
+    }
+
+    #[tokio::test]
+    async fn pull_dedup_skips_existing_layers() {
+        let server = MockServer::start().await;
+
+        let config_data = br#"{"architecture":"amd64"}"#;
+        let config_digest = test_digest(config_data);
+
+        let layer_data = b"already-have-this-layer";
+        let layer_digest = test_digest(layer_data);
+
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_MANIFEST.into()),
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: config_digest.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: vec![Descriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                digest: layer_digest.clone(),
+                size: layer_data.len() as u64,
+            }],
+        };
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(&manifest)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{config_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(config_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        // Layer endpoint should NOT be called — pre-store it.
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{layer_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(layer_data.to_vec()))
+            .expect(0) // Should not be called!
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        // Pre-store the layer blob.
+        store.store_blob(&layer_digest, layer_data).unwrap();
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let reference = ImageRef {
+            registry: server.address().to_string(),
+            repository: "library/alpine".into(),
+            tag: "latest".into(),
+            digest: None,
+        };
+
+        let image = store.pull(&reference, &client).await.unwrap();
+        assert_eq!(image.layers.len(), 1);
+        // Layer blob endpoint was NOT hit (expect(0) validates this).
+    }
+
+    #[tokio::test]
+    async fn pull_multiple_layers() {
+        let server = MockServer::start().await;
+
+        let config_data = br#"{"os":"linux"}"#;
+        let config_digest = test_digest(config_data);
+
+        let layer1_data = b"layer-one-data";
+        let layer1_digest = test_digest(layer1_data);
+        let layer2_data = b"layer-two-data";
+        let layer2_digest = test_digest(layer2_data);
+        let layer3_data = b"layer-three-data";
+        let layer3_digest = test_digest(layer3_data);
+
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: None,
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: config_digest.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: vec![
+                Descriptor {
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    digest: layer1_digest.clone(),
+                    size: layer1_data.len() as u64,
+                },
+                Descriptor {
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    digest: layer2_digest.clone(),
+                    size: layer2_data.len() as u64,
+                },
+                Descriptor {
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    digest: layer3_digest.clone(),
+                    size: layer3_data.len() as u64,
+                },
+            ],
+        };
+
+        Mock::given(method("GET"))
+            .and(path("/v2/myapp/manifests/v1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(&manifest)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        for (digest, data) in [
+            (&config_digest, config_data.as_slice()),
+            (&layer1_digest, layer1_data.as_slice()),
+            (&layer2_digest, layer2_data.as_slice()),
+            (&layer3_digest, layer3_data.as_slice()),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/myapp/blobs/{digest}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(data.to_vec()))
+                .mount(&server)
+                .await;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+        let client = RegistryClient::with_base_url(&server.uri());
+
+        let reference = ImageRef {
+            registry: server.address().to_string(),
+            repository: "myapp".into(),
+            tag: "v1".into(),
+            digest: None,
+        };
+
+        let image = store.pull(&reference, &client).await.unwrap();
+        assert_eq!(image.layers.len(), 3);
+        assert!(store.has_blob(&layer1_digest));
+        assert!(store.has_blob(&layer2_digest));
+        assert!(store.has_blob(&layer3_digest));
+
+        let total: u64 = [layer1_data.len(), layer2_data.len(), layer3_data.len()]
+            .iter()
+            .map(|l| *l as u64)
+            .sum();
+        assert_eq!(image.size_bytes, total);
+    }
 }

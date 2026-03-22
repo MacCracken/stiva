@@ -93,10 +93,11 @@ struct AuthToken {
 // Media types
 // ---------------------------------------------------------------------------
 
-const MEDIA_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
-const MEDIA_MANIFEST_LIST_V2: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
-const MEDIA_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
-const MEDIA_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
+pub(crate) const MEDIA_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
+pub(crate) const MEDIA_MANIFEST_LIST_V2: &str =
+    "application/vnd.docker.distribution.manifest.list.v2+json";
+pub(crate) const MEDIA_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+pub(crate) const MEDIA_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
 // ---------------------------------------------------------------------------
 // RegistryClient
@@ -108,6 +109,10 @@ pub struct RegistryClient {
     config: RegistryConfig,
     /// Cached tokens keyed by `"{registry}\0{scope}"`.
     tokens: Arc<RwLock<HashMap<String, AuthToken>>>,
+    /// Override base URL for testing (e.g. `http://localhost:PORT`).
+    /// When set, replaces `https://{registry_host}` in all requests.
+    #[cfg(test)]
+    base_url: Option<String>,
 }
 
 impl Default for RegistryClient {
@@ -134,16 +139,46 @@ impl RegistryClient {
             client,
             config,
             tokens: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            base_url: None,
         }
+    }
+
+    /// Create a client that talks to a mock server instead of real registries.
+    #[cfg(test)]
+    pub(crate) fn with_base_url(base_url: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent("stiva/0.21.3")
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self {
+            client,
+            config: RegistryConfig::default(),
+            tokens: Arc::new(RwLock::new(HashMap::new())),
+            base_url: Some(base_url.to_string()),
+        }
+    }
+
+    // -- internal -----------------------------------------------------------
+
+    /// Get the base URL for API requests.
+    fn api_base(&self, image: &ImageRef) -> String {
+        #[cfg(test)]
+        if let Some(ref base) = self.base_url {
+            return base.clone();
+        }
+        format!("https://{}", registry_host(&image.registry))
     }
 
     // -- public API ---------------------------------------------------------
 
     /// Fetch a manifest or manifest list for an image.
     pub async fn fetch_manifest(&self, image: &ImageRef) -> Result<ManifestResponse, StivaError> {
+        let base = self.api_base(image);
         let url = format!(
-            "https://{}/v2/{}/manifests/{}",
-            registry_host(&image.registry),
+            "{base}/v2/{}/manifests/{}",
             image.repository,
             image.digest.as_deref().unwrap_or(&image.tag),
         );
@@ -212,12 +247,8 @@ impl RegistryClient {
         image: &ImageRef,
         digest: &str,
     ) -> Result<bytes::Bytes, StivaError> {
-        let url = format!(
-            "https://{}/v2/{}/blobs/{}",
-            registry_host(&image.registry),
-            image.repository,
-            digest,
-        );
+        let base = self.api_base(image);
+        let url = format!("{base}/v2/{}/blobs/{}", image.repository, digest);
 
         let response = self.authenticated_get(image, &url, None).await?;
 
@@ -957,5 +988,773 @@ mod tests {
             index.manifests[1].platform.as_ref().unwrap().variant,
             Some("v8".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wiremock integration tests
+    // -----------------------------------------------------------------------
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Helper: JSON body for a simple OCI manifest.
+    fn test_manifest_json() -> String {
+        serde_json::to_string(&OciManifest {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_MANIFEST.into()),
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: "sha256:cfgaaa".into(),
+                size: 64,
+            },
+            layers: vec![Descriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                digest: "sha256:layeraaa".into(),
+                size: 128,
+            }],
+        })
+        .unwrap()
+    }
+
+    /// Helper: ImageRef pointing at the mock server.
+    fn mock_image(server: &MockServer) -> ImageRef {
+        // Use the mock server's address as the registry.
+        let addr = server.address().to_string();
+        ImageRef {
+            registry: addr,
+            repository: "library/alpine".into(),
+            tag: "latest".into(),
+            digest: None,
+        }
+    }
+
+    // -- fetch_manifest (no auth required) --
+
+    #[tokio::test]
+    async fn mock_fetch_manifest_no_auth() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(&body)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        match resp {
+            ManifestResponse::Manifest(m) => {
+                assert_eq!(m.schema_version, 2);
+                assert_eq!(m.layers.len(), 1);
+                assert_eq!(m.config.digest, "sha256:cfgaaa");
+            }
+            ManifestResponse::Index(_) => panic!("expected manifest, got index"),
+        }
+    }
+
+    // -- fetch_manifest returning manifest list --
+
+    #[tokio::test]
+    async fn mock_fetch_manifest_list() {
+        let server = MockServer::start().await;
+        let arch = normalize_arch(std::env::consts::ARCH);
+        let os = std::env::consts::OS;
+
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_INDEX.into()),
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_OCI_MANIFEST.into(),
+                digest: "sha256:platform_digest".into(),
+                size: 512,
+                platform: Some(Platform {
+                    os: os.into(),
+                    architecture: arch,
+                    variant: None,
+                    os_version: None,
+                }),
+            }],
+        };
+        let index_json = serde_json::to_string(&index).unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", MEDIA_OCI_INDEX)
+                    .set_body_raw(index_json, "application/vnd.oci.image.index.v1+json"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Index(_)));
+    }
+
+    // -- fetch_blob --
+
+    #[tokio::test]
+    async fn mock_fetch_blob() {
+        let server = MockServer::start().await;
+        let blob_data = b"fake layer content here";
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/blobs/sha256:layeraaa"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(blob_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let data = client.fetch_blob(&image, "sha256:layeraaa").await.unwrap();
+        assert_eq!(data.as_ref(), blob_data);
+    }
+
+    // -- bearer token auth flow --
+
+    #[tokio::test]
+    async fn mock_auth_flow() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        // First request → 401 with WWW-Authenticate.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(401).insert_header(
+                    "www-authenticate",
+                    &format!(
+                        r#"Bearer realm="{}/token",service="registry",scope="repository:library/alpine:pull""#,
+                        server.uri()
+                    ),
+                ),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Token endpoint.
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "test-bearer-token"})),
+            )
+            .mount(&server)
+            .await;
+
+        // Retry with token → success.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer test-bearer-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(&body)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+    }
+
+    // -- auth flow with access_token key --
+
+    #[tokio::test]
+    async fn mock_auth_access_token_key() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Token response uses "access_token" instead of "token".
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "alt-token"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer alt-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(&body)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+    }
+
+    // -- resolve_manifest (manifest list → concrete manifest) --
+
+    #[tokio::test]
+    async fn mock_resolve_manifest_from_index() {
+        let server = MockServer::start().await;
+        let arch = normalize_arch(std::env::consts::ARCH);
+        let os = std::env::consts::OS;
+
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_INDEX.into()),
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_OCI_MANIFEST.into(),
+                digest: "sha256:resolved_digest".into(),
+                size: 512,
+                platform: Some(Platform {
+                    os: os.into(),
+                    architecture: arch,
+                    variant: None,
+                    os_version: None,
+                }),
+            }],
+        };
+
+        // Tag request → index.
+        let index_json = serde_json::to_string(&index).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(index_json, MEDIA_OCI_INDEX))
+            .mount(&server)
+            .await;
+
+        // Digest request → concrete manifest.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/sha256:resolved_digest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(test_manifest_json(), MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let manifest = client.resolve_manifest(&image).await.unwrap();
+        assert_eq!(manifest.schema_version, 2);
+        assert_eq!(manifest.config.digest, "sha256:cfgaaa");
+    }
+
+    // -- error: 404 manifest --
+
+    #[tokio::test]
+    async fn mock_manifest_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+    }
+
+    // -- error: 500 server error --
+
+    #[tokio::test]
+    async fn mock_server_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+    }
+
+    // -- error: auth failure (401 after token) --
+
+    #[tokio::test]
+    async fn mock_auth_failure_after_token() {
+        let server = MockServer::start().await;
+
+        // Always 401.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .mount(&server)
+            .await;
+
+        // Token endpoint succeeds.
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "bad-token"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::AuthFailed(_)));
+    }
+
+    // -- error: 401 without WWW-Authenticate header --
+
+    #[tokio::test]
+    async fn mock_401_no_www_authenticate() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::AuthFailed(_)));
+    }
+
+    // -- error: token endpoint returns no token field --
+
+    #[tokio::test]
+    async fn mock_token_endpoint_no_token_field() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"error": "nope"})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::AuthFailed(_)));
+    }
+
+    // -- error: token endpoint returns HTTP error --
+
+    #[tokio::test]
+    async fn mock_token_endpoint_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::AuthFailed(_)));
+    }
+
+    // -- blob fetch error --
+
+    #[tokio::test]
+    async fn mock_blob_not_found() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/blobs/sha256:missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client
+            .fetch_blob(&image, "sha256:missing")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+    }
+
+    // -- fetch manifest by digest --
+
+    #[tokio::test]
+    async fn mock_fetch_manifest_by_digest() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/sha256:pinned"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(&body)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let mut image = mock_image(&server);
+        image.digest = Some("sha256:pinned".into());
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+    }
+
+    // -- cached token reuse --
+
+    #[tokio::test]
+    async fn mock_cached_token_reused() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        // Serve manifest for any request with valid bearer.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer cached-tok"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(&body)
+                    .insert_header("content-type", MEDIA_OCI_MANIFEST),
+            )
+            .expect(2) // Should be called twice, both using cached token.
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+
+        // Pre-populate cache.
+        let cache_key = format!("{}\0repository:{}:pull", image.registry, image.repository);
+        client.cache_token(&cache_key, "cached-tok").await;
+
+        // Both calls should use the cached token, no auth dance.
+        client.fetch_manifest(&image).await.unwrap();
+        client.fetch_manifest(&image).await.unwrap();
+    }
+
+    // -- nested manifest list error --
+
+    #[tokio::test]
+    async fn mock_nested_manifest_list_error() {
+        let server = MockServer::start().await;
+        let arch = normalize_arch(std::env::consts::ARCH);
+        let os = std::env::consts::OS;
+
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_INDEX.into()),
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_OCI_MANIFEST.into(),
+                digest: "sha256:nested".into(),
+                size: 512,
+                platform: Some(Platform {
+                    os: os.into(),
+                    architecture: arch,
+                    variant: None,
+                    os_version: None,
+                }),
+            }],
+        };
+        let index_json = serde_json::to_string(&index).unwrap();
+
+        // Both tag and digest requests return an index (nested).
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(index_json.clone(), MEDIA_OCI_INDEX),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/sha256:nested"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(index_json.clone(), MEDIA_OCI_INDEX),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.resolve_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+        assert!(err.to_string().contains("nested"));
+    }
+
+    // -- cached token gets server error (not 401) --
+
+    #[tokio::test]
+    async fn mock_cached_token_server_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer stale-tok"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+
+        let cache_key = format!("{}\0repository:{}:pull", image.registry, image.repository);
+        client.cache_token(&cache_key, "stale-tok").await;
+
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+    }
+
+    // -- cached token expired triggers re-auth --
+
+    #[tokio::test]
+    async fn mock_expired_token_returns_none() {
+        let client = RegistryClient::new();
+        let key = "test\0scope";
+        {
+            let mut tokens = client.tokens.write().await;
+            tokens.insert(
+                key.to_string(),
+                AuthToken {
+                    token: "old".into(),
+                    expires_at: Some(
+                        tokio::time::Instant::now() - std::time::Duration::from_secs(10),
+                    ),
+                },
+            );
+        }
+        assert!(client.get_cached_token(key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_cached_token_401_triggers_reauth() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        // Success with fresh token — must be registered FIRST so it has lower priority...
+        // Actually wiremock uses specificity. Register the specific match first,
+        // then the catch-all 401. Wiremock picks the most-specific matching mock.
+
+        // Token endpoint.
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "fresh-token"})),
+            )
+            .mount(&server)
+            .await;
+
+        // 401 for stale token attempt + unauthenticated probe (exactly 2 calls).
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+
+        // After the 401s are exhausted, this catches the retry with fresh token.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, MEDIA_OCI_MANIFEST))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+
+        // Pre-populate with a stale token the server rejects.
+        let cache_key = format!("{}\0repository:{}:pull", image.registry, image.repository);
+        client.cache_token(&cache_key, "stale-rejected-tok").await;
+
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+    }
+
+    // -- post-auth-retry gets server error --
+
+    #[tokio::test]
+    async fn mock_post_auth_retry_server_error() {
+        let server = MockServer::start().await;
+
+        // First: 401 with challenge.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token""#, server.uri()),
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "good-tok"})),
+            )
+            .mount(&server)
+            .await;
+
+        // Retry with token → 500.
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer good-tok"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::Registry(_)));
+    }
+
+    // -- 401 with WWW-Authenticate missing realm --
+
+    #[tokio::test]
+    async fn mock_www_authenticate_no_realm() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("www-authenticate", r#"Bearer service="registry""#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image = mock_image(&server);
+        let err = client.fetch_manifest(&image).await.unwrap_err();
+        assert!(matches!(err, StivaError::AuthFailed(_)));
+        assert!(err.to_string().contains("realm"));
+    }
+
+    // -- auth with basic credentials --
+
+    #[tokio::test]
+    async fn mock_auth_with_basic_credentials() {
+        let server = MockServer::start().await;
+        let body = test_manifest_json();
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                &format!(r#"Bearer realm="{}/token",service="reg""#, server.uri()),
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Token endpoint expects basic auth header.
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .and(header("authorization", "Basic dXNlcjpwYXNz")) // base64("user:pass")
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "authed-tok"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .and(header("authorization", "Bearer authed-tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, MEDIA_OCI_MANIFEST))
+            .mount(&server)
+            .await;
+
+        let mut client = RegistryClient::with_base_url(&server.uri());
+        client.config = RegistryConfig {
+            username: Some("user".into()),
+            password: Some("pass".into()),
+        };
+
+        let image = mock_image(&server);
+        let resp = client.fetch_manifest(&image).await.unwrap();
+        assert!(matches!(resp, ManifestResponse::Manifest(_)));
+    }
+
+    // -- relaxed platform match (variant mismatch, falls to relaxed) --
+
+    #[test]
+    fn platform_selection_relaxed_variant_match() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_MANIFEST_V2.into(),
+                digest: "sha256:v7only".into(),
+                size: 1024,
+                platform: Some(Platform {
+                    os: "linux".into(),
+                    architecture: "arm".into(),
+                    variant: Some("v7".into()),
+                    os_version: None,
+                }),
+            }],
+        };
+
+        // Target wants v6, only v7 available — should fall to relaxed match.
+        let target = Platform {
+            os: "linux".into(),
+            architecture: "arm".into(),
+            variant: Some("v6".into()),
+            os_version: None,
+        };
+        let selected = select_platform(&index, &target).unwrap();
+        assert_eq!(selected.digest, "sha256:v7only");
     }
 }

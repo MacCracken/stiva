@@ -277,4 +277,138 @@ mod tests {
         assert!(stiva.images().await.unwrap().is_empty());
         assert!(stiva.ps().await.unwrap().is_empty());
     }
+
+    // -- mock-backed Stiva::pull and Stiva::run --
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_digest(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(data);
+        format!("sha256:{}", hex::encode(hash))
+    }
+
+    async fn mock_stiva(server: &MockServer) -> (Stiva, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let image_store = Arc::new(image::ImageStore::new(&dir.path().join("images")).unwrap());
+        let containers =
+            Arc::new(container::ContainerManager::new(&dir.path().join("containers")).unwrap());
+        let registry_client = Arc::new(registry::RegistryClient::with_base_url(&server.uri()));
+
+        let stiva = Stiva {
+            image_store,
+            registry_client,
+            containers,
+            config: StivaConfig {
+                root_path: dir.path().join("containers"),
+                image_path: dir.path().join("images"),
+                ..Default::default()
+            },
+        };
+        (stiva, dir)
+    }
+
+    #[tokio::test]
+    async fn stiva_pull_with_mock() {
+        let server = MockServer::start().await;
+
+        let config_data = br#"{"os":"linux"}"#;
+        let config_digest = test_digest(config_data);
+        let layer_data = b"layer";
+        let layer_digest = test_digest(layer_data);
+
+        let manifest = registry::OciManifest {
+            schema_version: 2,
+            media_type: None,
+            config: registry::Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: config_digest.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: vec![registry::Descriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                digest: layer_digest.clone(),
+                size: layer_data.len() as u64,
+            }],
+        };
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                serde_json::to_string(&manifest).unwrap(),
+                registry::MEDIA_OCI_MANIFEST,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{config_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(config_data.to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{layer_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(layer_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        let (stiva, _dir) = mock_stiva(&server).await;
+
+        // Use a reference that resolves to the mock server's registry.
+        let img_ref = format!("{}/library/alpine:latest", server.address());
+        let image = stiva.pull(&img_ref).await.unwrap();
+        assert_eq!(image.id, config_digest);
+        assert_eq!(image.layers.len(), 1);
+
+        let images = stiva.images().await.unwrap();
+        assert_eq!(images.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stiva_run_with_mock() {
+        let server = MockServer::start().await;
+
+        let config_data = br#"{"os":"linux"}"#;
+        let config_digest = test_digest(config_data);
+
+        let manifest = registry::OciManifest {
+            schema_version: 2,
+            media_type: None,
+            config: registry::Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: config_digest.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: vec![],
+        };
+
+        Mock::given(method("GET"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                serde_json::to_string(&manifest).unwrap(),
+                registry::MEDIA_OCI_MANIFEST,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/alpine/blobs/{config_digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(config_data.to_vec()))
+            .mount(&server)
+            .await;
+
+        let (stiva, _dir) = mock_stiva(&server).await;
+        let img_ref = format!("{}/library/alpine:latest", server.address());
+
+        let c = stiva
+            .run(&img_ref, container::ContainerConfig::default())
+            .await
+            .unwrap();
+        // run() returns the snapshot from create() — check the manager for live state.
+        assert!(!c.id.is_empty());
+
+        let ps = stiva.ps().await.unwrap();
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].state, container::ContainerState::Running);
+        assert!(ps[0].started_at.is_some());
+    }
 }
