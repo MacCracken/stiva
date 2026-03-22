@@ -130,7 +130,7 @@ impl RegistryClient {
     /// Create a registry client with explicit configuration.
     pub fn with_config(config: RegistryConfig) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("stiva/0.21.3")
+            .user_agent(concat!("stiva/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to build HTTP client");
@@ -148,7 +148,7 @@ impl RegistryClient {
     #[cfg(test)]
     pub(crate) fn with_base_url(base_url: &str) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("stiva/0.21.3")
+            .user_agent(concat!("stiva/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to build HTTP client");

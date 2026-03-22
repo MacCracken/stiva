@@ -10,7 +10,7 @@
 //! stiva (this crate)
 //!   ├── kavach (sandbox: seccomp, Landlock, namespaces, OCI spec)
 //!   ├── majra (job queue, heartbeat FSM, pub/sub)
-//!   └── nein (network policy — planned)
+//!   └── nein (nftables firewall, NAT, port mapping)
 //! ```
 //!
 //! ## Modules

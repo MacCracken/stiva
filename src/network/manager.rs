@@ -18,8 +18,6 @@ const DEFAULT_OUTBOUND_IFACE: &str = "eth0";
 
 /// A managed bridge network.
 struct ManagedNetwork {
-    #[allow(dead_code)]
-    name: String,
     pool: IpPool,
     #[allow(dead_code)]
     bridge_created: bool,
@@ -85,7 +83,6 @@ impl NetworkManager {
         self.networks.insert(
             name.to_string(),
             ManagedNetwork {
-                name: name.to_string(),
                 pool,
                 bridge_created,
             },

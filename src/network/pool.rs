@@ -95,7 +95,7 @@ impl IpPool {
 
     /// Allocate the next available IP address.
     pub fn allocate(&mut self) -> Result<Ipv4Addr, StivaError> {
-        if self.allocated.len() as u32 >= self.max_hosts() {
+        if self.allocated.len() >= self.max_hosts() as usize {
             return Err(StivaError::Network(format!(
                 "IP pool exhausted for subnet {}",
                 self.subnet()

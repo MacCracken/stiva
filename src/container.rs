@@ -126,8 +126,8 @@ impl ContainerManager {
             }
         };
 
-        // Generate OCI runtime spec.
-        let temp_container = Container {
+        // Build container record.
+        let container = Container {
             id: id.clone(),
             name: Some(name.clone()),
             image_id: image.id.clone(),
@@ -140,12 +140,13 @@ impl ContainerManager {
             exit_code: None,
         };
 
+        // Generate OCI runtime spec.
         let rootfs = overlay
             .as_ref()
             .map(|o| o.merged.clone())
             .unwrap_or_else(|| container_root.join("rootfs"));
 
-        let spec = runtime::generate_spec(&temp_container, &rootfs)?;
+        let spec = runtime::generate_spec(&container, &rootfs)?;
 
         // Log path.
         let log_dir = container_root.join("logs");
@@ -166,7 +167,6 @@ impl ContainerManager {
             );
         }
 
-        let container = temp_container;
         self.containers.write().await.insert(id, container.clone());
         Ok(container)
     }
@@ -221,8 +221,9 @@ impl ContainerManager {
             }
         }
 
-        // Write logs.
-        if let Ok(ref exec_result) = result {
+        // Write logs and propagate result.
+        let exec_result = result?;
+        {
             let mut internals = self.internals.write().await;
             if let Some(internal) = internals.get_mut(id) {
                 let log_content = format!(
@@ -234,12 +235,9 @@ impl ContainerManager {
                     exec_result.timed_out,
                 );
                 let _ = std::fs::write(&internal.log_path, &log_content);
-                internal.exec_result = Some(exec_result.clone());
+                internal.exec_result = Some(exec_result);
             }
         }
-
-        // Propagate execution errors.
-        result?;
         Ok(())
     }
 
