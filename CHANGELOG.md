@@ -15,3 +15,13 @@ All notable changes to stiva are documented here.
   - Concurrent layer downloads (4 at a time via `buffer_unordered`)
   - Image index persistence (`images.json`) with dedup-on-re-pull and GC on remove
   - 30 tests passing
+- **Phase 2 — Container Execution**
+  - Layer unpacking — tar+gzip decompression to content-addressable layer directories with dedup
+  - Overlay filesystem — overlayfs assembly from image layers (upper/work/merged on Linux)
+  - Full OCI runtime spec generation — resource limits (memory, CPU, PIDs), user, workdir, standard mounts (/proc, /sys, /dev), volume bind mounts
+  - kavach sandbox integration — OCI backend (crun/runc) with Process fallback, SandboxPolicy from container config
+  - Volume bind mounts — host→container bind, tmpfs, read-only support
+  - Container logging — stdout/stderr capture to per-container log files
+  - One-shot execution model — container runs command to completion, transitions Created→Running→Stopped
+  - Overlay teardown + blob GC on container remove
+  - 181 tests passing, 98%+ coverage

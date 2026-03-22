@@ -79,7 +79,10 @@ impl Stiva {
     /// Create a new stiva runtime.
     pub async fn new(config: StivaConfig) -> Result<Self, StivaError> {
         let image_store = Arc::new(image::ImageStore::new(&config.image_path)?);
-        let containers = Arc::new(container::ContainerManager::new(&config.root_path)?);
+        let containers = Arc::new(container::ContainerManager::new(
+            &config.root_path,
+            Arc::clone(&image_store),
+        )?);
         let registry_client = Arc::new(registry::RegistryClient::new());
 
         Ok(Self {
@@ -96,7 +99,10 @@ impl Stiva {
         registry_config: registry::RegistryConfig,
     ) -> Result<Self, StivaError> {
         let image_store = Arc::new(image::ImageStore::new(&config.image_path)?);
-        let containers = Arc::new(container::ContainerManager::new(&config.root_path)?);
+        let containers = Arc::new(container::ContainerManager::new(
+            &config.root_path,
+            Arc::clone(&image_store),
+        )?);
         let registry_client = Arc::new(registry::RegistryClient::with_config(registry_config));
 
         Ok(Self {
@@ -143,6 +149,11 @@ impl Stiva {
     /// List local images.
     pub async fn images(&self) -> Result<Vec<image::Image>, StivaError> {
         self.image_store.list()
+    }
+
+    /// Read container logs.
+    pub async fn logs(&self, id: &str) -> Result<String, StivaError> {
+        self.containers.logs(id).await
     }
 }
 
@@ -292,8 +303,13 @@ mod tests {
     async fn mock_stiva(server: &MockServer) -> (Stiva, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let image_store = Arc::new(image::ImageStore::new(&dir.path().join("images")).unwrap());
-        let containers =
-            Arc::new(container::ContainerManager::new(&dir.path().join("containers")).unwrap());
+        let containers = Arc::new(
+            container::ContainerManager::new(
+                &dir.path().join("containers"),
+                Arc::clone(&image_store),
+            )
+            .unwrap(),
+        );
         let registry_client = Arc::new(registry::RegistryClient::with_base_url(&server.uri()));
 
         let stiva = Stiva {
@@ -399,16 +415,20 @@ mod tests {
         let (stiva, _dir) = mock_stiva(&server).await;
         let img_ref = format!("{}/library/alpine:latest", server.address());
 
+        // run() calls pull → create → start. start() invokes kavach sandbox
+        // with Process backend (no crun/runc needed). For one-shot exec, the
+        // container runs to completion and transitions to Stopped.
         let c = stiva
             .run(&img_ref, container::ContainerConfig::default())
             .await
             .unwrap();
-        // run() returns the snapshot from create() — check the manager for live state.
         assert!(!c.id.is_empty());
 
         let ps = stiva.ps().await.unwrap();
         assert_eq!(ps.len(), 1);
-        assert_eq!(ps[0].state, container::ContainerState::Running);
+        // One-shot exec: container has already run and stopped.
+        assert_eq!(ps[0].state, container::ContainerState::Stopped);
         assert!(ps[0].started_at.is_some());
+        assert!(ps[0].exit_code.is_some());
     }
 }

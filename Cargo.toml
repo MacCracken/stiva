@@ -48,6 +48,10 @@ kavach = { version = "0.21.3", features = ["process", "oci"] }
 # Queue / scheduling (majra provides fleet primitives)
 majra = { version = "0.21.3", features = ["queue", "heartbeat"] }
 
+# Container filesystem
+flate2 = "1"
+tar = "0.4"
+
 # Linux-specific
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["sched", "mount", "process", "signal", "resource", "fs", "user"] }

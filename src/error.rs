@@ -46,6 +46,12 @@ pub enum StivaError {
     #[error("compose error: {0}")]
     Compose(String),
 
+    #[error("layer unpack error: {0}")]
+    LayerUnpack(String),
+
+    #[error("overlay error: {0}")]
+    Overlay(String),
+
     #[error("sandbox error: {0}")]
     Sandbox(String),
 

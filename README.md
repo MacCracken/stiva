@@ -94,7 +94,7 @@ stiva.rm(&container.id).await?;
 - [x] TOML compose file parser
 - [x] Runtime spec generation
 
-### Phase 1 — Image Pull Pipeline (current)
+### Phase 1 — Image Pull Pipeline
 - [x] OCI distribution spec client (manifest fetch, blob download)
 - [x] Token auth (Docker Hub, GHCR bearer tokens)
 - [x] Multi-arch manifest list support (platform selection, index resolution)
@@ -103,14 +103,16 @@ stiva.rm(&container.id).await?;
 - [x] Image index persistence
 - [x] 30 tests passing
 
-### Phase 2 — Container Execution
-- [ ] Overlay filesystem assembly from image layers
-- [ ] kavach sandbox integration (process backend → container)
-- [ ] OCI runtime spec generation (full spec, not just command)
-- [ ] Namespace creation (pid, net, mount, uts, ipc, user)
-- [ ] Cgroup resource limits (memory, CPU)
-- [ ] Volume bind mounts
-- [ ] Container logging (stdout/stderr capture)
+### Phase 2 — Container Execution (current)
+- [x] Layer unpacking (tar+gzip decompression to layer directories)
+- [x] Overlay filesystem assembly from image layers (overlayfs mount on Linux)
+- [x] kavach sandbox integration (OCI backend with crun/runc, Process fallback)
+- [x] OCI runtime spec generation (full spec: resource limits, mounts, env, user, workdir)
+- [x] Namespace creation (pid, net, mount, uts, ipc)
+- [x] Cgroup resource limits (memory, CPU via kavach policy)
+- [x] Volume bind mounts (bind + tmpfs, read-only support)
+- [x] Container logging (stdout/stderr capture to log files)
+- [x] One-shot container execution (run-to-completion model)
 
 ### Phase 3 — Networking
 - [ ] Bridge network with veth pairs (via agnosys netns)
