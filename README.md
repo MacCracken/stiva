@@ -103,7 +103,7 @@ stiva.rm(&container.id).await?;
 - [x] Image index persistence
 - [x] 30 tests passing
 
-### Phase 2 — Container Execution (current)
+### Phase 2 — Container Execution
 - [x] Layer unpacking (tar+gzip decompression to layer directories)
 - [x] Overlay filesystem assembly from image layers (overlayfs mount on Linux)
 - [x] kavach sandbox integration (OCI backend with crun/runc, Process fallback)
@@ -114,13 +114,14 @@ stiva.rm(&container.id).await?;
 - [x] Container logging (stdout/stderr capture to log files)
 - [x] One-shot container execution (run-to-completion model)
 
-### Phase 3 — Networking
-- [ ] Bridge network with veth pairs (via agnosys netns)
-- [ ] NAT rules via nftables (nein crate when available)
-- [ ] Port mapping (host:container)
-- [ ] Container DNS resolution
-- [ ] Custom named networks
-- [ ] Network isolation between containers
+### Phase 3 — Networking (current)
+- [x] Bridge network with veth pairs (via `ip` commands + nix)
+- [x] NAT rules via nftables (nein crate)
+- [x] Port mapping (host:container) with TCP/UDP support
+- [x] Container DNS resolution (resolv.conf + hosts injection)
+- [x] Custom named networks (NetworkManager with IP pools)
+- [x] Network isolation between containers (per-bridge IP pool + veth isolation)
+- [x] IP address pool with sequential allocation and release
 
 ### Phase 4 — Orchestration
 - [ ] Compose up/down/restart

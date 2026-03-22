@@ -1,7 +1,16 @@
-//! Container networking — bridge, host, none, custom modes.
+//! Container networking — bridge networks, NAT, port mapping, veth pairs, DNS.
 
-use crate::error::StivaError;
+pub mod bridge;
+pub mod dns;
+pub mod manager;
+pub mod nat;
+pub mod pool;
+
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 /// Network mode for a container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,21 +44,17 @@ pub enum NetworkDriver {
     Macvlan,
 }
 
-/// Set up networking for a container.
-pub async fn setup_container_network(
-    _container_id: &str,
-    _mode: &NetworkMode,
-) -> Result<(), StivaError> {
-    // TODO: Create veth pair via agnosys netns
-    // TODO: Configure bridge/NAT via nftables (nein crate, when available)
-    // TODO: Assign IP from subnet pool
-    Ok(())
-}
-
-/// Tear down container networking.
-pub async fn teardown_container_network(_container_id: &str) -> Result<(), StivaError> {
-    // TODO: Remove veth pair, release IP
-    Ok(())
+/// Result of connecting a container to a network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerNetwork {
+    /// Assigned IP address.
+    pub ip: std::net::Ipv4Addr,
+    /// Network name.
+    pub network_name: String,
+    /// Host-side veth interface name.
+    pub host_veth: String,
+    /// Container-side veth interface name.
+    pub container_veth: String,
 }
 
 #[cfg(test)]
@@ -102,27 +107,6 @@ mod tests {
         assert_eq!(back.subnet, "172.17.0.0/16");
     }
 
-    #[tokio::test]
-    async fn setup_network_stub() {
-        // Stub returns Ok for all modes.
-        for mode in [
-            NetworkMode::Bridge,
-            NetworkMode::Host,
-            NetworkMode::None,
-            NetworkMode::Container("abc".into()),
-            NetworkMode::Custom("net0".into()),
-        ] {
-            setup_container_network("test-container", &mode)
-                .await
-                .unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn teardown_network_stub() {
-        teardown_container_network("test-container").await.unwrap();
-    }
-
     #[test]
     fn network_mode_custom_value() {
         let mode = NetworkMode::Custom("my-overlay".into());
@@ -144,5 +128,18 @@ mod tests {
             let json = serde_json::to_string(&driver).unwrap();
             let _back: NetworkDriver = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn container_network_serde() {
+        let cn = ContainerNetwork {
+            ip: "172.17.0.2".parse().unwrap(),
+            network_name: "bridge".into(),
+            host_veth: "veth-abc".into(),
+            container_veth: "eth0".into(),
+        };
+        let json = serde_json::to_string(&cn).unwrap();
+        let back: ContainerNetwork = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ip, "172.17.0.2".parse::<std::net::Ipv4Addr>().unwrap());
     }
 }

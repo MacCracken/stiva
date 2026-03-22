@@ -1029,6 +1029,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nein"
+version = "0.21.3"
+dependencies = [
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1607,6 +1617,7 @@ dependencies = [
  "hex",
  "kavach",
  "majra",
+ "nein",
  "nix",
  "reqwest",
  "serde",

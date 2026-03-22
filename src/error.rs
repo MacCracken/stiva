@@ -52,6 +52,9 @@ pub enum StivaError {
     #[error("overlay error: {0}")]
     Overlay(String),
 
+    #[error("port mapping error: {0}")]
+    PortMapping(String),
+
     #[error("sandbox error: {0}")]
     Sandbox(String),
 

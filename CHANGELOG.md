@@ -25,3 +25,11 @@ All notable changes to stiva are documented here.
   - One-shot execution model — container runs command to completion, transitions Created→Running→Stopped
   - Overlay teardown + blob GC on container remove
   - 181 tests passing, 98%+ coverage
+- **Phase 3 — Container Networking**
+  - Restructured `network.rs` → `network/` submodule (pool, bridge, nat, dns, manager)
+  - IP address pool — sequential allocation within CIDR subnet, release + reuse
+  - Bridge + veth management — `ip` commands for bridge creation, veth pairs, netns attachment
+  - NAT + port mapping via nein crate — masquerade, DNAT, port spec parsing (`8080:80/tcp`)
+  - DNS injection — resolv.conf, hosts, hostname written to container rootfs
+  - NetworkManager — lifecycle for named networks, container connect/disconnect, default bridge
+  - 237 tests passing
