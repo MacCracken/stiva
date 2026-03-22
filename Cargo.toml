@@ -10,6 +10,7 @@ repository = "https://github.com/MacCracken/stiva"
 readme = "README.md"
 keywords = ["container", "oci", "runtime", "docker", "orchestration"]
 categories = ["os", "virtualization"]
+exclude = ["Cargo.lock"]
 
 [features]
 default = ["runtime"]
