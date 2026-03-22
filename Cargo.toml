@@ -43,10 +43,10 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Sandbox (kavach provides isolation)
-kavach = { version = "0.22.3", features = ["process", "oci"] }
+kavach = { version = ">=0.21.3", features = ["process", "oci"] }
 
 # Queue / scheduling (majra provides fleet primitives)
-majra = { version = "0.22.3", features = ["queue", "heartbeat", "pubsub"] }
+majra = { version = ">=0.21.3", features = ["queue", "heartbeat", "pubsub"] }
 
 # Container filesystem
 flate2 = "1"
