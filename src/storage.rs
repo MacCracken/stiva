@@ -18,7 +18,7 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// Parse a volume string "source:target[:ro]".
+/// Parse a volume string `"source:target[:ro]"`.
 pub fn parse_volume(spec: &str) -> Result<VolumeMount, StivaError> {
     let parts: Vec<&str> = spec.split(':').collect();
     match parts.len() {
@@ -215,7 +215,7 @@ pub fn teardown_overlay(paths: &OverlayPaths) -> Result<(), StivaError> {
 
 /// Mount bind volumes into the container rootfs.
 ///
-/// Each volume spec is "source:target[:ro]". The target path is relative to
+/// Each volume spec is `"source:target[:ro]"`. The target path is relative to
 /// the merged rootfs directory.
 #[cfg(target_os = "linux")]
 pub fn mount_volumes(

@@ -8,10 +8,11 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 /// Container restart policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
     /// Never restart (default).
+    #[default]
     Never,
     /// Always restart on exit.
     Always,
@@ -19,12 +20,6 @@ pub enum RestartPolicy {
     OnFailure { max_retries: u32 },
     /// Restart unless explicitly stopped by user.
     UnlessStopped,
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self::Never
-    }
 }
 
 /// Health status of a container.

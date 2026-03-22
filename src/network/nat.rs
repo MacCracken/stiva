@@ -21,16 +21,11 @@ pub struct PortSpec {
 }
 
 /// Protocol for port mappings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortProtocol {
+    #[default]
     Tcp,
     Udp,
-}
-
-impl Default for PortProtocol {
-    fn default() -> Self {
-        Self::Tcp
-    }
 }
 
 /// Parse a port specification string.
