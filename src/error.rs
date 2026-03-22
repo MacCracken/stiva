@@ -31,6 +31,15 @@ pub enum StivaError {
     #[error("invalid image reference: {0}")]
     InvalidReference(String),
 
+    #[error("digest mismatch: expected {expected}, got {actual}")]
+    DigestMismatch { expected: String, actual: String },
+
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
+
+    #[error("unsupported platform: {0}")]
+    UnsupportedPlatform(String),
+
     #[error("sandbox error: {0}")]
     Sandbox(String),
 

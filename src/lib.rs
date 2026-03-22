@@ -22,7 +22,6 @@
 //! - [`storage`] — Overlay filesystem, volume mounts, tmpfs
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
-//! - [`cli`] — CLI types for `stiva run/pull/ps/stop/rm`
 
 pub mod image;
 pub mod container;
@@ -41,6 +40,7 @@ use std::sync::Arc;
 /// Top-level entry point for the stiva runtime.
 pub struct Stiva {
     image_store: Arc<image::ImageStore>,
+    registry_client: Arc<registry::RegistryClient>,
     containers: Arc<container::ContainerManager>,
     #[allow(dead_code)]
     config: StivaConfig,
@@ -80,9 +80,28 @@ impl Stiva {
     pub async fn new(config: StivaConfig) -> Result<Self, StivaError> {
         let image_store = Arc::new(image::ImageStore::new(&config.image_path)?);
         let containers = Arc::new(container::ContainerManager::new(&config.root_path)?);
+        let registry_client = Arc::new(registry::RegistryClient::new());
 
         Ok(Self {
             image_store,
+            registry_client,
+            containers,
+            config,
+        })
+    }
+
+    /// Create a new stiva runtime with explicit registry configuration.
+    pub async fn with_registry(
+        config: StivaConfig,
+        registry_config: registry::RegistryConfig,
+    ) -> Result<Self, StivaError> {
+        let image_store = Arc::new(image::ImageStore::new(&config.image_path)?);
+        let containers = Arc::new(container::ContainerManager::new(&config.root_path)?);
+        let registry_client = Arc::new(registry::RegistryClient::with_config(registry_config));
+
+        Ok(Self {
+            image_store,
+            registry_client,
             containers,
             config,
         })
@@ -91,7 +110,7 @@ impl Stiva {
     /// Pull an OCI image from a registry.
     pub async fn pull(&self, reference: &str) -> Result<image::Image, StivaError> {
         let parsed = image::ImageRef::parse(reference)?;
-        self.image_store.pull(&parsed).await
+        self.image_store.pull(&parsed, &self.registry_client).await
     }
 
     /// Create and start a container.
@@ -134,7 +153,10 @@ mod tests {
     #[test]
     fn default_config() {
         let config = StivaConfig::default();
-        assert_eq!(config.root_path, std::path::PathBuf::from("/var/lib/agnos/containers"));
+        assert_eq!(
+            config.root_path,
+            std::path::PathBuf::from("/var/lib/agnos/containers")
+        );
         assert_eq!(config.max_containers, 64);
     }
 }

@@ -83,7 +83,7 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap
 
-### Phase 0 — Foundation (current)
+### Phase 0 — Foundation
 - [x] Scaffold crate with module structure
 - [x] Image reference parser (docker.io, ghcr.io, custom)
 - [x] Container lifecycle state machine (Created → Running → Stopped)
@@ -93,15 +93,15 @@ stiva.rm(&container.id).await?;
 - [x] Network mode types (Bridge, Host, None, Container, Custom)
 - [x] TOML compose file parser
 - [x] Runtime spec generation
-- [x] 17 tests passing
 
-### Phase 1 — Image Pull Pipeline
-- [ ] OCI distribution spec client (manifest fetch, blob download)
-- [ ] Token auth (Docker Hub, GHCR bearer tokens)
-- [ ] Multi-arch manifest list support
-- [ ] Layer deduplication in content-addressable store
-- [ ] Download resume + SHA-256 verification
-- [ ] Image index persistence
+### Phase 1 — Image Pull Pipeline (current)
+- [x] OCI distribution spec client (manifest fetch, blob download)
+- [x] Token auth (Docker Hub, GHCR bearer tokens)
+- [x] Multi-arch manifest list support (platform selection, index resolution)
+- [x] Layer deduplication in content-addressable store
+- [x] Download resume + SHA-256 verification
+- [x] Image index persistence
+- [x] 30 tests passing
 
 ### Phase 2 — Container Execution
 - [ ] Overlay filesystem assembly from image layers
