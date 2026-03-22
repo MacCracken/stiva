@@ -58,7 +58,7 @@ echo ""
 echo "--- Release build timing ---"
 cargo clean --release -q 2>/dev/null || true
 BUILD_START=$(date +%s%N)
-cargo build --release --quiet 2>&1
+cargo build --release --all-features --quiet 2>&1
 BUILD_END=$(date +%s%N)
 BUILD_MS=$(( (BUILD_END - BUILD_START) / 1000000 ))
 echo "Release build: ${BUILD_MS}ms"

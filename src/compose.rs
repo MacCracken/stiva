@@ -58,29 +58,8 @@ pub struct VolumeDef {
     pub driver: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Restart policies
-// ---------------------------------------------------------------------------
-
-/// Container restart policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RestartPolicy {
-    /// Never restart (default).
-    Never,
-    /// Always restart on exit.
-    Always,
-    /// Restart only on non-zero exit, up to max_retries.
-    OnFailure { max_retries: u32 },
-    /// Restart unless explicitly stopped by user.
-    UnlessStopped,
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self::Never
-    }
-}
+// Re-export RestartPolicy from health module (shared between compose and health).
+pub use crate::health::RestartPolicy;
 
 // ---------------------------------------------------------------------------
 // Health checks

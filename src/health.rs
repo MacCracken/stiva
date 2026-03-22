@@ -1,12 +1,31 @@
 //! Container health monitoring — wraps majra HeartbeatTracker for container liveness.
 
-use crate::compose::RestartPolicy;
 use majra::heartbeat::{ConcurrentHeartbeatTracker, HeartbeatConfig, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
+
+/// Container restart policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    /// Never restart (default).
+    Never,
+    /// Always restart on exit.
+    Always,
+    /// Restart only on non-zero exit, up to max_retries.
+    OnFailure { max_retries: u32 },
+    /// Restart unless explicitly stopped by user.
+    UnlessStopped,
+}
+
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        Self::Never
+    }
+}
 
 /// Health status of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
