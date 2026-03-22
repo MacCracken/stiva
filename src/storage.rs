@@ -86,6 +86,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_named_volume() {
+        let vol = parse_volume("pgdata:/var/lib/postgresql/data").unwrap();
+        assert_eq!(vol.source, PathBuf::from("pgdata"));
+        assert_eq!(vol.target, PathBuf::from("/var/lib/postgresql/data"));
+        assert!(!vol.read_only);
+    }
+
+    #[test]
+    fn parse_volume_empty_string() {
+        assert!(parse_volume("").is_err());
+    }
+
+    #[tokio::test]
+    async fn setup_overlay_not_implemented() {
+        let result = setup_overlay(&[], std::path::Path::new("/tmp")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn teardown_overlay_ok() {
+        teardown_overlay(std::path::Path::new("/nonexistent"))
+            .await
+            .unwrap();
+    }
+
+    #[test]
     fn volume_mount_serde() {
         let vol = VolumeMount {
             source: PathBuf::from("/host/data"),

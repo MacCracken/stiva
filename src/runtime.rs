@@ -119,6 +119,34 @@ mod tests {
         assert!(spec.env.contains(&"DEBUG=1".to_string()));
     }
 
+    #[tokio::test]
+    async fn exec_container_not_implemented() {
+        let container = test_container(ContainerConfig::default());
+        let spec = generate_spec(&container, std::path::Path::new("/rootfs")).unwrap();
+        let err = exec_container(&spec).await.unwrap_err();
+        assert!(matches!(err, crate::StivaError::Runtime(_)));
+    }
+
+    #[test]
+    fn namespace_debug() {
+        let ns = Namespace::Pid;
+        let dbg = format!("{ns:?}");
+        assert_eq!(dbg, "Pid");
+
+        // Cover all variants via Debug.
+        for ns in [
+            Namespace::Pid,
+            Namespace::Net,
+            Namespace::Mount,
+            Namespace::Uts,
+            Namespace::Ipc,
+            Namespace::User,
+            Namespace::Cgroup,
+        ] {
+            let _ = format!("{ns:?}");
+        }
+    }
+
     #[test]
     fn namespaces_are_correct() {
         let container = test_container(ContainerConfig::default());

@@ -97,6 +97,48 @@ mod tests {
     }
 
     #[test]
+    fn display_all_string_variants() {
+        // Cover every String-wrapping variant not in display_messages.
+        let cases: Vec<(StivaError, &str)> = vec![
+            (
+                StivaError::PullFailed("timeout".into()),
+                "image pull failed: timeout",
+            ),
+            (
+                StivaError::Runtime("segfault".into()),
+                "runtime error: segfault",
+            ),
+            (
+                StivaError::Network("no route".into()),
+                "network error: no route",
+            ),
+            (
+                StivaError::Storage("disk full".into()),
+                "storage error: disk full",
+            ),
+            (StivaError::Registry("503".into()), "registry error: 503"),
+            (
+                StivaError::InvalidReference("???".into()),
+                "invalid image reference: ???",
+            ),
+            (
+                StivaError::Sandbox("denied".into()),
+                "sandbox error: denied",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn debug_impl() {
+        let e = StivaError::ImageNotFound("test".into());
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ImageNotFound"));
+    }
+
+    #[test]
     fn from_io_error() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
         let e: StivaError = io_err.into();

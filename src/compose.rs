@@ -139,6 +139,106 @@ replicas = 3
     }
 
     #[test]
+    fn parse_compose_empty_string() {
+        assert!(parse_compose("").is_err());
+    }
+
+    #[test]
+    fn parse_compose_service_with_command() {
+        let toml = r#"
+[services.app]
+image = "alpine"
+command = ["/bin/sh", "-c", "echo hello"]
+"#;
+        let compose = parse_compose(toml).unwrap();
+        assert_eq!(
+            compose.services["app"].command,
+            vec!["/bin/sh", "-c", "echo hello"]
+        );
+    }
+
+    #[test]
+    fn parse_compose_dependency_chain() {
+        let toml = r#"
+[services.frontend]
+image = "nginx"
+depends_on = ["api"]
+
+[services.api]
+image = "app:latest"
+depends_on = ["db", "cache"]
+
+[services.db]
+image = "postgres:16"
+
+[services.cache]
+image = "redis:7"
+"#;
+        let compose = parse_compose(toml).unwrap();
+        assert_eq!(compose.services.len(), 4);
+        assert_eq!(compose.services["frontend"].depends_on, vec!["api"]);
+        assert_eq!(compose.services["api"].depends_on, vec!["db", "cache"]);
+        assert!(compose.services["db"].depends_on.is_empty());
+    }
+
+    #[test]
+    fn parse_compose_service_all_fields() {
+        let toml = r#"
+[services.app]
+image = "myapp:latest"
+command = ["/start.sh"]
+env = { PORT = "8080", DEBUG = "true" }
+ports = ["8080:80", "443:443"]
+volumes = ["/data:/app/data:ro"]
+depends_on = ["db"]
+replicas = 2
+"#;
+        let compose = parse_compose(toml).unwrap();
+        let svc = &compose.services["app"];
+        assert_eq!(svc.image, "myapp:latest");
+        assert_eq!(svc.command, vec!["/start.sh"]);
+        assert_eq!(svc.env.len(), 2);
+        assert_eq!(svc.ports.len(), 2);
+        assert_eq!(svc.volumes, vec!["/data:/app/data:ro"]);
+        assert_eq!(svc.depends_on, vec!["db"]);
+        assert_eq!(svc.replicas, Some(2));
+    }
+
+    #[test]
+    fn network_def_serde() {
+        let net = NetworkDef {
+            driver: Some("bridge".into()),
+            subnet: Some("10.0.0.0/24".into()),
+        };
+        let json = serde_json::to_string(&net).unwrap();
+        let back: NetworkDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.driver.as_deref(), Some("bridge"));
+    }
+
+    #[test]
+    fn volume_def_serde() {
+        let vol = VolumeDef {
+            driver: Some("local".into()),
+        };
+        let json = serde_json::to_string(&vol).unwrap();
+        let back: VolumeDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.driver.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn network_def_default() {
+        let net = NetworkDef::default();
+        assert!(net.driver.is_none());
+        assert!(net.subnet.is_none());
+    }
+
+    #[test]
+    fn volume_def_default() {
+        let vol = VolumeDef::default();
+        assert!(vol.driver.is_none());
+    }
+
+    #[test]
     fn compose_file_serde_round_trip() {
         let compose = ComposeFile {
             services: HashMap::from([(

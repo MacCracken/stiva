@@ -703,6 +703,234 @@ mod tests {
         assert!(matches!(resp, ManifestResponse::Index(_)));
     }
 
+    #[tokio::test]
+    async fn token_cache_round_trip() {
+        let client = RegistryClient::new();
+        let key = "test-registry\0repository:lib/nginx:pull";
+
+        // No token cached initially.
+        assert!(client.get_cached_token(key).await.is_none());
+
+        // Cache a token.
+        client.cache_token(key, "my-secret-token").await;
+
+        // Should be retrievable.
+        let token = client.get_cached_token(key).await.unwrap();
+        assert_eq!(token, "my-secret-token");
+    }
+
+    #[test]
+    fn descriptor_serde_round_trip() {
+        let desc = Descriptor {
+            media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+            digest: "sha256:abc123".into(),
+            size: 1_048_576,
+        };
+        let json = serde_json::to_string(&desc).unwrap();
+        let back: Descriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.digest, "sha256:abc123");
+        assert_eq!(back.size, 1_048_576);
+    }
+
+    #[test]
+    fn platform_serde_round_trip() {
+        let platform = Platform {
+            architecture: "arm64".into(),
+            os: "linux".into(),
+            variant: Some("v8".into()),
+            os_version: Some("22.04".into()),
+        };
+        let json = serde_json::to_string(&platform).unwrap();
+        let back: Platform = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, platform);
+    }
+
+    #[test]
+    fn platform_manifest_serde_round_trip() {
+        let pm = PlatformManifest {
+            media_type: MEDIA_OCI_MANIFEST.into(),
+            digest: "sha256:aabbcc".into(),
+            size: 2048,
+            platform: Some(Platform {
+                architecture: "amd64".into(),
+                os: "linux".into(),
+                variant: None,
+                os_version: None,
+            }),
+        };
+        let json = serde_json::to_string(&pm).unwrap();
+        let back: PlatformManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.digest, "sha256:aabbcc");
+        assert!(back.platform.is_some());
+    }
+
+    #[test]
+    fn manifest_serde_round_trip() {
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_MANIFEST.into()),
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: "sha256:config".into(),
+                size: 512,
+            },
+            layers: vec![
+                Descriptor {
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    digest: "sha256:layer1".into(),
+                    size: 10_000,
+                },
+                Descriptor {
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    digest: "sha256:layer2".into(),
+                    size: 20_000,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: OciManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, 2);
+        assert_eq!(back.layers.len(), 2);
+        assert!(back.media_type.is_some());
+    }
+
+    #[test]
+    fn index_serde_round_trip() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_INDEX.into()),
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_OCI_MANIFEST.into(),
+                digest: "sha256:amd64".into(),
+                size: 1024,
+                platform: Some(Platform {
+                    os: "linux".into(),
+                    architecture: "amd64".into(),
+                    variant: None,
+                    os_version: None,
+                }),
+            }],
+        };
+        let json = serde_json::to_string(&index).unwrap();
+        let back: OciIndex = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.manifests.len(), 1);
+    }
+
+    #[test]
+    fn select_platform_empty_index() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![],
+        };
+        let target = Platform {
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            variant: None,
+            os_version: None,
+        };
+        assert!(select_platform(&index, &target).is_err());
+    }
+
+    #[test]
+    fn select_platform_no_platform_field() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_MANIFEST_V2.into(),
+                digest: "sha256:noplat".into(),
+                size: 1024,
+                platform: None, // No platform specified.
+            }],
+        };
+        let target = Platform {
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            variant: None,
+            os_version: None,
+        };
+        // Should fail — no platform to match against.
+        assert!(select_platform(&index, &target).is_err());
+    }
+
+    #[test]
+    fn select_platform_wrong_os() {
+        let index = OciIndex {
+            schema_version: 2,
+            media_type: None,
+            manifests: vec![PlatformManifest {
+                media_type: MEDIA_MANIFEST_V2.into(),
+                digest: "sha256:win".into(),
+                size: 1024,
+                platform: Some(Platform {
+                    os: "windows".into(),
+                    architecture: "amd64".into(),
+                    variant: None,
+                    os_version: None,
+                }),
+            }],
+        };
+        let target = Platform {
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            variant: None,
+            os_version: None,
+        };
+        assert!(select_platform(&index, &target).is_err());
+    }
+
+    #[test]
+    fn media_type_constants() {
+        assert!(MEDIA_MANIFEST_V2.contains("docker"));
+        assert!(MEDIA_MANIFEST_LIST_V2.contains("list"));
+        assert!(MEDIA_OCI_MANIFEST.contains("oci"));
+        assert!(MEDIA_OCI_INDEX.contains("index"));
+    }
+
+    #[test]
+    fn parse_www_authenticate_empty() {
+        let params = parse_www_authenticate("");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parse_www_authenticate_lowercase_bearer() {
+        let header = r#"bearer realm="https://auth.example.com/token""#;
+        let params = parse_www_authenticate(header);
+        assert_eq!(
+            params.get("realm").unwrap(),
+            "https://auth.example.com/token"
+        );
+    }
+
+    #[test]
+    fn registry_config_default() {
+        let config = RegistryConfig::default();
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+    }
+
+    #[test]
+    fn platform_equality() {
+        let p1 = Platform {
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            variant: None,
+            os_version: None,
+        };
+        let p2 = p1.clone();
+        assert_eq!(p1, p2);
+
+        let p3 = Platform {
+            os: "linux".into(),
+            architecture: "arm64".into(),
+            variant: None,
+            os_version: None,
+        };
+        assert_ne!(p1, p3);
+    }
+
     #[test]
     fn index_serde() {
         let json = r#"{

@@ -188,6 +188,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stiva_with_registry_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let reg_config = registry::RegistryConfig {
+            username: Some("user".into()),
+            password: Some("pass".into()),
+        };
+        let stiva = Stiva::with_registry(config, reg_config).await.unwrap();
+        assert!(stiva.images().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stiva_stop_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let stiva = Stiva::new(config).await.unwrap();
+        assert!(stiva.stop("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stiva_rm_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let stiva = Stiva::new(config).await.unwrap();
+        assert!(stiva.rm("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stiva_pull_invalid_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StivaConfig {
+            root_path: dir.path().join("containers"),
+            image_path: dir.path().join("images"),
+            ..Default::default()
+        };
+        let stiva = Stiva::new(config).await.unwrap();
+        assert!(stiva.pull("").await.is_err());
+    }
+
+    #[test]
+    fn config_custom_values_serde() {
+        let config = StivaConfig {
+            root_path: "/custom/containers".into(),
+            image_path: "/custom/images".into(),
+            default_network: network::NetworkMode::Host,
+            max_containers: 128,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: StivaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.root_path,
+            std::path::PathBuf::from("/custom/containers")
+        );
+        assert_eq!(back.default_network, network::NetworkMode::Host);
+        assert_eq!(back.max_containers, 128);
+    }
+
+    #[test]
+    fn config_toml_serde() {
+        let config = StivaConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        let back: StivaConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.root_path, config.root_path);
+    }
+
+    #[tokio::test]
     async fn stiva_images_empty_on_init() {
         let dir = tempfile::tempdir().unwrap();
         let config = StivaConfig {

@@ -685,6 +685,160 @@ mod tests {
         assert!(!store.has_blob(&shared_digest));
     }
 
+    // -- Serde round-trips --
+
+    #[test]
+    fn image_ref_serde_round_trip() {
+        let r = ImageRef::parse("ghcr.io/org/repo:v3").unwrap();
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ImageRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.registry, "ghcr.io");
+        assert_eq!(back.repository, "org/repo");
+        assert_eq!(back.tag, "v3");
+        assert_eq!(back.full_ref(), r.full_ref());
+    }
+
+    #[test]
+    fn image_serde_round_trip() {
+        let image = Image {
+            id: "sha256:abc".into(),
+            reference: ImageRef::parse("nginx:1.25").unwrap(),
+            size_bytes: 50_000_000,
+            layers: vec![
+                Layer {
+                    digest: "sha256:layer1".into(),
+                    size_bytes: 30_000_000,
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                },
+                Layer {
+                    digest: "sha256:layer2".into(),
+                    size_bytes: 20_000_000,
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                },
+            ],
+            created_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&image).unwrap();
+        let back: Image = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "sha256:abc");
+        assert_eq!(back.layers.len(), 2);
+        assert_eq!(back.size_bytes, 50_000_000);
+    }
+
+    #[test]
+    fn layer_serde_round_trip() {
+        let layer = Layer {
+            digest: "sha256:aabbcc".into(),
+            size_bytes: 12345,
+            media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.digest, "sha256:aabbcc");
+        assert_eq!(back.size_bytes, 12345);
+    }
+
+    // -- More ImageRef edge cases --
+
+    #[test]
+    fn parse_full_registry_with_digest() {
+        let r = ImageRef::parse("ghcr.io/user/repo:v1@sha256:deadbeef").unwrap();
+        assert_eq!(r.registry, "ghcr.io");
+        assert_eq!(r.repository, "user/repo");
+        assert_eq!(r.tag, "v1");
+        assert_eq!(r.digest.as_deref(), Some("sha256:deadbeef"));
+    }
+
+    #[test]
+    fn parse_registry_port_deep_path() {
+        let r = ImageRef::parse("myregistry.io:8443/org/team/app:prod").unwrap();
+        assert_eq!(r.registry, "myregistry.io:8443");
+        assert_eq!(r.repository, "org/team/app");
+        assert_eq!(r.tag, "prod");
+    }
+
+    #[test]
+    fn parse_whitespace_trimmed() {
+        let r = ImageRef::parse("  nginx:latest  ").unwrap();
+        assert_eq!(r.repository, "library/nginx");
+        assert_eq!(r.tag, "latest");
+    }
+
+    #[test]
+    fn full_ref_default_tag() {
+        let r = ImageRef::parse("alpine").unwrap();
+        assert_eq!(r.full_ref(), "docker.io/library/alpine:latest");
+    }
+
+    // -- Blob store edge cases --
+
+    #[test]
+    fn store_empty_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        let data = b"";
+        let digest = sha256_digest(data);
+        store.store_blob(&digest, data).unwrap();
+        let read_back = store.read_blob(&digest).unwrap();
+        assert!(read_back.is_empty());
+    }
+
+    #[test]
+    fn store_large_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        let data = vec![0xABu8; 1_000_000]; // 1MB
+        let digest = sha256_digest(&data);
+        store.store_blob(&digest, &data).unwrap();
+        let read_back = store.read_blob(&digest).unwrap();
+        assert_eq!(read_back.len(), 1_000_000);
+    }
+
+    #[test]
+    fn blob_path_is_under_store_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        let data = b"path check";
+        let digest = sha256_digest(data);
+        let path = store.store_blob(&digest, data).unwrap();
+        assert!(path.starts_with(dir.path()));
+        assert!(path.to_string_lossy().contains("blobs/sha256"));
+    }
+
+    // -- Multi-image index --
+
+    #[test]
+    fn image_index_multiple_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::new(dir.path()).unwrap();
+
+        for i in 0..5 {
+            let image = Image {
+                id: format!("sha256:id{i}"),
+                reference: ImageRef::parse(&format!("app:v{i}")).unwrap(),
+                size_bytes: 100,
+                layers: vec![],
+                created_at: chrono::Utc::now(),
+            };
+            store.add_to_index(&image).unwrap();
+        }
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 5);
+    }
+
+    #[test]
+    fn image_index_different_digests() {
+        let data_a = b"data a";
+        let data_b = b"data b";
+        let digest_a = sha256_digest(data_a);
+        let digest_b = sha256_digest(data_b);
+        assert_ne!(digest_a, digest_b);
+    }
+
     #[test]
     fn image_index_dedup_on_re_pull() {
         let dir = tempfile::tempdir().unwrap();

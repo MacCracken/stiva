@@ -102,6 +102,38 @@ mod tests {
         assert_eq!(back.subnet, "172.17.0.0/16");
     }
 
+    #[tokio::test]
+    async fn setup_network_stub() {
+        // Stub returns Ok for all modes.
+        for mode in [
+            NetworkMode::Bridge,
+            NetworkMode::Host,
+            NetworkMode::None,
+            NetworkMode::Container("abc".into()),
+            NetworkMode::Custom("net0".into()),
+        ] {
+            setup_container_network("test-container", &mode)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_network_stub() {
+        teardown_container_network("test-container").await.unwrap();
+    }
+
+    #[test]
+    fn network_mode_custom_value() {
+        let mode = NetworkMode::Custom("my-overlay".into());
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: NetworkMode = serde_json::from_str(&json).unwrap();
+        match back {
+            NetworkMode::Custom(name) => assert_eq!(name, "my-overlay"),
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
     #[test]
     fn network_driver_variants() {
         for driver in [

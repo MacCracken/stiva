@@ -331,6 +331,146 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn stop_restart_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "img".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        manager.start(&c.id).await.unwrap();
+        manager.stop(&c.id).await.unwrap();
+
+        // Should be able to start again after stopping.
+        manager.start(&c.id).await.unwrap();
+        let listed = manager.list().await.unwrap();
+        assert_eq!(listed[0].state, ContainerState::Running);
+    }
+
+    #[tokio::test]
+    async fn multiple_containers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "img".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        let c1 = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        let c2 = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        let c3 = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+
+        assert_ne!(c1.id, c2.id);
+        assert_ne!(c2.id, c3.id);
+
+        let listed = manager.list().await.unwrap();
+        assert_eq!(listed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn remove_cleans_up_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+
+        let image = Image {
+            id: "img".to_string(),
+            reference: crate::image::ImageRef::parse("alpine").unwrap(),
+            size_bytes: 0,
+            layers: vec![],
+            created_at: chrono::Utc::now(),
+        };
+
+        let c = manager
+            .create(&image, ContainerConfig::default())
+            .await
+            .unwrap();
+        let container_dir = dir.path().join(&c.id);
+        assert!(container_dir.exists());
+
+        manager.remove(&c.id).await.unwrap();
+        assert!(!container_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn start_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ContainerManager::new(dir.path()).unwrap();
+        let err = manager.start("nonexistent").await.unwrap_err();
+        assert!(matches!(err, crate::StivaError::ContainerNotFound(_)));
+    }
+
+    #[test]
+    fn container_serde_round_trip() {
+        let container = Container {
+            id: "abc-123".into(),
+            name: Some("web".into()),
+            image_id: "sha256:img".into(),
+            image_ref: "docker.io/library/nginx:latest".into(),
+            state: ContainerState::Running,
+            pid: Some(42),
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            config: ContainerConfig {
+                name: Some("web".into()),
+                command: vec!["/bin/sh".into()],
+                env: HashMap::from([("K".into(), "V".into())]),
+                volumes: vec!["/host:/container".into()],
+                ports: vec!["8080:80".into()],
+                network: Some("bridge".into()),
+                memory_limit: 256 * 1024 * 1024,
+                cpu_shares: 1024,
+                user: Some("nobody".into()),
+                workdir: Some("/app".into()),
+            },
+        };
+        let json = serde_json::to_string(&container).unwrap();
+        let back: Container = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "abc-123");
+        assert_eq!(back.state, ContainerState::Running);
+        assert_eq!(back.pid, Some(42));
+        assert_eq!(back.config.memory_limit, 256 * 1024 * 1024);
+        assert_eq!(back.config.user.as_deref(), Some("nobody"));
+        assert_eq!(back.config.workdir.as_deref(), Some("/app"));
+    }
+
+    #[test]
+    fn container_config_defaults() {
+        let config = ContainerConfig::default();
+        assert!(config.name.is_none());
+        assert!(config.command.is_empty());
+        assert!(config.env.is_empty());
+        assert!(config.volumes.is_empty());
+        assert!(config.ports.is_empty());
+        assert!(config.network.is_none());
+        assert_eq!(config.memory_limit, 0);
+        assert_eq!(config.cpu_shares, 0);
+        assert!(config.user.is_none());
+        assert!(config.workdir.is_none());
+    }
+
     #[test]
     fn container_config_serde() {
         let config = ContainerConfig {
