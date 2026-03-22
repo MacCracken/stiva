@@ -1,1 +1,40 @@
-/target
+# Build artifacts
+/target/
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debugging
+*.pdb
+core
+core.*
+
+# Coverage
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# Benchmark output
+criterion/
+benches/history.log
+
+# Fuzz artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+
+# cargo-vet downloads
+supply-chain/.cache/
+
+# Environment / secrets
+.env
+.env.*

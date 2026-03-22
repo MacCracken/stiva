@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{error, info};
 
 /// Container state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +177,7 @@ impl ContainerManager {
     /// completion and captures stdout/stderr. The container transitions
     /// Created → Running → Stopped.
     pub async fn start(&self, id: &str) -> Result<(), StivaError> {
-        // Transition to Running.
+        info!(container = id, "starting container");
         {
             let mut containers = self.containers.write().await;
             let container = containers
@@ -213,7 +213,8 @@ impl ContainerManager {
                         container.state = ContainerState::Stopped;
                         container.pid = None;
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        error!(container = id, error = %e, "container execution failed");
                         container.state = ContainerState::Stopped;
                         container.pid = None;
                     }

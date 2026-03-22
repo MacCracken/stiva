@@ -22,11 +22,19 @@
 //! - [`storage`] — Overlay filesystem, volume mounts, tmpfs
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
+//! - [`health`] — Container health monitoring via majra heartbeat
+//! - [`agent`] — Daimon agent registration
+//! - [`mcp`] — MCP tools for AI agent integration
+//! - [`intents`] — Agnoshi intent system (stub)
 
+pub mod agent;
 #[cfg(feature = "compose")]
 pub mod compose;
 pub mod container;
+pub mod health;
 pub mod image;
+pub mod intents;
+pub mod mcp;
 pub mod network;
 pub mod registry;
 pub mod runtime;
@@ -36,6 +44,7 @@ mod error;
 pub use error::StivaError;
 
 use std::sync::Arc;
+use tracing::info;
 
 /// Top-level entry point for the stiva runtime.
 pub struct Stiva {
@@ -78,6 +87,12 @@ impl Default for StivaConfig {
 impl Stiva {
     /// Create a new stiva runtime.
     pub async fn new(config: StivaConfig) -> Result<Self, StivaError> {
+        info!(
+            root = %config.root_path.display(),
+            images = %config.image_path.display(),
+            max_containers = config.max_containers,
+            "initializing stiva runtime"
+        );
         let image_store = Arc::new(image::ImageStore::new(&config.image_path)?);
         let containers = Arc::new(container::ContainerManager::new(
             &config.root_path,
@@ -125,6 +140,7 @@ impl Stiva {
         image: &str,
         config: container::ContainerConfig,
     ) -> Result<container::Container, StivaError> {
+        info!(image, "stiva run");
         let img = self.pull(image).await?;
         let container = self.containers.create(&img, config).await?;
         self.containers.start(&container.id).await?;
@@ -138,11 +154,13 @@ impl Stiva {
 
     /// Stop a container.
     pub async fn stop(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "stiva stop");
         self.containers.stop(id).await
     }
 
     /// Remove a container.
     pub async fn rm(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "stiva rm");
         self.containers.remove(id).await
     }
 
@@ -154,6 +172,70 @@ impl Stiva {
     /// Read container logs.
     pub async fn logs(&self, id: &str) -> Result<String, StivaError> {
         self.containers.logs(id).await
+    }
+
+    /// Deploy a compose file — parse, resolve dependencies, create and start services.
+    #[cfg(feature = "compose")]
+    pub async fn compose_up(
+        &self,
+        toml_content: &str,
+    ) -> Result<compose::ComposeSession, StivaError> {
+        info!(
+            services = toml_content.matches("[services.").count(),
+            "compose up"
+        );
+        let compose_file = compose::parse_compose(toml_content)?;
+        let startup_order = compose::resolve_startup_order(&compose_file)?;
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let mut services: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        for service_name in &startup_order {
+            let service = compose_file.services.get(service_name).ok_or_else(|| {
+                StivaError::Compose(format!("service '{service_name}' not found"))
+            })?;
+
+            let replicas = compose::replica_count(service);
+            let mut container_ids = Vec::new();
+
+            for i in 0..replicas {
+                let config = compose::service_to_config(service_name, service, i);
+
+                // Pull image (may already be cached).
+                let img = self.pull(&service.image).await?;
+
+                // Create and start container.
+                let container = self.containers.create(&img, config).await?;
+                let _ = self.containers.start(&container.id).await;
+                container_ids.push(container.id);
+            }
+
+            services.insert(service_name.clone(), container_ids);
+        }
+
+        Ok(compose::ComposeSession {
+            id: session_id,
+            services,
+            networks: vec![],
+            startup_order,
+            created_at: chrono::Utc::now(),
+        })
+    }
+
+    /// Tear down a compose session — stop and remove all containers.
+    #[cfg(feature = "compose")]
+    pub async fn compose_down(&self, session: &compose::ComposeSession) -> Result<(), StivaError> {
+        // Stop in reverse order.
+        for service_name in session.startup_order.iter().rev() {
+            if let Some(ids) = session.services.get(service_name) {
+                for id in ids {
+                    let _ = self.containers.stop(id).await;
+                    let _ = self.containers.remove(id).await;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

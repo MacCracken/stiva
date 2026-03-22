@@ -3,6 +3,7 @@
 use crate::error::StivaError;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use tracing::debug;
 
 /// Default DNS servers if host resolv.conf is unavailable.
 const DEFAULT_DNS: &[&str] = &["8.8.8.8", "8.8.4.4"];
@@ -32,6 +33,7 @@ pub fn parse_resolv_conf(content: &str) -> Vec<Ipv4Addr> {
 
 /// Write /etc/resolv.conf into the container rootfs.
 pub fn inject_resolv_conf(rootfs: &Path, dns_servers: &[Ipv4Addr]) -> Result<(), StivaError> {
+    debug!(rootfs = %rootfs.display(), servers = dns_servers.len(), "injecting resolv.conf");
     let etc = rootfs.join("etc");
     std::fs::create_dir_all(&etc)?;
 

@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test bench audit deny build doc clean
+.PHONY: check fmt clippy test bench bench-history audit deny build doc clean
 
 # Run all CI checks locally
 check: fmt clippy test
@@ -18,6 +18,10 @@ test:
 # Run benchmarks (criterion)
 bench:
 	cargo bench
+
+# Run benchmark suite and append to history log
+bench-history:
+	./scripts/bench.sh
 
 # Security audit
 audit:

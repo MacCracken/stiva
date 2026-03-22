@@ -1,0 +1,95 @@
+//! Agnoshi intent system — stub for future NL→intent parsing.
+//!
+//! The agnoshi project does not exist yet. This module defines the intent types
+//! that stiva will support when NL intent parsing is available.
+
+use crate::error::StivaError;
+use serde::{Deserialize, Serialize};
+
+/// A parsed container intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Intent {
+    /// Run a container from an image.
+    Run { image: String, name: Option<String> },
+    /// Stop a running container.
+    Stop { id: String },
+    /// Pull an image from a registry.
+    Pull { image: String },
+    /// Deploy a compose file.
+    Compose { action: ComposeAction },
+    /// Scale a service to N replicas.
+    Scale { service: String, replicas: u32 },
+    /// Inspect a container or image.
+    Inspect { target: String },
+}
+
+/// Compose sub-action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComposeAction {
+    Up,
+    Down,
+    Restart,
+}
+
+/// Parse a natural language intent into a structured Intent.
+///
+/// This is a placeholder — actual NL parsing requires the agnoshi project.
+pub fn parse_intent(_text: &str) -> Result<Intent, StivaError> {
+    Err(StivaError::Runtime(
+        "agnoshi intent parsing not yet implemented".into(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_intent_not_implemented() {
+        assert!(parse_intent("run nginx").is_err());
+    }
+
+    #[test]
+    fn intent_serde() {
+        let intents = vec![
+            Intent::Run {
+                image: "nginx".into(),
+                name: Some("web".into()),
+            },
+            Intent::Stop {
+                id: "abc123".into(),
+            },
+            Intent::Pull {
+                image: "alpine".into(),
+            },
+            Intent::Compose {
+                action: ComposeAction::Up,
+            },
+            Intent::Scale {
+                service: "worker".into(),
+                replicas: 3,
+            },
+            Intent::Inspect {
+                target: "nginx".into(),
+            },
+        ];
+        for intent in intents {
+            let json = serde_json::to_string(&intent).unwrap();
+            let back: Intent = serde_json::from_str(&json).unwrap();
+            assert_eq!(intent, back);
+        }
+    }
+
+    #[test]
+    fn compose_action_serde() {
+        for action in [
+            ComposeAction::Up,
+            ComposeAction::Down,
+            ComposeAction::Restart,
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            let back: ComposeAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(action, back);
+        }
+    }
+}

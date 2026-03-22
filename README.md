@@ -12,7 +12,7 @@ Stiva is the container runtime that completes AGNOS's path to a full orchestrati
 stiva (this crate)
   ├── kavach (sandbox: seccomp, Landlock, namespaces, OCI spec, gVisor, Firecracker, WASM)
   ├── majra (job queue, heartbeat FSM, pub/sub, relay)
-  └── nein (network policy — planned)
+  └── nein (nftables firewall, NAT, port mapping)
 ```
 
 ```
@@ -28,6 +28,8 @@ stiva (this crate)
               │   Overlay FS                │
               │   OCI registry client       │
               │   Compose orchestration     │
+              │   Health + restart policies │
+              │   MCP tools + agent reg.    │
               ├──────────┬─────────────────┤
               │  kavach  │     majra       │
               │ (sandbox)│  (queue/fleet)  │
@@ -44,7 +46,11 @@ stiva (this crate)
 - **Volume Mounts** — bind mounts, tmpfs, named volumes
 - **OCI Registry Client** — Docker Hub, GHCR, custom registries, token auth
 - **TOML Compose** — multi-container orchestration using TOML (not YAML)
-- **Majra Integration** — priority-based container scheduling, heartbeat health tracking
+- **Health Monitoring** — heartbeat-based health tracking via majra FSM
+- **Restart Policies** — always, on-failure (with max retries), unless-stopped
+- **MCP Tools** — AI agent integration (stiva_pull, stiva_run, stiva_ps, stiva_stop, stiva_compose)
+- **Daimon Integration** — register containers as agents for fleet orchestration
+- **Sutra Module** — deploy containers via sutra playbooks (`sutra-stiva` crate)
 
 ## Usage
 
@@ -83,57 +89,8 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap
 
-### Phase 0 — Foundation
-- [x] Scaffold crate with module structure
-- [x] Image reference parser (docker.io, ghcr.io, custom)
-- [x] Container lifecycle state machine (Created → Running → Stopped)
-- [x] Container manager with create/start/stop/remove
-- [x] OCI manifest/descriptor types
-- [x] Volume mount parsing
-- [x] Network mode types (Bridge, Host, None, Container, Custom)
-- [x] TOML compose file parser
-- [x] Runtime spec generation
-
-### Phase 1 — Image Pull Pipeline
-- [x] OCI distribution spec client (manifest fetch, blob download)
-- [x] Token auth (Docker Hub, GHCR bearer tokens)
-- [x] Multi-arch manifest list support (platform selection, index resolution)
-- [x] Layer deduplication in content-addressable store
-- [x] Download resume + SHA-256 verification
-- [x] Image index persistence
-- [x] 30 tests passing
-
-### Phase 2 — Container Execution
-- [x] Layer unpacking (tar+gzip decompression to layer directories)
-- [x] Overlay filesystem assembly from image layers (overlayfs mount on Linux)
-- [x] kavach sandbox integration (OCI backend with crun/runc, Process fallback)
-- [x] OCI runtime spec generation (full spec: resource limits, mounts, env, user, workdir)
-- [x] Namespace creation (pid, net, mount, uts, ipc)
-- [x] Cgroup resource limits (memory, CPU via kavach policy)
-- [x] Volume bind mounts (bind + tmpfs, read-only support)
-- [x] Container logging (stdout/stderr capture to log files)
-- [x] One-shot container execution (run-to-completion model)
-
-### Phase 3 — Networking (current)
-- [x] Bridge network with veth pairs (via `ip` commands + nix)
-- [x] NAT rules via nftables (nein crate)
-- [x] Port mapping (host:container) with TCP/UDP support
-- [x] Container DNS resolution (resolv.conf + hosts injection)
-- [x] Custom named networks (NetworkManager with IP pools)
-- [x] Network isolation between containers (per-bridge IP pool + veth isolation)
-- [x] IP address pool with sequential allocation and release
-
-### Phase 4 — Orchestration
-- [ ] Compose up/down/restart
-- [ ] Service dependency ordering (DAG via majra)
-- [ ] Health checks
-- [ ] Restart policies (always, on-failure, unless-stopped)
-- [ ] Daimon integration (register containers as agents)
-- [ ] Sutra module for container deployment playbooks
-- [ ] MCP tools: `stiva_run`, `stiva_ps`, `stiva_pull`, `stiva_stop`, `stiva_compose`
-- [ ] Agnoshi intents
-
-### Phase 5 — Advanced
+### Phase 5 — Advanced (next)
+- [ ] Long-running daemon containers (kavach spawn/wait/kill)
 - [ ] Build from Dockerfile/Containerfile (or TOML equivalent)
 - [ ] Image push to registries
 - [ ] Container checkpointing (CRIU integration)
@@ -141,17 +98,54 @@ stiva.rm(&container.id).await?;
 - [ ] Integration with daimon edge fleet (schedule containers across nodes)
 - [ ] Rootless containers (user namespace remapping)
 
-## Reference Code
+### Completed
 
-| Source | What to Reference | Path | Maturity |
-|--------|------------------|------|----------|
-| **Kavach** | Sandbox backends (process, gVisor, Firecracker, WASM, OCI, SGX, SEV), policy engine, lifecycle, credential proxy, strength scoring | `/home/macro/Repos/kavach/src/` | **High** — 8 backends, published to crates.io (0.21.3) |
-| **Kavach** `backend/oci/` | OCI runtime spec execution, existing container isolation patterns | `/home/macro/Repos/kavach/src/backend/oci/` | **High** — foundation for stiva's runtime module |
-| **Majra** | Priority queue (DAG scheduling), heartbeat FSM, pub/sub, relay, rate limiting | `/home/macro/Repos/majra/src/` | **High** — crates.io (0.21.3), benchmarked, proptested |
-| **Agnosys** | Namespace creation (netns, cgroups), mount operations, seccomp, Landlock | `userland/agnos-sys/src/` | **High** — syscall bindings used across AGNOS |
-| **Daimon** `sandbox_v2` | Novel sandboxing patterns (79 tests), Landlock + seccomp composition | `userland/agent-runtime/src/sandbox_v2.rs` | **High** — production sandbox code |
-| **Daimon** `edge` | Fleet node management, capability routing, VRAM-aware placement | `userland/agent-runtime/src/edge.rs` | **High** — 37 tests, integration target |
-| **Sutra Community** | nftables module (network rules), sysctl module | `/home/macro/Repos/sutra-community/` | **Medium-High** — reference for networking |
+<details>
+<summary>Phase 0–4 (click to expand)</summary>
+
+#### Phase 0 — Foundation
+Scaffold, image reference parser, container lifecycle state machine, OCI types, volume parsing, network mode types, TOML compose parser, runtime spec generation.
+
+#### Phase 1 — Image Pull Pipeline
+OCI distribution spec client, bearer token auth, multi-arch manifest list, content-addressable blob store with SHA-256 verification, layer deduplication, concurrent downloads, image index persistence.
+
+#### Phase 2 — Container Execution
+Layer unpacking (tar+gzip), overlay filesystem (overlayfs on Linux), kavach sandbox integration (OCI + Process backends), full OCI runtime spec (resource limits, mounts, env, user, workdir), volume bind mounts, container logging, one-shot execution model.
+
+#### Phase 3 — Networking
+Bridge networks with veth pairs, NAT via nein/nftables, port mapping (TCP/UDP), container DNS (resolv.conf + hosts injection), custom named networks, IP address pool with allocation/release.
+
+#### Phase 4 — Orchestration
+Compose up/down with DAG dependency ordering (majra), health checks via majra HeartbeatTracker, restart policies (Always, OnFailure, UnlessStopped, Never), daimon agent registration, sutra-stiva deployment module, 5 MCP tools, agnoshi intent stubs, replica support, PubSub events.
+
+</details>
+
+## Development
+
+### Scripts
+
+| Script | Description |
+|--------|-------------|
+| `scripts/version-bump.sh <version>` | Bump version in `VERSION` and `Cargo.toml`, update `Cargo.lock` |
+| `scripts/bench.sh` | Run test suite + release build, append timing results to `benches/history.log` |
+| `scripts/bench.sh --history` | Show benchmark history |
+| `scripts/bench.sh --clean` | Clear benchmark history |
+
+### Makefile targets
+
+| Target | Description |
+|--------|-------------|
+| `make check` | Run fmt + clippy + test |
+| `make fmt` | Check formatting |
+| `make clippy` | Lint with zero warnings |
+| `make test` | Run test suite |
+| `make bench` | Run criterion benchmarks |
+| `make bench-history` | Run benchmark suite and append to history log |
+| `make audit` | Security audit via `cargo audit` |
+| `make deny` | Supply-chain checks (license + advisory) |
+| `make build` | Release build |
+| `make doc` | Generate documentation |
+| `make clean` | Clean build artifacts |
 
 ## How Stiva Completes the k8s Picture
 
@@ -164,6 +158,8 @@ See [k8s-roadmap.md](../docs/development/k8s-roadmap.md) in agnosticos.
 | Image registry | ark packages only | OCI images + ark packages |
 | Docker Compose | Not supported | `stiva compose` (TOML-based) |
 | Container networking | agnosys netns only | Full bridge/NAT/custom networks |
+| Health/restart | Manual | Heartbeat FSM + restart policies |
+| Orchestration | None | DAG-ordered compose + sutra playbooks |
 
 ## License
 

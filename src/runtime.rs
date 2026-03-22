@@ -4,6 +4,7 @@ use crate::container::Container;
 use crate::error::StivaError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info};
 
 // ---------------------------------------------------------------------------
 // Runtime spec types
@@ -215,8 +216,12 @@ pub struct ContainerExecResult {
 /// Converts the RuntimeSpec into a kavach SandboxConfig, creates a sandbox,
 /// and runs the container command. Returns when the command completes.
 pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, StivaError> {
-    // Build the command string.
     let command = spec.command.join(" ");
+    info!(
+        command = command.as_str(),
+        rootfs = %spec.rootfs.display(),
+        "executing container via kavach sandbox"
+    );
 
     // Build kavach SandboxPolicy from spec resource limits.
     let mut policy = kavach::SandboxPolicy::basic();
@@ -230,12 +235,12 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
     policy.network.enabled = false;
     policy.read_only_rootfs = spec.read_only_rootfs;
 
-    // Determine backend: prefer OCI (crun/runc) if available, fall back to Process.
     let backend = if kavach::Backend::Oci.is_available() {
         kavach::Backend::Oci
     } else {
         kavach::Backend::Process
     };
+    debug!(backend = %backend, "selected sandbox backend");
 
     // Build SandboxConfig.
     let config = kavach::SandboxConfig::builder()
@@ -245,20 +250,28 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
         .build();
 
     // Create and run sandbox.
-    let mut sandbox = kavach::Sandbox::create(config)
-        .await
-        .map_err(|e| StivaError::Sandbox(format!("failed to create sandbox: {e}")))?;
+    let mut sandbox = kavach::Sandbox::create(config).await.map_err(|e| {
+        error!(error = %e, "failed to create sandbox");
+        StivaError::Sandbox(format!("failed to create sandbox: {e}"))
+    })?;
 
     sandbox
         .transition(kavach::SandboxState::Running)
         .map_err(|e| StivaError::Sandbox(format!("failed to transition sandbox: {e}")))?;
 
-    let result = sandbox
-        .exec(&command)
-        .await
-        .map_err(|e| StivaError::Sandbox(format!("sandbox execution failed: {e}")))?;
+    let result = sandbox.exec(&command).await.map_err(|e| {
+        error!(error = %e, "sandbox execution failed");
+        StivaError::Sandbox(format!("sandbox execution failed: {e}"))
+    })?;
 
     let _ = sandbox.destroy().await;
+
+    info!(
+        exit_code = result.exit_code,
+        duration_ms = result.duration_ms,
+        timed_out = result.timed_out,
+        "container execution complete"
+    );
 
     Ok(ContainerExecResult {
         exit_code: result.exit_code,
