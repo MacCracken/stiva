@@ -35,6 +35,8 @@ pub struct RuntimeSpec {
     pub read_only_rootfs: bool,
     /// Filesystem mounts (proc, sys, dev, volumes).
     pub mounts: Vec<SpecMount>,
+    /// Whether to run rootless (user namespace with UID remapping).
+    pub rootless: bool,
 }
 
 /// A mount entry in the runtime spec.
@@ -180,17 +182,22 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
     let mut mounts = standard_mounts();
     mounts.extend(volume_mounts(&config.volumes)?);
 
+    let mut namespaces = vec![
+        Namespace::Pid,
+        Namespace::Net,
+        Namespace::Mount,
+        Namespace::Uts,
+        Namespace::Ipc,
+    ];
+    if config.rootless {
+        namespaces.push(Namespace::User);
+    }
+
     Ok(RuntimeSpec {
         rootfs: rootfs.to_path_buf(),
         command,
         env,
-        namespaces: vec![
-            Namespace::Pid,
-            Namespace::Net,
-            Namespace::Mount,
-            Namespace::Uts,
-            Namespace::Ipc,
-        ],
+        namespaces,
         memory_limit_bytes,
         cpu_shares,
         max_pids: None, // TODO: Add max_pids to ContainerConfig
@@ -198,6 +205,7 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
         workdir,
         read_only_rootfs: false,
         mounts,
+        rootless: config.rootless,
     })
 }
 
@@ -243,7 +251,7 @@ async fn build_sandbox(spec: &RuntimeSpec) -> Result<(kavach::Sandbox, String), 
     } else {
         kavach::Backend::Process
     };
-    debug!(backend = %backend, "selected sandbox backend");
+    debug!(backend = %backend, rootless = spec.rootless, "selected sandbox backend");
 
     let config = kavach::SandboxConfig::builder()
         .backend(backend)
@@ -383,6 +391,163 @@ pub async fn spawn_container(spec: &RuntimeSpec) -> Result<DaemonHandle, StivaEr
         process,
         _sandbox: sandbox,
     })
+}
+
+// ---------------------------------------------------------------------------
+// CRIU checkpoint / restore
+// ---------------------------------------------------------------------------
+
+/// Check if CRIU is available on the system.
+///
+/// Scans `PATH` for the `criu` binary, returning `true` if found.
+#[must_use]
+pub fn criu_available() -> bool {
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    path_var
+        .split(':')
+        .any(|dir| Path::new(dir).join("criu").is_file())
+}
+
+/// Checkpoint a running container process via CRIU.
+///
+/// Dumps the process state to the given directory. The process is frozen
+/// during checkpoint and optionally left running (`leave_running = true`)
+/// or killed after dump.
+pub async fn checkpoint_container(
+    pid: u32,
+    dump_dir: &Path,
+    leave_running: bool,
+) -> Result<(), StivaError> {
+    info!(
+        pid,
+        dump_dir = %dump_dir.display(),
+        leave_running,
+        "checkpointing container via CRIU"
+    );
+
+    if !criu_available() {
+        return Err(StivaError::Runtime(
+            "CRIU is not available on this system".into(),
+        ));
+    }
+
+    tokio::fs::create_dir_all(dump_dir).await.map_err(|e| {
+        error!(error = %e, dump_dir = %dump_dir.display(), "failed to create checkpoint dir");
+        StivaError::Runtime(format!("failed to create checkpoint directory: {e}"))
+    })?;
+
+    let mut cmd = tokio::process::Command::new("criu");
+    cmd.arg("dump")
+        .arg("--tree")
+        .arg(pid.to_string())
+        .arg("--images-dir")
+        .arg(dump_dir)
+        .arg("--shell-job");
+
+    if leave_running {
+        cmd.arg("--leave-running");
+    }
+
+    debug!(pid, dump_dir = %dump_dir.display(), leave_running, "running criu dump");
+
+    let output = cmd.output().await.map_err(|e| {
+        error!(error = %e, "failed to execute criu dump");
+        StivaError::Runtime(format!("failed to execute criu dump: {e}"))
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!(
+            pid,
+            exit_code = output.status.code(),
+            stderr = %stderr,
+            "criu dump failed"
+        );
+        return Err(StivaError::Runtime(format!(
+            "criu dump failed (exit {}): {stderr}",
+            output.status.code().unwrap_or(-1),
+        )));
+    }
+
+    info!(
+        pid,
+        dump_dir = %dump_dir.display(),
+        "checkpoint complete"
+    );
+    Ok(())
+}
+
+/// Restore a container process from a CRIU checkpoint.
+///
+/// Returns the PID of the restored process.
+pub async fn restore_container(dump_dir: &Path, rootfs: &Path) -> Result<u32, StivaError> {
+    info!(
+        dump_dir = %dump_dir.display(),
+        rootfs = %rootfs.display(),
+        "restoring container via CRIU"
+    );
+
+    if !criu_available() {
+        return Err(StivaError::Runtime(
+            "CRIU is not available on this system".into(),
+        ));
+    }
+
+    let mut cmd = tokio::process::Command::new("criu");
+    cmd.arg("restore")
+        .arg("--images-dir")
+        .arg(dump_dir)
+        .arg("--root")
+        .arg(rootfs)
+        .arg("--shell-job")
+        .arg("--restore-detached")
+        .arg("--pidfile")
+        .arg(dump_dir.join("restore.pid"));
+
+    debug!(
+        dump_dir = %dump_dir.display(),
+        rootfs = %rootfs.display(),
+        "running criu restore"
+    );
+
+    let output = cmd.output().await.map_err(|e| {
+        error!(error = %e, "failed to execute criu restore");
+        StivaError::Runtime(format!("failed to execute criu restore: {e}"))
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!(
+            exit_code = output.status.code(),
+            stderr = %stderr,
+            "criu restore failed"
+        );
+        return Err(StivaError::Runtime(format!(
+            "criu restore failed (exit {}): {stderr}",
+            output.status.code().unwrap_or(-1),
+        )));
+    }
+
+    // Read the PID file written by --pidfile.
+    let pid_path = dump_dir.join("restore.pid");
+    let pid_str = tokio::fs::read_to_string(&pid_path).await.map_err(|e| {
+        error!(error = %e, path = %pid_path.display(), "failed to read restored PID");
+        StivaError::Runtime(format!("failed to read restored PID file: {e}"))
+    })?;
+
+    let pid: u32 = pid_str.trim().parse().map_err(|e| {
+        error!(error = %e, raw = %pid_str, "failed to parse restored PID");
+        StivaError::Runtime(format!("failed to parse restored PID '{pid_str}': {e}"))
+    })?;
+
+    info!(
+        pid,
+        dump_dir = %dump_dir.display(),
+        "restore complete"
+    );
+    Ok(pid)
 }
 
 // ---------------------------------------------------------------------------
@@ -622,5 +787,11 @@ mod tests {
         ] {
             let _ = format!("{ns:?}");
         }
+    }
+
+    #[test]
+    fn criu_available_returns_bool() {
+        // Must not panic — just returns true/false based on PATH.
+        let _available = criu_available();
     }
 }

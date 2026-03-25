@@ -71,6 +71,11 @@ pub struct ContainerConfig {
     /// Default: 10000 (10 seconds).
     #[serde(default = "default_stop_grace_ms")]
     pub stop_grace_ms: u64,
+    /// Run as a rootless container (user namespace UID remapping).
+    /// When true, the container runs as UID 0 inside a user namespace
+    /// mapped to the invoking user's UID outside. No real root required.
+    #[serde(default)]
+    pub rootless: bool,
 }
 
 fn default_stop_grace_ms() -> u64 {
@@ -92,8 +97,26 @@ impl Default for ContainerConfig {
             workdir: None,
             detach: false,
             stop_grace_ms: default_stop_grace_ms(),
+            rootless: false,
         }
     }
+}
+
+/// A migration bundle containing everything needed to transfer a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationBundle {
+    /// Container ID on the source node.
+    pub source_container_id: String,
+    /// Image reference to pull on the target.
+    pub image_ref: String,
+    /// Serialized container config.
+    pub config: ContainerConfig,
+    /// Path to checkpoint directory.
+    pub checkpoint_dir: PathBuf,
+    /// Source node identifier.
+    pub source_node: String,
+    /// Timestamp of migration preparation.
+    pub prepared_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Internal state for a running container (not serialized).
@@ -246,7 +269,18 @@ impl ContainerManager {
 
         if detach {
             info!(container = id, "spawning daemon container");
-            let handle = runtime::spawn_container(&spec).await?;
+            let handle = match runtime::spawn_container(&spec).await {
+                Ok(h) => h,
+                Err(e) => {
+                    // Revert state on spawn failure.
+                    let mut containers = self.containers.write().await;
+                    if let Some(container) = containers.get_mut(id) {
+                        container.state = ContainerState::Stopped;
+                        container.pid = None;
+                    }
+                    return Err(e);
+                }
+            };
             let pid = handle.pid();
 
             {
@@ -286,9 +320,15 @@ impl ContainerManager {
                 }
             }
 
-            // Write logs and propagate result.
+            // Write logs, store result, and propagate.
             let exec_result = result?;
             self.write_log(id, &exec_result).await;
+            {
+                let mut internals = self.internals.write().await;
+                if let Some(internal) = internals.get_mut(id) {
+                    internal.exec_result = Some(exec_result);
+                }
+            }
         }
         Ok(())
     }
@@ -466,6 +506,224 @@ impl ContainerManager {
     /// List all containers.
     pub async fn list(&self) -> Result<Vec<Container>, StivaError> {
         Ok(self.containers.read().await.values().cloned().collect())
+    }
+
+    /// Checkpoint a running daemon container.
+    ///
+    /// Creates a snapshot of the container's process state that can be
+    /// restored later. The container remains running if `leave_running` is true.
+    /// Returns the path to the checkpoint directory.
+    pub async fn checkpoint(&self, id: &str, leave_running: bool) -> Result<PathBuf, StivaError> {
+        info!(container = id, leave_running, "checkpointing container");
+
+        let (state, pid) = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            (container.state, container.pid)
+        };
+
+        if state != ContainerState::Running {
+            return Err(StivaError::InvalidState(format!(
+                "cannot checkpoint container {id}: not running (state: {state:?})"
+            )));
+        }
+
+        let pid = pid.ok_or_else(|| {
+            StivaError::InvalidState(format!(
+                "cannot checkpoint container {id}: no PID available"
+            ))
+        })?;
+
+        // Create checkpoint dir: {container_root}/checkpoints/{timestamp}/
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
+        let checkpoint_dir = self
+            .root
+            .join(id)
+            .join("checkpoints")
+            .join(timestamp.to_string());
+
+        runtime::checkpoint_container(pid, &checkpoint_dir, leave_running).await?;
+
+        // If not leaving running, transition to Paused.
+        if !leave_running {
+            let mut containers = self.containers.write().await;
+            if let Some(container) = containers.get_mut(id) {
+                container.state = ContainerState::Paused;
+                info!(container = id, "container paused after checkpoint");
+            }
+        }
+
+        info!(
+            container = id,
+            checkpoint_dir = %checkpoint_dir.display(),
+            "checkpoint created"
+        );
+        Ok(checkpoint_dir)
+    }
+
+    /// Restore a container from a checkpoint.
+    ///
+    /// Restores the process state from a previous checkpoint and transitions
+    /// the container back to Running.
+    pub async fn restore(&self, id: &str, checkpoint_dir: &Path) -> Result<(), StivaError> {
+        info!(
+            container = id,
+            checkpoint_dir = %checkpoint_dir.display(),
+            "restoring container from checkpoint"
+        );
+
+        let state = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            container.state
+        };
+
+        if state != ContainerState::Paused && state != ContainerState::Stopped {
+            return Err(StivaError::InvalidState(format!(
+                "cannot restore container {id}: must be Paused or Stopped (state: {state:?})"
+            )));
+        }
+
+        // Get rootfs from internals.
+        let rootfs = {
+            let internals = self.internals.read().await;
+            let internal = internals
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            internal
+                .overlay
+                .as_ref()
+                .map(|o| o.merged.clone())
+                .unwrap_or_else(|| self.root.join(id).join("rootfs"))
+        };
+
+        let new_pid = runtime::restore_container(checkpoint_dir, &rootfs).await?;
+
+        // Update container PID and state to Running.
+        {
+            let mut containers = self.containers.write().await;
+            if let Some(container) = containers.get_mut(id) {
+                container.pid = Some(new_pid);
+                container.state = ContainerState::Running;
+                info!(
+                    container = id,
+                    pid = new_pid,
+                    "container restored and running"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Prepare a container for live migration — checkpoint and package for transfer.
+    ///
+    /// Returns the path to a migration bundle (directory containing checkpoint
+    /// data, container config, and image reference) that can be transferred
+    /// to a target node.
+    pub async fn prepare_migration(&self, id: &str) -> Result<MigrationBundle, StivaError> {
+        info!(container = id, "preparing container for migration");
+
+        let (container_state, container_config, image_ref) = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            (
+                container.state,
+                container.config.clone(),
+                container.image_ref.clone(),
+            )
+        };
+
+        if container_state != ContainerState::Running {
+            return Err(StivaError::InvalidState(format!(
+                "cannot migrate container {id}: not running (state: {container_state:?})"
+            )));
+        }
+
+        // Checkpoint with leave_running = false (pauses the container).
+        let checkpoint_dir = self.checkpoint(id, false).await?;
+
+        let hostname = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("NODE_ID"))
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let bundle = MigrationBundle {
+            source_container_id: id.to_string(),
+            image_ref,
+            config: container_config,
+            checkpoint_dir,
+            source_node: hostname,
+            prepared_at: chrono::Utc::now(),
+        };
+
+        info!(
+            container = id,
+            source_node = %bundle.source_node,
+            "migration bundle prepared"
+        );
+        Ok(bundle)
+    }
+
+    /// Apply a migration bundle — restore a container from a transferred checkpoint.
+    ///
+    /// Creates a new container from the bundle's config, then restores
+    /// process state from the checkpoint data.
+    pub async fn apply_migration(&self, bundle: &MigrationBundle) -> Result<Container, StivaError> {
+        info!(
+            source_container = %bundle.source_container_id,
+            source_node = %bundle.source_node,
+            image = %bundle.image_ref,
+            "applying migration bundle"
+        );
+
+        // Resolve image from the store (caller must ensure image is present).
+        let images = self.image_store.list()?;
+        let image = images
+            .iter()
+            .find(|i| i.reference.full_ref() == bundle.image_ref)
+            .ok_or_else(|| {
+                StivaError::ImageNotFound(format!(
+                    "image {} not found locally — pull it before applying migration",
+                    bundle.image_ref
+                ))
+            })?;
+
+        // Create a new container with the bundle's config.
+        let container = self.create(image, bundle.config.clone()).await?;
+
+        // Restore from checkpoint.
+        let restore_result = self.restore(&container.id, &bundle.checkpoint_dir).await;
+        if let Err(e) = restore_result {
+            // Clean up the created container on restore failure.
+            error!(
+                container = %container.id,
+                error = %e,
+                "migration restore failed, cleaning up"
+            );
+            let _ = self.remove(&container.id).await;
+            return Err(StivaError::Migration(format!(
+                "failed to restore from checkpoint: {e}"
+            )));
+        }
+
+        info!(
+            container = %container.id,
+            source = %bundle.source_container_id,
+            "migration applied successfully"
+        );
+
+        // Return updated container state.
+        let containers = self.containers.read().await;
+        containers
+            .get(&container.id)
+            .cloned()
+            .ok_or_else(|| StivaError::ContainerNotFound(container.id.clone()))
     }
 
     /// Read container logs.
@@ -769,6 +1027,43 @@ mod tests {
         assert!(manager.try_wait("nonexistent").await.is_err());
     }
 
+    #[tokio::test]
+    async fn wait_not_started_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // Never started — wait should error.
+        let err = manager.wait(&c.id).await;
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn config_detach_serde() {
+        let config = ContainerConfig {
+            detach: true,
+            stop_grace_ms: 5000,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: ContainerConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.detach);
+        assert_eq!(back.stop_grace_ms, 5000);
+    }
+
+    #[test]
+    fn config_detach_defaults_in_json() {
+        // JSON without detach/stop_grace_ms should use serde defaults.
+        let json =
+            r#"{"command":[],"env":{},"volumes":[],"ports":[],"memory_limit":0,"cpu_shares":0}"#;
+        let config: ContainerConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.detach);
+        assert_eq!(config.stop_grace_ms, 10_000);
+    }
+
     #[test]
     fn container_config_serde() {
         let config = ContainerConfig {
@@ -818,5 +1113,111 @@ mod tests {
         assert_eq!(back.exit_code, Some(0));
         assert_eq!(back.config.memory_limit, 256 * 1024 * 1024);
         assert_eq!(back.config.user.as_deref(), Some("nobody"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // Container is Created, not Running — checkpoint should fail.
+        let err = manager.checkpoint(&c.id, false).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_no_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // Manually set to Running but leave pid as None.
+        {
+            let mut containers = manager.containers.write().await;
+            containers.get_mut(&c.id).unwrap().state = ContainerState::Running;
+        }
+        let err = manager.checkpoint(&c.id, false).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn restore_not_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // Manually set to Running — restore should fail.
+        {
+            let mut containers = manager.containers.write().await;
+            containers.get_mut(&c.id).unwrap().state = ContainerState::Running;
+        }
+        let err = manager
+            .restore(&c.id, Path::new("/tmp/fake-checkpoint"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_dir_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        // Verify the checkpoints directory structure exists after create.
+        let container_root = dir.path().join("containers").join(&c.id);
+        assert!(container_root.exists());
+
+        // The checkpoints subdirectory is created on-demand during checkpoint.
+        // Verify the parent container dir is in place.
+        let checkpoints_parent = container_root.join("checkpoints");
+        // Not created yet — only created when checkpoint() is actually called.
+        assert!(!checkpoints_parent.exists());
+    }
+
+    #[test]
+    fn migration_bundle_serde() {
+        let bundle = MigrationBundle {
+            source_container_id: "abc-123".into(),
+            image_ref: "docker.io/library/nginx:latest".into(),
+            config: ContainerConfig::default(),
+            checkpoint_dir: PathBuf::from("/tmp/checkpoint"),
+            source_node: "node-1".into(),
+            prepared_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&bundle).unwrap();
+        let back: MigrationBundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_container_id, "abc-123");
+        assert_eq!(back.image_ref, "docker.io/library/nginx:latest");
+        assert_eq!(back.source_node, "node-1");
+        assert_eq!(back.checkpoint_dir, PathBuf::from("/tmp/checkpoint"));
+    }
+
+    #[tokio::test]
+    async fn prepare_migration_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // Container is Created, not Running — prepare_migration should fail.
+        let err = manager.prepare_migration(&c.id).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
     }
 }

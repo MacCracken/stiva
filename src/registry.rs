@@ -276,79 +276,8 @@ impl RegistryClient {
         accept: Option<&str>,
     ) -> Result<reqwest::Response, StivaError> {
         let scope = format!("repository:{}:pull", image.repository);
-        let cache_key = format!("{}\0{}", image.registry, scope);
-
-        // Try with cached token first.
-        if let Some(token) = self.get_cached_token(&cache_key).await {
-            let mut req = self.client.get(url).bearer_auth(&token);
-            if let Some(a) = accept {
-                req = req.header(reqwest::header::ACCEPT, a);
-            }
-            let resp = req.send().await?;
-            if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
-                if resp.status().is_client_error() || resp.status().is_server_error() {
-                    return Err(StivaError::Registry(format!(
-                        "HTTP {} from {}",
-                        resp.status(),
-                        url
-                    )));
-                }
-                return Ok(resp);
-            }
-            debug!("cached token expired, re-authenticating");
-        }
-
-        // No cached token or it expired — probe to get auth challenge.
-        let mut req = self.client.get(url);
-        if let Some(a) = accept {
-            req = req.header(reqwest::header::ACCEPT, a);
-        }
-        let resp = req.send().await?;
-
-        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
-            if resp.status().is_client_error() || resp.status().is_server_error() {
-                return Err(StivaError::Registry(format!(
-                    "HTTP {} from {}",
-                    resp.status(),
-                    url
-                )));
-            }
-            return Ok(resp);
-        }
-
-        // Parse WWW-Authenticate and acquire token.
-        let www_auth = resp
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| StivaError::AuthFailed("401 without WWW-Authenticate header".into()))?
-            .to_string();
-
-        let token = self.acquire_token(&www_auth, &scope).await?;
-        self.cache_token(&cache_key, &token).await;
-
-        // Retry with fresh token.
-        let mut req = self.client.get(url).bearer_auth(&token);
-        if let Some(a) = accept {
-            req = req.header(reqwest::header::ACCEPT, a);
-        }
-        let resp = req.send().await?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(StivaError::AuthFailed(format!(
-                "authentication failed for {}",
-                image.full_ref()
-            )));
-        }
-        if resp.status().is_client_error() || resp.status().is_server_error() {
-            return Err(StivaError::Registry(format!(
-                "HTTP {} from {}",
-                resp.status(),
-                url
-            )));
-        }
-
-        Ok(resp)
+        self.authenticated_request(image, reqwest::Method::GET, url, &scope, accept)
+            .await
     }
 
     /// Parse `WWW-Authenticate: Bearer realm="...",service="...",scope="..."` and fetch a token.
@@ -392,6 +321,255 @@ impl RegistryClient {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| StivaError::AuthFailed("no token in auth response".into()))
+    }
+
+    // -- push API -----------------------------------------------------------
+
+    /// Check if a blob already exists in the registry.
+    pub async fn blob_exists(&self, image: &ImageRef, digest: &str) -> Result<bool, StivaError> {
+        let base = self.api_base(image);
+        let url = format!("{base}/v2/{}/blobs/{digest}", image.repository);
+        let scope = format!("repository:{}:pull", image.repository);
+
+        match self
+            .authenticated_request(image, reqwest::Method::HEAD, &url, &scope, None)
+            .await
+        {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Push a blob to the registry (monolithic upload).
+    ///
+    /// Implements the OCI distribution spec monolithic blob upload:
+    /// 1. `POST /v2/{repo}/blobs/uploads/` → get upload URL from `Location` header
+    /// 2. `PUT {location}?digest={digest}` with blob data
+    pub async fn push_blob(
+        &self,
+        image: &ImageRef,
+        digest: &str,
+        data: &[u8],
+    ) -> Result<(), StivaError> {
+        // Skip if already present.
+        if self.blob_exists(image, digest).await? {
+            tracing::info!(digest, "blob already exists, skipping upload");
+            return Ok(());
+        }
+
+        let base = self.api_base(image);
+        let scope = format!("repository:{}:push,pull", image.repository);
+
+        // Step 1: Initiate upload.
+        let upload_url = format!("{base}/v2/{}/blobs/uploads/", image.repository);
+        let resp = self
+            .authenticated_request(image, reqwest::Method::POST, &upload_url, &scope, None)
+            .await?;
+
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| StivaError::Registry("no Location header in upload response".into()))?
+            .to_string();
+
+        // Resolve relative location against base URL.
+        let put_url = if location.starts_with("http") {
+            location
+        } else {
+            format!("{base}{location}")
+        };
+
+        // Step 2: Upload blob in single PUT.
+        let sep = if put_url.contains('?') { '&' } else { '?' };
+        let final_url = format!("{put_url}{sep}digest={digest}");
+
+        let token = {
+            let cache_key = format!("{}\0{}", image.registry, scope);
+            self.get_cached_token(&cache_key).await
+        };
+
+        let mut req = self
+            .client
+            .put(&final_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, data.len())
+            .body(data.to_vec());
+
+        if let Some(ref t) = token {
+            req = req.bearer_auth(t);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StivaError::Registry(format!("blob upload failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StivaError::Registry(format!(
+                "blob upload failed: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        tracing::info!(digest, size = data.len(), "blob pushed");
+        Ok(())
+    }
+
+    /// Push a manifest to the registry.
+    ///
+    /// `PUT /v2/{repo}/manifests/{reference}` with the manifest JSON.
+    pub async fn push_manifest(
+        &self,
+        image: &ImageRef,
+        manifest: &OciManifest,
+    ) -> Result<(), StivaError> {
+        let base = self.api_base(image);
+        let url = format!("{base}/v2/{}/manifests/{}", image.repository, image.tag);
+        let scope = format!("repository:{}:push,pull", image.repository);
+
+        let body = serde_json::to_vec(manifest)?;
+
+        let token = {
+            let cache_key = format!("{}\0{}", image.registry, scope);
+            // Acquire push token if not cached.
+            match self.get_cached_token(&cache_key).await {
+                Some(t) => Some(t),
+                None => {
+                    // Probe for auth challenge.
+                    let probe = self.client.put(&url).send().await?;
+                    if probe.status() == reqwest::StatusCode::UNAUTHORIZED {
+                        if let Some(www_auth) = probe
+                            .headers()
+                            .get(reqwest::header::WWW_AUTHENTICATE)
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            let t = self.acquire_token(www_auth, &scope).await?;
+                            self.cache_token(&cache_key, &t).await;
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        let mut req = self
+            .client
+            .put(&url)
+            .header(reqwest::header::CONTENT_TYPE, MEDIA_OCI_MANIFEST)
+            .body(body);
+
+        if let Some(ref t) = token {
+            req = req.bearer_auth(t);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StivaError::Registry(format!("manifest push failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StivaError::Registry(format!(
+                "manifest push failed: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        tracing::info!(
+            image = %image.full_ref(),
+            "manifest pushed"
+        );
+        Ok(())
+    }
+
+    // -- generic auth -------------------------------------------------------
+
+    /// Perform an authenticated request with arbitrary method.
+    async fn authenticated_request(
+        &self,
+        image: &ImageRef,
+        method: reqwest::Method,
+        url: &str,
+        scope: &str,
+        accept: Option<&str>,
+    ) -> Result<reqwest::Response, StivaError> {
+        let cache_key = format!("{}\0{}", image.registry, scope);
+
+        // Try with cached token first.
+        if let Some(token) = self.get_cached_token(&cache_key).await {
+            let mut req = self.client.request(method.clone(), url).bearer_auth(&token);
+            if let Some(a) = accept {
+                req = req.header(reqwest::header::ACCEPT, a);
+            }
+            let resp = req.send().await?;
+            if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+                if resp.status().is_client_error() || resp.status().is_server_error() {
+                    return Err(StivaError::Registry(format!(
+                        "HTTP {} from {}",
+                        resp.status(),
+                        url
+                    )));
+                }
+                return Ok(resp);
+            }
+            debug!("cached token expired, re-authenticating");
+        }
+
+        // Probe for auth challenge.
+        let mut req = self.client.request(method.clone(), url);
+        if let Some(a) = accept {
+            req = req.header(reqwest::header::ACCEPT, a);
+        }
+        let resp = req.send().await?;
+
+        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            if resp.status().is_client_error() || resp.status().is_server_error() {
+                return Err(StivaError::Registry(format!(
+                    "HTTP {} from {}",
+                    resp.status(),
+                    url
+                )));
+            }
+            return Ok(resp);
+        }
+
+        // Parse WWW-Authenticate and acquire token.
+        let www_auth = resp
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| StivaError::AuthFailed("401 without WWW-Authenticate header".into()))?
+            .to_string();
+
+        let token = self.acquire_token(&www_auth, scope).await?;
+        self.cache_token(&cache_key, &token).await;
+
+        // Retry with fresh token.
+        let mut req = self.client.request(method, url).bearer_auth(&token);
+        if let Some(a) = accept {
+            req = req.header(reqwest::header::ACCEPT, a);
+        }
+        let resp = req.send().await?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(StivaError::AuthFailed(format!(
+                "authentication failed for {}",
+                image.full_ref()
+            )));
+        }
+        if resp.status().is_client_error() || resp.status().is_server_error() {
+            return Err(StivaError::Registry(format!(
+                "HTTP {} from {}",
+                resp.status(),
+                url
+            )));
+        }
+
+        Ok(resp)
     }
 
     async fn get_cached_token(&self, key: &str) -> Option<String> {
@@ -1757,5 +1935,152 @@ mod tests {
         };
         let selected = select_platform(&index, &target).unwrap();
         assert_eq!(selected.digest, "sha256:v7only");
+    }
+
+    // -- push tests --
+
+    #[tokio::test]
+    async fn mock_blob_exists_true() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .and(path("/v2/library/alpine/blobs/sha256:abc123"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image =
+            crate::image::ImageRef::parse(&format!("{}/library/alpine:latest", server.address()))
+                .unwrap();
+
+        assert!(client.blob_exists(&image, "sha256:abc123").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mock_blob_exists_false() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .and(path("/v2/library/alpine/blobs/sha256:missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image =
+            crate::image::ImageRef::parse(&format!("{}/library/alpine:latest", server.address()))
+                .unwrap();
+
+        assert!(!client.blob_exists(&image, "sha256:missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mock_push_blob() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // HEAD check: blob does not exist.
+        Mock::given(method("HEAD"))
+            .and(path("/v2/library/alpine/blobs/sha256:abc"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // POST initiate upload: return Location.
+        Mock::given(method("POST"))
+            .and(path("/v2/library/alpine/blobs/uploads/"))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .append_header("Location", "/v2/library/alpine/blobs/uploads/uuid-123"),
+            )
+            .mount(&server)
+            .await;
+
+        // PUT complete upload.
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image =
+            crate::image::ImageRef::parse(&format!("{}/library/alpine:latest", server.address()))
+                .unwrap();
+
+        client
+            .push_blob(&image, "sha256:abc", b"blob data")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_push_blob_skip_existing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // HEAD check: blob already exists.
+        Mock::given(method("HEAD"))
+            .and(path("/v2/library/alpine/blobs/sha256:exists"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image =
+            crate::image::ImageRef::parse(&format!("{}/library/alpine:latest", server.address()))
+                .unwrap();
+
+        // Should succeed without POST/PUT.
+        client
+            .push_blob(&image, "sha256:exists", b"data")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_push_manifest() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/v2/library/alpine/manifests/latest"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::with_base_url(&server.uri());
+        let image =
+            crate::image::ImageRef::parse(&format!("{}/library/alpine:latest", server.address()))
+                .unwrap();
+
+        let manifest = OciManifest {
+            schema_version: 2,
+            media_type: Some(MEDIA_OCI_MANIFEST.to_string()),
+            config: Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: "sha256:config".into(),
+                size: 100,
+            },
+            layers: vec![Descriptor {
+                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                digest: "sha256:layer1".into(),
+                size: 4096,
+            }],
+        };
+
+        client.push_manifest(&image, &manifest).await.unwrap();
     }
 }

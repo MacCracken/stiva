@@ -330,6 +330,60 @@ impl ImageStore {
         self.save_index(&images)
     }
 
+    /// Push a local image to a registry.
+    ///
+    /// Uploads all layer blobs and the config blob, then pushes the manifest.
+    /// Blobs already present in the registry are skipped (dedup via HEAD check).
+    pub async fn push(
+        &self,
+        image: &Image,
+        target: &ImageRef,
+        client: &RegistryClient,
+    ) -> Result<(), StivaError> {
+        info!(image = %target.full_ref(), "pushing image");
+
+        // 1. Push config blob.
+        let config_data = self.read_blob(&image.id)?;
+        info!(digest = %image.id, "pushing config blob");
+        client.push_blob(target, &image.id, &config_data).await?;
+
+        // 2. Push layer blobs.
+        for layer in &image.layers {
+            let data = self.read_blob(&layer.digest)?;
+            info!(digest = %layer.digest, size = data.len(), "pushing layer");
+            client.push_blob(target, &layer.digest, &data).await?;
+        }
+
+        // 3. Build and push manifest.
+        let manifest = crate::registry::OciManifest {
+            schema_version: 2,
+            media_type: Some(crate::registry::MEDIA_OCI_MANIFEST.to_string()),
+            config: crate::registry::Descriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".into(),
+                digest: image.id.clone(),
+                size: config_data.len() as u64,
+            },
+            layers: image
+                .layers
+                .iter()
+                .map(|l| crate::registry::Descriptor {
+                    media_type: l.media_type.clone(),
+                    digest: l.digest.clone(),
+                    size: l.size_bytes,
+                })
+                .collect(),
+        };
+
+        client.push_manifest(target, &manifest).await?;
+
+        info!(
+            image = %target.full_ref(),
+            layers = image.layers.len(),
+            "push complete"
+        );
+        Ok(())
+    }
+
     /// List locally stored images.
     pub fn list(&self) -> Result<Vec<Image>, StivaError> {
         self.load_index()

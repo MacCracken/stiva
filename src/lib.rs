@@ -21,6 +21,7 @@
 //! - [`network`] — Container networking (bridge, host, none, custom)
 //! - [`storage`] — Overlay filesystem, volume mounts, tmpfs
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
+//! - [`build`] — Image building from TOML-based build specs (Stivafile.toml)
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
 //! - [`health`] — Container health monitoring via majra heartbeat
 //! - [`agent`] — Daimon agent registration
@@ -28,10 +29,12 @@
 //! - [`intents`] — Agnoshi intent system (stub)
 
 pub mod agent;
+pub mod build;
 #[cfg(feature = "compose")]
 pub mod compose;
 pub mod container;
 pub mod encrypted;
+pub mod fleet;
 pub mod health;
 pub mod image;
 pub mod intents;
@@ -165,6 +168,47 @@ impl Stiva {
         self.containers.remove(id).await
     }
 
+    /// Build an image from a TOML build spec (Stivafile.toml).
+    ///
+    /// `context_dir` is the directory containing files referenced by `copy` steps.
+    pub async fn build(
+        &self,
+        toml_content: &str,
+        context_dir: &std::path::Path,
+    ) -> Result<image::Image, StivaError> {
+        let spec = build::parse_build_spec(toml_content)?;
+        info!(
+            base = spec.image.base.as_str(),
+            name = spec.image.name.as_str(),
+            tag = spec.image.tag.as_str(),
+            steps = spec.steps.len(),
+            "stiva build"
+        );
+        build::build_image(&spec, &self.image_store, &self.registry_client, context_dir).await
+    }
+
+    /// Push a local image to a registry.
+    ///
+    /// If `target` is provided, the image is pushed to that reference.
+    /// Otherwise, it is pushed to its original pull reference.
+    pub async fn push(&self, image_id: &str, target: Option<&str>) -> Result<(), StivaError> {
+        let images = self.image_store.list()?;
+        let image = images
+            .iter()
+            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))?;
+
+        let target_ref = match target {
+            Some(t) => image::ImageRef::parse(t)?,
+            None => image.reference.clone(),
+        };
+
+        info!(image = %target_ref.full_ref(), "stiva push");
+        self.image_store
+            .push(image, &target_ref, &self.registry_client)
+            .await
+    }
+
     /// List local images.
     pub async fn images(&self) -> Result<Vec<image::Image>, StivaError> {
         self.image_store.list()
@@ -179,6 +223,59 @@ impl Stiva {
     /// Read container logs.
     pub async fn logs(&self, id: &str) -> Result<String, StivaError> {
         self.containers.logs(id).await
+    }
+
+    /// Checkpoint a running daemon container via CRIU.
+    ///
+    /// Creates a snapshot of the container's process state. Returns the
+    /// checkpoint directory path. If `leave_running` is false, the container
+    /// transitions to Paused.
+    pub async fn checkpoint(
+        &self,
+        id: &str,
+        leave_running: bool,
+    ) -> Result<std::path::PathBuf, StivaError> {
+        info!(container = id, leave_running, "stiva checkpoint");
+        self.containers.checkpoint(id, leave_running).await
+    }
+
+    /// Restore a container from a CRIU checkpoint.
+    ///
+    /// Restores process state and transitions the container back to Running.
+    pub async fn restore(
+        &self,
+        id: &str,
+        checkpoint_dir: &std::path::Path,
+    ) -> Result<(), StivaError> {
+        info!(container = id, checkpoint_dir = %checkpoint_dir.display(), "stiva restore");
+        self.containers.restore(id, checkpoint_dir).await
+    }
+
+    /// Prepare a container for live migration — checkpoint and package for transfer.
+    ///
+    /// Returns a migration bundle containing everything needed to transfer
+    /// the container to another node.
+    pub async fn prepare_migration(
+        &self,
+        id: &str,
+    ) -> Result<container::MigrationBundle, StivaError> {
+        info!(container = id, "stiva prepare_migration");
+        self.containers.prepare_migration(id).await
+    }
+
+    /// Apply a migration bundle — restore a container from a transferred checkpoint.
+    ///
+    /// Creates a new container from the bundle's config, then restores
+    /// process state from the checkpoint data.
+    pub async fn apply_migration(
+        &self,
+        bundle: &container::MigrationBundle,
+    ) -> Result<container::Container, StivaError> {
+        info!(
+            source = %bundle.source_container_id,
+            "stiva apply_migration"
+        );
+        self.containers.apply_migration(bundle).await
     }
 
     /// Deploy a compose file — parse, resolve dependencies, create and start services.

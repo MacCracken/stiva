@@ -59,6 +59,12 @@ pub enum StivaError {
     #[error("sandbox error: {0}")]
     Sandbox(String),
 
+    #[error("fleet error: {0}")]
+    Fleet(String),
+
+    #[error("migration error: {0}")]
+    Migration(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

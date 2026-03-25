@@ -91,12 +91,12 @@ stiva.rm(&container.id).await?;
 
 ### Phase 5 — Advanced (next)
 - [x] Long-running daemon containers (kavach spawn/wait/kill)
-- [ ] Build from Dockerfile/Containerfile (or TOML equivalent)
-- [ ] Image push to registries
-- [ ] Container checkpointing (CRIU integration)
-- [ ] Live migration between nodes
-- [ ] Integration with daimon edge fleet (schedule containers across nodes)
-- [ ] Rootless containers (user namespace remapping)
+- [x] Build from Dockerfile/Containerfile (or TOML equivalent)
+- [x] Image push to registries
+- [x] Container checkpointing (CRIU integration)
+- [x] Live migration between nodes
+- [x] Integration with daimon edge fleet (schedule containers across nodes)
+- [x] Rootless containers (user namespace remapping)
 
 ### Completed
 
