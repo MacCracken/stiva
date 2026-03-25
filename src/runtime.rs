@@ -52,6 +52,7 @@ pub struct SpecMount {
 
 /// Linux namespaces for container isolation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Namespace {
     Pid,
     Net,
@@ -67,6 +68,7 @@ pub enum Namespace {
 // ---------------------------------------------------------------------------
 
 /// Standard container mounts (/proc, /sys, /dev, etc.).
+#[must_use]
 fn standard_mounts() -> Vec<SpecMount> {
     vec![
         SpecMount {
@@ -137,10 +139,21 @@ fn volume_mounts(volumes: &[String]) -> Result<Vec<SpecMount>, StivaError> {
 }
 
 /// Generate a full OCI runtime spec from a container and rootfs path.
+#[must_use = "spec generation returns a new RuntimeSpec"]
 pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec, StivaError> {
     let config = &container.config;
 
-    let env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let env: Vec<String> = config
+        .env
+        .iter()
+        .map(|(k, v)| {
+            let mut s = String::with_capacity(k.len() + 1 + v.len());
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+            s
+        })
+        .collect();
 
     let command = if config.command.is_empty() {
         vec!["/bin/sh".to_string()]

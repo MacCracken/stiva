@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// A parsed container intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Intent {
     /// Run a container from an image.
     Run { image: String, name: Option<String> },
@@ -25,6 +26,7 @@ pub enum Intent {
 
 /// Compose sub-action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ComposeAction {
     Up,
     Down,
@@ -34,6 +36,7 @@ pub enum ComposeAction {
 /// Parse a natural language intent into a structured Intent.
 ///
 /// This is a placeholder — actual NL parsing requires the agnoshi project.
+#[must_use = "parsing returns a new Intent"]
 pub fn parse_intent(_text: &str) -> Result<Intent, StivaError> {
     Err(StivaError::Runtime(
         "agnoshi intent parsing not yet implemented".into(),

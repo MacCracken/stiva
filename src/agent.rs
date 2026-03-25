@@ -35,6 +35,7 @@ pub struct AgentStatus {
 }
 
 /// Build an agent registration from a container.
+#[must_use]
 pub fn build_registration(container: &Container) -> AgentRegistration {
     AgentRegistration {
         id: container.id.clone(),

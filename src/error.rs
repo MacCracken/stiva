@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StivaError {
     #[error("image not found: {0}")]
     ImageNotFound(String),

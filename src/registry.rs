@@ -77,6 +77,7 @@ pub struct RegistryConfig {
 
 /// Fetched manifest — either a single manifest or an index.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ManifestResponse {
     Manifest(OciManifest),
     Index(OciIndex),

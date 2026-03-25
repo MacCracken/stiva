@@ -115,6 +115,7 @@ pub struct ComposeSession {
 // ---------------------------------------------------------------------------
 
 /// Parse a compose file from TOML.
+#[must_use = "parsing returns a new ComposeFile"]
 pub fn parse_compose(toml_str: &str) -> Result<ComposeFile, StivaError> {
     toml::from_str(toml_str).map_err(|e| StivaError::Compose(format!("invalid compose file: {e}")))
 }
@@ -124,6 +125,7 @@ pub fn parse_compose(toml_str: &str) -> Result<ComposeFile, StivaError> {
 // ---------------------------------------------------------------------------
 
 /// Build a majra DAG from compose service dependencies.
+#[must_use]
 pub fn build_dag(compose: &ComposeFile) -> majra::queue::Dag {
     let mut edges = HashMap::new();
     for (name, service) in &compose.services {
@@ -150,6 +152,7 @@ pub fn resolve_startup_order(compose: &ComposeFile) -> Result<Vec<String>, Stiva
 // ---------------------------------------------------------------------------
 
 /// Convert a ServiceDef to a ContainerConfig for a specific replica.
+#[must_use]
 pub fn service_to_config(
     service_name: &str,
     service: &ServiceDef,
@@ -172,6 +175,8 @@ pub fn service_to_config(
 }
 
 /// Get the number of replicas for a service (default 1).
+#[inline]
+#[must_use]
 pub fn replica_count(service: &ServiceDef) -> u32 {
     service.replicas.unwrap_or(1).max(1)
 }
@@ -181,6 +186,7 @@ pub fn replica_count(service: &ServiceDef) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Check which services from a DAG are ready to start given completed services.
+#[must_use]
 pub fn ready_services(compose: &ComposeFile, completed: &HashSet<String>) -> Vec<String> {
     let dag = build_dag(compose);
     match majra::queue::DagScheduler::new(&dag) {

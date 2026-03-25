@@ -19,6 +19,7 @@ pub struct VolumeMount {
 }
 
 /// Parse a volume string `"source:target[:ro]"`.
+#[must_use = "parsing returns a new VolumeMount"]
 pub fn parse_volume(spec: &str) -> Result<VolumeMount, StivaError> {
     let parts: Vec<&str> = spec.split(':').collect();
     match parts.len() {

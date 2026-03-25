@@ -13,6 +13,7 @@ use tracing::{error, info};
 
 /// Container state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ContainerState {
     Created,
     Running,

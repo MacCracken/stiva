@@ -22,6 +22,7 @@ pub struct PortSpec {
 
 /// Protocol for port mappings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PortProtocol {
     #[default]
     Tcp,
@@ -36,6 +37,7 @@ pub enum PortProtocol {
 /// - `"8080:80/udp"` — UDP
 /// - `"0.0.0.0:8080:80"` — explicit bind address
 /// - `"127.0.0.1:8080:80/tcp"` — bind address + protocol
+#[must_use = "parsing returns a new PortSpec"]
 pub fn parse_port_spec(spec: &str) -> Result<PortSpec, StivaError> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -98,6 +100,7 @@ fn parse_port(s: &str) -> Result<u16, StivaError> {
 }
 
 /// Convert a PortSpec to a nein PortMapping.
+#[must_use]
 pub fn to_nein_port_mapping(spec: &PortSpec, container_ip: Ipv4Addr) -> PortMapping {
     let protocol = match spec.protocol {
         PortProtocol::Tcp => Protocol::Tcp,
@@ -113,16 +116,19 @@ pub fn to_nein_port_mapping(spec: &PortSpec, container_ip: Ipv4Addr) -> PortMapp
 }
 
 /// Build a masquerade NAT rule for a bridge subnet.
+#[must_use]
 pub fn masquerade_rule(subnet: &str, outbound_iface: &str) -> NatRule {
     nein::nat::container_masquerade(subnet, outbound_iface)
 }
 
 /// Build a DNAT (port forward) rule.
+#[must_use]
 pub fn port_forward_rule(host_port: u16, container_addr: &str, container_port: u16) -> NatRule {
     nein::nat::port_forward(host_port, container_addr, container_port)
 }
 
 /// Create a nein BridgeConfig.
+#[must_use]
 pub fn bridge_config(bridge_name: &str, subnet: &str, outbound_iface: &str) -> BridgeConfig {
     BridgeConfig::new(bridge_name, subnet, outbound_iface)
 }

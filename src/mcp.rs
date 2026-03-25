@@ -27,6 +27,7 @@ pub struct McpResult {
 
 impl McpResult {
     /// Create a success result.
+    #[must_use]
     pub fn ok(data: serde_json::Value) -> Self {
         Self {
             success: true,
@@ -35,6 +36,7 @@ impl McpResult {
     }
 
     /// Create an error result.
+    #[must_use]
     pub fn err(message: &str) -> Self {
         Self {
             success: false,
@@ -44,6 +46,7 @@ impl McpResult {
 }
 
 /// Return the list of MCP tools provided by stiva.
+#[must_use]
 pub fn tool_list() -> Vec<McpTool> {
     vec![
         McpTool {

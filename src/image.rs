@@ -5,6 +5,8 @@ use crate::registry::RegistryClient;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -22,6 +24,7 @@ impl ImageRef {
     ///
     /// Supports: `nginx`, `nginx:1.25`, `user/repo:tag`, `ghcr.io/user/repo:tag`,
     /// `localhost:5000/repo:tag`, `repo@sha256:...`.
+    #[must_use = "parsing returns a new ImageRef"]
     pub fn parse(reference: &str) -> Result<Self, StivaError> {
         let reference = reference.trim();
         if reference.is_empty() {
@@ -86,6 +89,7 @@ impl ImageRef {
     }
 
     /// Full reference string.
+    #[must_use]
     pub fn full_ref(&self) -> String {
         format!("{}/{}:{}", self.registry, self.repository, self.tag)
     }
@@ -228,7 +232,7 @@ impl ImageStore {
     /// Store a blob by its expected digest. Verifies SHA-256.
     pub fn store_blob(&self, digest: &str, data: &[u8]) -> Result<PathBuf, StivaError> {
         let hex = digest_hex(digest);
-        let path = self.root.join("blobs").join("sha256").join(&hex);
+        let path = self.root.join("blobs").join("sha256").join(&*hex);
 
         // Dedup: skip if already exists.
         if path.exists() {
@@ -253,15 +257,16 @@ impl ImageStore {
     }
 
     /// Check whether a blob exists locally.
+    #[inline]
     pub fn has_blob(&self, digest: &str) -> bool {
         let hex = digest_hex(digest);
-        self.root.join("blobs").join("sha256").join(hex).exists()
+        self.root.join("blobs").join("sha256").join(&*hex).exists()
     }
 
     /// Read a blob from the store.
     pub fn read_blob(&self, digest: &str) -> Result<Vec<u8>, StivaError> {
         let hex = digest_hex(digest);
-        let path = self.root.join("blobs").join("sha256").join(hex);
+        let path = self.root.join("blobs").join("sha256").join(&*hex);
         std::fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 StivaError::ImageNotFound(format!("blob {digest} not found"))
@@ -366,6 +371,8 @@ impl ImageStore {
     }
 
     /// Get image storage root.
+    #[inline]
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -376,16 +383,26 @@ impl ImageStore {
 // ---------------------------------------------------------------------------
 
 /// Compute `sha256:{hex}` digest for data.
+#[must_use]
 fn sha256_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let hash = hasher.finalize();
-    format!("sha256:{}", hex::encode(hash))
+    let mut out = String::with_capacity(7 + 64); // "sha256:" + 64 hex chars
+    out.push_str("sha256:");
+    let _ = write!(out, "{}", hex::encode(hash));
+    out
 }
 
 /// Extract the hex portion from a `sha256:{hex}` digest.
-fn digest_hex(digest: &str) -> String {
-    digest.strip_prefix("sha256:").unwrap_or(digest).to_string()
+/// Returns a borrowed slice when the prefix is present, avoiding allocation.
+#[inline]
+#[must_use]
+fn digest_hex(digest: &str) -> Cow<'_, str> {
+    match digest.strip_prefix("sha256:") {
+        Some(hex) => Cow::Borrowed(hex),
+        None => Cow::Borrowed(digest),
+    }
 }
 
 // ---------------------------------------------------------------------------

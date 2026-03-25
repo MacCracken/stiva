@@ -222,6 +222,8 @@ impl NetworkManager {
     }
 
     /// Resolve which network to use based on NetworkMode.
+    #[inline]
+    #[must_use]
     pub fn resolve_network_name(&self, mode: &NetworkMode) -> Option<String> {
         match mode {
             NetworkMode::Bridge => Some(DEFAULT_BRIDGE.to_string()),
@@ -231,16 +233,21 @@ impl NetworkManager {
     }
 
     /// Get the connection info for a container.
+    #[inline]
+    #[must_use]
     pub fn get_connection(&self, container_id: &str) -> Option<&ContainerNetwork> {
         self.connections.get(container_id)
     }
 
     /// List all networks.
+    #[must_use]
     pub fn list_networks(&self) -> Vec<&str> {
         self.networks.keys().map(|s| s.as_str()).collect()
     }
 
     /// Get the IP pool for a network (for inspection).
+    #[inline]
+    #[must_use]
     pub fn get_pool(&self, network_name: &str) -> Option<&IpPool> {
         self.networks.get(network_name).map(|n| &n.pool)
     }

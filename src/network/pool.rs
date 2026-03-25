@@ -63,21 +63,28 @@ impl IpPool {
     }
 
     /// Gateway address for this pool.
+    #[inline]
+    #[must_use]
     pub fn gateway(&self) -> Ipv4Addr {
         self.gateway
     }
 
     /// Prefix length.
+    #[inline]
+    #[must_use]
     pub fn prefix_len(&self) -> u8 {
         self.prefix_len
     }
 
     /// Subnet string in CIDR notation.
+    #[must_use]
     pub fn subnet(&self) -> String {
         format!("{}/{}", Ipv4Addr::from(self.base), self.prefix_len)
     }
 
     /// Number of allocated addresses.
+    #[inline]
+    #[must_use]
     pub fn allocated_count(&self) -> usize {
         self.allocated.len()
     }

@@ -10,6 +10,7 @@ use tracing::info;
 /// Container restart policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum RestartPolicy {
     /// Never restart (default).
     #[default]
@@ -24,6 +25,7 @@ pub enum RestartPolicy {
 
 /// Health status of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum HealthStatus {
     Healthy,
     Unhealthy,
@@ -115,6 +117,8 @@ impl HealthMonitor {
     }
 
     /// Get health status for a container.
+    #[inline]
+    #[must_use]
     pub fn get_status(&self, container_id: &str) -> HealthStatus {
         self.tracker
             .get(container_id)
@@ -170,11 +174,15 @@ impl HealthMonitor {
     }
 
     /// Number of tracked containers.
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.tracker.len()
     }
 
     /// Whether any containers are tracked.
+    #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tracker.is_empty()
     }

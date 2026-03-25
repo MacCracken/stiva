@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Network mode for a container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NetworkMode {
     /// Isolated bridge network with NAT.
     Bridge,
@@ -38,6 +39,7 @@ pub struct Network {
 
 /// Network driver type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NetworkDriver {
     Bridge,
     Overlay,

@@ -9,6 +9,7 @@ use tracing::debug;
 const DEFAULT_DNS: &[&str] = &["8.8.8.8", "8.8.4.4"];
 
 /// Read DNS servers from the host's /etc/resolv.conf.
+#[must_use]
 pub fn host_dns_servers() -> Vec<Ipv4Addr> {
     match std::fs::read_to_string("/etc/resolv.conf") {
         Ok(content) => parse_resolv_conf(&content),
@@ -17,6 +18,7 @@ pub fn host_dns_servers() -> Vec<Ipv4Addr> {
 }
 
 /// Parse nameserver entries from resolv.conf content.
+#[must_use]
 pub fn parse_resolv_conf(content: &str) -> Vec<Ipv4Addr> {
     content
         .lines()
