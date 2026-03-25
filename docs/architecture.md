@@ -43,7 +43,7 @@ stiva (this crate)
 | `network` | Bridge networks, NAT, DNS, IP pools, port mapping |
 | `storage` | Overlay filesystem, volume mounts, layer unpacking |
 | `registry` | OCI distribution client (pull + push), token auth |
-| `build` | TOML-based image builds (Stivafile.toml) |
+| `build` | TOML-based image builds (Stivafile) |
 | `compose` | Multi-container orchestration, DAG ordering |
 | `health` | Heartbeat monitoring, restart policies |
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |

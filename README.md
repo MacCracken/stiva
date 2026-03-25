@@ -46,7 +46,7 @@ See [docs/cli.md](docs/cli.md) for all 26 commands.
 
 | Category | Capabilities |
 |----------|-------------|
-| **Images** | Pull, push, build (Stivafile.toml), tag, inspect, import/export |
+| **Images** | Pull, push, build (Stivafile), tag, inspect, import/export |
 | **Containers** | Create, start, stop, restart, exec, signal, pause/unpause, stats, top, logs |
 | **Networking** | Bridge (NAT), host, custom networks, port mapping, DNS injection |
 | **Storage** | Overlay FS, volume mounts, layer dedup, cgroups v2 enforcement |
@@ -70,6 +70,7 @@ See [docs/cli.md](docs/cli.md) for all 26 commands.
 
 | Document | Description |
 |----------|-------------|
+| [ADRs](docs/adr/) | Architecture decision records (8 decisions) |
 | [Architecture](docs/architecture.md) | System design, module map, k8s comparison |
 | [CLI Reference](docs/cli.md) | All 26 commands with examples |
 | [Testing Guide](docs/development/testing.md) | Test organization, coverage, mocking |

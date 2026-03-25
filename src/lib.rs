@@ -21,7 +21,7 @@
 //! - [`network`] — Container networking (bridge, host, none, custom)
 //! - [`storage`] — Overlay filesystem, volume mounts, tmpfs
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
-//! - [`build`] — Image building from TOML-based build specs (Stivafile.toml)
+//! - [`build`] — Image building from TOML-based build specs (Stivafile)
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
 //! - [`health`] — Container health monitoring via majra heartbeat
 //! - [`agent`] — Daimon agent registration
@@ -56,6 +56,7 @@ pub mod build;
 #[cfg(feature = "compose")]
 pub mod compose;
 pub mod container;
+pub mod convert;
 pub mod encrypted;
 pub mod fleet;
 pub mod health;
@@ -228,7 +229,7 @@ impl Stiva {
         self.containers.stats(id).await
     }
 
-    /// Build an image from a TOML build spec (Stivafile.toml).
+    /// Build an image from a TOML build spec (Stivafile).
     ///
     /// `context_dir` is the directory containing files referenced by `copy` steps.
     pub async fn build(

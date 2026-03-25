@@ -257,6 +257,65 @@ user = "nobody"
     });
 }
 
+// ---------------------------------------------------------------------------
+// YAML → TOML conversion
+// ---------------------------------------------------------------------------
+
+fn bench_convert(c: &mut Criterion) {
+    let compose_yaml = r#"
+services:
+  web:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+  api:
+    image: myapp:latest
+    environment:
+      PORT: "8080"
+      DEBUG: "true"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - db
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+"#;
+
+    let dockerfile = r#"
+FROM alpine:3.19
+RUN apk add --no-cache curl wget
+COPY ./app /app
+ENV PORT=8080
+ENV DEBUG=false
+WORKDIR /app
+RUN chmod +x /app/start.sh
+EXPOSE 8080
+ENTRYPOINT ["/app/start.sh"]
+USER nobody
+"#;
+
+    let mut group = c.benchmark_group("convert");
+
+    group.bench_function("compose_yaml_to_toml", |b| {
+        b.iter(|| stiva::convert::compose_yaml_to_toml(compose_yaml).unwrap());
+    });
+
+    group.bench_function("dockerfile_to_toml", |b| {
+        b.iter(|| stiva::convert::dockerfile_to_toml(dockerfile).unwrap());
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_imageref_parse,
@@ -266,5 +325,6 @@ criterion_group!(
     bench_ip_pool,
     bench_fleet_schedule,
     bench_build_parse,
+    bench_convert,
 );
 criterion_main!(benches);

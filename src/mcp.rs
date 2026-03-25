@@ -167,7 +167,7 @@ pub fn tool_list() -> Vec<McpTool> {
         },
         McpTool {
             name: "stiva_build".into(),
-            description: "Build an image from a Stivafile.toml specification".into(),
+            description: "Build an image from a Stivafile specification".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

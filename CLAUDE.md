@@ -34,7 +34,7 @@ daimon (container management), sutra (fleet deployment)
 | `network/` | Bridge, NAT, DNS, IP pools, port mapping (5 submodules) |
 | `storage` | Overlay FS, volume mounts, layer unpacking |
 | `registry` | OCI distribution client (pull + push), token auth |
-| `build` | TOML-based image builds (Stivafile.toml) |
+| `build` | TOML-based image builds (Stivafile) |
 | `compose` | Multi-container orchestration, DAG ordering |
 | `health` | Heartbeat monitoring, restart policies |
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |

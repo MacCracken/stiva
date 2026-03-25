@@ -1,6 +1,6 @@
 //! Container image building from a TOML-based build specification.
 //!
-//! Stiva uses `Stivafile.toml` as its build specification format — a structured,
+//! Stiva uses `Stivafile` as its build specification format — a structured,
 //! typed alternative to Dockerfiles. Each build step is explicit, each field is
 //! validated by serde, and the result is an OCI image stored locally.
 //!

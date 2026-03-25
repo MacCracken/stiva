@@ -52,7 +52,7 @@ Tests live alongside the code they test (Rust convention):
 | `image_store_roundtrip` | blob store → has → read |
 | `image_tag_and_rmi` | tag + remove by ID |
 | `export_import_roundtrip` | rootfs tar → import as image |
-| `build_spec_parsing` | Stivafile.toml parsing |
+| `build_spec_parsing` | Stivafile parsing |
 | `fleet_schedule_spread` | spread strategy with 2 nodes |
 | `copy_into_and_out_of_container` | bidirectional file copy |
 | `restart_stopped_container` | stop → restart → stop cycle |

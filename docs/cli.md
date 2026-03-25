@@ -17,7 +17,7 @@ Stiva provides a `stiva` binary with 26 subcommands.
 |---------|-------------|
 | `stiva pull <IMAGE>` | Pull an image from a registry |
 | `stiva push <IMAGE> [TARGET]` | Push a local image to a registry |
-| `stiva build [-f FILE] [-c CONTEXT]` | Build image from Stivafile.toml |
+| `stiva build [-f FILE] [-c CONTEXT]` | Build image from Stivafile |
 | `stiva images` | List local images |
 | `stiva rmi <IMAGE>` | Remove a local image |
 | `stiva tag <SOURCE> <TARGET>` | Tag a local image |
@@ -52,6 +52,7 @@ Stiva provides a `stiva` binary with 26 subcommands.
 | `stiva checkpoint <ID> [--leave-running]` | CRIU checkpoint |
 | `stiva restore <ID> <DIR>` | Restore from checkpoint |
 | `stiva info` | Show system information |
+| `stiva convert <FILE> [-f FORMAT] [-o OUT]` | Convert YAML to TOML (compose or dockerfile) |
 
 ## Examples
 
@@ -74,7 +75,7 @@ stiva rm <container-id>
 stiva prune
 
 # Build and push
-stiva build -f Stivafile.toml -c .
+stiva build -f Stivafile -c .
 stiva push myapp:latest registry.example.com/myapp:latest
 
 # Export/import

@@ -26,10 +26,10 @@ enum Commands {
         /// Image reference (e.g., nginx:latest).
         image: String,
     },
-    /// Build an image from a Stivafile.toml.
+    /// Build an image from a Stivafile.
     Build {
-        /// Path to Stivafile.toml.
-        #[arg(short, long, default_value = "Stivafile.toml")]
+        /// Path to Stivafile.
+        #[arg(short, long, default_value = "Stivafile")]
         file: std::path::PathBuf,
         /// Build context directory.
         #[arg(short, long, default_value = ".")]
@@ -195,6 +195,17 @@ enum Commands {
     },
     /// Show system information.
     Info,
+    /// Convert a YAML file (docker-compose, Dockerfile) to TOML equivalent.
+    Convert {
+        /// Input YAML file path.
+        input: std::path::PathBuf,
+        /// Output TOML file path (default: stdout).
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        /// Input format.
+        #[arg(short, long, default_value = "compose")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -460,6 +471,28 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
         Commands::Restart { id } => {
             stiva.restart(&id).await?;
             println!("{id}");
+        }
+        Commands::Convert {
+            input,
+            output,
+            format,
+        } => {
+            let content = std::fs::read_to_string(&input).map_err(StivaError::Io)?;
+            let toml_output = match format.as_str() {
+                "compose" => stiva::convert::compose_yaml_to_toml(&content)?,
+                "dockerfile" => stiva::convert::dockerfile_to_toml(&content)?,
+                other => {
+                    return Err(StivaError::InvalidState(format!(
+                        "unknown format '{other}', expected 'compose' or 'dockerfile'"
+                    )));
+                }
+            };
+            if let Some(out_path) = output {
+                std::fs::write(&out_path, &toml_output).map_err(StivaError::Io)?;
+                println!("{}", out_path.display());
+            } else {
+                print!("{toml_output}");
+            }
         }
         Commands::Info => {
             println!("stiva {}", env!("CARGO_PKG_VERSION"));
