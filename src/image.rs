@@ -231,6 +231,7 @@ impl ImageStore {
 
     /// Store a blob by its expected digest. Verifies SHA-256.
     pub fn store_blob(&self, digest: &str, data: &[u8]) -> Result<PathBuf, StivaError> {
+        tracing::debug!(digest, size = data.len(), "storing blob");
         let hex = digest_hex(digest);
         let path = self.root.join("blobs").join("sha256").join(&*hex);
 
@@ -265,6 +266,7 @@ impl ImageStore {
 
     /// Read a blob from the store.
     pub fn read_blob(&self, digest: &str) -> Result<Vec<u8>, StivaError> {
+        tracing::debug!(digest, "reading blob");
         let hex = digest_hex(digest);
         let path = self.root.join("blobs").join("sha256").join(&*hex);
         std::fs::read(&path).map_err(|e| {

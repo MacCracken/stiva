@@ -77,6 +77,7 @@ impl IpPool {
     }
 
     /// Subnet string in CIDR notation.
+    #[inline]
     #[must_use]
     pub fn subnet(&self) -> String {
         format!("{}/{}", Ipv4Addr::from(self.base), self.prefix_len)

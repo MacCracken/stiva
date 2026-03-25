@@ -177,6 +177,7 @@ impl RegistryClient {
 
     /// Fetch a manifest or manifest list for an image.
     pub async fn fetch_manifest(&self, image: &ImageRef) -> Result<ManifestResponse, StivaError> {
+        debug!(image = %image.full_ref(), "fetching manifest");
         let base = self.api_base(image);
         let url = format!(
             "{base}/v2/{}/manifests/{}",
@@ -220,6 +221,7 @@ impl RegistryClient {
     /// If the registry returns a manifest list, selects the entry matching
     /// the current `(os, arch)` and fetches the concrete manifest.
     pub async fn resolve_manifest(&self, image: &ImageRef) -> Result<OciManifest, StivaError> {
+        debug!(image = %image.full_ref(), "resolving manifest for current platform");
         match self.fetch_manifest(image).await? {
             ManifestResponse::Manifest(m) => Ok(m),
             ManifestResponse::Index(index) => {
@@ -327,6 +329,7 @@ impl RegistryClient {
 
     /// Check if a blob already exists in the registry.
     pub async fn blob_exists(&self, image: &ImageRef, digest: &str) -> Result<bool, StivaError> {
+        debug!(digest, "checking if blob exists in registry");
         let base = self.api_base(image);
         let url = format!("{base}/v2/{}/blobs/{digest}", image.repository);
         let scope = format!("repository:{}:pull", image.repository);
