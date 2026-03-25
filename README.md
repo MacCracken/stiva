@@ -90,7 +90,7 @@ stiva.rm(&container.id).await?;
 ## Roadmap
 
 ### Phase 5 — Advanced (next)
-- [ ] Long-running daemon containers (kavach spawn/wait/kill)
+- [x] Long-running daemon containers (kavach spawn/wait/kill)
 - [ ] Build from Dockerfile/Containerfile (or TOML equivalent)
 - [ ] Image push to registries
 - [ ] Container checkpointing (CRIU integration)

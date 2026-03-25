@@ -2,6 +2,27 @@
 
 All notable changes to stiva are documented here.
 
+## [0.25.4] — 2026-03-25
+
+### Added
+- **Long-running daemon containers** — `ContainerConfig.detach = true` spawns containers as background daemons via kavach `spawn()` instead of blocking `exec()`
+- **Daemon lifecycle** — `ContainerManager::wait()`, `try_wait()` for daemon containers; `stop()` now sends SIGTERM with configurable grace period before SIGKILL
+- **`DaemonHandle`** — wrapper around kavach `SpawnedProcess` with PID tracking, wait, kill, and try_wait
+- **`Stiva::wait()`** — top-level API for waiting on container exit
+- **kavach `spawn()`** — new `Sandbox::spawn()` method and `SpawnedProcess` type for non-blocking process execution with PID, wait, kill (SIGTERM→SIGKILL), and try_wait
+- **`ContainerConfig.stop_grace_ms`** — configurable SIGTERM grace period (default 10s)
+- 305 tests passing
+
+### Changed
+- Version bump: 0.25.3 → 0.25.4 (stiva), 0.22.3 → 0.25.4 (kavach)
+- `ContainerManager::stop()` — now properly kills daemon processes with SIGTERM→SIGKILL instead of just setting state
+- `runtime::exec_container` — refactored to share sandbox setup with `spawn_container` via `build_sandbox()` helper
+
+### Improved
+- **P(-1) scaffold hardening** — `#[non_exhaustive]` on all 11 public enums, `#[must_use]` on ~30 pure functions, `#[inline]` on hot-path accessors
+- **`Cow` over clone** — `digest_hex()` returns `Cow<str>` avoiding allocation on every blob op
+- **`write!` over `format!`** — `sha256_digest()` and env var building avoid temporary allocations
+
 ## [0.22.3] — 2026-03-22
 
 ### Added

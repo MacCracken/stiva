@@ -170,6 +170,12 @@ impl Stiva {
         self.image_store.list()
     }
 
+    /// Wait for a container to exit. Returns execution result.
+    pub async fn wait(&self, id: &str) -> Result<runtime::ContainerExecResult, StivaError> {
+        info!(container = id, "stiva wait");
+        self.containers.wait(id).await
+    }
+
     /// Read container logs.
     pub async fn logs(&self, id: &str) -> Result<String, StivaError> {
         self.containers.logs(id).await

@@ -224,19 +224,10 @@ pub struct ContainerExecResult {
 // kavach sandbox integration
 // ---------------------------------------------------------------------------
 
-/// Execute a container using kavach sandbox.
-///
-/// Converts the RuntimeSpec into a kavach SandboxConfig, creates a sandbox,
-/// and runs the container command. Returns when the command completes.
-pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, StivaError> {
+/// Build a kavach sandbox from a RuntimeSpec (shared between exec and spawn).
+async fn build_sandbox(spec: &RuntimeSpec) -> Result<(kavach::Sandbox, String), StivaError> {
     let command = spec.command.join(" ");
-    info!(
-        command = command.as_str(),
-        rootfs = %spec.rootfs.display(),
-        "executing container via kavach sandbox"
-    );
 
-    // Build kavach SandboxPolicy from spec resource limits.
     let mut policy = kavach::SandboxPolicy::basic();
     if let Some(mem) = spec.memory_limit_bytes {
         policy.memory_limit_mb = Some(mem / (1024 * 1024));
@@ -244,7 +235,6 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
     if let Some(pids) = spec.max_pids {
         policy.max_pids = Some(pids);
     }
-    // Network disabled by default for containers.
     policy.network.enabled = false;
     policy.read_only_rootfs = spec.read_only_rootfs;
 
@@ -255,14 +245,12 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
     };
     debug!(backend = %backend, "selected sandbox backend");
 
-    // Build SandboxConfig.
     let config = kavach::SandboxConfig::builder()
         .backend(backend)
         .policy(policy)
-        .timeout_ms(0) // No timeout for container execution.
+        .timeout_ms(0)
         .build();
 
-    // Create and run sandbox.
     let mut sandbox = kavach::Sandbox::create(config).await.map_err(|e| {
         error!(error = %e, "failed to create sandbox");
         StivaError::Sandbox(format!("failed to create sandbox: {e}"))
@@ -271,6 +259,22 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
     sandbox
         .transition(kavach::SandboxState::Running)
         .map_err(|e| StivaError::Sandbox(format!("failed to transition sandbox: {e}")))?;
+
+    Ok((sandbox, command))
+}
+
+/// Execute a container using kavach sandbox (one-shot).
+///
+/// Converts the RuntimeSpec into a kavach SandboxConfig, creates a sandbox,
+/// and runs the container command. Returns when the command completes.
+pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, StivaError> {
+    info!(
+        command = spec.command.join(" ").as_str(),
+        rootfs = %spec.rootfs.display(),
+        "executing one-shot container via kavach"
+    );
+
+    let (sandbox, command) = build_sandbox(spec).await?;
 
     let result = sandbox.exec(&command).await.map_err(|e| {
         error!(error = %e, "sandbox execution failed");
@@ -292,6 +296,92 @@ pub async fn exec_container(spec: &RuntimeSpec) -> Result<ContainerExecResult, S
         stderr: result.stderr,
         duration_ms: result.duration_ms,
         timed_out: result.timed_out,
+    })
+}
+
+/// A handle to a running daemon container process.
+///
+/// Wraps a kavach `SpawnedProcess` and the sandbox that owns it.
+/// Dropping this handle will NOT kill the process — call `kill()` or `wait()`.
+pub struct DaemonHandle {
+    process: kavach::SpawnedProcess,
+    // Keep sandbox alive so backend resources are not released.
+    _sandbox: kavach::Sandbox,
+}
+
+impl DaemonHandle {
+    /// Get the OS process ID of the daemon.
+    #[inline]
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+
+    /// Wait for the daemon to exit naturally.
+    pub async fn wait(self) -> Result<ContainerExecResult, StivaError> {
+        let result = self
+            .process
+            .wait()
+            .await
+            .map_err(|e| StivaError::Sandbox(format!("daemon wait failed: {e}")))?;
+        let _ = self._sandbox.destroy().await;
+        Ok(ContainerExecResult {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            duration_ms: result.duration_ms,
+            timed_out: result.timed_out,
+        })
+    }
+
+    /// Send SIGTERM, wait up to `grace_ms`, then SIGKILL.
+    pub async fn kill(self, grace_ms: u64) -> Result<ContainerExecResult, StivaError> {
+        let result = self
+            .process
+            .kill(grace_ms)
+            .await
+            .map_err(|e| StivaError::Sandbox(format!("daemon kill failed: {e}")))?;
+        let _ = self._sandbox.destroy().await;
+        Ok(ContainerExecResult {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            duration_ms: result.duration_ms,
+            timed_out: result.timed_out,
+        })
+    }
+
+    /// Non-blocking check if process is still running.
+    /// Returns `Some(exit_code)` if exited, `None` if still running.
+    pub fn try_wait(&mut self) -> Result<Option<i32>, StivaError> {
+        self.process
+            .try_wait()
+            .map_err(|e| StivaError::Sandbox(format!("daemon try_wait failed: {e}")))
+    }
+}
+
+/// Spawn a long-running daemon container via kavach sandbox.
+///
+/// Returns a `DaemonHandle` that can be used to wait, kill, or inspect the process.
+pub async fn spawn_container(spec: &RuntimeSpec) -> Result<DaemonHandle, StivaError> {
+    info!(
+        command = spec.command.join(" ").as_str(),
+        rootfs = %spec.rootfs.display(),
+        "spawning daemon container via kavach"
+    );
+
+    let (sandbox, command) = build_sandbox(spec).await?;
+
+    let process = sandbox.spawn(&command).await.map_err(|e| {
+        error!(error = %e, "sandbox spawn failed");
+        StivaError::Sandbox(format!("sandbox spawn failed: {e}"))
+    })?;
+
+    info!("daemon container spawned");
+
+    Ok(DaemonHandle {
+        process,
+        _sandbox: sandbox,
     })
 }
 

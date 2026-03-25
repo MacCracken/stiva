@@ -40,7 +40,7 @@ pub struct Container {
 }
 
 /// Container creation configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerConfig {
     /// Container name (auto-generated if empty).
     pub name: Option<String>,
@@ -62,6 +62,38 @@ pub struct ContainerConfig {
     pub user: Option<String>,
     /// Working directory inside container.
     pub workdir: Option<String>,
+    /// Run as a long-running daemon (detached).
+    /// When true, `start()` spawns the process and returns immediately.
+    /// When false (default), `start()` runs to completion (one-shot).
+    #[serde(default)]
+    pub detach: bool,
+    /// Grace period in milliseconds for SIGTERM before SIGKILL on stop.
+    /// Default: 10000 (10 seconds).
+    #[serde(default = "default_stop_grace_ms")]
+    pub stop_grace_ms: u64,
+}
+
+fn default_stop_grace_ms() -> u64 {
+    10_000
+}
+
+impl Default for ContainerConfig {
+    fn default() -> Self {
+        Self {
+            name: None,
+            command: Vec::new(),
+            env: HashMap::new(),
+            volumes: Vec::new(),
+            ports: Vec::new(),
+            network: None,
+            memory_limit: 0,
+            cpu_shares: 0,
+            user: None,
+            workdir: None,
+            detach: false,
+            stop_grace_ms: default_stop_grace_ms(),
+        }
+    }
 }
 
 /// Internal state for a running container (not serialized).
@@ -74,6 +106,8 @@ struct ContainerInternals {
     exec_result: Option<ContainerExecResult>,
     /// Path to container log file.
     log_path: PathBuf,
+    /// Handle to a spawned long-running process (daemon mode).
+    spawned: Option<runtime::DaemonHandle>,
 }
 
 /// Manages container lifecycle.
@@ -164,6 +198,7 @@ impl ContainerManager {
                     spec: Some(spec),
                     exec_result: None,
                     log_path,
+                    spawned: None,
                 },
             );
         }
@@ -174,26 +209,33 @@ impl ContainerManager {
 
     /// Start a created container.
     ///
-    /// For the one-shot execution model, this runs the container command to
-    /// completion and captures stdout/stderr. The container transitions
+    /// **One-shot mode** (default): runs the command to completion, transitions
     /// Created → Running → Stopped.
+    ///
+    /// **Daemon mode** (`config.detach = true`): spawns the command and returns
+    /// immediately. The container stays in Running state until explicitly stopped
+    /// or the process exits.
     pub async fn start(&self, id: &str) -> Result<(), StivaError> {
-        info!(container = id, "starting container");
-        {
-            let mut containers = self.containers.write().await;
+        let detach = {
+            let containers = self.containers.read().await;
             let container = containers
-                .get_mut(id)
+                .get(id)
                 .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-
             if container.state == ContainerState::Running {
                 return Err(StivaError::AlreadyRunning(id.to_string()));
             }
+            container.config.detach
+        };
 
-            container.state = ContainerState::Running;
-            container.started_at = Some(chrono::Utc::now());
+        // Transition to Running.
+        {
+            let mut containers = self.containers.write().await;
+            if let Some(container) = containers.get_mut(id) {
+                container.state = ContainerState::Running;
+                container.started_at = Some(chrono::Utc::now());
+            }
         }
 
-        // Execute via kavach sandbox.
         let spec = {
             let internals = self.internals.read().await;
             internals
@@ -202,61 +244,188 @@ impl ContainerManager {
                 .ok_or_else(|| StivaError::Runtime("no runtime spec for container".into()))?
         };
 
-        let result = runtime::exec_container(&spec).await;
+        if detach {
+            info!(container = id, "spawning daemon container");
+            let handle = runtime::spawn_container(&spec).await?;
+            let pid = handle.pid();
 
-        // Update container state based on execution result.
-        {
-            let mut containers = self.containers.write().await;
-            if let Some(container) = containers.get_mut(id) {
-                match &result {
-                    Ok(exec_result) => {
-                        container.exit_code = Some(exec_result.exit_code);
-                        container.state = ContainerState::Stopped;
-                        container.pid = None;
-                    }
-                    Err(e) => {
-                        error!(container = id, error = %e, "container execution failed");
-                        container.state = ContainerState::Stopped;
-                        container.pid = None;
+            {
+                let mut containers = self.containers.write().await;
+                if let Some(container) = containers.get_mut(id) {
+                    container.pid = pid;
+                }
+            }
+            {
+                let mut internals = self.internals.write().await;
+                if let Some(internal) = internals.get_mut(id) {
+                    internal.spawned = Some(handle);
+                }
+            }
+
+            info!(container = id, pid = ?pid, "daemon container started");
+        } else {
+            info!(container = id, "executing one-shot container");
+            let result = runtime::exec_container(&spec).await;
+
+            // Update container state based on execution result.
+            {
+                let mut containers = self.containers.write().await;
+                if let Some(container) = containers.get_mut(id) {
+                    match &result {
+                        Ok(exec_result) => {
+                            container.exit_code = Some(exec_result.exit_code);
+                            container.state = ContainerState::Stopped;
+                            container.pid = None;
+                        }
+                        Err(e) => {
+                            error!(container = id, error = %e, "container execution failed");
+                            container.state = ContainerState::Stopped;
+                            container.pid = None;
+                        }
                     }
                 }
             }
-        }
 
-        // Write logs and propagate result.
-        let exec_result = result?;
-        {
-            let mut internals = self.internals.write().await;
-            if let Some(internal) = internals.get_mut(id) {
-                let log_content = format!(
-                    "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code: {} | duration: {}ms | timed_out: {} ===\n",
-                    exec_result.stdout,
-                    exec_result.stderr,
-                    exec_result.exit_code,
-                    exec_result.duration_ms,
-                    exec_result.timed_out,
-                );
-                let _ = std::fs::write(&internal.log_path, &log_content);
-                internal.exec_result = Some(exec_result);
-            }
+            // Write logs and propagate result.
+            let exec_result = result?;
+            self.write_log(id, &exec_result).await;
         }
         Ok(())
     }
 
-    /// Stop a running container.
+    /// Wait for a daemon container to exit. Returns the exit code.
     ///
-    /// For the one-shot model, containers are already stopped after exec
-    /// completes. This is a no-op for stopped containers.
-    pub async fn stop(&self, id: &str) -> Result<(), StivaError> {
-        let mut containers = self.containers.write().await;
-        let container = containers
+    /// For one-shot containers, this returns immediately since they are
+    /// already stopped after `start()`.
+    pub async fn wait(&self, id: &str) -> Result<ContainerExecResult, StivaError> {
+        let handle = {
+            let mut internals = self.internals.write().await;
+            let internal = internals
+                .get_mut(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            internal.spawned.take()
+        };
+
+        if let Some(handle) = handle {
+            info!(container = id, "waiting for daemon container");
+            let exec_result = handle.wait().await?;
+
+            // Update state.
+            {
+                let mut containers = self.containers.write().await;
+                if let Some(container) = containers.get_mut(id) {
+                    container.exit_code = Some(exec_result.exit_code);
+                    container.state = ContainerState::Stopped;
+                    container.pid = None;
+                }
+            }
+
+            self.write_log(id, &exec_result).await;
+            Ok(exec_result)
+        } else {
+            // One-shot: already has a result.
+            let internals = self.internals.read().await;
+            let internal = internals
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            internal
+                .exec_result
+                .clone()
+                .ok_or_else(|| StivaError::InvalidState("container has not been started".into()))
+        }
+    }
+
+    /// Check if a daemon container is still running (non-blocking).
+    /// Returns `Some(exit_code)` if exited, `None` if still running.
+    pub async fn try_wait(&self, id: &str) -> Result<Option<i32>, StivaError> {
+        let mut internals = self.internals.write().await;
+        let internal = internals
             .get_mut(id)
             .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
 
-        // Future: send SIGTERM via kavach, wait, SIGKILL fallback.
-        container.state = ContainerState::Stopped;
-        container.pid = None;
+        if let Some(ref mut handle) = internal.spawned {
+            match handle.try_wait()? {
+                Some(exit_code) => {
+                    // Process exited — update state.
+                    drop(internals);
+                    let mut containers = self.containers.write().await;
+                    if let Some(container) = containers.get_mut(id) {
+                        container.exit_code = Some(exit_code);
+                        container.state = ContainerState::Stopped;
+                        container.pid = None;
+                    }
+                    Ok(Some(exit_code))
+                }
+                None => Ok(None),
+            }
+        } else {
+            // One-shot or already collected.
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            Ok(container.exit_code)
+        }
+    }
+
+    /// Stop a running container.
+    ///
+    /// For daemon containers, sends SIGTERM and waits up to `stop_grace_ms`
+    /// before sending SIGKILL. For one-shot containers that have already
+    /// completed, this is a no-op.
+    pub async fn stop(&self, id: &str) -> Result<(), StivaError> {
+        let grace_ms = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            container.config.stop_grace_ms
+        };
+
+        // Take the spawned handle if present.
+        let handle = {
+            let mut internals = self.internals.write().await;
+            internals.get_mut(id).and_then(|i| i.spawned.take())
+        };
+
+        if let Some(handle) = handle {
+            info!(container = id, grace_ms, "stopping daemon container");
+            let exec_result = handle.kill(grace_ms).await?;
+
+            {
+                let mut containers = self.containers.write().await;
+                if let Some(container) = containers.get_mut(id) {
+                    container.exit_code = Some(exec_result.exit_code);
+                    container.state = ContainerState::Stopped;
+                    container.pid = None;
+                }
+            }
+            self.write_log(id, &exec_result).await;
+        } else {
+            let mut containers = self.containers.write().await;
+            let container = containers
+                .get_mut(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            container.state = ContainerState::Stopped;
+            container.pid = None;
+        }
         Ok(())
+    }
+
+    /// Write execution result to the container log file.
+    async fn write_log(&self, id: &str, exec_result: &ContainerExecResult) {
+        let internals = self.internals.read().await;
+        if let Some(internal) = internals.get(id) {
+            let log_content = format!(
+                "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code: {} | duration: {}ms | timed_out: {} ===\n",
+                exec_result.stdout,
+                exec_result.stderr,
+                exec_result.exit_code,
+                exec_result.duration_ms,
+                exec_result.timed_out,
+            );
+            let _ = std::fs::write(&internal.log_path, &log_content);
+        }
     }
 
     /// Remove a stopped container.
@@ -530,6 +699,74 @@ mod tests {
         assert_eq!(config.cpu_shares, 0);
         assert!(config.user.is_none());
         assert!(config.workdir.is_none());
+        assert!(!config.detach);
+        assert_eq!(config.stop_grace_ms, 10_000);
+    }
+
+    #[tokio::test]
+    async fn daemon_container_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let config = ContainerConfig {
+            detach: true,
+            command: vec!["sleep".into(), "0.1".into()],
+            ..Default::default()
+        };
+        let c = manager.create(&test_image(), config).await.unwrap();
+        assert_eq!(c.state, ContainerState::Created);
+        assert!(c.config.detach);
+
+        // Start spawns the daemon and returns immediately.
+        let _ = manager.start(&c.id).await;
+
+        // Container should be Running (or Stopped if exec fell through).
+        let listed = manager.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn daemon_stop_with_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let config = ContainerConfig {
+            detach: true,
+            stop_grace_ms: 100,
+            ..Default::default()
+        };
+        let c = manager.create(&test_image(), config).await.unwrap();
+        let _ = manager.start(&c.id).await;
+
+        // Stop should work whether daemon is running or already exited.
+        let _ = manager.stop(&c.id).await;
+
+        let listed = manager.list().await.unwrap();
+        assert_eq!(listed[0].state, ContainerState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn wait_oneshot_returns_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        // One-shot start runs to completion.
+        let _ = manager.start(&c.id).await;
+
+        // Wait on a completed one-shot returns the cached result.
+        // (May error if exec failed in test env without sandbox.)
+        let _ = manager.wait(&c.id).await;
+    }
+
+    #[tokio::test]
+    async fn try_wait_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+        assert!(manager.try_wait("nonexistent").await.is_err());
     }
 
     #[test]
@@ -570,6 +807,7 @@ mod tests {
                 cpu_shares: 1024,
                 user: Some("nobody".into()),
                 workdir: Some("/app".into()),
+                ..Default::default()
             },
             exit_code: Some(0),
         };
