@@ -504,21 +504,28 @@ pub async fn unpause_container(pid: u32) -> Result<(), StivaError> {
     write_cgroup_file(pid, "cgroup.freeze", "0").await
 }
 
-/// Write a value to a cgroup v2 file for a process.
-async fn write_cgroup_file(pid: u32, filename: &str, value: &str) -> Result<(), StivaError> {
-    // Read the process's cgroup path from /proc/{pid}/cgroup.
+/// Resolve the cgroup v2 base path for a process.
+///
+/// Reads `/proc/{pid}/cgroup` and extracts the cgroup v2 path (format: `0::{path}`).
+/// Returns the full sysfs path like `/sys/fs/cgroup/{path}`.
+async fn resolve_cgroup_base(pid: u32) -> Result<String, StivaError> {
     let cgroup_info = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .await
         .map_err(|e| StivaError::Runtime(format!("failed to read cgroup for PID {pid}: {e}")))?;
 
-    // cgroups v2 format: "0::{path}"
     let cgroup_path = cgroup_info
         .lines()
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or_else(|| StivaError::Runtime(format!("no cgroup v2 entry for PID {pid}")))?
         .trim();
 
-    let file_path = format!("/sys/fs/cgroup{cgroup_path}/{filename}");
+    Ok(format!("/sys/fs/cgroup{cgroup_path}"))
+}
+
+/// Write a value to a cgroup v2 file for a process.
+async fn write_cgroup_file(pid: u32, filename: &str, value: &str) -> Result<(), StivaError> {
+    let base = resolve_cgroup_base(pid).await?;
+    let file_path = format!("{base}/{filename}");
 
     tokio::fs::write(&file_path, value)
         .await
@@ -549,17 +556,7 @@ pub struct ContainerStats {
 
 /// Read runtime stats for a container process from cgroups v2.
 pub async fn container_stats(pid: u32) -> Result<ContainerStats, StivaError> {
-    let cgroup_info = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .await
-        .map_err(|e| StivaError::Runtime(format!("failed to read cgroup for PID {pid}: {e}")))?;
-
-    let cgroup_path = cgroup_info
-        .lines()
-        .find_map(|line| line.strip_prefix("0::"))
-        .ok_or_else(|| StivaError::Runtime(format!("no cgroup v2 entry for PID {pid}")))?
-        .trim();
-
-    let base = format!("/sys/fs/cgroup{cgroup_path}");
+    let base = resolve_cgroup_base(pid).await?;
 
     let memory_bytes = read_cgroup_u64(&base, "memory.current").await.unwrap_or(0);
     let memory_limit_bytes = read_cgroup_u64(&base, "memory.max").await.unwrap_or(0);

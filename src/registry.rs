@@ -430,32 +430,14 @@ impl RegistryClient {
 
         let body = serde_json::to_vec(manifest)?;
 
-        let token = {
-            let cache_key = format!("{}\0{}", image.registry, scope);
-            // Acquire push token if not cached.
-            match self.get_cached_token(&cache_key).await {
-                Some(t) => Some(t),
-                None => {
-                    // Probe for auth challenge.
-                    let probe = self.client.put(&url).send().await?;
-                    if probe.status() == reqwest::StatusCode::UNAUTHORIZED {
-                        if let Some(www_auth) = probe
-                            .headers()
-                            .get(reqwest::header::WWW_AUTHENTICATE)
-                            .and_then(|v| v.to_str().ok())
-                        {
-                            let t = self.acquire_token(www_auth, &scope).await?;
-                            self.cache_token(&cache_key, &t).await;
-                            Some(t)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
+        // Ensure we have a push token (probe via authenticated_request).
+        let cache_key = format!("{}\0{}", image.registry, scope);
+        if self.get_cached_token(&cache_key).await.is_none() {
+            // Probe to trigger auth — ignore the response.
+            let _ = self
+                .authenticated_request(image, reqwest::Method::HEAD, &url, &scope, None)
+                .await;
+        }
 
         let mut req = self
             .client
@@ -463,8 +445,8 @@ impl RegistryClient {
             .header(reqwest::header::CONTENT_TYPE, MEDIA_OCI_MANIFEST)
             .body(body);
 
-        if let Some(ref t) = token {
-            req = req.bearer_auth(t);
+        if let Some(token) = self.get_cached_token(&cache_key).await {
+            req = req.bearer_auth(&token);
         }
 
         let resp = req

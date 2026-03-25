@@ -139,6 +139,9 @@ impl Stiva {
     }
 
     /// Create and start a container.
+    ///
+    /// Returns the container with its post-start state (Stopped for one-shot,
+    /// Running for daemon).
     pub async fn run(
         &self,
         image: &str,
@@ -148,7 +151,13 @@ impl Stiva {
         let img = self.pull(image).await?;
         let container = self.containers.create(&img, config).await?;
         self.containers.start(&container.id).await?;
-        Ok(container)
+        // Return updated state (start may have changed it).
+        self.containers
+            .list()
+            .await?
+            .into_iter()
+            .find(|c| c.id == container.id)
+            .ok_or_else(|| StivaError::ContainerNotFound(container.id))
     }
 
     /// List running containers.
@@ -169,8 +178,8 @@ impl Stiva {
     }
 
     /// Send a signal to a running container.
-    pub fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
-        self.containers.signal(id, signal)
+    pub async fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
+        self.containers.signal(id, signal).await
     }
 
     /// Pause a running container via cgroups freezer.
@@ -237,9 +246,34 @@ impl Stiva {
     }
 
     /// Remove a local image by ID or reference.
+    ///
+    /// When called with a tag reference (e.g. "nginx:latest"), removes only
+    /// that tag. When called with a digest ID, removes the image and all tags.
     pub fn rmi(&self, image_id: &str) -> Result<(), StivaError> {
         info!(image = image_id, "stiva rmi");
-        self.image_store.remove(image_id)
+        // Try removal by ID first (removes all tags for that digest).
+        match self.image_store.remove(image_id) {
+            Ok(()) => Ok(()),
+            Err(StivaError::ImageNotFound(_)) => {
+                // Try by reference — remove just the matching tag.
+                let images = self.image_store.list()?;
+                let match_ref = images
+                    .iter()
+                    .find(|i| i.reference.full_ref().contains(image_id))
+                    .map(|i| i.reference.full_ref());
+                match match_ref {
+                    Some(ref_str) => {
+                        let remaining: Vec<_> = images
+                            .into_iter()
+                            .filter(|i| i.reference.full_ref() != ref_str)
+                            .collect();
+                        self.image_store.save_index_pub(&remaining)
+                    }
+                    None => Err(StivaError::ImageNotFound(image_id.to_string())),
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Tag a local image with a new reference.

@@ -144,6 +144,32 @@ pub struct ContainerManager {
 }
 
 impl ContainerManager {
+    /// Get a container's PID, validating it's in one of the expected states.
+    ///
+    /// Returns the PID if the container exists, is in an allowed state, and has a PID.
+    async fn require_pid(
+        &self,
+        id: &str,
+        allowed_states: &[ContainerState],
+        op: &str,
+    ) -> Result<u32, StivaError> {
+        let containers = self.containers.read().await;
+        let container = containers
+            .get(id)
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+
+        if !allowed_states.contains(&container.state) {
+            return Err(StivaError::InvalidState(format!(
+                "cannot {op} container {id}: state is {:?}",
+                container.state
+            )));
+        }
+
+        container
+            .pid
+            .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))
+    }
+
     /// Create a new container manager.
     pub fn new(root: &Path, image_store: Arc<ImageStore>) -> Result<Self, StivaError> {
         std::fs::create_dir_all(root)?;
@@ -471,48 +497,18 @@ impl ContainerManager {
     /// Send a signal to a running container process.
     ///
     /// Common signals: SIGHUP(1), SIGINT(2), SIGTERM(15), SIGUSR1(10), SIGUSR2(12).
-    pub fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
-        // Use try_read to avoid async — this is a synchronous syscall.
-        let containers = self
-            .containers
-            .try_read()
-            .map_err(|_| StivaError::Runtime("container lock busy".into()))?;
-        let container = containers
-            .get(id)
-            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-
-        if container.state != ContainerState::Running {
-            return Err(StivaError::InvalidState(format!(
-                "cannot signal container {id}: state is {:?}",
-                container.state
-            )));
-        }
-
-        let pid = container
-            .pid
-            .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?;
-
+    pub async fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
+        let pid = self
+            .require_pid(id, &[ContainerState::Running], "signal")
+            .await?;
         runtime::send_signal(pid, signal)
     }
 
     /// Pause a running container via cgroups freezer.
     pub async fn pause(&self, id: &str) -> Result<(), StivaError> {
-        let pid = {
-            let containers = self.containers.read().await;
-            let container = containers
-                .get(id)
-                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-            if container.state != ContainerState::Running {
-                return Err(StivaError::InvalidState(format!(
-                    "cannot pause container {id}: state is {:?}",
-                    container.state
-                )));
-            }
-            container
-                .pid
-                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
-        };
-
+        let pid = self
+            .require_pid(id, &[ContainerState::Running], "pause")
+            .await?;
         runtime::pause_container(pid).await?;
 
         let mut containers = self.containers.write().await;
@@ -524,22 +520,9 @@ impl ContainerManager {
 
     /// Unpause a paused container.
     pub async fn unpause(&self, id: &str) -> Result<(), StivaError> {
-        let pid = {
-            let containers = self.containers.read().await;
-            let container = containers
-                .get(id)
-                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-            if container.state != ContainerState::Paused {
-                return Err(StivaError::InvalidState(format!(
-                    "cannot unpause container {id}: state is {:?}",
-                    container.state
-                )));
-            }
-            container
-                .pid
-                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
-        };
-
+        let pid = self
+            .require_pid(id, &[ContainerState::Paused], "unpause")
+            .await?;
         runtime::unpause_container(pid).await?;
 
         let mut containers = self.containers.write().await;
@@ -551,24 +534,13 @@ impl ContainerManager {
 
     /// Get runtime stats for a running or paused container.
     pub async fn stats(&self, id: &str) -> Result<runtime::ContainerStats, StivaError> {
-        let pid = {
-            let containers = self.containers.read().await;
-            let container = containers
-                .get(id)
-                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-            if container.state != ContainerState::Running
-                && container.state != ContainerState::Paused
-            {
-                return Err(StivaError::InvalidState(format!(
-                    "cannot get stats for container {id}: state is {:?}",
-                    container.state
-                )));
-            }
-            container
-                .pid
-                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
-        };
-
+        let pid = self
+            .require_pid(
+                id,
+                &[ContainerState::Running, ContainerState::Paused],
+                "get stats for",
+            )
+            .await?;
         runtime::container_stats(pid).await
     }
 
@@ -654,25 +626,9 @@ impl ContainerManager {
     pub async fn checkpoint(&self, id: &str, leave_running: bool) -> Result<PathBuf, StivaError> {
         info!(container = id, leave_running, "checkpointing container");
 
-        let (state, pid) = {
-            let containers = self.containers.read().await;
-            let container = containers
-                .get(id)
-                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-            (container.state, container.pid)
-        };
-
-        if state != ContainerState::Running {
-            return Err(StivaError::InvalidState(format!(
-                "cannot checkpoint container {id}: not running (state: {state:?})"
-            )));
-        }
-
-        let pid = pid.ok_or_else(|| {
-            StivaError::InvalidState(format!(
-                "cannot checkpoint container {id}: no PID available"
-            ))
-        })?;
+        let pid = self
+            .require_pid(id, &[ContainerState::Running], "checkpoint")
+            .await?;
 
         // Create checkpoint dir: {container_root}/checkpoints/{timestamp}/
         let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
@@ -766,23 +722,18 @@ impl ContainerManager {
     pub async fn prepare_migration(&self, id: &str) -> Result<MigrationBundle, StivaError> {
         info!(container = id, "preparing container for migration");
 
-        let (container_state, container_config, image_ref) = {
+        // Validate Running state (require_pid checks state + PID).
+        let _ = self
+            .require_pid(id, &[ContainerState::Running], "migrate")
+            .await?;
+
+        let (container_config, image_ref) = {
             let containers = self.containers.read().await;
             let container = containers
                 .get(id)
                 .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
-            (
-                container.state,
-                container.config.clone(),
-                container.image_ref.clone(),
-            )
+            (container.config.clone(), container.image_ref.clone())
         };
-
-        if container_state != ContainerState::Running {
-            return Err(StivaError::InvalidState(format!(
-                "cannot migrate container {id}: not running (state: {container_state:?})"
-            )));
-        }
 
         // Checkpoint with leave_running = false (pauses the container).
         let checkpoint_dir = self.checkpoint(id, false).await?;
@@ -1470,7 +1421,7 @@ mod tests {
             .create(&test_image(), ContainerConfig::default())
             .await
             .unwrap();
-        let err = manager.signal(&c.id, 15).unwrap_err();
+        let err = manager.signal(&c.id, 15).await.unwrap_err();
         assert!(matches!(err, StivaError::InvalidState(_)));
     }
 
@@ -1478,7 +1429,7 @@ mod tests {
     async fn signal_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let manager = test_manager(dir.path());
-        let err = manager.signal("nonexistent", 15).unwrap_err();
+        let err = manager.signal("nonexistent", 15).await.unwrap_err();
         assert!(matches!(err, StivaError::ContainerNotFound(_)));
     }
 }

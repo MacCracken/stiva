@@ -313,6 +313,11 @@ impl ImageStore {
         Ok(images)
     }
 
+    /// Save the image index (internal + crate-visible for rmi-by-tag).
+    pub(crate) fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError> {
+        self.save_index(images)
+    }
+
     fn save_index(&self, images: &[Image]) -> Result<(), StivaError> {
         let data = serde_json::to_vec_pretty(images)?;
         let path = self.index_path();
