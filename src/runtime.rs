@@ -460,6 +460,353 @@ pub async fn exec_in_container(
 }
 
 // ---------------------------------------------------------------------------
+// Container top — list processes inside a container
+// ---------------------------------------------------------------------------
+
+/// A process entry from /proc inside a container's PID namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    /// Process ID (as seen from the host).
+    pub pid: u32,
+    /// Parent PID.
+    pub ppid: u32,
+    /// Command name.
+    pub comm: String,
+    /// Full command line.
+    pub cmdline: String,
+    /// Process state (R=running, S=sleeping, etc.).
+    pub state: char,
+}
+
+/// List processes inside a container by reading /proc for all children of the container PID.
+pub async fn container_top(pid: u32) -> Result<Vec<ProcessInfo>, StivaError> {
+    info!(pid, "listing container processes");
+
+    let mut processes = Vec::new();
+
+    // Read /proc to find all processes whose parent chain leads to `pid`.
+    let proc_dir = tokio::fs::read_dir("/proc")
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read /proc: {e}")))?;
+
+    let mut entries = proc_dir;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read /proc entry: {e}")))?
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Only process numeric directories (PIDs).
+        let Ok(child_pid) = name_str.parse::<u32>() else {
+            continue;
+        };
+
+        // Check if this process is a descendant of our container PID.
+        if !is_descendant_of(child_pid, pid) {
+            continue;
+        }
+
+        if let Ok(info) = read_process_info(child_pid).await {
+            processes.push(info);
+        }
+    }
+
+    info!(pid, count = processes.len(), "container processes listed");
+    Ok(processes)
+}
+
+/// Check if `child` is a descendant of `ancestor` by walking the PPID chain.
+fn is_descendant_of(child: u32, ancestor: u32) -> bool {
+    if child == ancestor {
+        return true;
+    }
+    let mut current = child;
+    for _ in 0..64 {
+        // Safety limit to prevent infinite loops.
+        let stat_path = format!("/proc/{current}/stat");
+        let Ok(content) = std::fs::read_to_string(&stat_path) else {
+            return false;
+        };
+        // Format: "pid (comm) state ppid ..."
+        let ppid = parse_ppid_from_stat(&content);
+        if ppid == ancestor {
+            return true;
+        }
+        if ppid <= 1 {
+            return false;
+        }
+        current = ppid;
+    }
+    false
+}
+
+/// Parse PPID from /proc/{pid}/stat content.
+/// Format: "pid (comm) state ppid ..."
+#[inline]
+fn parse_ppid_from_stat(stat: &str) -> u32 {
+    // Find the closing ')' of comm field, then parse fields after it.
+    if let Some(after_comm) = stat.rfind(')') {
+        let remainder = &stat[after_comm + 2..]; // skip ") "
+        let mut fields = remainder.split_whitespace();
+        let _state = fields.next();
+        if let Some(ppid_str) = fields.next() {
+            return ppid_str.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// Read process info from /proc/{pid}/.
+async fn read_process_info(pid: u32) -> Result<ProcessInfo, StivaError> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read /proc/{pid}/stat: {e}")))?;
+
+    let cmdline = tokio::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .await
+        .unwrap_or_default()
+        .replace('\0', " ")
+        .trim()
+        .to_string();
+
+    // Parse stat fields.
+    let comm = stat
+        .find('(')
+        .and_then(|start| stat.rfind(')').map(|end| &stat[start + 1..end]))
+        .unwrap_or("?")
+        .to_string();
+
+    let ppid = parse_ppid_from_stat(&stat);
+
+    let state = stat
+        .rfind(')')
+        .and_then(|pos| stat[pos + 2..].chars().next())
+        .unwrap_or('?');
+
+    Ok(ProcessInfo {
+        pid,
+        ppid,
+        comm,
+        cmdline,
+        state,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Container export / import
+// ---------------------------------------------------------------------------
+
+/// Export a container's rootfs as a tar archive.
+///
+/// Writes the merged overlay directory (or rootfs fallback) to a tar file.
+pub async fn export_rootfs(rootfs: &Path, output: &Path) -> Result<(), StivaError> {
+    info!(rootfs = %rootfs.display(), output = %output.display(), "exporting rootfs");
+
+    let rootfs = rootfs.to_path_buf();
+    let output = output.to_path_buf();
+
+    // Use blocking task for tar creation.
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::create(&output)
+            .map_err(|e| StivaError::Storage(format!("failed to create export file: {e}")))?;
+        let mut archive = tar::Builder::new(file);
+        archive
+            .append_dir_all(".", &rootfs)
+            .map_err(|e| StivaError::Storage(format!("failed to archive rootfs: {e}")))?;
+        archive
+            .finish()
+            .map_err(|e| StivaError::Storage(format!("failed to finish export archive: {e}")))?;
+        Ok::<(), StivaError>(())
+    })
+    .await
+    .map_err(|e| StivaError::Runtime(format!("export task failed: {e}")))?
+}
+
+/// Import a tar archive as a new image layer.
+///
+/// Creates a single-layer image from the tar file content.
+pub fn import_rootfs(
+    tar_path: &Path,
+    image_store: &crate::image::ImageStore,
+    name: &str,
+    tag: &str,
+) -> Result<crate::image::Image, StivaError> {
+    info!(tar = %tar_path.display(), name, tag, "importing rootfs as image");
+
+    // Read and gzip the tar.
+    let tar_data = std::fs::read(tar_path)
+        .map_err(|e| StivaError::Storage(format!("failed to read import tar: {e}")))?;
+
+    let mut gz_buf = Vec::new();
+    {
+        let mut encoder = flate2::write::GzEncoder::new(&mut gz_buf, flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &tar_data)
+            .map_err(|e| StivaError::Storage(format!("failed to compress import data: {e}")))?;
+        encoder
+            .finish()
+            .map_err(|e| StivaError::Storage(format!("failed to finish gzip: {e}")))?;
+    }
+
+    // Compute digest and store.
+    let layer_digest = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&gz_buf);
+        let mut out = String::with_capacity(71);
+        out.push_str("sha256:");
+        for byte in hash {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    };
+    image_store.store_blob(&layer_digest, &gz_buf)?;
+
+    let layer = crate::image::Layer {
+        digest: layer_digest.clone(),
+        size_bytes: gz_buf.len() as u64,
+        media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+    };
+
+    // Build minimal image config.
+    let config_json = serde_json::json!({
+        "os": "linux",
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [layer_digest],
+        },
+    });
+    let config_bytes = serde_json::to_vec_pretty(&config_json)?;
+    let config_digest = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&config_bytes);
+        let mut out = String::with_capacity(71);
+        out.push_str("sha256:");
+        for byte in hash {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    };
+    image_store.store_blob(&config_digest, &config_bytes)?;
+
+    let image = crate::image::Image {
+        id: config_digest,
+        reference: crate::image::ImageRef {
+            registry: "local".into(),
+            repository: name.to_string(),
+            tag: tag.to_string(),
+            digest: None,
+        },
+        size_bytes: gz_buf.len() as u64,
+        layers: vec![layer],
+        created_at: chrono::Utc::now(),
+    };
+
+    image_store.add_to_index(&image)?;
+
+    info!(
+        id = %image.id,
+        name,
+        tag,
+        size = gz_buf.len(),
+        "import complete"
+    );
+    Ok(image)
+}
+
+// ---------------------------------------------------------------------------
+// Container copy — files in/out
+// ---------------------------------------------------------------------------
+
+/// Copy a file from the host into a container's rootfs.
+pub fn copy_into_container(
+    rootfs: &Path,
+    host_src: &Path,
+    container_dst: &Path,
+) -> Result<(), StivaError> {
+    info!(
+        src = %host_src.display(),
+        dst = %container_dst.display(),
+        "copying file into container"
+    );
+
+    let target = rootfs.join(container_dst.strip_prefix("/").unwrap_or(container_dst));
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if host_src.is_dir() {
+        copy_dir_recursive(host_src, &target)?;
+    } else {
+        std::fs::copy(host_src, &target).map_err(|e| {
+            StivaError::Storage(format!(
+                "failed to copy {} → {}: {e}",
+                host_src.display(),
+                target.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Copy a file from a container's rootfs to the host.
+pub fn copy_from_container(
+    rootfs: &Path,
+    container_src: &Path,
+    host_dst: &Path,
+) -> Result<(), StivaError> {
+    info!(
+        src = %container_src.display(),
+        dst = %host_dst.display(),
+        "copying file from container"
+    );
+
+    let source = rootfs.join(container_src.strip_prefix("/").unwrap_or(container_src));
+
+    if !source.exists() {
+        return Err(StivaError::Storage(format!(
+            "source path does not exist in container: {}",
+            container_src.display()
+        )));
+    }
+
+    if let Some(parent) = host_dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if source.is_dir() {
+        copy_dir_recursive(&source, host_dst)?;
+    } else {
+        std::fs::copy(&source, host_dst).map_err(|e| {
+            StivaError::Storage(format!(
+                "failed to copy {} → {}: {e}",
+                source.display(),
+                host_dst.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StivaError> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Signal forwarding
 // ---------------------------------------------------------------------------
 
@@ -1111,5 +1458,134 @@ mod tests {
         };
         // Should skip because values are 0.
         apply_cgroup_limits(1, &spec).await;
+    }
+
+    #[test]
+    fn parse_ppid_from_stat_basic() {
+        // Real /proc/pid/stat format
+        let stat = "1234 (bash) S 1 1234 1234 0 -1 4194560";
+        assert_eq!(parse_ppid_from_stat(stat), 1);
+    }
+
+    #[test]
+    fn parse_ppid_from_stat_comm_with_parens() {
+        // comm can contain parens: "1234 (my (app)) S 42 ..."
+        let stat = "1234 (my (app)) S 42 1234 1234 0";
+        assert_eq!(parse_ppid_from_stat(stat), 42);
+    }
+
+    #[test]
+    fn parse_ppid_from_stat_empty() {
+        assert_eq!(parse_ppid_from_stat(""), 0);
+    }
+
+    #[test]
+    fn process_info_serde() {
+        let info = ProcessInfo {
+            pid: 123,
+            ppid: 1,
+            comm: "sleep".into(),
+            cmdline: "sleep 60".into(),
+            state: 'S',
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ProcessInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pid, 123);
+        assert_eq!(back.state, 'S');
+    }
+
+    #[test]
+    fn copy_into_container_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        let src = dir.path().join("hello.txt");
+        std::fs::write(&src, "hello").unwrap();
+
+        copy_into_container(&rootfs, &src, Path::new("/app/hello.txt")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("app/hello.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn copy_from_container_reads_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(rootfs.join("data")).unwrap();
+        std::fs::write(rootfs.join("data/out.txt"), "result").unwrap();
+
+        let dst = dir.path().join("output.txt");
+        copy_from_container(&rootfs, Path::new("/data/out.txt"), &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "result");
+    }
+
+    #[test]
+    fn copy_from_container_missing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        let err = copy_from_container(&rootfs, Path::new("/nope"), &dir.path().join("out"));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn copy_dir_recursive_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        std::fs::write(src.join("sub/b.txt"), "b").unwrap();
+
+        let dst = dir.path().join("dst");
+        copy_dir_recursive(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "b");
+    }
+
+    #[test]
+    fn import_rootfs_creates_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::image::ImageStore::new(&dir.path().join("store")).unwrap();
+
+        // Create a tar file.
+        let tar_path = dir.path().join("rootfs.tar");
+        {
+            let file = std::fs::File::create(&tar_path).unwrap();
+            let mut builder = tar::Builder::new(file);
+            let data = b"hello from import";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("hello.txt").unwrap();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, &data[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let image = import_rootfs(&tar_path, &store, "imported", "v1").unwrap();
+        assert_eq!(image.reference.repository, "imported");
+        assert_eq!(image.reference.tag, "v1");
+        assert_eq!(image.layers.len(), 1);
+
+        // Should appear in index.
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_rootfs_creates_tar() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join("test.txt"), "export test").unwrap();
+
+        let output = dir.path().join("export.tar");
+        export_rootfs(&rootfs, &output).await.unwrap();
+        assert!(output.exists());
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
     }
 }

@@ -98,51 +98,52 @@ stiva.rm(&container.id).await?;
 | `registry` | OCI registry client |
 | `full` | All features |
 
-## Roadmap
+## Roadmap to 1.0
 
-### Phase 8 — Runtime Integration (next)
-- [x] Cgroups v2 resource enforcement (memory.max, pids.max on daemon start)
-- [x] Network wiring (auto-connect containers to bridge on start)
-- [x] Container lifecycle events via majra pubsub
-- [x] Log streaming (log_tail for daemon containers)
+### Phase 10 — 1.0 Release (next)
+- [ ] Persistent container state (survive daemon restart)
+- [ ] Container restart on crash (auto-restart via health monitor)
+- [ ] Streaming blob push (avoid loading full layer into memory)
+- [ ] Feature-gate enforcement (declared features actually gate module compilation)
+- [ ] Integration test suite (real container lifecycle with process backend)
+- [ ] Doc-tests for public API
+- [ ] `stiva version` / `stiva info` CLI commands
+- [ ] Error message quality pass (user-facing errors in CLI)
 
-### Phase 7 — Complete Runtime
-- [x] Container exec (nsenter into running namespaces)
-- [x] Signal forwarding (arbitrary signals via nix)
-- [x] Pause/unpause (cgroups v2 freezer)
-- [x] Container stats (CPU/memory/PIDs from cgroups v2)
-- [x] Image management (tag, rmi, inspect)
-- [x] Container inspect
-- [x] Prune (stopped containers + unused images)
-- [x] MCP tools expanded (9 tools: +exec, build, push, inspect)
-
-### Completed
+### Completed (Phase 0–9)
 
 <details>
-<summary>Phase 0–6 (click to expand)</summary>
+<summary>Click to expand</summary>
+
+#### Phase 9 — Usability
+CLI binary (24 subcommands), container top (/proc walk), export/import (tar round-trip), container copy (files in/out), criterion benchmarks (18 benchmarks + bench-history.sh).
+
+#### Phase 8 — Runtime Integration
+Cgroups v2 resource enforcement, network wiring into container start, lifecycle events via majra pubsub, log streaming.
+
+#### Phase 7 — Complete Runtime
+Container exec (nsenter), signal forwarding, pause/unpause (cgroups v2 freezer), container stats, image management (tag/rmi/inspect), container inspect, prune, 9 MCP tools.
 
 #### Phase 6 — Production Hardening
-Container exec (nsenter into running namespaces), signal forwarding (arbitrary signals via nix), pause/unpause (cgroups v2 freezer), container stats (memory/CPU/PIDs from cgroups v2), checkpointing (CRIU dump/restore), live migration (checkpoint + transfer + restore), daimon edge fleet scheduling (spread/binpack/pinned strategies), TOML image build (Stivafile.toml), image push, rootless containers (user namespace UID remapping).
+Checkpointing (CRIU dump/restore), live migration, daimon edge fleet scheduling, TOML image build, image push, rootless containers.
 
 #### Phase 5 — Advanced
-Long-running daemon containers (kavach spawn/wait/kill), rootless containers (user namespace UID/GID mapping), image push to registries, container checkpointing (CRIU), live migration, daimon edge fleet integration.
-
-
-
-#### Phase 0 — Foundation
-Scaffold, image reference parser, container lifecycle state machine, OCI types, volume parsing, network mode types, TOML compose parser, runtime spec generation.
-
-#### Phase 1 — Image Pull Pipeline
-OCI distribution spec client, bearer token auth, multi-arch manifest list, content-addressable blob store with SHA-256 verification, layer deduplication, concurrent downloads, image index persistence.
-
-#### Phase 2 — Container Execution
-Layer unpacking (tar+gzip), overlay filesystem (overlayfs on Linux), kavach sandbox integration (OCI + Process backends), full OCI runtime spec (resource limits, mounts, env, user, workdir), volume bind mounts, container logging, one-shot execution model.
-
-#### Phase 3 — Networking
-Bridge networks with veth pairs, NAT via nein/nftables, port mapping (TCP/UDP), container DNS (resolv.conf + hosts injection), custom named networks, IP address pool with allocation/release.
+Long-running daemon containers (kavach spawn/wait/kill), rootless (user namespace UID/GID mapping), image push, container checkpointing, live migration, fleet integration.
 
 #### Phase 4 — Orchestration
-Compose up/down with DAG dependency ordering (majra), health checks via majra HeartbeatTracker, restart policies (Always, OnFailure, UnlessStopped, Never), daimon agent registration, sutra-stiva deployment module, 5 MCP tools, agnoshi intent stubs, replica support, PubSub events.
+Compose up/down (DAG ordering via majra), health checks, restart policies, daimon agent registration, sutra module, MCP tools, intent stubs, replica support.
+
+#### Phase 3 — Networking
+Bridge networks, NAT via nein/nftables, port mapping, container DNS, custom networks, IP pool.
+
+#### Phase 2 — Container Execution
+Layer unpacking, overlay filesystem, kavach sandbox integration, OCI runtime spec, volume mounts, container logging.
+
+#### Phase 1 — Image Pull Pipeline
+OCI distribution client, bearer token auth, multi-arch manifests, content-addressable blob store, layer dedup, concurrent downloads.
+
+#### Phase 0 — Foundation
+Scaffold, image reference parser, container lifecycle state machine, OCI types, volume parsing, network modes, TOML compose parser, runtime spec generation.
 
 </details>
 
@@ -156,6 +157,7 @@ Compose up/down with DAG dependency ordering (majra), health checks via majra He
 | `scripts/bench.sh` | Run test suite + release build, append timing results to `benches/history.log` |
 | `scripts/bench.sh --history` | Show benchmark history |
 | `scripts/bench.sh --clean` | Clear benchmark history |
+| `scripts/bench-history.sh` | Run criterion benchmarks, append to `bench-history.csv`, generate `benchmarks.md` |
 
 ### Makefile targets
 

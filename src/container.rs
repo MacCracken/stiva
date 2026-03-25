@@ -153,7 +153,7 @@ impl ContainerManager {
     /// Get a container's PID, validating it's in one of the expected states.
     ///
     /// Returns the PID if the container exists, is in an allowed state, and has a PID.
-    async fn require_pid(
+    pub(crate) async fn require_pid(
         &self,
         id: &str,
         allowed_states: &[ContainerState],
@@ -695,6 +695,19 @@ impl ContainerManager {
         }));
 
         Ok(())
+    }
+
+    /// Get the rootfs path for a container (overlay merged or fallback).
+    pub async fn get_rootfs(&self, id: &str) -> Result<PathBuf, StivaError> {
+        let internals = self.internals.read().await;
+        let internal = internals
+            .get(id)
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+        Ok(internal
+            .overlay
+            .as_ref()
+            .map(|o| o.merged.clone())
+            .unwrap_or_else(|| self.root.join(id).join("rootfs")))
     }
 
     /// List all containers.

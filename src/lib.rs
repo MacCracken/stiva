@@ -344,6 +344,55 @@ impl Stiva {
         Ok((removed_containers, removed_images))
     }
 
+    /// List processes inside a running container.
+    pub async fn top(&self, id: &str) -> Result<Vec<runtime::ProcessInfo>, StivaError> {
+        let pid = self
+            .containers
+            .require_pid(id, &[container::ContainerState::Running], "top")
+            .await?;
+        runtime::container_top(pid).await
+    }
+
+    /// Export a container's rootfs as a tar archive.
+    pub async fn export(&self, id: &str, output: &std::path::Path) -> Result<(), StivaError> {
+        info!(container = id, output = %output.display(), "stiva export");
+        let rootfs = self.containers.get_rootfs(id).await?;
+        runtime::export_rootfs(&rootfs, output).await
+    }
+
+    /// Import a tar archive as a new local image.
+    pub fn import(
+        &self,
+        tar_path: &std::path::Path,
+        name: &str,
+        tag: &str,
+    ) -> Result<image::Image, StivaError> {
+        info!(tar = %tar_path.display(), name, tag, "stiva import");
+        runtime::import_rootfs(tar_path, &self.image_store, name, tag)
+    }
+
+    /// Copy a file from the host into a container.
+    pub async fn cp_into(
+        &self,
+        id: &str,
+        host_src: &std::path::Path,
+        container_dst: &std::path::Path,
+    ) -> Result<(), StivaError> {
+        let rootfs = self.containers.get_rootfs(id).await?;
+        runtime::copy_into_container(&rootfs, host_src, container_dst)
+    }
+
+    /// Copy a file from a container to the host.
+    pub async fn cp_from(
+        &self,
+        id: &str,
+        container_src: &std::path::Path,
+        host_dst: &std::path::Path,
+    ) -> Result<(), StivaError> {
+        let rootfs = self.containers.get_rootfs(id).await?;
+        runtime::copy_from_container(&rootfs, container_src, host_dst)
+    }
+
     /// Wait for a container to exit. Returns execution result.
     pub async fn wait(&self, id: &str) -> Result<runtime::ContainerExecResult, StivaError> {
         info!(container = id, "stiva wait");
@@ -363,6 +412,11 @@ impl Stiva {
     /// Read container logs.
     pub async fn logs(&self, id: &str) -> Result<String, StivaError> {
         self.containers.logs(id).await
+    }
+
+    /// Read the last N lines of container logs.
+    pub async fn log_tail(&self, id: &str, lines: usize) -> Result<String, StivaError> {
+        self.containers.log_tail(id, lines).await
     }
 
     /// Checkpoint a running daemon container via CRIU.
