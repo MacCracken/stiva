@@ -25,8 +25,31 @@
 //! - [`compose`] — Multi-container orchestration (compose-file equivalent)
 //! - [`health`] — Container health monitoring via majra heartbeat
 //! - [`agent`] — Daimon agent registration
+//! - [`fleet`] — Daimon edge fleet scheduling
 //! - [`mcp`] — MCP tools for AI agent integration
 //! - [`intents`] — Agnoshi intent system (stub)
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use stiva::{Stiva, StivaConfig};
+//! use stiva::container::ContainerConfig;
+//!
+//! # async fn example() -> Result<(), stiva::StivaError> {
+//! let stiva = Stiva::new(StivaConfig::default()).await?;
+//!
+//! // Pull and run
+//! let container = stiva.run("alpine:latest", ContainerConfig::default()).await?;
+//!
+//! // Inspect
+//! let info = stiva.inspect(&container.id).await?;
+//! println!("state: {:?}", info.state);
+//!
+//! // Clean up
+//! stiva.stop(&container.id).await?;
+//! stiva.rm(&container.id).await?;
+//! # Ok(())
+//! # }
 
 pub mod agent;
 pub mod build;
@@ -175,6 +198,12 @@ impl Stiva {
     pub async fn rm(&self, id: &str) -> Result<(), StivaError> {
         info!(container = id, "stiva rm");
         self.containers.remove(id).await
+    }
+
+    /// Restart a stopped container.
+    pub async fn restart(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "stiva restart");
+        self.containers.restart(id).await
     }
 
     /// Send a signal to a running container.

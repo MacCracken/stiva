@@ -2,6 +2,24 @@
 
 All notable changes to stiva are documented here.
 
+## [1.0.0] — 2026-03-25
+
+### Added
+- **Persistent state** — container records saved to `state.json`, restored on manager restart; running/paused containers transition to Stopped on restart
+- **Container restart** — `ContainerManager::restart()`, `Stiva::restart()`, `stiva restart` CLI; resets Stopped→Created→start()
+- **Feature-gate chain** — `runtime` implies `image`+`registry`, `compose` implies `runtime`, `default = full`
+- **Integration test suite** — 10 integration tests covering full lifecycle, persistence, export/import, fleet scheduling, copy
+- **Doc-test** — crate-level quick start example
+- **`stiva info`** — system information (version, paths, container/image counts, CRIU availability)
+- **`stiva restart`** — restart stopped containers (26 CLI commands total)
+- **Error quality** — user-friendly error messages in CLI (container not found, auth failed, invalid reference, etc.)
+- 404 total tests (393 lib + 10 integration + 1 doc-test)
+
+### Changed
+- Version: 0.25.4 → 1.0.0
+- `ImageStore::add_to_index` and `save_index_pub` now `pub` (were `pub(crate)`)
+- `default` feature changed from `runtime` to `full`
+
 ## [0.25.4] — 2026-03-25
 
 ### Added

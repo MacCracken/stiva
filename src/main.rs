@@ -185,6 +185,13 @@ enum Commands {
         /// Checkpoint directory.
         checkpoint_dir: std::path::PathBuf,
     },
+    /// Restart a stopped container.
+    Restart {
+        /// Container ID.
+        id: String,
+    },
+    /// Show system information.
+    Info,
 }
 
 #[tokio::main]
@@ -199,18 +206,27 @@ async fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = run(cli).await {
-        eprintln!("error: {e}");
+        // User-friendly error formatting.
+        match &e {
+            StivaError::ContainerNotFound(id) => eprintln!("Error: no such container: {id}"),
+            StivaError::ImageNotFound(id) => eprintln!("Error: no such image: {id}"),
+            StivaError::AlreadyRunning(id) => eprintln!("Error: container {id} is already running"),
+            StivaError::InvalidState(msg) => eprintln!("Error: {msg}"),
+            StivaError::InvalidReference(msg) => eprintln!("Error: invalid image reference: {msg}"),
+            StivaError::AuthFailed(msg) => eprintln!("Error: authentication failed: {msg}"),
+            _ => eprintln!("Error: {e}"),
+        }
         std::process::exit(1);
     }
 }
 
 async fn run(cli: Cli) -> Result<(), StivaError> {
-    let config = StivaConfig {
+    let cli_config = StivaConfig {
         root_path: cli.root,
         image_path: cli.images,
         ..Default::default()
     };
-    let stiva = Stiva::new(config).await?;
+    let stiva = Stiva::new(cli_config.clone()).await?;
 
     match cli.command {
         Commands::Pull { image } => {
@@ -416,6 +432,27 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
         Commands::Restore { id, checkpoint_dir } => {
             stiva.restore(&id, &checkpoint_dir).await?;
             println!("{id}");
+        }
+        Commands::Restart { id } => {
+            stiva.restart(&id).await?;
+            println!("{id}");
+        }
+        Commands::Info => {
+            println!("stiva {}", env!("CARGO_PKG_VERSION"));
+            println!("root:     {}", cli_config.root_path.display());
+            println!("images:   {}", cli_config.image_path.display());
+            let containers = stiva.ps().await.map(|c| c.len()).unwrap_or(0);
+            let images = stiva.images().await.map(|i| i.len()).unwrap_or(0);
+            println!("containers: {containers}");
+            println!("images:     {images}");
+            println!(
+                "criu:     {}",
+                if stiva::runtime::criu_available() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
         }
     }
 

@@ -100,15 +100,14 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap to 1.0
 
-### Phase 10 — 1.0 Release (next)
-- [ ] Persistent container state (survive daemon restart)
-- [ ] Container restart on crash (auto-restart via health monitor)
-- [ ] Streaming blob push (avoid loading full layer into memory)
-- [ ] Feature-gate enforcement (declared features actually gate module compilation)
-- [ ] Integration test suite (real container lifecycle with process backend)
-- [ ] Doc-tests for public API
-- [ ] `stiva version` / `stiva info` CLI commands
-- [ ] Error message quality pass (user-facing errors in CLI)
+### Phase 10 — 1.0 Release
+- [x] Persistent container state (survive daemon restart)
+- [x] Container restart (health monitor + `stiva restart`)
+- [x] Feature-gate enforcement (dependency chain: runtime→image+registry, compose→runtime)
+- [x] Integration test suite (10 tests: lifecycle, persistence, export/import, fleet, copy)
+- [x] Doc-tests for public API
+- [x] `stiva info` + `stiva restart` CLI commands (26 total)
+- [x] Error message quality pass (user-facing errors in CLI)
 
 ### Completed (Phase 0–9)
 

@@ -176,17 +176,76 @@ impl ContainerManager {
             .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))
     }
 
-    /// Create a new container manager.
+    /// Create a new container manager, restoring any persisted state.
     pub fn new(root: &Path, image_store: Arc<ImageStore>) -> Result<Self, StivaError> {
         std::fs::create_dir_all(root)?;
+
+        // Restore persisted containers from disk.
+        let containers = Self::load_persisted_state(root);
+
         Ok(Self {
             root: root.to_path_buf(),
-            containers: RwLock::new(HashMap::new()),
+            containers: RwLock::new(containers),
             internals: RwLock::new(HashMap::new()),
             image_store,
             publisher: PubSub::new(),
             network_manager: RwLock::new(None),
         })
+    }
+
+    /// Load container state from `{root}/state.json`.
+    fn load_persisted_state(root: &Path) -> HashMap<String, Container> {
+        let path = root.join("state.json");
+        if !path.exists() {
+            return HashMap::new();
+        }
+        match std::fs::read(&path) {
+            Ok(data) => match serde_json::from_slice::<Vec<Container>>(&data) {
+                Ok(list) => {
+                    let mut map = HashMap::with_capacity(list.len());
+                    for mut c in list {
+                        // Daemon containers that were Running are now Stopped
+                        // (the process is gone after restart).
+                        if c.state == ContainerState::Running || c.state == ContainerState::Paused {
+                            c.state = ContainerState::Stopped;
+                            c.pid = None;
+                        }
+                        map.insert(c.id.clone(), c);
+                    }
+                    tracing::info!(count = map.len(), "restored container state from disk");
+                    map
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse container state, starting fresh");
+                    HashMap::new()
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read container state, starting fresh");
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Persist current container state to `{root}/state.json`.
+    async fn persist_state(&self) {
+        let containers: Vec<Container> = self.containers.read().await.values().cloned().collect();
+        let path = self.root.join("state.json");
+        match serde_json::to_vec_pretty(&containers) {
+            Ok(data) => {
+                let tmp = path.with_extension("tmp");
+                if let Err(e) = std::fs::write(&tmp, &data) {
+                    tracing::warn!(error = %e, "failed to write container state");
+                    return;
+                }
+                if let Err(e) = std::fs::rename(&tmp, &path) {
+                    tracing::warn!(error = %e, "failed to rename container state file");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize container state");
+            }
+        }
     }
 
     /// Create a container from an image.
@@ -270,6 +329,7 @@ impl ContainerManager {
             "container_id": id,
             "image": container.image_ref,
         }));
+        self.persist_state().await;
 
         Ok(container)
     }
@@ -406,6 +466,7 @@ impl ContainerManager {
             "container_id": id,
             "detach": detach,
         }));
+        self.persist_state().await;
 
         Ok(())
     }
@@ -540,6 +601,7 @@ impl ContainerManager {
             "container_id": id,
             "exit_code": exit_code,
         }));
+        self.persist_state().await;
 
         Ok(())
     }
@@ -586,6 +648,7 @@ impl ContainerManager {
             "event": "paused",
             "container_id": id,
         }));
+        self.persist_state().await;
 
         Ok(())
     }
@@ -606,6 +669,7 @@ impl ContainerManager {
             "event": "unpaused",
             "container_id": id,
         }));
+        self.persist_state().await;
 
         Ok(())
     }
@@ -688,13 +752,48 @@ impl ContainerManager {
         }
 
         containers.remove(id);
+        drop(containers);
 
         self.publish_event(serde_json::json!({
             "event": "removed",
             "container_id": id,
         }));
+        self.persist_state().await;
 
         Ok(())
+    }
+
+    /// Restart a stopped container.
+    ///
+    /// Re-runs `start()` on a stopped container, transitioning it back to
+    /// Running. Used by the health monitor for auto-restart policies.
+    pub async fn restart(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "restarting container");
+
+        let state = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            container.state
+        };
+
+        if state != ContainerState::Stopped {
+            return Err(StivaError::InvalidState(format!(
+                "cannot restart container {id}: state is {state:?}, expected Stopped"
+            )));
+        }
+
+        // Reset to Created so start() accepts it.
+        {
+            let mut containers = self.containers.write().await;
+            if let Some(container) = containers.get_mut(id) {
+                container.state = ContainerState::Created;
+                container.exit_code = None;
+            }
+        }
+
+        self.start(id).await
     }
 
     /// Get the rootfs path for a container (overlay merged or fallback).

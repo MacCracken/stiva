@@ -315,8 +315,8 @@ impl ImageStore {
         Ok(images)
     }
 
-    /// Save the image index (internal + crate-visible for rmi-by-tag).
-    pub(crate) fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError> {
+    /// Save the image index. Used for bulk operations (tag, rmi by reference).
+    pub fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError> {
         self.save_index(images)
     }
 
@@ -329,7 +329,8 @@ impl ImageStore {
         Ok(())
     }
 
-    pub(crate) fn add_to_index(&self, image: &Image) -> Result<(), StivaError> {
+    /// Add or replace an image in the local index.
+    pub fn add_to_index(&self, image: &Image) -> Result<(), StivaError> {
         let mut images = self.load_index()?;
         // Replace existing entry for same reference.
         images.retain(|i| i.reference.full_ref() != image.reference.full_ref());

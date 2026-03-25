@@ -1,6 +1,6 @@
 [package]
 name = "stiva"
-version = "0.25.4"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0"
@@ -13,11 +13,11 @@ categories = ["os", "virtualization"]
 exclude = ["Cargo.lock"]
 
 [features]
-default = ["runtime"]
-runtime = []
+default = ["full"]
+runtime = ["image", "registry"]
 image = []
 network = []
-compose = []
+compose = ["runtime"]
 registry = []
 encrypted = ["dep:agnosys"]
 full = ["runtime", "image", "network", "compose", "registry"]
