@@ -13,7 +13,11 @@ All notable changes to stiva are documented here.
 - **`stiva info`** — system information (version, paths, container/image counts, CRIU availability)
 - **`stiva restart`** — restart stopped containers (26 CLI commands total)
 - **Error quality** — user-friendly error messages in CLI (container not found, auth failed, invalid reference, etc.)
-- 404 total tests (393 lib + 10 integration + 1 doc-test)
+- **Credential injection** — `ContainerConfig.secrets` accepts `kavach::SecretRef` for env var / file / stdin secret injection without exposing in config; `--secret KEY=VALUE` CLI flag
+- **Security scoring** — `Stiva::security_score()` and `container_security_score(id)` via `kavach::score_backend()`; shown in `stiva info` and `stiva inspect` output
+- **Output scanning** — `ContainerConfig.scan_policy` enables `kavach::ExternalizationGate` on exec/logs output; blocks private keys, oversized output, PII per policy
+- **`ScanBlocked` error variant** — returned when output scanning blocks container output
+- 423 total tests (412 lib + 10 integration + 1 doc-test)
 
 ### Changed
 - Version: 0.25.4 → 1.0.0

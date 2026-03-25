@@ -68,6 +68,34 @@ make bench-history   # Runs scripts/bench.sh
 
 ---
 
+## `scripts/bench-history.sh`
+
+Runs criterion benchmarks, appends results to a CSV history, and generates a `benchmarks.md` trend report (matching hisab's pattern).
+
+```bash
+# Run benchmarks and generate report
+./scripts/bench-history.sh
+
+# Custom CSV file
+./scripts/bench-history.sh results.csv
+```
+
+**What it measures:**
+- All criterion benchmark groups (imageref, volume, port, blob, ippool, fleet, build)
+- Median time per benchmark, normalized to nanoseconds
+
+**Output files:**
+- `bench-history.csv` — timestamped CSV with all benchmark results
+- `benchmarks.md` — 3-point trend table (baseline → mid → current)
+
+**Makefile integration:**
+```bash
+make bench           # Runs criterion benchmarks
+make bench-history   # Runs scripts/bench-history.sh
+```
+
+---
+
 ## Adding New Scripts
 
 Scripts should:

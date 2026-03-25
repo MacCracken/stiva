@@ -613,6 +613,7 @@ pub(crate) fn parse_www_authenticate(header: &str) -> HashMap<String, String> {
 }
 
 /// Detect current platform.
+#[must_use]
 fn current_platform() -> Platform {
     Platform {
         os: std::env::consts::OS.to_string(),
@@ -635,6 +636,7 @@ fn normalize_arch(arch: &str) -> String {
 }
 
 /// Select the best matching platform from an index.
+#[must_use = "returns the selected platform manifest"]
 fn select_platform(index: &OciIndex, target: &Platform) -> Result<PlatformManifest, StivaError> {
     // Exact match first.
     for entry in &index.manifests {

@@ -58,6 +58,9 @@ enum Commands {
         /// Environment variable (KEY=VALUE).
         #[arg(short, long)]
         env: Vec<String>,
+        /// Inject a secret (KEY=VALUE, delivered as env var).
+        #[arg(short, long)]
+        secret: Vec<String>,
         /// Command to run.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
@@ -248,6 +251,7 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
             detach,
             port,
             env,
+            secret,
             command,
         } => {
             let env_map: std::collections::HashMap<String, String> = env
@@ -257,12 +261,24 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                 })
                 .collect();
+            let secrets: Vec<kavach::SecretRef> = secret
+                .iter()
+                .filter_map(|s| {
+                    s.split_once('=').map(|(k, _v)| kavach::SecretRef {
+                        name: k.to_string(),
+                        inject_via: kavach::credential::InjectionMethod::EnvVar {
+                            var_name: k.to_string(),
+                        },
+                    })
+                })
+                .collect();
             let cfg = stiva::container::ContainerConfig {
                 name,
                 command,
                 env: env_map,
                 ports: port,
                 detach,
+                secrets,
                 ..Default::default()
             };
             let c = stiva.run(&image, cfg).await?;
@@ -316,7 +332,15 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
         Commands::Inspect { id } => {
             // Try container first, then image.
             if let Ok(c) = stiva.inspect(&id).await {
-                println!("{}", serde_json::to_string_pretty(&c)?);
+                let score = stiva.container_security_score(&id).await.ok();
+                let mut json = serde_json::to_value(&c)?;
+                if let Some(s) = score {
+                    json["security_score"] = serde_json::json!({
+                        "value": s.value(),
+                        "label": s.label(),
+                    });
+                }
+                println!("{}", serde_json::to_string_pretty(&json)?);
             } else if let Ok(img) = stiva.inspect_image(&id) {
                 println!("{}", serde_json::to_string_pretty(&img)?);
             } else {
@@ -453,6 +477,8 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
                     "no"
                 }
             );
+            let score = stiva.security_score();
+            println!("security: {score}");
         }
     }
 

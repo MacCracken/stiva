@@ -37,6 +37,18 @@ pub struct RuntimeSpec {
     pub mounts: Vec<SpecMount>,
     /// Whether to run rootless (user namespace with UID remapping).
     pub rootless: bool,
+    /// Secrets to inject into the sandbox (resolved at start time).
+    pub secrets: Vec<kavach::SecretRef>,
+    /// Output scanning policy (None = no scanning).
+    pub scan_policy: Option<kavach::ExternalizationPolicy>,
+    /// Execution timeout in milliseconds (0 = no timeout).
+    pub timeout_ms: u64,
+    /// Preferred backend name (None = auto-select strongest).
+    pub backend: Option<String>,
+    /// Minimum isolation strength score (0–100).
+    pub min_isolation_score: Option<u8>,
+    /// Agent ID for sandbox tracking.
+    pub agent_id: Option<String>,
 }
 
 /// A mount entry in the runtime spec.
@@ -200,12 +212,22 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
         namespaces,
         memory_limit_bytes,
         cpu_shares,
-        max_pids: None, // TODO: Add max_pids to ContainerConfig
+        max_pids: if config.max_pids > 0 {
+            Some(config.max_pids)
+        } else {
+            None
+        },
         user: config.user.clone(),
         workdir,
         read_only_rootfs: false,
         mounts,
         rootless: config.rootless,
+        secrets: config.secrets.clone(),
+        scan_policy: config.scan_policy.clone(),
+        timeout_ms: config.timeout_ms,
+        backend: config.backend.clone(),
+        min_isolation_score: config.min_isolation_score,
+        agent_id: config.agent_id.clone(),
     })
 }
 
@@ -243,21 +265,57 @@ async fn build_sandbox(spec: &RuntimeSpec) -> Result<(kavach::Sandbox, String), 
     if let Some(pids) = spec.max_pids {
         policy.max_pids = Some(pids);
     }
+    // Convert cpu_shares to fractional cores for kavach policy.
+    if let Some(shares) = spec.cpu_shares
+        && shares > 0
+    {
+        policy.cpu_limit = Some(shares as f64 / 1024.0);
+    }
     policy.network.enabled = false;
     policy.read_only_rootfs = spec.read_only_rootfs;
 
-    let backend = if kavach::Backend::Oci.is_available() {
+    // Backend selection: explicit > min_strength > default fallback.
+    let backend = if let Some(ref name) = spec.backend {
+        name.parse::<kavach::Backend>()
+            .map_err(|_| StivaError::Runtime(format!("unknown backend: {name}")))?
+    } else if let Some(min_score) = spec.min_isolation_score {
+        kavach::Backend::resolve_min_strength(&policy, min_score).ok_or_else(|| {
+            StivaError::Runtime(format!(
+                "no backend meets minimum isolation score {min_score}"
+            ))
+        })?
+    } else if kavach::Backend::Oci.is_available() {
         kavach::Backend::Oci
     } else {
         kavach::Backend::Process
     };
     debug!(backend = %backend, rootless = spec.rootless, "selected sandbox backend");
 
-    let config = kavach::SandboxConfig::builder()
+    let mut builder = kavach::SandboxConfig::builder()
         .backend(backend)
         .policy(policy)
-        .timeout_ms(0)
-        .build();
+        .timeout_ms(spec.timeout_ms);
+
+    // Set agent ID if provided.
+    if let Some(ref agent_id) = spec.agent_id {
+        builder = builder.agent_id(agent_id);
+    }
+
+    // Attach externalization scanning policy if configured.
+    if let Some(ref ext_policy) = spec.scan_policy {
+        builder = builder.externalization(ext_policy.clone());
+    }
+
+    let mut config = builder.build();
+
+    // Inject secrets from the RuntimeSpec into the sandbox config.
+    if !spec.secrets.is_empty() {
+        info!(
+            count = spec.secrets.len(),
+            "injecting secrets into sandbox config"
+        );
+        config.secrets = spec.secrets.clone();
+    }
 
     let mut sandbox = kavach::Sandbox::create(config).await.map_err(|e| {
         error!(error = %e, "failed to create sandbox");
@@ -457,6 +515,83 @@ pub async fn exec_in_container(
         duration_ms,
         timed_out: false,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Output scanning (ExternalizationGate)
+// ---------------------------------------------------------------------------
+
+/// Scan container output for secrets/PII before returning.
+///
+/// Uses kavach's `ExternalizationGate` to run secrets, code, and data scanners
+/// against the provided output. Returns the scan result containing findings
+/// and a verdict.
+#[must_use = "scan result should be inspected for findings"]
+pub fn scan_output(
+    output: &ContainerExecResult,
+    policy: &kavach::ExternalizationPolicy,
+) -> Result<ContainerExecResult, StivaError> {
+    info!("scanning container output via externalization gate");
+
+    let gate = kavach::ExternalizationGate::new();
+
+    // Convert to kavach ExecResult for the gate.
+    let kavach_result = kavach::ExecResult {
+        exit_code: output.exit_code,
+        stdout: output.stdout.clone(),
+        stderr: output.stderr.clone(),
+        duration_ms: output.duration_ms,
+        timed_out: output.timed_out,
+    };
+
+    let scanned = gate.apply(kavach_result, policy).map_err(|e| {
+        info!(error = %e, "output scanning blocked or quarantined result");
+        StivaError::Sandbox(format!("output scan: {e}"))
+    })?;
+
+    info!("output scan passed");
+
+    Ok(ContainerExecResult {
+        exit_code: scanned.exit_code,
+        stdout: scanned.stdout,
+        stderr: scanned.stderr,
+        duration_ms: scanned.duration_ms,
+        timed_out: scanned.timed_out,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Backend strength scoring
+// ---------------------------------------------------------------------------
+
+/// Compute the security strength score for the current sandbox backend and policy.
+///
+/// Returns a kavach `StrengthScore` (0–100) reflecting the isolation strength
+/// of the configured backend with policy modifiers applied.
+#[must_use = "security score should be used or displayed"]
+pub fn security_score() -> kavach::StrengthScore {
+    let backend = if kavach::Backend::Oci.is_available() {
+        kavach::Backend::Oci
+    } else {
+        kavach::Backend::Process
+    };
+    let policy = kavach::SandboxPolicy::basic();
+
+    info!(
+        backend = %backend,
+        "computing security strength score"
+    );
+
+    kavach::score_backend(backend, &policy)
+}
+
+/// Compute the security strength score for a specific backend and policy.
+#[must_use = "security score should be used or displayed"]
+pub fn security_score_for(
+    backend: kavach::Backend,
+    policy: &kavach::SandboxPolicy,
+) -> kavach::StrengthScore {
+    kavach::score_backend(backend, policy)
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,6 +1548,12 @@ mod tests {
             read_only_rootfs: false,
             mounts: vec![],
             rootless: false,
+            secrets: vec![],
+            scan_policy: None,
+            timeout_ms: 0,
+            backend: None,
+            min_isolation_score: None,
+            agent_id: None,
         };
         // PID 1 won't have a valid cgroup in test, so this should warn and return.
         apply_cgroup_limits(1, &spec).await;
@@ -1434,6 +1575,12 @@ mod tests {
             read_only_rootfs: false,
             mounts: vec![],
             rootless: false,
+            secrets: vec![],
+            scan_policy: None,
+            timeout_ms: 0,
+            backend: None,
+            min_isolation_score: None,
+            agent_id: None,
         };
         // Invalid PID — should warn but not panic.
         apply_cgroup_limits(99999999, &spec).await;
@@ -1455,6 +1602,12 @@ mod tests {
             read_only_rootfs: false,
             mounts: vec![],
             rootless: false,
+            secrets: vec![],
+            scan_policy: None,
+            timeout_ms: 0,
+            backend: None,
+            min_isolation_score: None,
+            agent_id: None,
         };
         // Should skip because values are 0.
         apply_cgroup_limits(1, &spec).await;
@@ -1587,5 +1740,189 @@ mod tests {
         export_rootfs(&rootfs, &output).await.unwrap();
         assert!(output.exists());
         assert!(std::fs::metadata(&output).unwrap().len() > 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Credential injection tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn generate_spec_includes_secrets() {
+        use crate::container::{Container, ContainerConfig, ContainerState};
+
+        let config = ContainerConfig {
+            secrets: vec![kavach::SecretRef {
+                name: "API_KEY".into(),
+                inject_via: kavach::credential::InjectionMethod::EnvVar {
+                    var_name: "MY_API_KEY".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let container = Container {
+            id: "test-secrets".into(),
+            name: Some("test".into()),
+            image_id: "img".into(),
+            image_ref: "alpine:latest".into(),
+            state: ContainerState::Created,
+            pid: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            config,
+            exit_code: None,
+        };
+        let spec = generate_spec(&container, Path::new("/tmp/rootfs")).unwrap();
+        assert_eq!(spec.secrets.len(), 1);
+        assert_eq!(spec.secrets[0].name, "API_KEY");
+    }
+
+    #[test]
+    fn generate_spec_default_no_secrets() {
+        use crate::container::{Container, ContainerConfig, ContainerState};
+
+        let container = Container {
+            id: "test-no-secrets".into(),
+            name: Some("test".into()),
+            image_id: "img".into(),
+            image_ref: "alpine:latest".into(),
+            state: ContainerState::Created,
+            pid: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            config: ContainerConfig::default(),
+            exit_code: None,
+        };
+        let spec = generate_spec(&container, Path::new("/tmp/rootfs")).unwrap();
+        assert!(spec.secrets.is_empty());
+        assert!(spec.scan_policy.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Security strength scoring tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn security_score_returns_valid_range() {
+        let score = security_score();
+        assert!(score.value() <= 100);
+        assert!(!score.label().is_empty());
+    }
+
+    #[test]
+    fn security_score_for_noop_is_minimal() {
+        let score = security_score_for(kavach::Backend::Noop, &kavach::SandboxPolicy::minimal());
+        assert!(score.value() <= 10, "noop minimal should be low");
+    }
+
+    #[test]
+    fn security_score_for_firecracker_is_high() {
+        let score = security_score_for(
+            kavach::Backend::Firecracker,
+            &kavach::SandboxPolicy::strict(),
+        );
+        assert!(
+            score.value() >= 90,
+            "firecracker strict should be >= 90, got {}",
+            score.value()
+        );
+    }
+
+    #[test]
+    fn security_score_display_format() {
+        let score = security_score_for(kavach::Backend::Process, &kavach::SandboxPolicy::basic());
+        let display = score.to_string();
+        assert!(display.contains('('));
+        assert!(display.contains(')'));
+    }
+
+    // -----------------------------------------------------------------
+    // Output scanning tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scan_output_clean_passes() {
+        let result = ContainerExecResult {
+            exit_code: 0,
+            stdout: "hello world".into(),
+            stderr: String::new(),
+            duration_ms: 10,
+            timed_out: false,
+        };
+        let policy = kavach::ExternalizationPolicy::default();
+        let scanned = scan_output(&result, &policy).unwrap();
+        assert_eq!(scanned.stdout, "hello world");
+    }
+
+    #[test]
+    fn scan_output_blocks_private_key() {
+        let result = ContainerExecResult {
+            exit_code: 0,
+            stdout: "-----BEGIN RSA PRIVATE KEY-----\nMIIEp...".into(),
+            stderr: String::new(),
+            duration_ms: 10,
+            timed_out: false,
+        };
+        let policy = kavach::ExternalizationPolicy::default();
+        let scanned = scan_output(&result, &policy);
+        assert!(scanned.is_err(), "private key should be blocked");
+    }
+
+    #[test]
+    fn scan_output_disabled_passes_everything() {
+        let result = ContainerExecResult {
+            exit_code: 0,
+            stdout: "-----BEGIN RSA PRIVATE KEY-----".into(),
+            stderr: String::new(),
+            duration_ms: 10,
+            timed_out: false,
+        };
+        let policy = kavach::ExternalizationPolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        let scanned = scan_output(&result, &policy).unwrap();
+        assert!(scanned.stdout.contains("BEGIN RSA PRIVATE KEY"));
+    }
+
+    #[test]
+    fn scan_output_blocks_oversized() {
+        let result = ContainerExecResult {
+            exit_code: 0,
+            stdout: "x".repeat(100),
+            stderr: String::new(),
+            duration_ms: 10,
+            timed_out: false,
+        };
+        let policy = kavach::ExternalizationPolicy {
+            max_artifact_size_bytes: 10,
+            ..Default::default()
+        };
+        let scanned = scan_output(&result, &policy);
+        assert!(scanned.is_err(), "oversized output should be blocked");
+    }
+
+    #[test]
+    fn generate_spec_with_scan_policy() {
+        use crate::container::{Container, ContainerConfig, ContainerState};
+
+        let config = ContainerConfig {
+            scan_policy: Some(kavach::ExternalizationPolicy::default()),
+            ..Default::default()
+        };
+        let container = Container {
+            id: "test-scan".into(),
+            name: Some("test".into()),
+            image_id: "img".into(),
+            image_ref: "alpine:latest".into(),
+            state: ContainerState::Created,
+            pid: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            config,
+            exit_code: None,
+        };
+        let spec = generate_spec(&container, Path::new("/tmp/rootfs")).unwrap();
+        assert!(spec.scan_policy.is_some());
+        assert!(spec.scan_policy.as_ref().unwrap().enabled);
     }
 }

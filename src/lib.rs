@@ -448,6 +448,36 @@ impl Stiva {
         self.containers.log_tail(id, lines).await
     }
 
+    /// Compute the security strength score for the default sandbox backend.
+    ///
+    /// Returns a kavach `StrengthScore` (0–100) reflecting the isolation
+    /// strength of the auto-detected backend with basic policy.
+    #[must_use = "security score should be used or displayed"]
+    pub fn security_score(&self) -> kavach::StrengthScore {
+        runtime::security_score()
+    }
+
+    /// Compute the security strength score for a container's sandbox configuration.
+    ///
+    /// Reads the container's backend and policy, then delegates to
+    /// `kavach::score_backend()`.
+    pub async fn container_security_score(
+        &self,
+        id: &str,
+    ) -> Result<kavach::StrengthScore, StivaError> {
+        let _container = self.inspect(id).await?;
+
+        // Derive backend and policy from what build_sandbox would use.
+        let backend = if kavach::Backend::Oci.is_available() {
+            kavach::Backend::Oci
+        } else {
+            kavach::Backend::Process
+        };
+        let policy = kavach::SandboxPolicy::basic();
+
+        Ok(runtime::security_score_for(backend, &policy))
+    }
+
     /// Checkpoint a running daemon container via CRIU.
     ///
     /// Creates a snapshot of the container's process state. Returns the

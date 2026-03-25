@@ -94,6 +94,7 @@ pub fn parse_port_spec(spec: &str) -> Result<PortSpec, StivaError> {
     }
 }
 
+#[must_use = "returns parsed port number"]
 fn parse_port(s: &str) -> Result<u16, StivaError> {
     s.parse::<u16>()
         .map_err(|e| StivaError::PortMapping(format!("invalid port number '{s}': {e}")))

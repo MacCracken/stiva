@@ -1,59 +1,59 @@
 # Benchmarks
 
-Latest: **2026-03-25T20:46:14Z** — commit `3783676`
+Latest: **2026-03-25T22:01:29Z** — commit `ed01420`
 
 ## imageref
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `simple` | 103.4 ns |
-| `tagged` | 110.0 ns |
-| `full_registry` | 222.6 ns |
-| `with_port` | 247.3 ns |
-| `digest` | 116.7 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `simple` | 103.4 ns | 83.33 ns **-19%** |
+| `tagged` | 110.0 ns | 96.55 ns **-12%** |
+| `full_registry` | 222.6 ns | 204.8 ns **-8%** |
+| `with_port` | 247.3 ns | 224.0 ns **-9%** |
+| `digest` | 116.7 ns | 106.4 ns **-9%** |
 
 ## volume
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `rw` | 62.40 ns |
-| `ro` | 81.29 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `rw` | 62.40 ns | 55.48 ns **-11%** |
+| `ro` | 81.29 ns | 67.67 ns **-17%** |
 
 ## port
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `simple` | 58.73 ns |
-| `with_proto` | 79.33 ns |
-| `with_bind` | 113.1 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `simple` | 58.73 ns | 70.24 ns +20% |
+| `with_proto` | 79.33 ns | 74.16 ns **-7%** |
+| `with_bind` | 113.1 ns | 120.5 ns +7% |
 
 ## blob
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `store_1kb` | 28525.0 ns |
-| `store_1mb` | 1187.3 µs |
-| `has_blob` | 1890.6 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `store_1kb` | 28525.0 ns | 28494.0 ns |
+| `store_1mb` | 1187.3 µs | 1211.9 µs |
+| `has_blob` | 1890.6 ns | 1987.2 ns +5% |
 
 ## ippool
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `allocate` | 42.27 ns |
-| `allocate_release_cycle` | 32.26 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `allocate` | 42.27 ns | 48.15 ns +14% |
+| `allocate_release_cycle` | 32.26 ns | 35.31 ns +9% |
 
 ## fleet
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `spread_10_replicas` | 3264.9 ns |
-| `binpack_10_replicas` | 1912.1 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `spread_10_replicas` | 3264.9 ns | 4937.7 ns +51% |
+| `binpack_10_replicas` | 1912.1 ns | 3037.6 ns +59% |
 
 ## build
 
-| Benchmark | Current (`3783676`) |
-|-----------|------|
-| `parse_spec` | 14644.0 ns |
+| Benchmark | Baseline (`3783676`) | Current (`ed01420`) |
+|-----------|------|------|
+| `parse_spec` | 14644.0 ns | 23673.0 ns +62% |
 
 ---
 

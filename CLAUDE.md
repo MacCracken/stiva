@@ -4,16 +4,59 @@
 
 **Stiva** (Romanian: stack) — OCI container runtime — image management, container lifecycle, orchestration
 
-- **Type**: Flat crate with binary
+- **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0
 - **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
+- **Version**: SemVer, currently 1.0.0
+
+## Stack
+
+| Crate | Role |
+|-------|------|
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) |
+| majra | Job queue, heartbeat FSM, pub/sub |
+| nein | nftables firewall, NAT, port mapping |
+| agnosys | LUKS + dm-verity (optional, `encrypted` feature) |
+
+All AGNOS crates are patched to local paths in `[patch.crates-io]`.
 
 ## Consumers
 
 daimon (container management), sutra (fleet deployment)
 
-**Note**: Builds on kavach (isolation) + nein (networking) + ark (images) + libro (audit). Daemonless, no override flags.
+## Modules (18)
+
+| Module | Purpose |
+|--------|---------|
+| `image` | OCI image pull, push, build, store, layer management |
+| `container` | Container lifecycle, state persistence, events, restart |
+| `runtime` | OCI spec, kavach integration, cgroups, CRIU, exec, signals, export/import, copy |
+| `network/` | Bridge, NAT, DNS, IP pools, port mapping (5 submodules) |
+| `storage` | Overlay FS, volume mounts, layer unpacking |
+| `registry` | OCI distribution client (pull + push), token auth |
+| `build` | TOML-based image builds (Stivafile.toml) |
+| `compose` | Multi-container orchestration, DAG ordering |
+| `health` | Heartbeat monitoring, restart policies |
+| `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |
+| `agent` | Daimon agent registration |
+| `mcp` | 9 MCP tools for AI agent integration |
+| `encrypted` | LUKS + dm-verity (feature-gated) |
+| `intents` | Agnoshi intent stubs |
+| `error` | Error types |
+| `main` | CLI binary (26 subcommands) |
+
+## kavach Integration
+
+Stiva uses these kavach features — keep them wired:
+
+- **Sandbox** — `Sandbox::create`, `exec`, `spawn`, `destroy`
+- **SpawnedProcess** — daemon containers (pid, wait, kill, try_wait)
+- **SandboxPolicy** — memory, CPU, PID limits, seccomp, network
+- **CredentialProxy / SecretRef** — secret injection via env var / file
+- **StrengthScore / score_backend** — security scoring in inspect/info
+- **ExternalizationGate** — output scanning for secrets/PII in exec/logs
+- **User namespaces** — rootless containers (UID/GID mapping)
+
 ## Development Process
 
 ### P(-1): Scaffold Hardening (before any new features)
@@ -44,7 +87,7 @@ daimon (container management), sutra (fleet deployment)
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
+- **Tests + benchmarks are the way.** 423 tests, 18 criterion benchmarks. Keep adding.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -55,12 +98,30 @@ daimon (container management), sutra (fleet deployment)
 - **Vec arena over HashMap** — when indices are known, direct access beats hashing.
 - **Feature-gate optional deps** — consumers pull only what they need.
 - **tracing on all operations** — structured logging for audit trail.
+- **Persist state** — container records survive daemon restart via `state.json`.
+- **Lifecycle events** — all state changes publish to majra pub/sub.
+
+## Testing
+
+| Category | Count |
+|----------|-------|
+| Library unit tests | 412 |
+| Integration tests | 10 |
+| Doc-tests | 1 |
+| Criterion benchmarks | 18 |
+
+```bash
+cargo test --all-features                    # All tests
+cargo test --all-features --test integration # Integration only
+cargo bench --bench benchmarks               # Criterion benchmarks
+./scripts/bench-history.sh                   # Benchmarks + CSV + trend report
+./scripts/bench.sh                           # Test + build timing history
+```
 
 ## DO NOT
-- **Do not commit or push** — the user handles all git operations (commit, push, tag)
 
+- **Do not commit or push** — the user handles all git operations (commit, push, tag)
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
 - Do not add unnecessary dependencies — keep it lean
 - Do not `unwrap()` or `panic!()` in library code
 - Do not skip benchmarks before claiming performance improvements
-- Do not commit `target/` or `Cargo.lock` (library crates only)

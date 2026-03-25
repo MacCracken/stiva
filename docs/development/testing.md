@@ -37,7 +37,25 @@ Tests live alongside the code they test (Rust convention):
 | `agent` | Daimon HTTP registration (wiremock) |
 | `mcp` | Tool list, dispatcher, parameter validation |
 | `intents` | Serde round-trips for intent types |
+| `build` | Spec parsing, layer creation, import/export |
+| `fleet` | Scheduling strategies (spread, binpack, pinned), node filtering |
+| `encrypted` | LUKS/verity config serde, availability checks |
 | `lib` | Stiva facade, config serde, mock-backed pull/run |
+
+### Integration Tests (`tests/integration.rs`)
+
+| Test | Coverage |
+|------|----------|
+| `container_full_lifecycle` | create → start → logs → remove |
+| `daemon_container_lifecycle` | detach, stop, remove |
+| `state_persists_across_manager_instances` | state.json persistence |
+| `image_store_roundtrip` | blob store → has → read |
+| `image_tag_and_rmi` | tag + remove by ID |
+| `export_import_roundtrip` | rootfs tar → import as image |
+| `build_spec_parsing` | Stivafile.toml parsing |
+| `fleet_schedule_spread` | spread strategy with 2 nodes |
+| `copy_into_and_out_of_container` | bidirectional file copy |
+| `restart_stopped_container` | stop → restart → stop cycle |
 
 ## Mock HTTP Testing
 
@@ -62,10 +80,9 @@ The `RegistryClient::with_base_url()` constructor (test-only, `#[cfg(test)]`) re
 ```bash
 # Run coverage
 cargo tarpaulin --all-features --skip-clean --out stdout
-
-# Target: ≥94% on testable code
-# Uncoverable: Linux mount syscalls, prod-only HTTPS paths
 ```
+
+**Uncoverable**: Linux mount syscalls (require root), overlay mounts, veth creation, CRIU checkpoint/restore, live container exec via nsenter.
 
 ## Linux-Only Code
 

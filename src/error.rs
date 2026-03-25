@@ -59,6 +59,9 @@ pub enum StivaError {
     #[error("sandbox error: {0}")]
     Sandbox(String),
 
+    #[error("scan blocked: {0}")]
+    ScanBlocked(String),
+
     #[error("fleet error: {0}")]
     Fleet(String),
 
@@ -140,6 +143,10 @@ mod tests {
             (
                 StivaError::Sandbox("denied".into()),
                 "sandbox error: denied",
+            ),
+            (
+                StivaError::ScanBlocked("private key detected".into()),
+                "scan blocked: private key detected",
             ),
         ];
         for (err, expected) in cases {
