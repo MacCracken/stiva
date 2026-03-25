@@ -45,7 +45,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Sandbox (kavach provides isolation)
-kavach = { version = ">=0.22", features = ["process", "oci"] }
+kavach = { version = ">=0.25", features = ["process", "oci"] }
 
 # Queue / scheduling (majra provides fleet primitives)
 majra = { version = ">=0.22", features = ["queue", "heartbeat", "pubsub"] }
