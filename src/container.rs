@@ -322,6 +322,11 @@ impl ContainerManager {
                         container.state = ContainerState::Stopped;
                         container.pid = None;
                     }
+                    self.publish_event(serde_json::json!({
+                        "event": "start_failed",
+                        "container_id": id,
+                        "error": e.to_string(),
+                    }));
                     return Err(e);
                 }
             };
@@ -375,12 +380,23 @@ impl ContainerManager {
             }
 
             // Write logs, store result, and propagate.
-            let exec_result = result?;
-            self.write_log(id, &exec_result).await;
-            {
-                let mut internals = self.internals.write().await;
-                if let Some(internal) = internals.get_mut(id) {
-                    internal.exec_result = Some(exec_result);
+            match result {
+                Ok(exec_result) => {
+                    self.write_log(id, &exec_result).await;
+                    {
+                        let mut internals = self.internals.write().await;
+                        if let Some(internal) = internals.get_mut(id) {
+                            internal.exec_result = Some(exec_result);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.publish_event(serde_json::json!({
+                        "event": "start_failed",
+                        "container_id": id,
+                        "error": e.to_string(),
+                    }));
+                    return Err(e);
                 }
             }
         }
@@ -510,6 +526,9 @@ impl ContainerManager {
             container.state = ContainerState::Stopped;
             container.pid = None;
         }
+
+        // Disconnect from network.
+        self.disconnect_network(id).await;
 
         // Read exit_code for the event.
         let exit_code = {
@@ -925,22 +944,24 @@ impl ContainerManager {
     async fn connect_network(&self, id: &str, _pid: u32) {
         info!(container = id, "attempting network connection");
 
-        let (ports, network, rootfs) = {
+        // Read config from containers (drop lock before acquiring internals).
+        let (ports, network) = {
             let containers = self.containers.read().await;
             let Some(container) = containers.get(id) else {
                 return;
             };
-            let rootfs = {
-                let internals = self.internals.read().await;
-                internals
-                    .get(id)
-                    .and_then(|i| i.overlay.as_ref().map(|o| o.merged.clone()))
-            };
             (
                 container.config.ports.clone(),
                 container.config.network.clone(),
-                rootfs,
             )
+        };
+
+        // Read rootfs from internals (separate lock scope).
+        let rootfs = {
+            let internals = self.internals.read().await;
+            internals
+                .get(id)
+                .and_then(|i| i.overlay.as_ref().map(|o| o.merged.clone()))
         };
 
         if ports.is_empty() && network.is_none() {
@@ -982,6 +1003,22 @@ impl ContainerManager {
                         error = %e,
                         "failed to connect container to network"
                     );
+                }
+            }
+        }
+    }
+
+    /// Disconnect a container from its network. Best-effort.
+    async fn disconnect_network(&self, id: &str) {
+        let mut mgr_guard = self.network_manager.write().await;
+        if let Some(ref mut nm) = *mgr_guard {
+            match nm.disconnect_container(id) {
+                Ok(()) => {
+                    info!(container = id, "container disconnected from network");
+                }
+                Err(e) => {
+                    // Not connected or already disconnected — fine.
+                    tracing::debug!(container = id, error = %e, "network disconnect skipped");
                 }
             }
         }
