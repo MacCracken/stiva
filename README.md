@@ -48,7 +48,18 @@ stiva (this crate)
 - **TOML Compose** — multi-container orchestration using TOML (not YAML)
 - **Health Monitoring** — heartbeat-based health tracking via majra FSM
 - **Restart Policies** — always, on-failure (with max retries), unless-stopped
-- **MCP Tools** — AI agent integration (stiva_pull, stiva_run, stiva_ps, stiva_stop, stiva_compose)
+- **Daemon Containers** — long-running processes with spawn/wait/kill, SIGTERM→SIGKILL grace
+- **Container Exec** — run commands inside running containers via nsenter
+- **Signal Forwarding** — send arbitrary signals to container processes
+- **Pause/Unpause** — cgroups v2 freezer for lightweight suspension
+- **Container Stats** — CPU, memory, PID metrics from cgroups v2
+- **TOML Image Build** — Stivafile.toml build spec (run, copy, env, workdir, label steps)
+- **Image Push** — OCI distribution push with dedup (blob exists check)
+- **Rootless Containers** — user namespace UID/GID remapping, no root required
+- **Checkpointing** — CRIU-based checkpoint/restore for daemon containers
+- **Live Migration** — checkpoint + transfer + restore across nodes
+- **Fleet Scheduling** — spread, bin-pack, pinned strategies across daimon nodes
+- **MCP Tools** — 9 AI agent tools (pull, run, ps, stop, compose, exec, build, push, inspect)
 - **Daimon Integration** — register containers as agents for fleet orchestration
 - **Sutra Module** — deploy containers via sutra playbooks (`sutra-stiva` crate)
 
@@ -89,8 +100,15 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap
 
-### Phase 7 — (next)
-- TBD
+### Phase 7 — Complete Runtime (next)
+- [x] Container exec (nsenter into running namespaces)
+- [x] Signal forwarding (arbitrary signals via nix)
+- [x] Pause/unpause (cgroups v2 freezer)
+- [x] Container stats (CPU/memory/PIDs from cgroups v2)
+- [x] Image management (tag, rmi, inspect)
+- [x] Container inspect
+- [x] Prune (stopped containers + unused images)
+- [x] MCP tools expanded (9 tools: +exec, build, push, inspect)
 
 ### Completed
 

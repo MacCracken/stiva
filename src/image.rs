@@ -322,7 +322,7 @@ impl ImageStore {
         Ok(())
     }
 
-    fn add_to_index(&self, image: &Image) -> Result<(), StivaError> {
+    pub(crate) fn add_to_index(&self, image: &Image) -> Result<(), StivaError> {
         let mut images = self.load_index()?;
         // Replace existing entry for same reference.
         images.retain(|i| i.reference.full_ref() != image.reference.full_ref());

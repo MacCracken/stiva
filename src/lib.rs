@@ -236,6 +236,80 @@ impl Stiva {
         self.image_store.list()
     }
 
+    /// Remove a local image by ID or reference.
+    pub fn rmi(&self, image_id: &str) -> Result<(), StivaError> {
+        info!(image = image_id, "stiva rmi");
+        self.image_store.remove(image_id)
+    }
+
+    /// Tag a local image with a new reference.
+    pub fn tag(&self, image_id: &str, new_ref: &str) -> Result<(), StivaError> {
+        info!(image = image_id, tag = new_ref, "stiva tag");
+        let parsed = image::ImageRef::parse(new_ref)?;
+        let images = self.image_store.list()?;
+        let image = images
+            .iter()
+            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))?;
+
+        let tagged = image::Image {
+            id: image.id.clone(),
+            reference: parsed,
+            size_bytes: image.size_bytes,
+            layers: image.layers.clone(),
+            created_at: image.created_at,
+        };
+        self.image_store.add_to_index(&tagged)
+    }
+
+    /// Inspect a local image — returns full details.
+    pub fn inspect_image(&self, image_id: &str) -> Result<image::Image, StivaError> {
+        let images = self.image_store.list()?;
+        images
+            .into_iter()
+            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))
+    }
+
+    /// Inspect a container — returns full details.
+    pub async fn inspect(&self, id: &str) -> Result<container::Container, StivaError> {
+        let containers = self.containers.list().await?;
+        containers
+            .into_iter()
+            .find(|c| c.id == id || c.name.as_deref() == Some(id))
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))
+    }
+
+    /// Remove all stopped containers and unreferenced images.
+    pub async fn prune(&self) -> Result<(u32, u32), StivaError> {
+        info!("stiva prune");
+        // Remove stopped containers.
+        let containers = self.containers.list().await?;
+        let mut removed_containers = 0u32;
+        for c in &containers {
+            if c.state == container::ContainerState::Stopped {
+                let _ = self.containers.remove(&c.id).await;
+                removed_containers += 1;
+            }
+        }
+
+        // Remove images not referenced by any remaining container.
+        let remaining = self.containers.list().await?;
+        let in_use: std::collections::HashSet<String> =
+            remaining.iter().map(|c| c.image_id.clone()).collect();
+        let images = self.image_store.list()?;
+        let mut removed_images = 0u32;
+        for img in &images {
+            if !in_use.contains(&img.id) {
+                let _ = self.image_store.remove(&img.id);
+                removed_images += 1;
+            }
+        }
+
+        info!(removed_containers, removed_images, "prune complete");
+        Ok((removed_containers, removed_images))
+    }
+
     /// Wait for a container to exit. Returns execution result.
     pub async fn wait(&self, id: &str) -> Result<runtime::ContainerExecResult, StivaError> {
         info!(container = id, "stiva wait");

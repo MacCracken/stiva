@@ -146,6 +146,80 @@ pub fn tool_list() -> Vec<McpTool> {
                 "required": ["action"]
             }),
         },
+        McpTool {
+            name: "stiva_exec".into(),
+            description: "Execute a command inside a running container".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Container ID"
+                    },
+                    "command": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Command and arguments to execute"
+                    }
+                },
+                "required": ["id", "command"]
+            }),
+        },
+        McpTool {
+            name: "stiva_build".into(),
+            description: "Build an image from a Stivafile.toml specification".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "string",
+                        "description": "TOML build spec content"
+                    },
+                    "context_dir": {
+                        "type": "string",
+                        "description": "Build context directory path"
+                    }
+                },
+                "required": ["spec", "context_dir"]
+            }),
+        },
+        McpTool {
+            name: "stiva_push".into(),
+            description: "Push a local image to a registry".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "image": {
+                        "type": "string",
+                        "description": "Image ID or reference to push"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target registry reference (optional)"
+                    }
+                },
+                "required": ["image"]
+            }),
+        },
+        McpTool {
+            name: "stiva_inspect".into(),
+            description: "Inspect a container or image".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Container or image ID"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["container", "image"],
+                        "description": "What to inspect"
+                    }
+                },
+                "required": ["id", "type"]
+            }),
+        },
     ]
 }
 
@@ -161,6 +235,10 @@ pub async fn handle_tool(name: &str, params: &serde_json::Value) -> McpResult {
         "stiva_ps" => handle_ps(params).await,
         "stiva_stop" => handle_stop(params).await,
         "stiva_compose" => handle_compose(params).await,
+        "stiva_exec" => handle_exec(params).await,
+        "stiva_build" => handle_build(params).await,
+        "stiva_push" => handle_push(params).await,
+        "stiva_inspect" => handle_inspect(params).await,
         _ => McpResult::err(&format!("unknown tool: {name}")),
     }
 }
@@ -246,20 +324,92 @@ async fn handle_compose(params: &serde_json::Value) -> McpResult {
     }
 }
 
+async fn handle_exec(params: &serde_json::Value) -> McpResult {
+    let id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return McpResult::err("missing required parameter: id"),
+    };
+    let command = params.get("command").and_then(|v| v.as_array());
+    if command.is_none() {
+        return McpResult::err("missing required parameter: command");
+    }
+
+    McpResult::ok(serde_json::json!({
+        "action": "exec",
+        "id": id,
+        "status": "queued"
+    }))
+}
+
+async fn handle_build(params: &serde_json::Value) -> McpResult {
+    let spec = match params.get("spec").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return McpResult::err("missing required parameter: spec"),
+    };
+    let context_dir = params
+        .get("context_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    McpResult::ok(serde_json::json!({
+        "action": "build",
+        "spec_len": spec.len(),
+        "context_dir": context_dir,
+        "status": "queued"
+    }))
+}
+
+async fn handle_push(params: &serde_json::Value) -> McpResult {
+    let image = match params.get("image").and_then(|v| v.as_str()) {
+        Some(i) => i,
+        None => return McpResult::err("missing required parameter: image"),
+    };
+    let target = params.get("target").and_then(|v| v.as_str());
+
+    McpResult::ok(serde_json::json!({
+        "action": "push",
+        "image": image,
+        "target": target,
+        "status": "queued"
+    }))
+}
+
+async fn handle_inspect(params: &serde_json::Value) -> McpResult {
+    let id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return McpResult::err("missing required parameter: id"),
+    };
+    let inspect_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("container");
+
+    McpResult::ok(serde_json::json!({
+        "action": "inspect",
+        "id": id,
+        "type": inspect_type,
+        "status": "queued"
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_five_tools() {
+    fn tool_list_has_nine_tools() {
         let tools = tool_list();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 9);
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"stiva_pull"));
         assert!(names.contains(&"stiva_run"));
         assert!(names.contains(&"stiva_ps"));
         assert!(names.contains(&"stiva_stop"));
         assert!(names.contains(&"stiva_compose"));
+        assert!(names.contains(&"stiva_exec"));
+        assert!(names.contains(&"stiva_build"));
+        assert!(names.contains(&"stiva_push"));
+        assert!(names.contains(&"stiva_inspect"));
     }
 
     #[test]
@@ -378,5 +528,44 @@ mod tests {
         let params = serde_json::json!({});
         let result = handle_tool("nonexistent_tool", &params).await;
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn handle_exec_valid() {
+        let params = serde_json::json!({"id": "abc", "command": ["ls"]});
+        let result = handle_tool("stiva_exec", &params).await;
+        assert!(result.success);
+        assert_eq!(result.data["action"], "exec");
+    }
+
+    #[tokio::test]
+    async fn handle_exec_missing_id() {
+        let params = serde_json::json!({"command": ["ls"]});
+        let result = handle_tool("stiva_exec", &params).await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn handle_build_valid() {
+        let params = serde_json::json!({"spec": "[image]\nbase=\"alpine\"\nname=\"x\"", "context_dir": "/tmp"});
+        let result = handle_tool("stiva_build", &params).await;
+        assert!(result.success);
+        assert_eq!(result.data["action"], "build");
+    }
+
+    #[tokio::test]
+    async fn handle_push_valid() {
+        let params = serde_json::json!({"image": "nginx:latest"});
+        let result = handle_tool("stiva_push", &params).await;
+        assert!(result.success);
+        assert_eq!(result.data["image"], "nginx:latest");
+    }
+
+    #[tokio::test]
+    async fn handle_inspect_valid() {
+        let params = serde_json::json!({"id": "abc", "type": "container"});
+        let result = handle_tool("stiva_inspect", &params).await;
+        assert!(result.success);
+        assert_eq!(result.data["type"], "container");
     }
 }

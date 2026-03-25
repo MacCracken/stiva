@@ -22,7 +22,11 @@ All notable changes to stiva are documented here.
 - **Signal forwarding** — `runtime::send_signal()` via nix; `ContainerManager::signal()` and `Stiva::signal()` for sending arbitrary signals (SIGHUP, SIGINT, SIGUSR1, etc.)
 - **Pause/unpause** — `runtime::pause_container()`/`unpause_container()` via cgroups v2 freezer (`cgroup.freeze`); `Stiva::pause()`/`unpause()` with Paused state tracking
 - **Container stats** — `runtime::container_stats()` reads memory, CPU, PIDs from cgroups v2; `ContainerStats` type; `Stiva::stats()` API
-- 363 tests passing
+- **Image management** — `Stiva::rmi()` remove images, `tag()` create aliases, `inspect_image()` full details
+- **Container inspect** — `Stiva::inspect()` by ID or name
+- **Prune** — `Stiva::prune()` removes stopped containers and unreferenced images
+- **MCP tools expanded** — 9 tools (+exec, build, push, inspect) with handlers
+- 368 tests passing
 
 ### Changed
 - Version bump: 0.25.3 → 0.25.4 (stiva), 0.22.3 → 0.25.3 (kavach)

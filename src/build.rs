@@ -350,6 +350,9 @@ pub async fn build_image(
         created_at: chrono::Utc::now(),
     };
 
+    // 5. Persist to image index so it shows up in `stiva images`.
+    image_store.add_to_index(&image)?;
+
     info!(
         id = %image.id,
         name = %spec.image.name,
