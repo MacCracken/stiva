@@ -31,6 +31,7 @@ pub mod agent;
 #[cfg(feature = "compose")]
 pub mod compose;
 pub mod container;
+pub mod encrypted;
 pub mod health;
 pub mod image;
 pub mod intents;
