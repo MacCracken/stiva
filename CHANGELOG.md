@@ -26,7 +26,11 @@ All notable changes to stiva are documented here.
 - **Container inspect** — `Stiva::inspect()` by ID or name
 - **Prune** — `Stiva::prune()` removes stopped containers and unreferenced images
 - **MCP tools expanded** — 9 tools (+exec, build, push, inspect) with handlers
-- 368 tests passing
+- **Cgroups v2 enforcement** — `runtime::apply_cgroup_limits()` writes `memory.max` and `pids.max` after daemon spawn; best-effort with warning on failure
+- **Network wiring** — `ContainerManager` lazy-creates `NetworkManager`, auto-connects daemon containers to bridge network with port mappings and DNS injection on start
+- **Lifecycle events** — majra pubsub events on create/start/stop/remove/pause/unpause; `ContainerManager::event_bus()` accessor for subscribers
+- **Log streaming** — `ContainerManager::log_tail(id, lines)` reads last N lines from container log; `Stiva::log_tail()` top-level API
+- 383 tests passing
 
 ### Changed
 - Version bump: 0.25.3 → 0.25.4 (stiva), 0.22.3 → 0.25.3 (kavach)

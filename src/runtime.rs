@@ -536,6 +536,51 @@ async fn write_cgroup_file(pid: u32, filename: &str, value: &str) -> Result<(), 
 }
 
 // ---------------------------------------------------------------------------
+// Cgroups v2 resource enforcement
+// ---------------------------------------------------------------------------
+
+/// Write cgroups v2 resource limits for a container process.
+///
+/// Sets memory.max, pids.max based on the RuntimeSpec limits.
+/// Called after spawn for daemon containers. Best-effort: logs warnings
+/// on failure but does not return errors (cgroups may not be available).
+pub async fn apply_cgroup_limits(pid: u32, spec: &RuntimeSpec) {
+    info!(pid, "applying cgroup v2 resource limits");
+
+    let base = match resolve_cgroup_base(pid).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(pid, error = %e, "could not resolve cgroup base, skipping limits");
+            return;
+        }
+    };
+
+    if let Some(mem) = spec.memory_limit_bytes
+        && mem > 0
+    {
+        let path = format!("{base}/memory.max");
+        let val = mem.to_string();
+        if let Err(e) = tokio::fs::write(&path, &val).await {
+            tracing::warn!(pid, path = %path, error = %e, "failed to write memory.max");
+        } else {
+            info!(pid, memory_max = mem, "cgroup memory.max applied");
+        }
+    }
+
+    if let Some(pids) = spec.max_pids
+        && pids > 0
+    {
+        let path = format!("{base}/pids.max");
+        let val = pids.to_string();
+        if let Err(e) = tokio::fs::write(&path, &val).await {
+            tracing::warn!(pid, path = %path, error = %e, "failed to write pids.max");
+        } else {
+            info!(pid, pids_max = pids, "cgroup pids.max applied");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Container stats (CPU / memory / PIDs)
 // ---------------------------------------------------------------------------
 
@@ -1003,5 +1048,68 @@ mod tests {
     async fn exec_in_container_empty_command() {
         let err = exec_in_container(1, &[], &[], None).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_cgroup_limits_no_limits() {
+        // With no limits set, apply_cgroup_limits should be a no-op (no panic).
+        let spec = RuntimeSpec {
+            rootfs: PathBuf::from("/tmp/rootfs"),
+            command: vec!["/bin/sh".into()],
+            env: vec![],
+            namespaces: vec![],
+            memory_limit_bytes: None,
+            cpu_shares: None,
+            max_pids: None,
+            user: None,
+            workdir: "/".into(),
+            read_only_rootfs: false,
+            mounts: vec![],
+            rootless: false,
+        };
+        // PID 1 won't have a valid cgroup in test, so this should warn and return.
+        apply_cgroup_limits(1, &spec).await;
+    }
+
+    #[tokio::test]
+    async fn apply_cgroup_limits_with_limits() {
+        // With limits set but invalid PID/cgroup, should warn and return.
+        let spec = RuntimeSpec {
+            rootfs: PathBuf::from("/tmp/rootfs"),
+            command: vec!["/bin/sh".into()],
+            env: vec![],
+            namespaces: vec![],
+            memory_limit_bytes: Some(256 * 1024 * 1024),
+            cpu_shares: None,
+            max_pids: Some(100),
+            user: None,
+            workdir: "/".into(),
+            read_only_rootfs: false,
+            mounts: vec![],
+            rootless: false,
+        };
+        // Invalid PID — should warn but not panic.
+        apply_cgroup_limits(99999999, &spec).await;
+    }
+
+    #[tokio::test]
+    async fn apply_cgroup_limits_zero_values_skipped() {
+        // Zero values should be skipped (no writes attempted).
+        let spec = RuntimeSpec {
+            rootfs: PathBuf::from("/tmp/rootfs"),
+            command: vec!["/bin/sh".into()],
+            env: vec![],
+            namespaces: vec![],
+            memory_limit_bytes: Some(0),
+            cpu_shares: None,
+            max_pids: Some(0),
+            user: None,
+            workdir: "/".into(),
+            read_only_rootfs: false,
+            mounts: vec![],
+            rootless: false,
+        };
+        // Should skip because values are 0.
+        apply_cgroup_limits(1, &spec).await;
     }
 }

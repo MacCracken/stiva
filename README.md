@@ -100,7 +100,13 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap
 
-### Phase 7 — Complete Runtime (next)
+### Phase 8 — Runtime Integration (next)
+- [x] Cgroups v2 resource enforcement (memory.max, pids.max on daemon start)
+- [x] Network wiring (auto-connect containers to bridge on start)
+- [x] Container lifecycle events via majra pubsub
+- [x] Log streaming (log_tail for daemon containers)
+
+### Phase 7 — Complete Runtime
 - [x] Container exec (nsenter into running namespaces)
 - [x] Signal forwarding (arbitrary signals via nix)
 - [x] Pause/unpause (cgroups v2 freezer)

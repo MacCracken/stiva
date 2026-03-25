@@ -2,8 +2,10 @@
 
 use crate::error::StivaError;
 use crate::image::{Image, ImageStore};
+use crate::network::manager::NetworkManager;
 use crate::runtime::{self, ContainerExecResult, RuntimeSpec};
 use crate::storage::{self, OverlayPaths};
+use majra::pubsub::PubSub;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -141,6 +143,10 @@ pub struct ContainerManager {
     internals: RwLock<HashMap<String, ContainerInternals>>,
     /// Image store for resolving layer blobs.
     image_store: Arc<ImageStore>,
+    /// Pub/sub hub for container lifecycle events.
+    publisher: PubSub,
+    /// Network manager for container connectivity.
+    network_manager: RwLock<Option<NetworkManager>>,
 }
 
 impl ContainerManager {
@@ -178,6 +184,8 @@ impl ContainerManager {
             containers: RwLock::new(HashMap::new()),
             internals: RwLock::new(HashMap::new()),
             image_store,
+            publisher: PubSub::new(),
+            network_manager: RwLock::new(None),
         })
     }
 
@@ -252,7 +260,17 @@ impl ContainerManager {
             );
         }
 
-        self.containers.write().await.insert(id, container.clone());
+        self.containers
+            .write()
+            .await
+            .insert(id.clone(), container.clone());
+
+        self.publish_event(serde_json::json!({
+            "event": "created",
+            "container_id": id,
+            "image": container.image_ref,
+        }));
+
         Ok(container)
     }
 
@@ -322,6 +340,16 @@ impl ContainerManager {
                 }
             }
 
+            // Apply cgroup v2 resource limits.
+            if let Some(p) = pid {
+                runtime::apply_cgroup_limits(p, &spec).await;
+            }
+
+            // Connect to network if ports/network configured.
+            if let Some(p) = pid {
+                self.connect_network(id, p).await;
+            }
+
             info!(container = id, pid = ?pid, "daemon container started");
         } else {
             info!(container = id, "executing one-shot container");
@@ -356,6 +384,13 @@ impl ContainerManager {
                 }
             }
         }
+
+        self.publish_event(serde_json::json!({
+            "event": "started",
+            "container_id": id,
+            "detach": detach,
+        }));
+
         Ok(())
     }
 
@@ -475,6 +510,18 @@ impl ContainerManager {
             container.state = ContainerState::Stopped;
             container.pid = None;
         }
+
+        // Read exit_code for the event.
+        let exit_code = {
+            let containers = self.containers.read().await;
+            containers.get(id).and_then(|c| c.exit_code)
+        };
+        self.publish_event(serde_json::json!({
+            "event": "stopped",
+            "container_id": id,
+            "exit_code": exit_code,
+        }));
+
         Ok(())
     }
 
@@ -515,6 +562,12 @@ impl ContainerManager {
         if let Some(container) = containers.get_mut(id) {
             container.state = ContainerState::Paused;
         }
+
+        self.publish_event(serde_json::json!({
+            "event": "paused",
+            "container_id": id,
+        }));
+
         Ok(())
     }
 
@@ -529,6 +582,12 @@ impl ContainerManager {
         if let Some(container) = containers.get_mut(id) {
             container.state = ContainerState::Running;
         }
+
+        self.publish_event(serde_json::json!({
+            "event": "unpaused",
+            "container_id": id,
+        }));
+
         Ok(())
     }
 
@@ -610,6 +669,12 @@ impl ContainerManager {
         }
 
         containers.remove(id);
+
+        self.publish_event(serde_json::json!({
+            "event": "removed",
+            "container_id": id,
+        }));
+
         Ok(())
     }
 
@@ -827,6 +892,111 @@ impl ContainerManager {
         } else {
             Ok(String::new())
         }
+    }
+
+    /// Read the last N lines of a container's log file.
+    pub async fn log_tail(&self, id: &str, lines: usize) -> Result<String, StivaError> {
+        info!(container = id, lines, "tailing container logs");
+
+        let internals = self.internals.read().await;
+        let internal = internals
+            .get(id)
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+
+        if !internal.log_path.exists() {
+            return Ok(String::new());
+        }
+
+        let content = std::fs::read_to_string(&internal.log_path).map_err(StivaError::Io)?;
+
+        let all_lines: Vec<&str> = content.lines().collect();
+        let start = all_lines.len().saturating_sub(lines);
+        let tail: Vec<&str> = all_lines[start..].to_vec();
+
+        Ok(tail.join("\n"))
+    }
+
+    /// Connect a daemon container to its network after start.
+    ///
+    /// Reads the container's port and network config. If ports are non-empty
+    /// or a network is configured, creates a `NetworkManager` (or reuses the
+    /// cached one) and calls `connect_container`. Best-effort: warns on
+    /// failure, does not block start.
+    async fn connect_network(&self, id: &str, _pid: u32) {
+        info!(container = id, "attempting network connection");
+
+        let (ports, network, rootfs) = {
+            let containers = self.containers.read().await;
+            let Some(container) = containers.get(id) else {
+                return;
+            };
+            let rootfs = {
+                let internals = self.internals.read().await;
+                internals
+                    .get(id)
+                    .and_then(|i| i.overlay.as_ref().map(|o| o.merged.clone()))
+            };
+            (
+                container.config.ports.clone(),
+                container.config.network.clone(),
+                rootfs,
+            )
+        };
+
+        if ports.is_empty() && network.is_none() {
+            return;
+        }
+
+        let network_name = network
+            .as_deref()
+            .unwrap_or(crate::network::manager::DEFAULT_BRIDGE);
+
+        let mut mgr_guard = self.network_manager.write().await;
+        if mgr_guard.is_none() {
+            match NetworkManager::new() {
+                Ok(nm) => *mgr_guard = Some(nm),
+                Err(e) => {
+                    tracing::warn!(
+                        container = id,
+                        error = %e,
+                        "failed to create network manager, skipping network"
+                    );
+                    return;
+                }
+            }
+        }
+
+        if let Some(ref mut nm) = *mgr_guard {
+            match nm.connect_container(id, network_name, &ports, rootfs.as_deref()) {
+                Ok(cn) => {
+                    info!(
+                        container = id,
+                        ip = %cn.ip,
+                        network = %cn.network_name,
+                        "container connected to network"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        container = id,
+                        error = %e,
+                        "failed to connect container to network"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Publish a lifecycle event to the pub/sub hub.
+    fn publish_event(&self, event_json: serde_json::Value) {
+        self.publisher.publish("container.lifecycle", event_json);
+    }
+
+    /// Get a reference to the pub/sub hub (for subscribing to events).
+    #[inline]
+    #[must_use]
+    pub fn event_bus(&self) -> &PubSub {
+        &self.publisher
     }
 }
 
@@ -1431,5 +1601,214 @@ mod tests {
         let manager = test_manager(dir.path());
         let err = manager.signal("nonexistent", 15).await.unwrap_err();
         assert!(matches!(err, StivaError::ContainerNotFound(_)));
+    }
+
+    // --- log_tail tests ---
+
+    #[tokio::test]
+    async fn log_tail_empty_before_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let tail = manager.log_tail(&c.id, 10).await.unwrap();
+        assert!(tail.is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_tail_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+        assert!(manager.log_tail("nonexistent", 10).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn log_tail_returns_last_n_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        // Write some content to the log file.
+        {
+            let internals = manager.internals.read().await;
+            let internal = internals.get(&c.id).unwrap();
+            let content = "line1\nline2\nline3\nline4\nline5\n";
+            std::fs::write(&internal.log_path, content).unwrap();
+        }
+
+        let tail = manager.log_tail(&c.id, 3).await.unwrap();
+        // Last 3 non-empty lines (the trailing newline creates an empty last line).
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "line3");
+        assert_eq!(lines[1], "line4");
+        assert_eq!(lines[2], "line5");
+    }
+
+    #[tokio::test]
+    async fn log_tail_fewer_lines_than_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        {
+            let internals = manager.internals.read().await;
+            let internal = internals.get(&c.id).unwrap();
+            std::fs::write(&internal.log_path, "only\ntwo").unwrap();
+        }
+
+        let tail = manager.log_tail(&c.id, 10).await.unwrap();
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    // --- lifecycle event tests ---
+
+    #[tokio::test]
+    async fn create_publishes_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let mut rx = manager.event_bus().subscribe("container.lifecycle");
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.payload["event"], "created");
+        assert_eq!(msg.payload["container_id"], c.id);
+    }
+
+    #[tokio::test]
+    async fn start_publishes_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        let mut rx = manager.event_bus().subscribe("container.lifecycle");
+
+        // start() invokes kavach which may fail in test — event is still published.
+        let _ = manager.start(&c.id).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.payload["event"], "started");
+        assert_eq!(msg.payload["container_id"], c.id);
+    }
+
+    #[tokio::test]
+    async fn stop_publishes_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let _ = manager.start(&c.id).await;
+
+        let mut rx = manager.event_bus().subscribe("container.lifecycle");
+        let _ = manager.stop(&c.id).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.payload["event"], "stopped");
+        assert_eq!(msg.payload["container_id"], c.id);
+    }
+
+    #[tokio::test]
+    async fn remove_publishes_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let _ = manager.start(&c.id).await;
+
+        let mut rx = manager.event_bus().subscribe("container.lifecycle");
+        manager.remove(&c.id).await.unwrap();
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.payload["event"], "removed");
+        assert_eq!(msg.payload["container_id"], c.id);
+    }
+
+    // --- network connection tests ---
+
+    #[tokio::test]
+    async fn connect_network_no_ports_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+
+        // No ports, no network — should be a no-op (no panic).
+        manager.connect_network(&c.id, 1).await;
+
+        // Network manager should not have been initialized.
+        assert!(manager.network_manager.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_network_with_ports() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let config = ContainerConfig {
+            ports: vec!["8080:80".to_string()],
+            ..Default::default()
+        };
+        let c = manager.create(&test_image(), config).await.unwrap();
+
+        // Should attempt network connection (best-effort, won't fail).
+        manager.connect_network(&c.id, 1).await;
+
+        // Network manager should have been initialized.
+        assert!(manager.network_manager.read().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn connect_network_with_custom_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let config = ContainerConfig {
+            network: Some("custom-net".to_string()),
+            ..Default::default()
+        };
+        let c = manager.create(&test_image(), config).await.unwrap();
+
+        // Will attempt to connect to "custom-net" which doesn't exist,
+        // but should warn and not panic.
+        manager.connect_network(&c.id, 1).await;
+    }
+
+    #[tokio::test]
+    async fn event_bus_returns_pubsub() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+        // Verify we can subscribe.
+        let _rx = manager.event_bus().subscribe("container.lifecycle");
+        assert_eq!(manager.event_bus().pattern_count(), 1);
     }
 }
