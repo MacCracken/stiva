@@ -168,6 +168,28 @@ impl Stiva {
         self.containers.remove(id).await
     }
 
+    /// Send a signal to a running container.
+    pub fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
+        self.containers.signal(id, signal)
+    }
+
+    /// Pause a running container via cgroups freezer.
+    pub async fn pause(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "stiva pause");
+        self.containers.pause(id).await
+    }
+
+    /// Unpause a paused container.
+    pub async fn unpause(&self, id: &str) -> Result<(), StivaError> {
+        info!(container = id, "stiva unpause");
+        self.containers.unpause(id).await
+    }
+
+    /// Get runtime stats for a container (CPU, memory, PIDs).
+    pub async fn stats(&self, id: &str) -> Result<runtime::ContainerStats, StivaError> {
+        self.containers.stats(id).await
+    }
+
     /// Build an image from a TOML build spec (Stivafile.toml).
     ///
     /// `context_dir` is the directory containing files referenced by `copy` steps.
@@ -218,6 +240,16 @@ impl Stiva {
     pub async fn wait(&self, id: &str) -> Result<runtime::ContainerExecResult, StivaError> {
         info!(container = id, "stiva wait");
         self.containers.wait(id).await
+    }
+
+    /// Execute a command inside a running container.
+    pub async fn exec(
+        &self,
+        id: &str,
+        command: &[String],
+    ) -> Result<runtime::ContainerExecResult, StivaError> {
+        info!(container = id, command = ?command, "stiva exec");
+        self.containers.exec(id, command).await
     }
 
     /// Read container logs.

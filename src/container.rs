@@ -468,6 +468,144 @@ impl ContainerManager {
         }
     }
 
+    /// Send a signal to a running container process.
+    ///
+    /// Common signals: SIGHUP(1), SIGINT(2), SIGTERM(15), SIGUSR1(10), SIGUSR2(12).
+    pub fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
+        // Use try_read to avoid async — this is a synchronous syscall.
+        let containers = self
+            .containers
+            .try_read()
+            .map_err(|_| StivaError::Runtime("container lock busy".into()))?;
+        let container = containers
+            .get(id)
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+
+        if container.state != ContainerState::Running {
+            return Err(StivaError::InvalidState(format!(
+                "cannot signal container {id}: state is {:?}",
+                container.state
+            )));
+        }
+
+        let pid = container
+            .pid
+            .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?;
+
+        runtime::send_signal(pid, signal)
+    }
+
+    /// Pause a running container via cgroups freezer.
+    pub async fn pause(&self, id: &str) -> Result<(), StivaError> {
+        let pid = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            if container.state != ContainerState::Running {
+                return Err(StivaError::InvalidState(format!(
+                    "cannot pause container {id}: state is {:?}",
+                    container.state
+                )));
+            }
+            container
+                .pid
+                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
+        };
+
+        runtime::pause_container(pid).await?;
+
+        let mut containers = self.containers.write().await;
+        if let Some(container) = containers.get_mut(id) {
+            container.state = ContainerState::Paused;
+        }
+        Ok(())
+    }
+
+    /// Unpause a paused container.
+    pub async fn unpause(&self, id: &str) -> Result<(), StivaError> {
+        let pid = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            if container.state != ContainerState::Paused {
+                return Err(StivaError::InvalidState(format!(
+                    "cannot unpause container {id}: state is {:?}",
+                    container.state
+                )));
+            }
+            container
+                .pid
+                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
+        };
+
+        runtime::unpause_container(pid).await?;
+
+        let mut containers = self.containers.write().await;
+        if let Some(container) = containers.get_mut(id) {
+            container.state = ContainerState::Running;
+        }
+        Ok(())
+    }
+
+    /// Get runtime stats for a running or paused container.
+    pub async fn stats(&self, id: &str) -> Result<runtime::ContainerStats, StivaError> {
+        let pid = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+            if container.state != ContainerState::Running
+                && container.state != ContainerState::Paused
+            {
+                return Err(StivaError::InvalidState(format!(
+                    "cannot get stats for container {id}: state is {:?}",
+                    container.state
+                )));
+            }
+            container
+                .pid
+                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?
+        };
+
+        runtime::container_stats(pid).await
+    }
+
+    /// Execute a command inside a running container.
+    ///
+    /// Uses `nsenter` to enter the container's namespaces and run the command.
+    /// Only works on running daemon containers that have a PID.
+    pub async fn exec(
+        &self,
+        id: &str,
+        command: &[String],
+    ) -> Result<ContainerExecResult, StivaError> {
+        let (pid, env, workdir) = {
+            let containers = self.containers.read().await;
+            let container = containers
+                .get(id)
+                .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+
+            if container.state != ContainerState::Running {
+                return Err(StivaError::InvalidState(format!(
+                    "container {id} is {:?}, not running",
+                    container.state
+                )));
+            }
+
+            let pid = container
+                .pid
+                .ok_or_else(|| StivaError::InvalidState(format!("container {id} has no PID")))?;
+
+            let env: Vec<(String, String)> = container.config.env.clone().into_iter().collect();
+            let workdir = container.config.workdir.clone();
+            (pid, env, workdir)
+        };
+
+        runtime::exec_in_container(pid, command, &env, workdir.as_deref()).await
+    }
+
     /// Remove a stopped container.
     ///
     /// Tears down overlay filesystem and cleans up all container files.
@@ -1219,5 +1357,128 @@ mod tests {
         // Container is Created, not Running — prepare_migration should fail.
         let err = manager.prepare_migration(&c.id).await.unwrap_err();
         assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let err = manager
+            .exec(&c.id, &["echo".into(), "hi".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+        let err = manager
+            .exec("nonexistent", &["echo".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StivaError::ContainerNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_empty_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let config = ContainerConfig {
+            detach: true,
+            ..Default::default()
+        };
+        let c = manager.create(&test_image(), config).await.unwrap();
+        // Manually set Running with a PID to test empty command path.
+        {
+            let mut containers = manager.containers.write().await;
+            let container = containers.get_mut(&c.id).unwrap();
+            container.state = ContainerState::Running;
+            container.pid = Some(1);
+        }
+        let err = manager.exec(&c.id, &[]).await.unwrap_err();
+        assert!(matches!(err, StivaError::Runtime(_)));
+    }
+
+    #[tokio::test]
+    async fn pause_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let err = manager.pause(&c.id).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn unpause_not_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let err = manager.unpause(&c.id).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn stats_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let err = manager.stats(&c.id).await.unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[test]
+    fn container_stats_serde() {
+        let stats = runtime::ContainerStats {
+            memory_bytes: 1024 * 1024,
+            memory_limit_bytes: 512 * 1024 * 1024,
+            cpu_usage_us: 50_000,
+            pids_current: 3,
+            pids_limit: 100,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: runtime::ContainerStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.memory_bytes, 1024 * 1024);
+        assert_eq!(back.pids_current, 3);
+    }
+
+    #[tokio::test]
+    async fn signal_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+
+        let c = manager
+            .create(&test_image(), ContainerConfig::default())
+            .await
+            .unwrap();
+        let err = manager.signal(&c.id, 15).unwrap_err();
+        assert!(matches!(err, StivaError::InvalidState(_)));
+    }
+
+    #[tokio::test]
+    async fn signal_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = test_manager(dir.path());
+        let err = manager.signal("nonexistent", 15).unwrap_err();
+        assert!(matches!(err, StivaError::ContainerNotFound(_)));
     }
 }

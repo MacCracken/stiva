@@ -394,6 +394,213 @@ pub async fn spawn_container(spec: &RuntimeSpec) -> Result<DaemonHandle, StivaEr
 }
 
 // ---------------------------------------------------------------------------
+// Exec into running container
+// ---------------------------------------------------------------------------
+
+/// Execute a command inside a running container's namespaces via `nsenter`.
+///
+/// Enters the PID, mount, network, UTS, and IPC namespaces of the target
+/// process and runs the command. Returns when the command completes.
+pub async fn exec_in_container(
+    pid: u32,
+    command: &[String],
+    env: &[(String, String)],
+    workdir: Option<&str>,
+) -> Result<ContainerExecResult, StivaError> {
+    if command.is_empty() {
+        return Err(StivaError::Runtime("empty exec command".into()));
+    }
+
+    let pid_str = pid.to_string();
+    info!(pid, command = ?command, "exec into running container via nsenter");
+
+    let mut cmd = tokio::process::Command::new("nsenter");
+    cmd.arg("-t")
+        .arg(&pid_str)
+        .arg("-p") // PID namespace
+        .arg("-m") // mount namespace
+        .arg("-n") // network namespace
+        .arg("-u") // UTS namespace
+        .arg("-i") // IPC namespace
+        .arg("--")
+        .args(command);
+
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+
+    if let Some(wd) = workdir {
+        cmd.current_dir(wd);
+    }
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let start = std::time::Instant::now();
+
+    let output = cmd.output().await.map_err(|e| {
+        error!(error = %e, "nsenter exec failed");
+        StivaError::Runtime(format!("nsenter exec failed: {e}"))
+    })?;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    info!(
+        exit_code = output.status.code().unwrap_or(-1),
+        duration_ms, "exec complete"
+    );
+
+    Ok(ContainerExecResult {
+        exit_code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        duration_ms,
+        timed_out: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Signal forwarding
+// ---------------------------------------------------------------------------
+
+/// Send a signal to a container process.
+///
+/// Common signals: SIGHUP(1), SIGINT(2), SIGQUIT(3), SIGTERM(15), SIGUSR1(10), SIGUSR2(12).
+#[cfg(target_os = "linux")]
+pub fn send_signal(pid: u32, signal: i32) -> Result<(), StivaError> {
+    info!(pid, signal, "sending signal to container");
+    let nix_signal = nix::sys::signal::Signal::try_from(signal)
+        .map_err(|e| StivaError::Runtime(format!("invalid signal {signal}: {e}")))?;
+    let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+    nix::sys::signal::kill(nix_pid, nix_signal).map_err(|e| {
+        StivaError::Runtime(format!("failed to send signal {signal} to PID {pid}: {e}"))
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn send_signal(_pid: u32, _signal: i32) -> Result<(), StivaError> {
+    Err(StivaError::Runtime(
+        "signal forwarding requires Linux".into(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Pause / unpause via cgroups freezer
+// ---------------------------------------------------------------------------
+
+/// Pause a container by freezing its cgroup.
+///
+/// Uses cgroups v2 freezer (`cgroup.freeze`) to suspend all processes
+/// in the container's cgroup. This is instant and lightweight compared
+/// to CRIU checkpointing.
+pub async fn pause_container(pid: u32) -> Result<(), StivaError> {
+    info!(pid, "pausing container via cgroup freezer");
+    write_cgroup_file(pid, "cgroup.freeze", "1").await
+}
+
+/// Unpause a container by thawing its cgroup.
+pub async fn unpause_container(pid: u32) -> Result<(), StivaError> {
+    info!(pid, "unpausing container via cgroup freezer");
+    write_cgroup_file(pid, "cgroup.freeze", "0").await
+}
+
+/// Write a value to a cgroup v2 file for a process.
+async fn write_cgroup_file(pid: u32, filename: &str, value: &str) -> Result<(), StivaError> {
+    // Read the process's cgroup path from /proc/{pid}/cgroup.
+    let cgroup_info = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read cgroup for PID {pid}: {e}")))?;
+
+    // cgroups v2 format: "0::{path}"
+    let cgroup_path = cgroup_info
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| StivaError::Runtime(format!("no cgroup v2 entry for PID {pid}")))?
+        .trim();
+
+    let file_path = format!("/sys/fs/cgroup{cgroup_path}/{filename}");
+
+    tokio::fs::write(&file_path, value)
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to write {value} to {file_path}: {e}")))?;
+
+    debug!(pid, file = %file_path, value, "cgroup file written");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Container stats (CPU / memory / PIDs)
+// ---------------------------------------------------------------------------
+
+/// Runtime statistics for a container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerStats {
+    /// Memory usage in bytes.
+    pub memory_bytes: u64,
+    /// Memory limit in bytes (0 = unlimited).
+    pub memory_limit_bytes: u64,
+    /// CPU usage in microseconds.
+    pub cpu_usage_us: u64,
+    /// Number of running PIDs.
+    pub pids_current: u32,
+    /// PID limit (0 = unlimited).
+    pub pids_limit: u32,
+}
+
+/// Read runtime stats for a container process from cgroups v2.
+pub async fn container_stats(pid: u32) -> Result<ContainerStats, StivaError> {
+    let cgroup_info = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read cgroup for PID {pid}: {e}")))?;
+
+    let cgroup_path = cgroup_info
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| StivaError::Runtime(format!("no cgroup v2 entry for PID {pid}")))?
+        .trim();
+
+    let base = format!("/sys/fs/cgroup{cgroup_path}");
+
+    let memory_bytes = read_cgroup_u64(&base, "memory.current").await.unwrap_or(0);
+    let memory_limit_bytes = read_cgroup_u64(&base, "memory.max").await.unwrap_or(0);
+    let cpu_usage_us = read_cpu_usage(&base).await.unwrap_or(0);
+    let pids_current = read_cgroup_u64(&base, "pids.current").await.unwrap_or(0) as u32;
+    let pids_limit = read_cgroup_u64(&base, "pids.max").await.unwrap_or(0) as u32;
+
+    Ok(ContainerStats {
+        memory_bytes,
+        memory_limit_bytes,
+        cpu_usage_us,
+        pids_current,
+        pids_limit,
+    })
+}
+
+/// Read a single u64 from a cgroup file. Returns None on any failure.
+async fn read_cgroup_u64(base: &str, filename: &str) -> Option<u64> {
+    let path = format!("{base}/{filename}");
+    let content = tokio::fs::read_to_string(&path).await.ok()?;
+    let trimmed = content.trim();
+    // "max" means unlimited — return 0.
+    if trimmed == "max" {
+        return Some(0);
+    }
+    trimmed.parse().ok()
+}
+
+/// Read CPU usage from cpu.stat (usage_usec field).
+async fn read_cpu_usage(base: &str) -> Option<u64> {
+    let path = format!("{base}/cpu.stat");
+    let content = tokio::fs::read_to_string(&path).await.ok()?;
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("usage_usec ") {
+            return val.trim().parse().ok();
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // CRIU checkpoint / restore
 // ---------------------------------------------------------------------------
 
@@ -793,5 +1000,11 @@ mod tests {
     fn criu_available_returns_bool() {
         // Must not panic — just returns true/false based on PATH.
         let _available = criu_available();
+    }
+
+    #[tokio::test]
+    async fn exec_in_container_empty_command() {
+        let err = exec_in_container(1, &[], &[], None).await;
+        assert!(err.is_err());
     }
 }

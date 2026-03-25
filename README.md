@@ -89,19 +89,21 @@ stiva.rm(&container.id).await?;
 
 ## Roadmap
 
-### Phase 5 — Advanced (next)
-- [x] Long-running daemon containers (kavach spawn/wait/kill)
-- [x] Build from Dockerfile/Containerfile (or TOML equivalent)
-- [x] Image push to registries
-- [x] Container checkpointing (CRIU integration)
-- [x] Live migration between nodes
-- [x] Integration with daimon edge fleet (schedule containers across nodes)
-- [x] Rootless containers (user namespace remapping)
+### Phase 7 — (next)
+- TBD
 
 ### Completed
 
 <details>
-<summary>Phase 0–4 (click to expand)</summary>
+<summary>Phase 0–6 (click to expand)</summary>
+
+#### Phase 6 — Production Hardening
+Container exec (nsenter into running namespaces), signal forwarding (arbitrary signals via nix), pause/unpause (cgroups v2 freezer), container stats (memory/CPU/PIDs from cgroups v2), checkpointing (CRIU dump/restore), live migration (checkpoint + transfer + restore), daimon edge fleet scheduling (spread/binpack/pinned strategies), TOML image build (Stivafile.toml), image push, rootless containers (user namespace UID remapping).
+
+#### Phase 5 — Advanced
+Long-running daemon containers (kavach spawn/wait/kill), rootless containers (user namespace UID/GID mapping), image push to registries, container checkpointing (CRIU), live migration, daimon edge fleet integration.
+
+
 
 #### Phase 0 — Foundation
 Scaffold, image reference parser, container lifecycle state machine, OCI types, volume parsing, network mode types, TOML compose parser, runtime spec generation.
