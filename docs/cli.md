@@ -1,6 +1,6 @@
 # CLI Reference
 
-Stiva provides a `stiva` binary with 26 subcommands.
+Stiva provides a `stiva` binary with 28 subcommands.
 
 ## Global Options
 
@@ -17,42 +17,110 @@ Stiva provides a `stiva` binary with 26 subcommands.
 |---------|-------------|
 | `stiva pull <IMAGE>` | Pull an image from a registry |
 | `stiva push <IMAGE> [TARGET]` | Push a local image to a registry |
-| `stiva build [-f FILE] [-c CONTEXT]` | Build image from Stivafile |
+| `stiva build [-f FILE] [-c CONTEXT]` | Build image from `Stivafile` (default: `./Stivafile`) |
 | `stiva images` | List local images |
-| `stiva rmi <IMAGE>` | Remove a local image |
-| `stiva tag <SOURCE> <TARGET>` | Tag a local image |
-| `stiva import <FILE> --name NAME [--tag TAG]` | Import tar as image |
+| `stiva rmi <IMAGE>` | Remove a local image (by ID or tag) |
+| `stiva tag <SOURCE> <TARGET>` | Tag a local image with a new reference |
+| `stiva import <FILE> --name NAME [--tag TAG]` | Import tar archive as a local image |
 
 ### Containers
 
 | Command | Description |
 |---------|-------------|
-| `stiva run <IMAGE> [-d] [-p PORT] [-e ENV] [CMD...]` | Run a container |
+| `stiva run <IMAGE> [-d] [-p PORT] [-e ENV] [-s SECRET] [CMD...]` | Run a container |
 | `stiva ps` | List containers |
-| `stiva stop <ID>` | Stop a container |
-| `stiva rm <ID>` | Remove a container |
+| `stiva stop <ID>` | Stop a container (SIGTERM → SIGKILL) |
+| `stiva rm <ID>` | Remove a stopped container |
 | `stiva restart <ID>` | Restart a stopped container |
-| `stiva exec <ID> <CMD...>` | Execute command in running container |
-| `stiva kill <ID> [-s SIGNAL]` | Send signal (default: SIGTERM) |
-| `stiva pause <ID>` | Pause via cgroups freezer |
+| `stiva exec <ID> <CMD...>` | Execute command in a running container |
+| `stiva kill <ID> [-s SIGNAL]` | Send signal (default: 15/SIGTERM) |
+| `stiva pause <ID>` | Pause via cgroups v2 freezer |
 | `stiva unpause <ID>` | Unpause a paused container |
-| `stiva inspect <ID>` | Inspect container or image (JSON) |
-| `stiva top <ID>` | List processes in container |
-| `stiva stats <ID>` | Show CPU/memory/PID stats |
-| `stiva logs <ID> [-n LINES]` | Show container logs (last N lines) |
-| `stiva export <ID> -o FILE` | Export rootfs as tar |
-| `stiva cp <SRC> <DST>` | Copy files (container:path or host path) |
-| `stiva wait <ID>` | Wait for container to exit |
+| `stiva inspect <ID>` | Inspect container or image (JSON output) |
+| `stiva top <ID>` | List processes inside a running container |
+| `stiva stats <ID>` | Show CPU/memory/PID stats from cgroups v2 |
+| `stiva logs <ID> [-n LINES]` | Show last N lines of container logs |
+| `stiva export <ID> -o FILE` | Export container rootfs as tar archive |
+| `stiva cp <SRC> <DST>` | Copy files between host and container |
+| `stiva wait <ID>` | Wait for container to exit, return exit code |
 
 ### Operations
 
 | Command | Description |
 |---------|-------------|
-| `stiva prune` | Remove stopped containers + unused images |
-| `stiva checkpoint <ID> [--leave-running]` | CRIU checkpoint |
-| `stiva restore <ID> <DIR>` | Restore from checkpoint |
-| `stiva info` | Show system information |
+| `stiva prune` | Remove stopped containers and unused images |
+| `stiva checkpoint <ID> [--leave-running]` | CRIU checkpoint a running container |
+| `stiva restore <ID> <DIR>` | Restore container from CRIU checkpoint |
 | `stiva convert <FILE> [-f FORMAT] [-o OUT]` | Convert YAML to TOML (compose or dockerfile) |
+| `stiva info` | Show system information and security score |
+
+## `stiva run` Flags
+
+| Flag | Description |
+|------|-------------|
+| `-d, --detach` | Run as daemon (return immediately) |
+| `-p, --port <HOST:CONTAINER>` | Port mapping (repeatable) |
+| `-e, --env <KEY=VALUE>` | Environment variable (repeatable) |
+| `-s, --secret <KEY=VALUE>` | Secret injection via kavach (repeatable, not stored in config) |
+| `--name <NAME>` | Container name |
+
+## `stiva build` Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-f, --file <PATH>` | `Stivafile` | Path to build spec |
+| `-c, --context <DIR>` | `.` | Build context directory |
+
+## `stiva convert` Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-f, --format <FORMAT>` | `compose` | Input format: `compose` or `dockerfile` |
+| `-o, --output <PATH>` | stdout | Output file path |
+
+## `Stivafile` Format
+
+`Stivafile` is stiva's build spec — a TOML file (like Dockerfile, but typed and validated):
+
+```toml
+[image]
+base = "alpine:3.19"
+name = "myapp"
+tag = "v1.0"
+
+[[steps]]
+type = "run"
+command = ["apk", "add", "--no-cache", "curl"]
+
+[[steps]]
+type = "copy"
+source = "./app"
+destination = "/app"
+
+[[steps]]
+type = "env"
+key = "PORT"
+value = "8080"
+
+[[steps]]
+type = "workdir"
+path = "/app"
+
+[config]
+entrypoint = ["/app/start.sh"]
+expose = [8080]
+user = "nobody"
+```
+
+### Step Types
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `run` | `command: [String]` | Execute a command |
+| `copy` | `source`, `destination` | Copy from build context |
+| `env` | `key`, `value` | Set environment variable |
+| `workdir` | `path` | Set working directory |
+| `label` | `key`, `value` | Add metadata label |
 
 ## Examples
 
@@ -61,34 +129,57 @@ Stiva provides a `stiva` binary with 26 subcommands.
 stiva pull nginx:latest
 stiva run -d -p 8080:80 nginx:latest
 
+# Run with secrets (injected via kavach, not stored in config)
+stiva run -d -s DB_PASSWORD=secret123 -e DB_HOST=localhost myapp:latest
+
 # Check status
 stiva ps
-stiva top <container-id>
-stiva stats <container-id>
+stiva top <id>
+stiva stats <id>
 
-# Execute inside
-stiva exec <container-id> ls /etc/nginx
+# Execute inside running container
+stiva exec <id> ls /etc/nginx
 
-# Stop and clean up
-stiva stop <container-id>
-stiva rm <container-id>
+# Stop, restart, remove
+stiva stop <id>
+stiva restart <id>
+stiva rm <id>
 stiva prune
 
-# Build and push
-stiva build -f Stivafile -c .
+# Build from Stivafile
+stiva build
+stiva build -f Stivafile -c ./project
+
+# Push to registry
 stiva push myapp:latest registry.example.com/myapp:latest
 
 # Export/import
-stiva export <container-id> -o rootfs.tar
+stiva export <id> -o rootfs.tar
 stiva import rootfs.tar --name imported --tag v1
 
-# Copy files
-stiva cp ./local-file.txt <container-id>:/app/
-stiva cp <container-id>:/var/log/app.log ./app.log
+# Copy files in/out
+stiva cp ./config.toml <id>:/etc/app/
+stiva cp <id>:/var/log/app.log ./app.log
+
+# Convert from Docker formats
+stiva convert docker-compose.yml -f compose
+stiva convert docker-compose.yml -f compose -o ansamblu.toml
+stiva convert Dockerfile -f dockerfile -o Stivafile
+
+# System info
+stiva info
 ```
 
-## Environment
+## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Tracing filter (e.g., `stiva=debug`, `warn`) |
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (message printed to stderr) |
+| N | Container exit code (for `stiva exec` and `stiva wait`) |

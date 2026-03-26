@@ -40,7 +40,7 @@ stiva stop <id>
 stiva prune
 ```
 
-See [docs/cli.md](docs/cli.md) for all 26 commands.
+See [docs/cli.md](docs/cli.md) for all 28 commands.
 
 ## Features
 
@@ -50,7 +50,7 @@ See [docs/cli.md](docs/cli.md) for all 26 commands.
 | **Containers** | Create, start, stop, restart, exec, signal, pause/unpause, stats, top, logs |
 | **Networking** | Bridge (NAT), host, custom networks, port mapping, DNS injection |
 | **Storage** | Overlay FS, volume mounts, layer dedup, cgroups v2 enforcement |
-| **Orchestration** | TOML compose, DAG ordering, health checks, restart policies, fleet scheduling |
+| **Orchestration** | TOML ansamblu, DAG ordering, health checks, restart policies, fleet scheduling |
 | **Security** | Rootless containers, seccomp, Landlock, capability dropping, CRIU checkpoints |
 | **Integration** | 9 MCP tools, daimon agent registration, lifecycle events (pub/sub), persistent state |
 
@@ -62,7 +62,7 @@ See [docs/cli.md](docs/cli.md) for all 26 commands.
 | `runtime` | Container lifecycle (implies `image` + `registry`) |
 | `image` | OCI image pull and storage |
 | `network` | Container networking |
-| `compose` | TOML-based multi-container orchestration (implies `runtime`) |
+| `ansamblu` | TOML-based multi-container orchestration (implies `runtime`) |
 | `registry` | OCI registry client |
 | `encrypted` | LUKS + dm-verity encrypted storage |
 
@@ -72,7 +72,7 @@ See [docs/cli.md](docs/cli.md) for all 26 commands.
 |----------|-------------|
 | [ADRs](docs/adr/) | Architecture decision records (8 decisions) |
 | [Architecture](docs/architecture.md) | System design, module map, k8s comparison |
-| [CLI Reference](docs/cli.md) | All 26 commands with examples |
+| [CLI Reference](docs/cli.md) | All 28 commands with examples |
 | [Testing Guide](docs/development/testing.md) | Test organization, coverage, mocking |
 | [Scripts](docs/development/scripts.md) | Benchmark and version scripts |
 | [Changelog](CHANGELOG.md) | Release history (phases 0–10) |

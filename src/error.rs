@@ -44,8 +44,8 @@ pub enum StivaError {
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(String),
 
-    #[error("compose error: {0}")]
-    Compose(String),
+    #[error("ansamblu error: {0}")]
+    Ansamblu(String),
 
     #[error("layer unpack error: {0}")]
     LayerUnpack(String),
@@ -111,8 +111,8 @@ mod tests {
         let e = StivaError::UnsupportedPlatform("windows/arm".into());
         assert_eq!(e.to_string(), "unsupported platform: windows/arm");
 
-        let e = StivaError::Compose("missing services".into());
-        assert_eq!(e.to_string(), "compose error: missing services");
+        let e = StivaError::Ansamblu("missing services".into());
+        assert_eq!(e.to_string(), "ansamblu error: missing services");
     }
 
     #[test]

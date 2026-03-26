@@ -6,7 +6,7 @@
 # All tests (default features)
 cargo test
 
-# All tests (all features including compose)
+# All tests (all features including ansamblu)
 cargo test --all-features
 
 # Specific module
@@ -32,7 +32,7 @@ Tests live alongside the code they test (Rust convention):
 | `network/nat` | Port spec parsing, nein rule generation |
 | `network/dns` | resolv.conf parsing, DNS/hosts injection |
 | `network/manager` | Network create/delete, container connect/disconnect |
-| `compose` | TOML parsing, DAG resolution, ServiceDef→ContainerConfig |
+| `ansamblu` | TOML parsing, DAG resolution, ServiceDef→ContainerConfig |
 | `health` | Heartbeat registration, restart policies, status tracking |
 | `agent` | Daimon HTTP registration (wiremock) |
 | `mcp` | Tool list, dispatcher, parameter validation |

@@ -1,6 +1,6 @@
-//! Multi-container orchestration — compose-file equivalent.
+//! Multi-container orchestration — ansamblu — multi-service orchestration.
 //!
-//! Parses TOML compose files, resolves service dependency ordering via
+//! Parses TOML ansamblu files, resolves service dependency ordering via
 //! majra's DAG scheduler, and orchestrates container lifecycle.
 
 use crate::container::ContainerConfig;
@@ -10,12 +10,12 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 // ---------------------------------------------------------------------------
-// Compose file types
+// Ansamblu file types
 // ---------------------------------------------------------------------------
 
-/// A compose file definition (TOML-based, not YAML).
+/// A ansamblu file definition (TOML-based, not YAML).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeFile {
+pub struct AnsambluFile {
     pub services: HashMap<String, ServiceDef>,
     #[serde(default)]
     pub networks: HashMap<String, NetworkDef>,
@@ -23,7 +23,7 @@ pub struct ComposeFile {
     pub volumes: HashMap<String, VolumeDef>,
 }
 
-/// A service definition within a compose file.
+/// A service definition within an ansamblu file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceDef {
     pub image: String,
@@ -58,7 +58,7 @@ pub struct VolumeDef {
     pub driver: Option<String>,
 }
 
-// Re-export RestartPolicy from health module (shared between compose and health).
+// Re-export RestartPolicy from health module (shared between ansamblu and health).
 pub use crate::health::RestartPolicy;
 
 // ---------------------------------------------------------------------------
@@ -92,12 +92,12 @@ fn default_retries() -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Compose session
+// Ansamblu session
 // ---------------------------------------------------------------------------
 
-/// A running compose session tracking deployed services.
+/// A running ansamblu session tracking deployed services.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeSession {
+pub struct AnsambluSession {
     /// Unique session ID.
     pub id: String,
     /// Service name → container IDs (multiple if replicas > 1).
@@ -114,31 +114,32 @@ pub struct ComposeSession {
 // Parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a compose file from TOML.
-#[must_use = "parsing returns a new ComposeFile"]
-pub fn parse_compose(toml_str: &str) -> Result<ComposeFile, StivaError> {
-    toml::from_str(toml_str).map_err(|e| StivaError::Compose(format!("invalid compose file: {e}")))
+/// Parse a ansamblu file from TOML.
+#[must_use = "parsing returns a new AnsambluFile"]
+pub fn parse_ansamblu(toml_str: &str) -> Result<AnsambluFile, StivaError> {
+    toml::from_str(toml_str)
+        .map_err(|e| StivaError::Ansamblu(format!("invalid ansamblu file: {e}")))
 }
 
 // ---------------------------------------------------------------------------
 // DAG dependency resolution
 // ---------------------------------------------------------------------------
 
-/// Build a majra DAG from compose service dependencies.
+/// Build a majra DAG from ansamblu service dependencies.
 #[must_use]
-pub fn build_dag(compose: &ComposeFile) -> majra::queue::Dag {
+pub fn build_dag(spec: &AnsambluFile) -> majra::queue::Dag {
     let mut edges = HashMap::new();
-    for (name, service) in &compose.services {
+    for (name, service) in &spec.services {
         edges.insert(name.clone(), service.depends_on.clone());
     }
     majra::queue::Dag { edges }
 }
 
 /// Resolve service startup order via topological sort.
-pub fn resolve_startup_order(compose: &ComposeFile) -> Result<Vec<String>, StivaError> {
-    let dag = build_dag(compose);
+pub fn resolve_startup_order(spec: &AnsambluFile) -> Result<Vec<String>, StivaError> {
+    let dag = build_dag(spec);
     let order = majra::queue::DagScheduler::topological_sort(&dag)
-        .map_err(|e| StivaError::Compose(format!("dependency cycle detected: {e}")))?;
+        .map_err(|e| StivaError::Ansamblu(format!("dependency cycle detected: {e}")))?;
     info!(
         services = order.len(),
         order = ?order,
@@ -187,8 +188,8 @@ pub fn replica_count(service: &ServiceDef) -> u32 {
 
 /// Check which services from a DAG are ready to start given completed services.
 #[must_use]
-pub fn ready_services(compose: &ComposeFile, completed: &HashSet<String>) -> Vec<String> {
-    let dag = build_dag(compose);
+pub fn ready_services(spec: &AnsambluFile, completed: &HashSet<String>) -> Vec<String> {
+    let dag = build_dag(spec);
     match majra::queue::DagScheduler::new(&dag) {
         Ok(scheduler) => scheduler.ready(completed),
         Err(_) => vec![],
@@ -200,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_compose_toml() {
+    fn parse_ansamblu_toml() {
         let toml = r#"
 [services.web]
 image = "nginx:latest"
@@ -218,38 +219,38 @@ env = { POSTGRES_PASSWORD = "secret" }
 
 [volumes.pgdata]
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.services.len(), 3);
-        assert_eq!(compose.services["api"].depends_on, vec!["db"]);
-        assert!(compose.volumes.contains_key("pgdata"));
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.services.len(), 3);
+        assert_eq!(spec.services["api"].depends_on, vec!["db"]);
+        assert!(spec.volumes.contains_key("pgdata"));
     }
 
     #[test]
-    fn parse_compose_invalid_toml() {
-        assert!(parse_compose("not a [valid toml").is_err());
+    fn parse_ansamblu_invalid_toml() {
+        assert!(parse_ansamblu("not a [valid toml").is_err());
     }
 
     #[test]
-    fn parse_compose_missing_services() {
-        assert!(parse_compose("[networks.default]").is_err());
+    fn parse_ansamblu_missing_services() {
+        assert!(parse_ansamblu("[networks.default]").is_err());
     }
 
     #[test]
-    fn parse_compose_minimal() {
+    fn parse_ansamblu_minimal() {
         let toml = r#"
 [services.app]
 image = "alpine"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.services.len(), 1);
-        assert!(compose.services["app"].command.is_empty());
-        assert!(compose.services["app"].depends_on.is_empty());
-        assert!(compose.networks.is_empty());
-        assert!(compose.volumes.is_empty());
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.services.len(), 1);
+        assert!(spec.services["app"].command.is_empty());
+        assert!(spec.services["app"].depends_on.is_empty());
+        assert!(spec.networks.is_empty());
+        assert!(spec.volumes.is_empty());
     }
 
     #[test]
-    fn parse_compose_with_networks() {
+    fn parse_ansamblu_with_networks() {
         let toml = r#"
 [services.app]
 image = "alpine"
@@ -258,46 +259,43 @@ image = "alpine"
 driver = "bridge"
 subnet = "10.0.0.0/24"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.networks.len(), 1);
-        assert_eq!(
-            compose.networks["frontend"].driver.as_deref(),
-            Some("bridge")
-        );
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.networks.len(), 1);
+        assert_eq!(spec.networks["frontend"].driver.as_deref(), Some("bridge"));
     }
 
     #[test]
-    fn parse_compose_replicas() {
+    fn parse_ansamblu_replicas() {
         let toml = r#"
 [services.worker]
 image = "worker:latest"
 replicas = 3
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.services["worker"].replicas, Some(3));
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.services["worker"].replicas, Some(3));
     }
 
     #[test]
-    fn parse_compose_empty_string() {
-        assert!(parse_compose("").is_err());
+    fn parse_ansamblu_empty_string() {
+        assert!(parse_ansamblu("").is_err());
     }
 
     #[test]
-    fn parse_compose_service_with_command() {
+    fn parse_ansamblu_service_with_command() {
         let toml = r#"
 [services.app]
 image = "alpine"
 command = ["/bin/sh", "-c", "echo hello"]
 "#;
-        let compose = parse_compose(toml).unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
         assert_eq!(
-            compose.services["app"].command,
+            spec.services["app"].command,
             vec!["/bin/sh", "-c", "echo hello"]
         );
     }
 
     #[test]
-    fn parse_compose_dependency_chain() {
+    fn parse_ansamblu_dependency_chain() {
         let toml = r#"
 [services.frontend]
 image = "nginx"
@@ -313,13 +311,13 @@ image = "postgres:16"
 [services.cache]
 image = "redis:7"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.services.len(), 4);
-        assert_eq!(compose.services["frontend"].depends_on, vec!["api"]);
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.services.len(), 4);
+        assert_eq!(spec.services["frontend"].depends_on, vec!["api"]);
     }
 
     #[test]
-    fn parse_compose_service_all_fields() {
+    fn parse_ansamblu_service_all_fields() {
         let toml = r#"
 [services.app]
 image = "myapp:latest"
@@ -330,25 +328,25 @@ volumes = ["/data:/app/data:ro"]
 depends_on = ["db"]
 replicas = 2
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let svc = &compose.services["app"];
+        let spec = parse_ansamblu(toml).unwrap();
+        let svc = &spec.services["app"];
         assert_eq!(svc.image, "myapp:latest");
         assert_eq!(svc.replicas, Some(2));
     }
 
     #[test]
-    fn parse_compose_with_restart_policy() {
+    fn parse_ansamblu_with_restart_policy() {
         let toml = r#"
 [services.app]
 image = "myapp"
 restart = "always"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        assert_eq!(compose.services["app"].restart, Some(RestartPolicy::Always));
+        let spec = parse_ansamblu(toml).unwrap();
+        assert_eq!(spec.services["app"].restart, Some(RestartPolicy::Always));
     }
 
     #[test]
-    fn parse_compose_with_health_check() {
+    fn parse_ansamblu_with_health_check() {
         let toml = r#"
 [services.app]
 image = "myapp"
@@ -359,8 +357,8 @@ interval_secs = 10
 timeout_secs = 3
 retries = 5
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let hc = compose.services["app"].health_check.as_ref().unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
+        let hc = spec.services["app"].health_check.as_ref().unwrap();
         assert_eq!(hc.command, vec!["curl", "-f", "http://localhost/health"]);
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(hc.retries, 5);
@@ -375,8 +373,8 @@ image = "myapp"
 [services.app.health_check]
 command = ["true"]
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let hc = compose.services["app"].health_check.as_ref().unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
+        let hc = spec.services["app"].health_check.as_ref().unwrap();
         assert_eq!(hc.interval_secs, 30);
         assert_eq!(hc.timeout_secs, 5);
         assert_eq!(hc.retries, 3);
@@ -398,8 +396,8 @@ depends_on = ["db"]
 [services.db]
 image = "postgres"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let order = resolve_startup_order(&compose).unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
+        let order = resolve_startup_order(&spec).unwrap();
         let db_pos = order.iter().position(|s| s == "db").unwrap();
         let api_pos = order.iter().position(|s| s == "api").unwrap();
         let fe_pos = order.iter().position(|s| s == "frontend").unwrap();
@@ -417,8 +415,8 @@ image = "b"
 [services.c]
 image = "c"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let order = resolve_startup_order(&compose).unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
+        let order = resolve_startup_order(&spec).unwrap();
         assert_eq!(order.len(), 3);
     }
 
@@ -437,8 +435,8 @@ depends_on = ["db"]
 [services.db]
 image = "db"
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let order = resolve_startup_order(&compose).unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
+        let order = resolve_startup_order(&spec).unwrap();
         let db_pos = order.iter().position(|s| s == "db").unwrap();
         let web_pos = order.iter().position(|s| s == "web").unwrap();
         assert!(db_pos < web_pos);
@@ -529,8 +527,8 @@ image = "postgres"
 image = "app"
 depends_on = ["db"]
 "#;
-        let compose = parse_compose(toml).unwrap();
-        let ready = ready_services(&compose, &HashSet::new());
+        let spec = parse_ansamblu(toml).unwrap();
+        let ready = ready_services(&spec, &HashSet::new());
         assert!(ready.contains(&"db".to_string()));
         assert!(!ready.contains(&"api".to_string()));
     }
@@ -544,9 +542,9 @@ image = "postgres"
 image = "app"
 depends_on = ["db"]
 "#;
-        let compose = parse_compose(toml).unwrap();
+        let spec = parse_ansamblu(toml).unwrap();
         let completed = HashSet::from(["db".to_string()]);
-        let ready = ready_services(&compose, &completed);
+        let ready = ready_services(&spec, &completed);
         assert!(ready.contains(&"api".to_string()));
     }
 
@@ -572,8 +570,8 @@ depends_on = ["db"]
     }
 
     #[test]
-    fn compose_session_serde() {
-        let session = ComposeSession {
+    fn ansamblu_session_serde() {
+        let session = AnsambluSession {
             id: "sess-123".into(),
             services: HashMap::from([("web".into(), vec!["c1".into()])]),
             networks: vec!["mynet".into()],
@@ -581,7 +579,7 @@ depends_on = ["db"]
             created_at: chrono::Utc::now(),
         };
         let json = serde_json::to_string(&session).unwrap();
-        let back: ComposeSession = serde_json::from_str(&json).unwrap();
+        let back: AnsambluSession = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "sess-123");
         assert_eq!(back.startup_order, vec!["db", "web"]);
     }
@@ -620,8 +618,8 @@ depends_on = ["db"]
     }
 
     #[test]
-    fn compose_file_serde_round_trip() {
-        let compose = ComposeFile {
+    fn ansamblu_file_serde_round_trip() {
+        let spec = AnsambluFile {
             services: HashMap::from([(
                 "web".to_string(),
                 ServiceDef {
@@ -639,8 +637,8 @@ depends_on = ["db"]
             networks: HashMap::new(),
             volumes: HashMap::new(),
         };
-        let json = serde_json::to_string(&compose).unwrap();
-        let back: ComposeFile = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: AnsambluFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.services.len(), 1);
         assert_eq!(back.services["web"].image, "nginx");
     }

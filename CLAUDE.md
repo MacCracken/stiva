@@ -35,7 +35,7 @@ daimon (container management), sutra (fleet deployment)
 | `storage` | Overlay FS, volume mounts, layer unpacking |
 | `registry` | OCI distribution client (pull + push), token auth |
 | `build` | TOML-based image builds (Stivafile) |
-| `compose` | Multi-container orchestration, DAG ordering |
+| `ansamblu` | Multi-container orchestration, DAG ordering |
 | `health` | Heartbeat monitoring, restart policies |
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |
 | `agent` | Daimon agent registration |
@@ -43,7 +43,7 @@ daimon (container management), sutra (fleet deployment)
 | `encrypted` | LUKS + dm-verity (feature-gated) |
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
-| `main` | CLI binary (26 subcommands) |
+| `main` | CLI binary (28 subcommands) |
 
 ## kavach Integration
 
@@ -87,7 +87,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 423 tests, 18 criterion benchmarks. Keep adding.
+- **Tests + benchmarks are the way.** 433 tests, 20 criterion benchmarks. Keep adding.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -105,10 +105,10 @@ Stiva uses these kavach features — keep them wired:
 
 | Category | Count |
 |----------|-------|
-| Library unit tests | 412 |
+| Library unit tests | 422 |
 | Integration tests | 10 |
 | Doc-tests | 1 |
-| Criterion benchmarks | 18 |
+| Criterion benchmarks | 20 |
 
 ```bash
 cargo test --all-features                    # All tests

@@ -16,18 +16,18 @@ pub enum Intent {
     Stop { id: String },
     /// Pull an image from a registry.
     Pull { image: String },
-    /// Deploy a compose file.
-    Compose { action: ComposeAction },
+    /// Deploy an ansamblu file.
+    Ansamblu { action: AnsambluAction },
     /// Scale a service to N replicas.
     Scale { service: String, replicas: u32 },
     /// Inspect a container or image.
     Inspect { target: String },
 }
 
-/// Compose sub-action.
+/// Ansamblu sub-action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ComposeAction {
+pub enum AnsambluAction {
     Up,
     Down,
     Restart,
@@ -65,8 +65,8 @@ mod tests {
             Intent::Pull {
                 image: "alpine".into(),
             },
-            Intent::Compose {
-                action: ComposeAction::Up,
+            Intent::Ansamblu {
+                action: AnsambluAction::Up,
             },
             Intent::Scale {
                 service: "worker".into(),
@@ -84,14 +84,14 @@ mod tests {
     }
 
     #[test]
-    fn compose_action_serde() {
+    fn ansamblu_action_serde() {
         for action in [
-            ComposeAction::Up,
-            ComposeAction::Down,
-            ComposeAction::Restart,
+            AnsambluAction::Up,
+            AnsambluAction::Down,
+            AnsambluAction::Restart,
         ] {
             let json = serde_json::to_string(&action).unwrap();
-            let back: ComposeAction = serde_json::from_str(&json).unwrap();
+            let back: AnsambluAction = serde_json::from_str(&json).unwrap();
             assert_eq!(action, back);
         }
     }

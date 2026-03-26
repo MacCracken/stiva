@@ -3,7 +3,7 @@
 | ADR | Decision |
 |-----|----------|
 | [0001](0001-kavach-sandbox-abstraction.md) | Use kavach for sandbox abstraction |
-| [0002](0002-toml-over-yaml.md) | TOML over YAML for compose and build specs |
+| [0002](0002-toml-over-yaml.md) | TOML over YAML for ansamblu and build specs |
 | [0003](0003-daemon-vs-oneshot-model.md) | Dual execution model — one-shot and daemon |
 | [0004](0004-persistent-container-state.md) | Persistent container state via state.json |
 | [0005](0005-oci-fallback-backend-selection.md) | OCI → Process backend fallback (not auto-best) |

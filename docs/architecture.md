@@ -44,7 +44,7 @@ stiva (this crate)
 | `storage` | Overlay filesystem, volume mounts, layer unpacking |
 | `registry` | OCI distribution client (pull + push), token auth |
 | `build` | TOML-based image builds (Stivafile) |
-| `compose` | Multi-container orchestration, DAG ordering |
+| `ansamblu` | Multi-container orchestration, DAG ordering |
 | `health` | Heartbeat monitoring, restart policies |
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |
 | `agent` | Daimon agent registration |
@@ -59,7 +59,7 @@ stiva (this crate)
 | Container runtime | Missing | OCI-compatible runtime |
 | Pod sandbox | kavach (process-level) | kavach + stiva (full container isolation) |
 | Image registry | ark packages only | OCI images + ark packages |
-| Docker Compose | Not supported | `stiva compose` (TOML-based) |
+| Docker Compose | Not supported | `stiva ansamblu` (TOML-based) |
 | Container networking | agnosys netns only | Full bridge/NAT/custom networks |
 | Health/restart | Manual | Heartbeat FSM + restart policies |
-| Orchestration | None | DAG-ordered compose + sutra playbooks |
+| Orchestration | None | DAG-ordered ansamblu + sutra playbooks |

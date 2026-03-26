@@ -124,19 +124,19 @@ pub fn tool_list() -> Vec<McpTool> {
             }),
         },
         McpTool {
-            name: "stiva_compose".into(),
-            description: "Manage multi-container deployments via compose files".into(),
+            name: "stiva_ansamblu".into(),
+            description: "Manage multi-service deployments via ansamblu files".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": ["up", "down"],
-                        "description": "Compose action to perform"
+                        "description": "Ansamblu action to perform"
                     },
                     "file": {
                         "type": "string",
-                        "description": "TOML compose file content"
+                        "description": "TOML ansamblu file content"
                     },
                     "session_id": {
                         "type": "string",
@@ -234,7 +234,7 @@ pub async fn handle_tool(name: &str, params: &serde_json::Value) -> McpResult {
         "stiva_run" => handle_run(params).await,
         "stiva_ps" => handle_ps(params).await,
         "stiva_stop" => handle_stop(params).await,
-        "stiva_compose" => handle_compose(params).await,
+        "stiva_ansamblu" => handle_ansamblu(params).await,
         "stiva_exec" => handle_exec(params).await,
         "stiva_build" => handle_build(params).await,
         "stiva_push" => handle_push(params).await,
@@ -294,7 +294,7 @@ async fn handle_stop(params: &serde_json::Value) -> McpResult {
     }))
 }
 
-async fn handle_compose(params: &serde_json::Value) -> McpResult {
+async fn handle_ansamblu(params: &serde_json::Value) -> McpResult {
     let action = match params.get("action").and_then(|v| v.as_str()) {
         Some(a) => a,
         None => return McpResult::err("missing required parameter: action"),
@@ -304,7 +304,7 @@ async fn handle_compose(params: &serde_json::Value) -> McpResult {
         "up" => {
             let file = params.get("file").and_then(|v| v.as_str()).unwrap_or("");
             McpResult::ok(serde_json::json!({
-                "action": "compose_up",
+                "action": "ansamblu_up",
                 "file_len": file.len(),
                 "status": "queued"
             }))
@@ -315,12 +315,12 @@ async fn handle_compose(params: &serde_json::Value) -> McpResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             McpResult::ok(serde_json::json!({
-                "action": "compose_down",
+                "action": "ansamblu_down",
                 "session_id": session_id,
                 "status": "queued"
             }))
         }
-        _ => McpResult::err(&format!("unknown compose action: {action}")),
+        _ => McpResult::err(&format!("unknown ansamblu action: {action}")),
     }
 }
 
@@ -405,7 +405,7 @@ mod tests {
         assert!(names.contains(&"stiva_run"));
         assert!(names.contains(&"stiva_ps"));
         assert!(names.contains(&"stiva_stop"));
-        assert!(names.contains(&"stiva_compose"));
+        assert!(names.contains(&"stiva_ansamblu"));
         assert!(names.contains(&"stiva_exec"));
         assert!(names.contains(&"stiva_build"));
         assert!(names.contains(&"stiva_push"));
@@ -500,26 +500,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_compose_up() {
+    async fn handle_ansamblu_up() {
         let params =
             serde_json::json!({"action": "up", "file": "[services.web]\nimage = \"nginx\""});
-        let result = handle_tool("stiva_compose", &params).await;
+        let result = handle_tool("stiva_ansamblu", &params).await;
         assert!(result.success);
-        assert_eq!(result.data["action"], "compose_up");
+        assert_eq!(result.data["action"], "ansamblu_up");
     }
 
     #[tokio::test]
-    async fn handle_compose_down() {
+    async fn handle_ansamblu_down() {
         let params = serde_json::json!({"action": "down", "session_id": "sess-123"});
-        let result = handle_tool("stiva_compose", &params).await;
+        let result = handle_tool("stiva_ansamblu", &params).await;
         assert!(result.success);
         assert_eq!(result.data["session_id"], "sess-123");
     }
 
     #[tokio::test]
-    async fn handle_compose_invalid_action() {
+    async fn handle_ansamblu_invalid_action() {
         let params = serde_json::json!({"action": "restart"});
-        let result = handle_tool("stiva_compose", &params).await;
+        let result = handle_tool("stiva_ansamblu", &params).await;
         assert!(!result.success);
     }
 

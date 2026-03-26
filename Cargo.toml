@@ -17,10 +17,10 @@ default = ["full"]
 runtime = ["image", "registry"]
 image = []
 network = []
-compose = ["runtime"]
+ansamblu = ["runtime"]
 registry = []
 encrypted = ["dep:agnosys"]
-full = ["runtime", "image", "network", "compose", "registry"]
+full = ["runtime", "image", "network", "ansamblu", "registry"]
 
 [dependencies]
 # Core

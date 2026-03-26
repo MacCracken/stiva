@@ -22,7 +22,7 @@
 //! - [`storage`] — Overlay filesystem, volume mounts, tmpfs
 //! - [`registry`] — OCI registry client (Docker Hub, GHCR, custom)
 //! - [`build`] — Image building from TOML-based build specs (Stivafile)
-//! - [`compose`] — Multi-container orchestration (compose-file equivalent)
+//! - [`ansamblu`] — Multi-service orchestration (ansamblu = ensemble)
 //! - [`health`] — Container health monitoring via majra heartbeat
 //! - [`agent`] — Daimon agent registration
 //! - [`fleet`] — Daimon edge fleet scheduling
@@ -52,9 +52,9 @@
 //! # }
 
 pub mod agent;
+#[cfg(feature = "ansamblu")]
+pub mod ansamblu;
 pub mod build;
-#[cfg(feature = "compose")]
-pub mod compose;
 pub mod container;
 pub mod convert;
 pub mod encrypted;
@@ -532,33 +532,33 @@ impl Stiva {
         self.containers.apply_migration(bundle).await
     }
 
-    /// Deploy a compose file — parse, resolve dependencies, create and start services.
-    #[cfg(feature = "compose")]
-    pub async fn compose_up(
+    /// Deploy an ansamblu file — parse, resolve dependencies, create and start services.
+    #[cfg(feature = "ansamblu")]
+    pub async fn ansamblu_up(
         &self,
         toml_content: &str,
-    ) -> Result<compose::ComposeSession, StivaError> {
+    ) -> Result<ansamblu::AnsambluSession, StivaError> {
         info!(
             services = toml_content.matches("[services.").count(),
-            "compose up"
+            "ansamblu up"
         );
-        let compose_file = compose::parse_compose(toml_content)?;
-        let startup_order = compose::resolve_startup_order(&compose_file)?;
+        let ansamblu_file = ansamblu::parse_ansamblu(toml_content)?;
+        let startup_order = ansamblu::resolve_startup_order(&ansamblu_file)?;
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let mut services: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
 
         for service_name in &startup_order {
-            let service = compose_file.services.get(service_name).ok_or_else(|| {
-                StivaError::Compose(format!("service '{service_name}' not found"))
+            let service = ansamblu_file.services.get(service_name).ok_or_else(|| {
+                StivaError::Ansamblu(format!("service '{service_name}' not found"))
             })?;
 
-            let replicas = compose::replica_count(service);
+            let replicas = ansamblu::replica_count(service);
             let mut container_ids = Vec::new();
 
             for i in 0..replicas {
-                let config = compose::service_to_config(service_name, service, i);
+                let config = ansamblu::service_to_config(service_name, service, i);
 
                 // Pull image (may already be cached).
                 let img = self.pull(&service.image).await?;
@@ -572,7 +572,7 @@ impl Stiva {
             services.insert(service_name.clone(), container_ids);
         }
 
-        Ok(compose::ComposeSession {
+        Ok(ansamblu::AnsambluSession {
             id: session_id,
             services,
             networks: vec![],
@@ -581,9 +581,12 @@ impl Stiva {
         })
     }
 
-    /// Tear down a compose session — stop and remove all containers.
-    #[cfg(feature = "compose")]
-    pub async fn compose_down(&self, session: &compose::ComposeSession) -> Result<(), StivaError> {
+    /// Tear down an ansamblu session — stop and remove all containers.
+    #[cfg(feature = "ansamblu")]
+    pub async fn ansamblu_down(
+        &self,
+        session: &ansamblu::AnsambluSession,
+    ) -> Result<(), StivaError> {
         // Stop in reverse order.
         for service_name in session.startup_order.iter().rev() {
             if let Some(ids) = session.services.get(service_name) {

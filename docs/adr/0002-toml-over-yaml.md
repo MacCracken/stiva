@@ -1,4 +1,4 @@
-# ADR-0002: TOML over YAML for compose and build specs
+# ADR-0002: TOML over YAML for ansamblu and build specs
 
 ## Status
 Accepted
@@ -7,7 +7,7 @@ Accepted
 Docker uses YAML for Compose files and Dockerfiles for builds. YAML has implicit typing issues (the "Norway problem"), no standard schema, and ambiguous multiline strings.
 
 ## Decision
-Use TOML for both compose files and build specs (Stivafile). No YAML support.
+Use TOML for both ansamblu files and build specs (Stivafile). No YAML support.
 
 ## Consequences
 - **Positive**: Typed, unambiguous, serde-native. No implicit type coercion.
