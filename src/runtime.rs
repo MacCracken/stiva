@@ -309,6 +309,11 @@ async fn build_sandbox(spec: &RuntimeSpec) -> Result<(kavach::Sandbox, String), 
         builder = builder.externalization(ext_policy.clone());
     }
 
+    // Set UTS domain name (OCI runtime-spec v1.2.0).
+    if let Some(ref dn) = spec.domainname {
+        builder = builder.domainname(dn);
+    }
+
     let mut config = builder.build();
 
     // Inject secrets from the RuntimeSpec into the sandbox config.
@@ -1073,6 +1078,28 @@ pub async fn apply_cgroup_limits(pid: u32, spec: &RuntimeSpec) {
             tracing::warn!(pid, path = %path, error = %e, "failed to write pids.max");
         } else {
             info!(pid, pids_max = pids, "cgroup pids.max applied");
+        }
+    }
+
+    // CPU limit via cpu.max (format: "$MAX $PERIOD" where period is 100ms).
+    // cpu_shares maps to fractional cores: 1024 shares = 1 core.
+    if let Some(shares) = spec.cpu_shares
+        && shares > 0
+    {
+        let period: u64 = 100_000; // 100ms in microseconds
+        let quota = shares * period / 1024;
+        let path = format!("{base}/cpu.max");
+        let val = format!("{quota} {period}");
+        if let Err(e) = tokio::fs::write(&path, &val).await {
+            tracing::warn!(pid, path = %path, error = %e, "failed to write cpu.max");
+        } else {
+            info!(
+                pid,
+                cpu_shares = shares,
+                quota,
+                period,
+                "cgroup cpu.max applied"
+            );
         }
     }
 }

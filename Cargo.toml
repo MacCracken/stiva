@@ -58,6 +58,7 @@ majra = { version = ">=0.22", features = ["queue", "heartbeat", "pubsub"] }
 
 # Container filesystem
 flate2 = "1"
+zstd = "0.13"
 tar = "0.4"
 
 # Firewall / NAT (nein provides nftables rules)

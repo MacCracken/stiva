@@ -99,6 +99,9 @@ pub(crate) const MEDIA_MANIFEST_LIST_V2: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
 pub(crate) const MEDIA_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(crate) const MEDIA_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
+/// OCI layer media type for zstd-compressed tar archives.
+#[allow(dead_code)]
+pub(crate) const MEDIA_OCI_LAYER_ZSTD: &str = "application/vnd.oci.image.layer.v1.tar+zstd";
 
 // ---------------------------------------------------------------------------
 // RegistryClient
@@ -202,10 +205,28 @@ impl RegistryClient {
             .unwrap_or("")
             .to_string();
 
+        // Verify manifest digest if registry provides Docker-Content-Digest header.
+        // Defense-in-depth against registry MITM or corruption.
+        let expected_digest = response
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let body = response
             .bytes()
             .await
             .map_err(|e| StivaError::Registry(format!("failed to read manifest body: {e}")))?;
+
+        if let Some(ref expected) = expected_digest {
+            let actual = crate::image::sha256_digest(&body);
+            if actual != *expected {
+                return Err(StivaError::Registry(format!(
+                    "manifest digest mismatch: expected {expected}, got {actual}"
+                )));
+            }
+            debug!(digest = %actual, "manifest digest verified");
+        }
 
         if content_type.contains("manifest.list") || content_type.contains("image.index") {
             let index: OciIndex = serde_json::from_slice(&body)?;
@@ -419,6 +440,116 @@ impl RegistryClient {
         Ok(())
     }
 
+    /// Push a blob using chunked upload for large layers.
+    ///
+    /// Implements the OCI distribution spec chunked upload:
+    /// 1. `POST /v2/{repo}/blobs/uploads/` → get upload URL
+    /// 2. `PATCH {location}` with chunk data (repeatable)
+    /// 3. `PUT {location}?digest={digest}` to finalize
+    pub async fn push_blob_chunked(
+        &self,
+        image: &ImageRef,
+        digest: &str,
+        data: &[u8],
+        chunk_size: usize,
+    ) -> Result<(), StivaError> {
+        if self.blob_exists(image, digest).await? {
+            tracing::info!(digest, "blob already exists, skipping chunked upload");
+            return Ok(());
+        }
+
+        let base = self.api_base(image);
+        let scope = format!("repository:{}:push,pull", image.repository);
+
+        // Step 1: Initiate upload.
+        let upload_url = format!("{base}/v2/{}/blobs/uploads/", image.repository);
+        let resp = self
+            .authenticated_request(image, reqwest::Method::POST, &upload_url, &scope, None)
+            .await?;
+
+        let mut location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| StivaError::Registry("no Location header in upload response".into()))?
+            .to_string();
+
+        if !location.starts_with("http") {
+            location = format!("{base}{location}");
+        }
+
+        let cache_key = format!("{}\0{}", image.registry, scope);
+
+        // Step 2: Upload chunks via PATCH.
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + chunk_size).min(data.len());
+            let chunk = &data[offset..end];
+
+            let mut req = self
+                .client
+                .patch(&location)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_LENGTH, chunk.len())
+                .header("Content-Range", format!("{}-{}", offset, end - 1))
+                .body(chunk.to_vec());
+
+            if let Some(ref t) = self.get_cached_token(&cache_key).await {
+                req = req.bearer_auth(t);
+            }
+
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StivaError::Registry(format!("chunk upload failed: {e}")))?;
+
+            if let Some(new_loc) = resp.headers().get(reqwest::header::LOCATION)
+                && let Ok(s) = new_loc.to_str()
+            {
+                location = if s.starts_with("http") {
+                    s.to_string()
+                } else {
+                    format!("{base}{s}")
+                };
+            }
+
+            offset = end;
+        }
+
+        // Step 3: Finalize with PUT.
+        let sep = if location.contains('?') { '&' } else { '?' };
+        let final_url = format!("{location}{sep}digest={digest}");
+
+        let mut req = self
+            .client
+            .put(&final_url)
+            .header(reqwest::header::CONTENT_LENGTH, 0);
+
+        if let Some(ref t) = self.get_cached_token(&cache_key).await {
+            req = req.bearer_auth(t);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StivaError::Registry(format!("chunk finalize failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(StivaError::Registry(format!(
+                "chunked upload finalize failed: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        tracing::info!(
+            digest,
+            size = data.len(),
+            chunks = data.len().div_ceil(chunk_size),
+            "blob pushed (chunked)"
+        );
+        Ok(())
+    }
+
     /// Push a manifest to the registry.
     ///
     /// `PUT /v2/{repo}/manifests/{reference}` with the manifest JSON.
@@ -469,6 +600,104 @@ impl RegistryClient {
             "manifest pushed"
         );
         Ok(())
+    }
+
+    // -- discovery API ------------------------------------------------------
+
+    /// List tags for a repository.
+    ///
+    /// Implements `GET /v2/{name}/tags/list` with optional pagination.
+    pub async fn list_tags(&self, image: &ImageRef) -> Result<Vec<String>, StivaError> {
+        let base = self.api_base(image);
+        let url = format!("{base}/v2/{}/tags/list", image.repository);
+
+        let response = self.authenticated_get(image, &url, None).await?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| StivaError::Registry(format!("failed to parse tag list: {e}")))?;
+
+        let tags = body
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(tags)
+    }
+
+    /// List repositories in a registry (catalog).
+    ///
+    /// Implements `GET /v2/_catalog`. Not all registries support this.
+    pub async fn catalog(&self, registry: &str) -> Result<Vec<String>, StivaError> {
+        let host = registry_host(registry);
+        let url = format!("https://{host}/v2/_catalog");
+
+        // Catalog doesn't need repo-scoped auth, try unauthenticated.
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| StivaError::Registry(format!("catalog request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(StivaError::Registry(format!(
+                "catalog failed: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| StivaError::Registry(format!("failed to parse catalog: {e}")))?;
+
+        let repos = body
+            .get("repositories")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(repos)
+    }
+
+    /// Query the referrers API for artifacts referencing a manifest.
+    ///
+    /// Implements `GET /v2/{name}/referrers/{digest}` (OCI distribution v1.1.0).
+    pub async fn referrers(
+        &self,
+        image: &ImageRef,
+        digest: &str,
+    ) -> Result<Vec<Descriptor>, StivaError> {
+        let base = self.api_base(image);
+        let url = format!("{base}/v2/{}/referrers/{digest}", image.repository);
+
+        let response = self.authenticated_get(image, &url, None).await?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| StivaError::Registry(format!("failed to parse referrers: {e}")))?;
+
+        let manifests = body
+            .get("manifests")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value::<Descriptor>(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(manifests)
     }
 
     // -- generic auth -------------------------------------------------------

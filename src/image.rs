@@ -424,7 +424,7 @@ impl ImageStore {
 
 /// Compute `sha256:{hex}` digest for data.
 #[must_use]
-fn sha256_digest(data: &[u8]) -> String {
+pub(crate) fn sha256_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     let hash = hasher.finalize();

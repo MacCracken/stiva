@@ -104,6 +104,9 @@ pub struct ContainerConfig {
     /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
     #[serde(default)]
     pub domainname: Option<String>,
+    /// OCI annotations (key-value metadata propagated to runtime spec).
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
 }
 
 fn default_stop_grace_ms() -> u64 {
@@ -134,6 +137,7 @@ impl Default for ContainerConfig {
             min_isolation_score: None,
             agent_id: None,
             domainname: None,
+            annotations: HashMap::new(),
         }
     }
 }

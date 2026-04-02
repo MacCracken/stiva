@@ -41,7 +41,10 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount, StivaError> {
 // Layer unpacking
 // ---------------------------------------------------------------------------
 
-/// Unpack a single tar+gzip layer blob to a directory.
+/// Unpack a single layer blob to a directory.
+///
+/// Supports both gzip and zstd compressed tar archives. The compression
+/// format is detected by trying gzip first, then falling back to zstd.
 pub fn unpack_layer(blob_path: &Path, dest: &Path) -> Result<(), StivaError> {
     let file = std::fs::File::open(blob_path).map_err(|e| {
         StivaError::LayerUnpack(format!(
@@ -50,19 +53,43 @@ pub fn unpack_layer(blob_path: &Path, dest: &Path) -> Result<(), StivaError> {
         ))
     })?;
 
+    // Detect compression: try gzip first, fall back to zstd.
+    let unpack_result = unpack_tar_gz(&file, dest);
+    if unpack_result.is_ok() {
+        return Ok(());
+    }
+
+    // Reopen for zstd attempt.
+    let file = std::fs::File::open(blob_path).map_err(|e| {
+        StivaError::LayerUnpack(format!(
+            "cannot reopen layer blob {}: {e}",
+            blob_path.display()
+        ))
+    })?;
+    unpack_tar_zstd(&file, dest).map_err(|e| {
+        StivaError::LayerUnpack(format!(
+            "failed to unpack layer {} to {} (tried gzip and zstd): {e}",
+            blob_path.display(),
+            dest.display()
+        ))
+    })
+}
+
+fn unpack_tar_gz(file: &std::fs::File, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
     archive.set_overwrite(true);
     archive.set_preserve_permissions(true);
+    archive.unpack(dest)?;
+    Ok(())
+}
 
-    archive.unpack(dest).map_err(|e| {
-        StivaError::LayerUnpack(format!(
-            "failed to unpack layer {} to {}: {e}",
-            blob_path.display(),
-            dest.display()
-        ))
-    })?;
-
+fn unpack_tar_zstd(file: &std::fs::File, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let zst = zstd::stream::Decoder::new(file)?;
+    let mut archive = tar::Archive::new(zst);
+    archive.set_overwrite(true);
+    archive.set_preserve_permissions(true);
+    archive.unpack(dest)?;
     Ok(())
 }
 
