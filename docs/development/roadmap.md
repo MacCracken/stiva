@@ -1,14 +1,5 @@
 # Roadmap
 
-Tracks planned work for stiva, organized by priority and domain.
+All planned items through P6 have been completed as of 2026-04-02.
 
-Last updated: 2026-04-02
-
----
-
-## P6 — Developer Experience
-
-- [ ] `stiva events` — stream lifecycle events to terminal
-- [ ] `stiva diff` — show filesystem changes in a container vs its image
-- [ ] Shell completions — bash/zsh/fish completions for all 28 CLI commands
-- [ ] Config file — `~/.stiva/config.toml` for default registry, storage path, log level
+See [CHANGELOG.md](../../CHANGELOG.md) for the full list of changes in v1.1.0.

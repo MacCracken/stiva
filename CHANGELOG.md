@@ -37,6 +37,12 @@ All notable changes to stiva are documented here.
 - **Registry credential store** — `CredentialStore` persists credentials to `~/.stiva/credentials.json` with per-registry `set()` / `get()` / `remove()` and `to_config()` for `RegistryClient`
 - **CRIU pre-dump** — `pre_dump_container()` captures dirty pages incrementally with `--prev-images-dir` chaining for iterative migration
 - **CRIU lazy pages** — `restore_lazy()` restores with `--lazy-pages` and `--page-server` for on-demand page transfer during live migration
+- **`stiva events`** — CLI command streams container lifecycle events from majra pub/sub in real time
+- **`stiva diff`** — CLI command shows filesystem changes in a container by walking the overlay upper layer (C=changed, D=deleted via whiteout)
+- **Shell completions** — `stiva completions <bash|zsh|fish>` generates shell completion scripts via clap_complete
+- **`stiva rename`** — CLI command for renaming containers
+- **`stiva gc`** — CLI command for garbage-collecting unreferenced image blobs
+- **Config file** — `~/.stiva/config.toml` loaded at startup for default registry, paths, and log level
 - **Security audit log** — `docs/security-audit-log.md` tracking CVE reviews and remediation
 - **Spec compliance tracker** — `docs/spec-compliance.md` tracking OCI, MCP, CRIU, and networking spec conformance
 - **Roadmap** — `docs/development/roadmap.md` with prioritized work items

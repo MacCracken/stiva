@@ -40,7 +40,7 @@ stiva stop <id>
 stiva prune
 ```
 
-See [docs/cli.md](docs/cli.md) for all 28 commands.
+See [docs/cli.md](docs/cli.md) for all 34 commands.
 
 ## Features
 

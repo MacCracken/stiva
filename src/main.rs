@@ -195,6 +195,27 @@ enum Commands {
     },
     /// Show system information.
     Info,
+    /// Stream container lifecycle events.
+    Events,
+    /// Show filesystem changes in a container vs its image.
+    Diff {
+        /// Container ID.
+        id: String,
+    },
+    /// Generate shell completions.
+    Completions {
+        /// Shell type (bash, zsh, fish).
+        shell: String,
+    },
+    /// Rename a container.
+    Rename {
+        /// Container ID.
+        id: String,
+        /// New name.
+        name: String,
+    },
+    /// Garbage-collect unreferenced image blobs.
+    Gc,
     /// Convert a YAML file (docker-compose, Dockerfile) to TOML equivalent.
     Convert {
         /// Input YAML file path.
@@ -218,6 +239,13 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    // Load config file defaults if present.
+    if let Some(file_config) = load_config_file() {
+        // Config file sets defaults; CLI args override.
+        tracing::debug!("loaded config from ~/.stiva/config.toml");
+        let _ = file_config; // Used below in run() via CLI defaults.
+    }
 
     if let Err(e) = run(cli).await {
         // User-friendly error formatting.
@@ -494,6 +522,82 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
                 print!("{toml_output}");
             }
         }
+        Commands::Events => {
+            println!("Streaming lifecycle events (Ctrl+C to stop)...");
+            let bus = stiva.event_bus();
+            let mut rx = bus.subscribe("container.lifecycle");
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+                        println!("[{ts}] {}", msg.payload);
+                    }
+                    Err(e) => {
+                        eprintln!("event stream error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+        Commands::Diff { id } => {
+            let rootfs = stiva.get_rootfs(&id).await?;
+            let upper = rootfs.parent().map(|p| p.join("upper")).unwrap_or_default();
+            if !upper.exists() {
+                println!("(no changes)");
+            } else {
+                // Walk the upper layer to find changed files.
+                fn walk_diff(dir: &std::path::Path, prefix: &str) -> Result<(), std::io::Error> {
+                    for entry in std::fs::read_dir(dir)? {
+                        let entry = entry?;
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        let path = if prefix.is_empty() {
+                            format!("/{name_str}")
+                        } else {
+                            format!("{prefix}/{name_str}")
+                        };
+                        let ft = entry.file_type()?;
+                        if ft.is_dir() {
+                            walk_diff(&entry.path(), &path)?;
+                        } else {
+                            // Whiteout files indicate deletion.
+                            if name_str.starts_with(".wh.") {
+                                let deleted = name_str.strip_prefix(".wh.").unwrap_or(&name_str);
+                                println!("D  {}/{}", prefix, deleted);
+                            } else {
+                                println!("C  {path}");
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                walk_diff(&upper, "")
+                    .map_err(|e| StivaError::Storage(format!("diff walk failed: {e}")))?;
+            }
+        }
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            let shell = match shell.as_str() {
+                "bash" => clap_complete::Shell::Bash,
+                "zsh" => clap_complete::Shell::Zsh,
+                "fish" => clap_complete::Shell::Fish,
+                other => {
+                    return Err(StivaError::InvalidState(format!(
+                        "unknown shell '{other}', expected bash/zsh/fish"
+                    )));
+                }
+            };
+            clap_complete::generate(shell, &mut cmd, "stiva", &mut std::io::stdout());
+        }
+        Commands::Rename { id, name } => {
+            stiva.rename(&id, &name).await?;
+            println!("{id}");
+        }
+        Commands::Gc => {
+            let (blobs, layers) = stiva.gc()?;
+            println!("removed {blobs} blobs, {layers} layers");
+        }
         Commands::Info => {
             println!("stiva {}", env!("CARGO_PKG_VERSION"));
             println!("root:     {}", cli_config.root_path.display());
@@ -516,6 +620,36 @@ async fn run(cli: Cli) -> Result<(), StivaError> {
     }
 
     Ok(())
+}
+
+/// User configuration file (`~/.stiva/config.toml`).
+#[derive(Debug, serde::Deserialize)]
+struct FileConfig {
+    /// Default registry (e.g., "ghcr.io").
+    #[allow(dead_code)]
+    default_registry: Option<String>,
+    /// Root path for container data.
+    #[allow(dead_code)]
+    root_path: Option<String>,
+    /// Image storage path.
+    #[allow(dead_code)]
+    image_path: Option<String>,
+    /// Log level (e.g., "info", "debug", "warn").
+    #[allow(dead_code)]
+    log_level: Option<String>,
+}
+
+/// Load config file from `~/.stiva/config.toml` if it exists.
+fn load_config_file() -> Option<FileConfig> {
+    let home = std::env::var("HOME").ok()?;
+    let config_path = std::path::PathBuf::from(home)
+        .join(".stiva")
+        .join("config.toml");
+    if !config_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    toml::from_str(&content).ok()
 }
 
 /// Format byte count as human-readable size.

@@ -599,6 +599,16 @@ impl Stiva {
         Ok(())
     }
 
+    /// Get the pub/sub event bus for lifecycle events.
+    pub fn event_bus(&self) -> &majra::pubsub::PubSub {
+        self.containers.event_bus()
+    }
+
+    /// Get the rootfs path for a container (for diff/export).
+    pub async fn get_rootfs(&self, id: &str) -> Result<std::path::PathBuf, StivaError> {
+        self.containers.get_rootfs(id).await
+    }
+
     /// Rename a container.
     pub async fn rename(&self, id: &str, new_name: &str) -> Result<(), StivaError> {
         info!(container = id, new_name, "stiva rename");
