@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use bote::{ToolDef, ToolSchema};
+use bote::{ToolAnnotations, ToolDef, ToolSchema};
 use serde::{Deserialize, Serialize};
 
 /// Result of an MCP tool invocation.
@@ -52,28 +52,49 @@ pub fn tool_list() -> Vec<ToolDef> {
                 )]),
                 vec!["image".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::read_only()),
         ToolDef::new(
             "stiva_run",
             "Run a container from an image",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("image".into(), serde_json::json!({"type": "string", "description": "Image reference to run"})),
-                    ("name".into(), serde_json::json!({"type": "string", "description": "Container name (optional)"})),
-                    ("command".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command to execute (overrides entrypoint)"})),
-                    ("env".into(), serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables"})),
-                    ("ports".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Port mappings (e.g., '8080:80')"})),
-                    ("volumes".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Volume mounts (e.g., '/host:/container:ro')"})),
+                    (
+                        "image".into(),
+                        serde_json::json!({"type": "string", "description": "Image reference to run"}),
+                    ),
+                    (
+                        "name".into(),
+                        serde_json::json!({"type": "string", "description": "Container name (optional)"}),
+                    ),
+                    (
+                        "command".into(),
+                        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command to execute (overrides entrypoint)"}),
+                    ),
+                    (
+                        "env".into(),
+                        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables"}),
+                    ),
+                    (
+                        "ports".into(),
+                        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Port mappings (e.g., '8080:80')"}),
+                    ),
+                    (
+                        "volumes".into(),
+                        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Volume mounts (e.g., '/host:/container:ro')"}),
+                    ),
                 ]),
                 vec!["image".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_ps",
             "List all containers",
             ToolSchema::new("object", HashMap::new(), vec![]),
-        ),
+        )
+        .with_annotations(ToolAnnotations::read_only()),
         ToolDef::new(
             "stiva_stop",
             "Stop a running container",
@@ -85,68 +106,107 @@ pub fn tool_list() -> Vec<ToolDef> {
                 )]),
                 vec!["id".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_ansamblu",
             "Manage multi-service deployments via ansamblu files",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("action".into(), serde_json::json!({"type": "string", "enum": ["up", "down"], "description": "Ansamblu action to perform"})),
-                    ("file".into(), serde_json::json!({"type": "string", "description": "TOML ansamblu file content"})),
-                    ("session_id".into(), serde_json::json!({"type": "string", "description": "Session ID (required for 'down')"})),
+                    (
+                        "action".into(),
+                        serde_json::json!({"type": "string", "enum": ["up", "down"], "description": "Ansamblu action to perform"}),
+                    ),
+                    (
+                        "file".into(),
+                        serde_json::json!({"type": "string", "description": "TOML ansamblu file content"}),
+                    ),
+                    (
+                        "session_id".into(),
+                        serde_json::json!({"type": "string", "description": "Session ID (required for 'down')"}),
+                    ),
                 ]),
                 vec!["action".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_exec",
             "Execute a command inside a running container",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("id".into(), serde_json::json!({"type": "string", "description": "Container ID"})),
-                    ("command".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command and arguments to execute"})),
+                    (
+                        "id".into(),
+                        serde_json::json!({"type": "string", "description": "Container ID"}),
+                    ),
+                    (
+                        "command".into(),
+                        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command and arguments to execute"}),
+                    ),
                 ]),
                 vec!["id".into(), "command".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_build",
             "Build an image from a Stivafile specification",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("spec".into(), serde_json::json!({"type": "string", "description": "TOML build spec content"})),
-                    ("context_dir".into(), serde_json::json!({"type": "string", "description": "Build context directory path"})),
+                    (
+                        "spec".into(),
+                        serde_json::json!({"type": "string", "description": "TOML build spec content"}),
+                    ),
+                    (
+                        "context_dir".into(),
+                        serde_json::json!({"type": "string", "description": "Build context directory path"}),
+                    ),
                 ]),
                 vec!["spec".into(), "context_dir".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_push",
             "Push a local image to a registry",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("image".into(), serde_json::json!({"type": "string", "description": "Image ID or reference to push"})),
-                    ("target".into(), serde_json::json!({"type": "string", "description": "Target registry reference (optional)"})),
+                    (
+                        "image".into(),
+                        serde_json::json!({"type": "string", "description": "Image ID or reference to push"}),
+                    ),
+                    (
+                        "target".into(),
+                        serde_json::json!({"type": "string", "description": "Target registry reference (optional)"}),
+                    ),
                 ]),
                 vec!["image".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::destructive()),
         ToolDef::new(
             "stiva_inspect",
             "Inspect a container or image",
             ToolSchema::new(
                 "object",
                 HashMap::from([
-                    ("id".into(), serde_json::json!({"type": "string", "description": "Container or image ID"})),
-                    ("type".into(), serde_json::json!({"type": "string", "enum": ["container", "image"], "description": "What to inspect"})),
+                    (
+                        "id".into(),
+                        serde_json::json!({"type": "string", "description": "Container or image ID"}),
+                    ),
+                    (
+                        "type".into(),
+                        serde_json::json!({"type": "string", "enum": ["container", "image"], "description": "What to inspect"}),
+                    ),
                 ]),
                 vec!["id".into(), "type".into()],
             ),
-        ),
+        )
+        .with_annotations(ToolAnnotations::read_only()),
     ]
 }
 

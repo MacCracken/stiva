@@ -82,8 +82,8 @@ See [docs/cli.md](docs/cli.md) for all 28 commands.
 ## Development
 
 ```bash
-cargo test --all-features        # 404 tests
-cargo bench --bench benchmarks   # 18 criterion benchmarks
+cargo test --all-features        # 433 tests
+cargo bench --bench benchmarks   # 20 criterion benchmarks
 cargo clippy --all-features --all-targets -- -D warnings
 ./scripts/bench-history.sh       # Benchmark trend tracking
 ```

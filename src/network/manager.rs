@@ -3,8 +3,10 @@
 use super::pool::IpPool;
 use super::{ContainerNetwork, NetworkMode};
 use crate::error::StivaError;
+use nein::bridge::BridgeFirewall;
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 use tracing::info;
 
 /// Default bridge network name.
@@ -30,7 +32,6 @@ pub struct NetworkManager {
     /// Container → network connections.
     connections: HashMap<String, ContainerNetwork>,
     /// Outbound interface for NAT masquerade.
-    #[allow(dead_code)]
     outbound_iface: String,
 }
 
@@ -155,15 +156,26 @@ impl NetworkManager {
         // Attach host side to bridge.
         let _ = super::bridge::attach_to_bridge(&host_veth, network_name);
 
-        // Parse and apply port mappings.
-        for spec in port_specs {
-            let port_spec = super::nat::parse_port_spec(spec)?;
-            let _nat_rule = super::nat::port_forward_rule(
-                port_spec.host_port,
-                &ip.to_string(),
-                port_spec.container_port,
+        // Parse port mappings and apply NAT rules via nein.
+        if !port_specs.is_empty() {
+            let bridge_cfg = super::nat::bridge_config(
+                network_name,
+                &network.pool.subnet(),
+                &self.outbound_iface,
             );
-            // In production: apply via nein. For now, rules are constructed but not applied.
+            let mut bf = BridgeFirewall::new(bridge_cfg);
+            for spec in port_specs {
+                let port_spec = super::nat::parse_port_spec(spec)?;
+                let mapping = super::nat::to_nein_port_mapping(&port_spec, ip);
+                bf.add_port_mapping(mapping)
+                    .map_err(|e| StivaError::Network(format!("port mapping error: {e}")))?;
+            }
+            let fw = bf.to_firewall();
+            if let Err(e) = fw.validate() {
+                tracing::warn!("firewall validation failed: {e}");
+            } else {
+                apply_nft_ruleset(&fw.render());
+            }
         }
 
         // Inject DNS into container rootfs if available.
@@ -250,6 +262,39 @@ impl NetworkManager {
     #[must_use]
     pub fn get_pool(&self, network_name: &str) -> Option<&IpPool> {
         self.networks.get(network_name).map(|n| &n.pool)
+    }
+}
+
+/// Apply an nftables ruleset via `nft -f -` (synchronous, best-effort).
+fn apply_nft_ruleset(ruleset: &str) {
+    match Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(ruleset.as_bytes());
+            }
+            match child.wait_with_output() {
+                Ok(output) if output.status.success() => {
+                    tracing::debug!(bytes = ruleset.len(), "applied nftables ruleset");
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!(%stderr, "nft command failed (non-fatal)");
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "nft process error (non-fatal)");
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(%e, "nft not available (non-fatal)");
+        }
     }
 }
 

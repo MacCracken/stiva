@@ -256,7 +256,7 @@ impl Stiva {
         let images = self.image_store.list()?;
         let image = images
             .iter()
-            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .find(|i| i.id == image_id || i.reference.full_ref() == image_id)
             .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))?;
 
         let target_ref = match target {
@@ -313,7 +313,7 @@ impl Stiva {
         let images = self.image_store.list()?;
         let image = images
             .iter()
-            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .find(|i| i.id == image_id || i.reference.full_ref() == image_id)
             .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))?;
 
         let tagged = image::Image {
@@ -331,7 +331,7 @@ impl Stiva {
         let images = self.image_store.list()?;
         images
             .into_iter()
-            .find(|i| i.id == image_id || i.reference.full_ref().contains(image_id))
+            .find(|i| i.id == image_id || i.reference.full_ref() == image_id)
             .ok_or_else(|| StivaError::ImageNotFound(image_id.to_string()))
     }
 

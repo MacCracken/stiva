@@ -49,6 +49,8 @@ pub struct RuntimeSpec {
     pub min_isolation_score: Option<u8>,
     /// Agent ID for sandbox tracking.
     pub agent_id: Option<String>,
+    /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
+    pub domainname: Option<String>,
 }
 
 /// A mount entry in the runtime spec.
@@ -228,6 +230,7 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
         backend: config.backend.clone(),
         min_isolation_score: config.min_isolation_score,
         agent_id: config.agent_id.clone(),
+        domainname: config.domainname.clone(),
     })
 }
 
@@ -491,8 +494,20 @@ pub async fn exec_in_container(
         cmd.current_dir(wd);
     }
 
-    cmd.stdout(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    // CVE-2024-21626: close inherited host fds before exec to prevent
+    // container escape via /proc/self/fd/N pointing to host resources.
+    unsafe {
+        cmd.pre_exec(|| {
+            for fd in 3..1024 {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
 
     let start = std::time::Instant::now();
 
@@ -1554,6 +1569,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             agent_id: None,
+            domainname: None,
         };
         // PID 1 won't have a valid cgroup in test, so this should warn and return.
         apply_cgroup_limits(1, &spec).await;
@@ -1581,6 +1597,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             agent_id: None,
+            domainname: None,
         };
         // Invalid PID — should warn but not panic.
         apply_cgroup_limits(99999999, &spec).await;
@@ -1608,6 +1625,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             agent_id: None,
+            domainname: None,
         };
         // Should skip because values are 0.
         apply_cgroup_limits(1, &spec).await;

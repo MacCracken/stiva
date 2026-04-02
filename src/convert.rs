@@ -17,7 +17,7 @@ use tracing::info;
 pub fn compose_yaml_to_toml(yaml: &str) -> Result<String, StivaError> {
     info!("converting docker-compose YAML to stiva TOML");
 
-    let doc: Value = serde_yaml::from_str(yaml)
+    let doc: Value = serde_saphyr::from_str(yaml)
         .map_err(|e| StivaError::InvalidState(format!("invalid YAML: {e}")))?;
 
     let mut out = String::new();

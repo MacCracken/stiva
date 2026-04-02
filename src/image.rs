@@ -149,7 +149,6 @@ impl ImageStore {
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
         let manifest_digest = sha256_digest(&manifest_bytes);
         self.store_blob(&manifest_digest, &manifest_bytes)?;
-        self.store_manifest_ref(reference, &manifest_bytes)?;
 
         // 3. Download config blob.
         info!(digest = %manifest.config.digest, "pulling config");
@@ -276,27 +275,6 @@ impl ImageStore {
                 StivaError::Io(e)
             }
         })
-    }
-
-    // -- Manifest reference storage -----------------------------------------
-
-    /// Store a manifest reference at `manifests/{registry}/{repo}/{tag}.json`.
-    fn store_manifest_ref(
-        &self,
-        reference: &ImageRef,
-        manifest_bytes: &[u8],
-    ) -> Result<(), StivaError> {
-        let dir = self
-            .root
-            .join("manifests")
-            .join(&reference.registry)
-            .join(&reference.repository);
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", reference.tag));
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, manifest_bytes)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
     }
 
     // -- Image index --------------------------------------------------------
@@ -1056,14 +1034,8 @@ mod tests {
         let read_layer = store.read_blob(&layer_digest).unwrap();
         assert_eq!(read_layer, layer_data);
 
-        // Verify manifest stored at manifests/{registry}/{repo}/{tag}.json.
-        let manifest_path = dir
-            .path()
-            .join("manifests")
-            .join(reference.registry)
-            .join("library/alpine")
-            .join("latest.json");
-        assert!(manifest_path.exists());
+        // Manifest blob stored in content-addressable store (not tag-keyed).
+        // CVE-2024-24557: tag-keyed manifest cache removed to prevent poisoning.
 
         // Verify image index.
         let listed = store.list().unwrap();

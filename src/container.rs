@@ -101,6 +101,9 @@ pub struct ContainerConfig {
     /// Agent ID for sandbox ownership tracking.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
+    #[serde(default)]
+    pub domainname: Option<String>,
 }
 
 fn default_stop_grace_ms() -> u64 {
@@ -130,6 +133,7 @@ impl Default for ContainerConfig {
             backend: None,
             min_isolation_score: None,
             agent_id: None,
+            domainname: None,
         }
     }
 }
