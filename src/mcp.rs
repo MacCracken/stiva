@@ -3,18 +3,10 @@
 //! Exposes container runtime operations as MCP tools that can be discovered
 //! and invoked by AI agents via daimon.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// An MCP tool definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpTool {
-    /// Tool name (e.g., "stiva_run").
-    pub name: String,
-    /// Human-readable description.
-    pub description: String,
-    /// JSON Schema for the input parameters.
-    pub input_schema: serde_json::Value,
-}
+use bote::{ToolDef, ToolSchema};
+use serde::{Deserialize, Serialize};
 
 /// Result of an MCP tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,179 +39,114 @@ impl McpResult {
 
 /// Return the list of MCP tools provided by stiva.
 #[must_use]
-pub fn tool_list() -> Vec<McpTool> {
+pub fn tool_list() -> Vec<ToolDef> {
     vec![
-        McpTool {
-            name: "stiva_pull".into(),
-            description: "Pull an OCI container image from a registry".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "image": {
-                        "type": "string",
-                        "description": "Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')"
-                    }
-                },
-                "required": ["image"]
-            }),
-        },
-        McpTool {
-            name: "stiva_run".into(),
-            description: "Run a container from an image".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "image": {
-                        "type": "string",
-                        "description": "Image reference to run"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Container name (optional)"
-                    },
-                    "command": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Command to execute (overrides entrypoint)"
-                    },
-                    "env": {
-                        "type": "object",
-                        "additionalProperties": { "type": "string" },
-                        "description": "Environment variables"
-                    },
-                    "ports": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Port mappings (e.g., '8080:80')"
-                    },
-                    "volumes": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Volume mounts (e.g., '/host:/container:ro')"
-                    }
-                },
-                "required": ["image"]
-            }),
-        },
-        McpTool {
-            name: "stiva_ps".into(),
-            description: "List all containers".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        McpTool {
-            name: "stiva_stop".into(),
-            description: "Stop a running container".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Container ID to stop"
-                    }
-                },
-                "required": ["id"]
-            }),
-        },
-        McpTool {
-            name: "stiva_ansamblu".into(),
-            description: "Manage multi-service deployments via ansamblu files".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["up", "down"],
-                        "description": "Ansamblu action to perform"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "TOML ansamblu file content"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session ID (required for 'down')"
-                    }
-                },
-                "required": ["action"]
-            }),
-        },
-        McpTool {
-            name: "stiva_exec".into(),
-            description: "Execute a command inside a running container".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Container ID"
-                    },
-                    "command": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Command and arguments to execute"
-                    }
-                },
-                "required": ["id", "command"]
-            }),
-        },
-        McpTool {
-            name: "stiva_build".into(),
-            description: "Build an image from a Stivafile specification".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "spec": {
-                        "type": "string",
-                        "description": "TOML build spec content"
-                    },
-                    "context_dir": {
-                        "type": "string",
-                        "description": "Build context directory path"
-                    }
-                },
-                "required": ["spec", "context_dir"]
-            }),
-        },
-        McpTool {
-            name: "stiva_push".into(),
-            description: "Push a local image to a registry".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "image": {
-                        "type": "string",
-                        "description": "Image ID or reference to push"
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target registry reference (optional)"
-                    }
-                },
-                "required": ["image"]
-            }),
-        },
-        McpTool {
-            name: "stiva_inspect".into(),
-            description: "Inspect a container or image".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Container or image ID"
-                    },
-                    "type": {
-                        "type": "string",
-                        "enum": ["container", "image"],
-                        "description": "What to inspect"
-                    }
-                },
-                "required": ["id", "type"]
-            }),
-        },
+        ToolDef::new(
+            "stiva_pull",
+            "Pull an OCI container image from a registry",
+            ToolSchema::new(
+                "object",
+                HashMap::from([(
+                    "image".into(),
+                    serde_json::json!({"type": "string", "description": "Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')"}),
+                )]),
+                vec!["image".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_run",
+            "Run a container from an image",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("image".into(), serde_json::json!({"type": "string", "description": "Image reference to run"})),
+                    ("name".into(), serde_json::json!({"type": "string", "description": "Container name (optional)"})),
+                    ("command".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command to execute (overrides entrypoint)"})),
+                    ("env".into(), serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "Environment variables"})),
+                    ("ports".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Port mappings (e.g., '8080:80')"})),
+                    ("volumes".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Volume mounts (e.g., '/host:/container:ro')"})),
+                ]),
+                vec!["image".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_ps",
+            "List all containers",
+            ToolSchema::new("object", HashMap::new(), vec![]),
+        ),
+        ToolDef::new(
+            "stiva_stop",
+            "Stop a running container",
+            ToolSchema::new(
+                "object",
+                HashMap::from([(
+                    "id".into(),
+                    serde_json::json!({"type": "string", "description": "Container ID to stop"}),
+                )]),
+                vec!["id".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_ansamblu",
+            "Manage multi-service deployments via ansamblu files",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("action".into(), serde_json::json!({"type": "string", "enum": ["up", "down"], "description": "Ansamblu action to perform"})),
+                    ("file".into(), serde_json::json!({"type": "string", "description": "TOML ansamblu file content"})),
+                    ("session_id".into(), serde_json::json!({"type": "string", "description": "Session ID (required for 'down')"})),
+                ]),
+                vec!["action".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_exec",
+            "Execute a command inside a running container",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("id".into(), serde_json::json!({"type": "string", "description": "Container ID"})),
+                    ("command".into(), serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Command and arguments to execute"})),
+                ]),
+                vec!["id".into(), "command".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_build",
+            "Build an image from a Stivafile specification",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("spec".into(), serde_json::json!({"type": "string", "description": "TOML build spec content"})),
+                    ("context_dir".into(), serde_json::json!({"type": "string", "description": "Build context directory path"})),
+                ]),
+                vec!["spec".into(), "context_dir".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_push",
+            "Push a local image to a registry",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("image".into(), serde_json::json!({"type": "string", "description": "Image ID or reference to push"})),
+                    ("target".into(), serde_json::json!({"type": "string", "description": "Target registry reference (optional)"})),
+                ]),
+                vec!["image".into()],
+            ),
+        ),
+        ToolDef::new(
+            "stiva_inspect",
+            "Inspect a container or image",
+            ToolSchema::new(
+                "object",
+                HashMap::from([
+                    ("id".into(), serde_json::json!({"type": "string", "description": "Container or image ID"})),
+                    ("type".into(), serde_json::json!({"type": "string", "enum": ["container", "image"], "description": "What to inspect"})),
+                ]),
+                vec!["id".into(), "type".into()],
+            ),
+        ),
     ]
 }
 
@@ -413,10 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_schemas_are_valid_json() {
+    fn tool_schemas_are_valid() {
         for tool in tool_list() {
-            assert!(tool.input_schema.is_object());
-            assert!(tool.input_schema.get("type").is_some());
+            assert_eq!(tool.input_schema.schema_type, "object");
+            assert!(!tool.description.is_empty());
         }
     }
 
@@ -446,7 +373,7 @@ mod tests {
     fn mcp_tool_serde() {
         let tool = &tool_list()[0];
         let json = serde_json::to_string(tool).unwrap();
-        let back: McpTool = serde_json::from_str(&json).unwrap();
+        let back: ToolDef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, tool.name);
     }
 
