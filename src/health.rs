@@ -186,6 +186,77 @@ impl HealthMonitor {
     pub fn is_empty(&self) -> bool {
         self.tracker.is_empty()
     }
+
+    /// Run a health check probe for a container by executing a command inside it.
+    ///
+    /// Returns true if the probe succeeded (exit code 0), false otherwise.
+    /// On success, records a heartbeat. On failure, skips heartbeat so the
+    /// FSM will eventually transition to Suspect → Offline.
+    pub async fn run_probe(
+        &self,
+        container_id: &str,
+        pid: u32,
+        command: &[String],
+        timeout_secs: u64,
+    ) -> bool {
+        let result = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            crate::runtime::exec_in_container(pid, command, &[], None),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(exec_result)) if exec_result.exit_code == 0 => {
+                self.heartbeat(container_id);
+                true
+            }
+            Ok(Ok(exec_result)) => {
+                info!(
+                    container = container_id,
+                    exit_code = exec_result.exit_code,
+                    "health probe failed"
+                );
+                false
+            }
+            Ok(Err(e)) => {
+                info!(container = container_id, error = %e, "health probe error");
+                false
+            }
+            Err(_) => {
+                info!(container = container_id, "health probe timed out");
+                false
+            }
+        }
+    }
+
+    /// Start a background health check loop for a container.
+    ///
+    /// Runs the probe command at `interval_secs` intervals. Returns a
+    /// `tokio::task::JoinHandle` that can be aborted to stop checking.
+    /// Start a background health check loop for a container.
+    ///
+    /// Spawns a tokio task that runs the probe at the given interval.
+    /// The task sends heartbeats to its own monitor instance.
+    /// Returns a `JoinHandle` that can be aborted to stop checking.
+    pub fn start_probe_loop(
+        container_id: String,
+        pid: u32,
+        command: Vec<String>,
+        interval_secs: u64,
+        timeout_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let monitor = HealthMonitor::new();
+            monitor.register(&container_id, RestartPolicy::Never).await;
+            let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                tick.tick().await;
+                monitor
+                    .run_probe(&container_id, pid, &command, timeout_secs)
+                    .await;
+            }
+        })
+    }
 }
 
 impl Default for HealthMonitor {

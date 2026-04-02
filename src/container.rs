@@ -107,10 +107,40 @@ pub struct ContainerConfig {
     /// OCI annotations (key-value metadata propagated to runtime spec).
     #[serde(default)]
     pub annotations: HashMap<String, String>,
+    /// Seccomp profile name ("basic", "strict", or custom path).
+    /// None = use kavach default (basic when seccomp enabled).
+    #[serde(default)]
+    pub seccomp_profile: Option<String>,
+    /// Maximum log file size in bytes before rotation (0 = unlimited).
+    #[serde(default)]
+    pub log_max_bytes: u64,
+    /// Number of rotated log files to keep (0 = no rotation).
+    #[serde(default)]
+    pub log_max_files: u32,
 }
 
 fn default_stop_grace_ms() -> u64 {
     10_000
+}
+
+/// Rotate log files: container.log → container.log.1 → .2 → ... → .N (delete oldest).
+fn rotate_logs(log_path: &std::path::Path, max_files: u32) {
+    // Delete the oldest rotated file.
+    let oldest = log_path.with_extension(format!("log.{max_files}"));
+    let _ = std::fs::remove_file(&oldest);
+
+    // Shift existing rotated files: .N-1 → .N, .N-2 → .N-1, ...
+    for i in (1..max_files).rev() {
+        let from = log_path.with_extension(format!("log.{i}"));
+        let to = log_path.with_extension(format!("log.{}", i + 1));
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+
+    // Move current log to .1.
+    let first_rotated = log_path.with_extension("log.1");
+    let _ = std::fs::rename(log_path, &first_rotated);
 }
 
 impl Default for ContainerConfig {
@@ -138,6 +168,9 @@ impl Default for ContainerConfig {
             agent_id: None,
             domainname: None,
             annotations: HashMap::new(),
+            seccomp_profile: None,
+            log_max_bytes: 0,
+            log_max_files: 0,
         }
     }
 }
@@ -645,18 +678,43 @@ impl ContainerManager {
     }
 
     /// Write execution result to the container log file.
+    ///
+    /// Supports log rotation: if `log_max_bytes > 0` and the log exceeds
+    /// that size, rotates to `.1`, `.2`, etc. up to `log_max_files`.
     async fn write_log(&self, id: &str, exec_result: &ContainerExecResult) {
         let internals = self.internals.read().await;
-        if let Some(internal) = internals.get(id) {
-            let log_content = format!(
-                "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code: {} | duration: {}ms | timed_out: {} ===\n",
-                exec_result.stdout,
-                exec_result.stderr,
-                exec_result.exit_code,
-                exec_result.duration_ms,
-                exec_result.timed_out,
-            );
-            let _ = std::fs::write(&internal.log_path, &log_content);
+        let containers = self.containers.read().await;
+        let Some(internal) = internals.get(id) else {
+            return;
+        };
+
+        let log_content = format!(
+            "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code: {} | duration: {}ms | timed_out: {} ===\n",
+            exec_result.stdout,
+            exec_result.stderr,
+            exec_result.exit_code,
+            exec_result.duration_ms,
+            exec_result.timed_out,
+        );
+
+        // Check rotation before writing.
+        if let Some(container) = containers.get(id)
+            && container.config.log_max_bytes > 0
+            && container.config.log_max_files > 0
+            && let Ok(meta) = std::fs::metadata(&internal.log_path)
+            && meta.len() + log_content.len() as u64 > container.config.log_max_bytes
+        {
+            rotate_logs(&internal.log_path, container.config.log_max_files);
+        }
+
+        // Append to log file.
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&internal.log_path)
+        {
+            let _ = file.write_all(log_content.as_bytes());
         }
     }
 
@@ -921,6 +979,7 @@ impl ContainerManager {
             backend: None,
             min_isolation_score: None,
             io_max_bytes_per_sec: None,
+            seccomp_profile: None,
             agent_id: None,
             domainname: None,
         };

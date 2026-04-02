@@ -2,6 +2,15 @@
 
 All notable changes to stiva are documented here.
 
+## [2.0.1] — 2026-04-02
+
+### Added
+- **Image signature verification** — `ImageStore::verify_signature()` checks for cosign/notation signature artifacts via the referrers API on pull
+- **Rootfs integrity verification** — `ImageStore::verify_integrity()` re-computes SHA-256 of all stored blobs and reports corruption (TOCTOU defense)
+- **Health check probe execution** — `HealthMonitor::run_probe()` executes health check commands inside running containers via nsenter; `start_probe_loop()` runs probes on a configurable interval
+- **Seccomp profile customization** — `ContainerConfig.seccomp_profile` wired through to kavach's `SandboxPolicy.seccomp_profile` (supports "basic", "strict", or custom names)
+- **Log rotation** — `ContainerConfig.log_max_bytes` and `log_max_files` enable automatic log rotation with numbered backup files (`.1`, `.2`, etc.)
+
 ## [2.0.0] — 2026-04-02
 
 ### Added

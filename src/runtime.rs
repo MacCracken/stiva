@@ -49,6 +49,8 @@ pub struct RuntimeSpec {
     pub min_isolation_score: Option<u8>,
     /// IO throughput limit in bytes/sec (0 = unlimited).
     pub io_max_bytes_per_sec: Option<u64>,
+    /// Seccomp profile name ("basic", "strict", or custom).
+    pub seccomp_profile: Option<String>,
     /// Agent ID for sandbox tracking.
     pub agent_id: Option<String>,
     /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
@@ -240,7 +242,8 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
         timeout_ms: config.timeout_ms,
         backend: config.backend.clone(),
         min_isolation_score: config.min_isolation_score,
-        io_max_bytes_per_sec: None, // Not yet configurable via ContainerConfig.
+        io_max_bytes_per_sec: None,
+        seccomp_profile: config.seccomp_profile.clone(),
         agent_id: config.agent_id.clone(),
         domainname: config.domainname.clone(),
     })
@@ -288,6 +291,12 @@ async fn build_sandbox(spec: &RuntimeSpec) -> Result<(kavach::Sandbox, String), 
     }
     policy.network.enabled = false;
     policy.read_only_rootfs = spec.read_only_rootfs;
+
+    // Custom seccomp profile.
+    if let Some(ref profile) = spec.seccomp_profile {
+        policy.seccomp_enabled = true;
+        policy.seccomp_profile = Some(profile.clone());
+    }
 
     // Backend selection: explicit > min_strength > default fallback.
     let backend = if let Some(ref name) = spec.backend {
@@ -1757,6 +1766,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             io_max_bytes_per_sec: None,
+            seccomp_profile: None,
             agent_id: None,
             domainname: None,
         };
@@ -1786,6 +1796,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             io_max_bytes_per_sec: None,
+            seccomp_profile: None,
             agent_id: None,
             domainname: None,
         };
@@ -1815,6 +1826,7 @@ mod tests {
             backend: None,
             min_isolation_score: None,
             io_max_bytes_per_sec: None,
+            seccomp_profile: None,
             agent_id: None,
             domainname: None,
         };

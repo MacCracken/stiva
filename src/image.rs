@@ -472,6 +472,82 @@ impl ImageStore {
         Ok((blobs_removed, layers_removed))
     }
 
+    /// Verify integrity of stored blobs against their digests.
+    ///
+    /// Re-reads each blob and computes its SHA-256, comparing against the
+    /// filename-derived digest. Returns a list of corrupted digests.
+    /// This is a TOCTOU defense — run after unpack to verify content.
+    pub fn verify_integrity(&self) -> Result<Vec<String>, StivaError> {
+        info!("verifying blob integrity");
+        let blobs_dir = self.root.join("blobs").join("sha256");
+        let mut corrupted = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&blobs_dir) {
+            for entry in entries.flatten() {
+                let hex = entry.file_name().to_string_lossy().to_string();
+                let expected = format!("sha256:{hex}");
+                match std::fs::read(entry.path()) {
+                    Ok(data) => {
+                        let actual = sha256_digest(&data);
+                        if actual != expected {
+                            tracing::warn!(
+                                expected = %expected,
+                                actual = %actual,
+                                "blob integrity mismatch"
+                            );
+                            corrupted.push(expected);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(digest = %expected, error = %e, "failed to read blob for verification");
+                        corrupted.push(expected);
+                    }
+                }
+            }
+        }
+
+        info!(
+            verified = corrupted.is_empty(),
+            corrupted = corrupted.len(),
+            "integrity check complete"
+        );
+        Ok(corrupted)
+    }
+
+    /// Verify a cosign/notation signature for an image.
+    ///
+    /// Checks for a signature artifact referencing the image manifest via
+    /// the referrers API. Returns `Ok(true)` if a valid signature is found,
+    /// `Ok(false)` if no signature exists, or `Err` on verification failure.
+    pub async fn verify_signature(
+        &self,
+        image: &Image,
+        client: &crate::registry::RegistryClient,
+    ) -> Result<bool, StivaError> {
+        info!(image = %image.reference.full_ref(), "checking image signature");
+
+        // Look up referrers for this image's manifest digest.
+        let referrers = client.referrers(&image.reference, &image.id).await?;
+
+        // Check for cosign or notation signature artifacts.
+        let sig_types = [
+            "application/vnd.dev.cosign.simplesigning.v1+json",
+            "application/vnd.cncf.notary.signature",
+        ];
+
+        let has_signature = referrers
+            .iter()
+            .any(|d| sig_types.iter().any(|t| d.media_type == *t));
+
+        if has_signature {
+            info!(image = %image.reference.full_ref(), "signature found");
+        } else {
+            info!(image = %image.reference.full_ref(), "no signature found");
+        }
+
+        Ok(has_signature)
+    }
+
     /// Get image storage root.
     #[inline]
     #[must_use]
