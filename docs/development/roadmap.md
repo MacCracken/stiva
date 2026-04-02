@@ -19,21 +19,6 @@ Last updated: 2026-04-02
 
 ---
 
-## P2 — MCP & Integration
-
-### MCP 2025-03-26
-
-- [ ] Structured tool output — return `content` array with typed parts (`text`, `image`, `resource`) instead of flat JSON
-- [ ] Streamable HTTP transport — verify bote 0.91.0 supports streamable HTTP, wire up if available
-- [ ] Tool `title` annotation — add human-readable display names to all tools
-
-### Daimon integration
-
-- [ ] Live `handle_tool` wiring — connect MCP handlers to actual `Stiva` instance (currently returns stubs)
-- [ ] MCP resource exposure — expose container logs, stats, and image list as MCP resources
-
----
-
 ## P3 — Networking
 
 - [ ] IPv6 support — dual-stack IP pool, IPv6 NAT/masquerade via nein

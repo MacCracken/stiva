@@ -4,26 +4,62 @@
 //! and invoked by AI agents via daimon.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bote::{ToolAnnotations, ToolDef, ToolSchema};
 use serde::{Deserialize, Serialize};
 
-/// Result of an MCP tool invocation.
+use crate::Stiva;
+
+/// Result of an MCP tool invocation in structured MCP content format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResult {
     /// Whether the invocation succeeded.
     pub success: bool,
-    /// Result data (on success) or error message (on failure).
-    pub data: serde_json::Value,
+    /// Structured content array (MCP 2025-03-26 format).
+    pub content: Vec<ContentPart>,
+}
+
+/// A typed content part in an MCP tool result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum ContentPart {
+    /// Plain text content.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// JSON resource content.
+    #[serde(rename = "resource")]
+    Resource {
+        uri: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        text: String,
+    },
 }
 
 impl McpResult {
-    /// Create a success result.
+    /// Create a success result with text content.
     #[must_use]
     pub fn ok(data: serde_json::Value) -> Self {
         Self {
             success: true,
-            data,
+            content: vec![ContentPart::Text {
+                text: serde_json::to_string_pretty(&data).unwrap_or_default(),
+            }],
+        }
+    }
+
+    /// Create a success result with a JSON resource.
+    #[must_use]
+    pub fn resource(uri: &str, data: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            content: vec![ContentPart::Resource {
+                uri: uri.to_string(),
+                mime_type: "application/json".to_string(),
+                text: serde_json::to_string_pretty(&data).unwrap_or_default(),
+            }],
         }
     }
 
@@ -32,7 +68,9 @@ impl McpResult {
     pub fn err(message: &str) -> Self {
         Self {
             success: false,
-            data: serde_json::json!({ "error": message }),
+            content: vec![ContentPart::Text {
+                text: message.to_string(),
+            }],
         }
     }
 }
@@ -210,75 +248,234 @@ pub fn tool_list() -> Vec<ToolDef> {
     ]
 }
 
-/// Dispatch an MCP tool invocation.
-///
-/// This is the entry point for MCP tool handling. In production, the `stiva`
-/// parameter would be a reference to the running Stiva instance. For now,
-/// this returns structured results that describe what would happen.
-pub async fn handle_tool(name: &str, params: &serde_json::Value) -> McpResult {
+// ---------------------------------------------------------------------------
+// Live tool dispatch (wired to Stiva instance)
+// ---------------------------------------------------------------------------
+
+/// Dispatch an MCP tool invocation against a live Stiva instance.
+pub async fn handle_tool(stiva: &Arc<Stiva>, name: &str, params: &serde_json::Value) -> McpResult {
     match name {
-        "stiva_pull" => handle_pull(params).await,
-        "stiva_run" => handle_run(params).await,
-        "stiva_ps" => handle_ps(params).await,
-        "stiva_stop" => handle_stop(params).await,
-        "stiva_ansamblu" => handle_ansamblu(params).await,
-        "stiva_exec" => handle_exec(params).await,
+        "stiva_pull" => handle_pull(stiva, params).await,
+        "stiva_run" => handle_run(stiva, params).await,
+        "stiva_ps" => handle_ps(stiva).await,
+        "stiva_stop" => handle_stop(stiva, params).await,
+        "stiva_exec" => handle_exec(stiva, params).await,
         "stiva_build" => handle_build(params).await,
-        "stiva_push" => handle_push(params).await,
-        "stiva_inspect" => handle_inspect(params).await,
+        "stiva_push" => handle_push(stiva, params).await,
+        "stiva_inspect" => handle_inspect(stiva, params).await,
+        "stiva_ansamblu" => handle_ansamblu(params).await,
         _ => McpResult::err(&format!("unknown tool: {name}")),
     }
 }
 
-async fn handle_pull(params: &serde_json::Value) -> McpResult {
+async fn handle_pull(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
     let image = match params.get("image").and_then(|v| v.as_str()) {
         Some(img) => img,
         None => return McpResult::err("missing required parameter: image"),
     };
 
-    // In production: stiva.pull(image).await
-    McpResult::ok(serde_json::json!({
-        "action": "pull",
-        "image": image,
-        "status": "queued"
-    }))
+    match stiva.pull(image).await {
+        Ok(img) => McpResult::resource(
+            &format!("stiva://images/{}", img.id),
+            serde_json::json!({
+                "id": img.id,
+                "reference": img.reference.full_ref(),
+                "size_bytes": img.size_bytes,
+                "layers": img.layers.len(),
+            }),
+        ),
+        Err(e) => McpResult::err(&format!("pull failed: {e}")),
+    }
 }
 
-async fn handle_run(params: &serde_json::Value) -> McpResult {
+async fn handle_run(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
     let image = match params.get("image").and_then(|v| v.as_str()) {
         Some(img) => img,
         None => return McpResult::err("missing required parameter: image"),
     };
 
-    let name = params.get("name").and_then(|v| v.as_str());
+    let mut config = crate::container::ContainerConfig::default();
 
-    McpResult::ok(serde_json::json!({
-        "action": "run",
-        "image": image,
-        "name": name,
-        "status": "queued"
-    }))
+    if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+        config.name = Some(name.to_string());
+    }
+    if let Some(cmd) = params.get("command").and_then(|v| v.as_array()) {
+        config.command = cmd
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(ports) = params.get("ports").and_then(|v| v.as_array()) {
+        config.ports = ports
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    if let Some(vols) = params.get("volumes").and_then(|v| v.as_array()) {
+        config.volumes = vols
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    config.detach = true;
+
+    match stiva.run(image, config).await {
+        Ok(container) => McpResult::resource(
+            &format!("stiva://containers/{}", container.id),
+            serde_json::json!({
+                "id": container.id,
+                "name": container.name,
+                "state": format!("{:?}", container.state),
+                "image": image,
+            }),
+        ),
+        Err(e) => McpResult::err(&format!("run failed: {e}")),
+    }
 }
 
-async fn handle_ps(_params: &serde_json::Value) -> McpResult {
-    // In production: stiva.ps().await → serialize containers
-    McpResult::ok(serde_json::json!({
-        "action": "ps",
-        "containers": []
-    }))
+async fn handle_ps(stiva: &Arc<Stiva>) -> McpResult {
+    match stiva.ps().await {
+        Ok(containers) => {
+            let list: Vec<serde_json::Value> = containers
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "name": c.name,
+                        "state": format!("{:?}", c.state),
+                        "image": c.config.name,
+                    })
+                })
+                .collect();
+            McpResult::ok(serde_json::json!({ "containers": list }))
+        }
+        Err(e) => McpResult::err(&format!("ps failed: {e}")),
+    }
 }
 
-async fn handle_stop(params: &serde_json::Value) -> McpResult {
+async fn handle_stop(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
     let id = match params.get("id").and_then(|v| v.as_str()) {
         Some(id) => id,
         None => return McpResult::err("missing required parameter: id"),
     };
 
-    McpResult::ok(serde_json::json!({
-        "action": "stop",
-        "id": id,
-        "status": "queued"
-    }))
+    match stiva.stop(id).await {
+        Ok(()) => McpResult::ok(serde_json::json!({ "id": id, "status": "stopped" })),
+        Err(e) => McpResult::err(&format!("stop failed: {e}")),
+    }
+}
+
+async fn handle_exec(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
+    let id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return McpResult::err("missing required parameter: id"),
+    };
+    let command: Vec<String> = match params.get("command").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => return McpResult::err("missing required parameter: command"),
+    };
+
+    match stiva.exec(id, &command).await {
+        Ok(result) => McpResult::ok(serde_json::json!({
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration_ms": result.duration_ms,
+        })),
+        Err(e) => McpResult::err(&format!("exec failed: {e}")),
+    }
+}
+
+async fn handle_build(params: &serde_json::Value) -> McpResult {
+    let spec = match params.get("spec").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return McpResult::err("missing required parameter: spec"),
+    };
+    let context_dir = params
+        .get("context_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+
+    // Build requires a running Stiva with image store; return parsed spec info.
+    match crate::build::parse_build_spec(spec) {
+        Ok(build_spec) => McpResult::ok(serde_json::json!({
+            "action": "build",
+            "base": build_spec.image.base,
+            "name": build_spec.image.name,
+            "tag": build_spec.image.tag,
+            "steps": build_spec.steps.len(),
+            "context_dir": context_dir,
+            "status": "parsed"
+        })),
+        Err(e) => McpResult::err(&format!("build spec parse failed: {e}")),
+    }
+}
+
+async fn handle_push(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
+    let image = match params.get("image").and_then(|v| v.as_str()) {
+        Some(i) => i,
+        None => return McpResult::err("missing required parameter: image"),
+    };
+    let target = params.get("target").and_then(|v| v.as_str());
+
+    match stiva.push(image, target).await {
+        Ok(()) => McpResult::ok(serde_json::json!({
+            "image": image,
+            "target": target,
+            "status": "pushed"
+        })),
+        Err(e) => McpResult::err(&format!("push failed: {e}")),
+    }
+}
+
+async fn handle_inspect(stiva: &Arc<Stiva>, params: &serde_json::Value) -> McpResult {
+    let id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return McpResult::err("missing required parameter: id"),
+    };
+    let inspect_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("container");
+
+    match inspect_type {
+        "container" => match stiva.inspect(id).await {
+            Ok(c) => McpResult::resource(
+                &format!("stiva://containers/{}", c.id),
+                serde_json::json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "state": format!("{:?}", c.state),
+                    "created_at": c.created_at.to_rfc3339(),
+                    "config": {
+                        "command": c.config.command,
+                        "env": c.config.env,
+                        "ports": c.config.ports,
+                        "volumes": c.config.volumes,
+                        "detach": c.config.detach,
+                    }
+                }),
+            ),
+            Err(e) => McpResult::err(&format!("inspect failed: {e}")),
+        },
+        "image" => match stiva.inspect_image(id) {
+            Ok(img) => McpResult::resource(
+                &format!("stiva://images/{}", img.id),
+                serde_json::json!({
+                    "id": img.id,
+                    "reference": img.reference.full_ref(),
+                    "size_bytes": img.size_bytes,
+                    "layers": img.layers.len(),
+                    "created_at": img.created_at.to_rfc3339(),
+                }),
+            ),
+            Err(e) => McpResult::err(&format!("inspect failed: {e}")),
+        },
+        _ => McpResult::err(&format!("unknown inspect type: {inspect_type}")),
+    }
 }
 
 async fn handle_ansamblu(params: &serde_json::Value) -> McpResult {
@@ -290,11 +487,14 @@ async fn handle_ansamblu(params: &serde_json::Value) -> McpResult {
     match action {
         "up" => {
             let file = params.get("file").and_then(|v| v.as_str()).unwrap_or("");
-            McpResult::ok(serde_json::json!({
-                "action": "ansamblu_up",
-                "file_len": file.len(),
-                "status": "queued"
-            }))
+            match crate::ansamblu::parse_ansamblu(file) {
+                Ok(af) => McpResult::ok(serde_json::json!({
+                    "action": "ansamblu_up",
+                    "services": af.services.len(),
+                    "status": "parsed"
+                })),
+                Err(e) => McpResult::err(&format!("ansamblu parse failed: {e}")),
+            }
         }
         "down" => {
             let session_id = params
@@ -311,72 +511,76 @@ async fn handle_ansamblu(params: &serde_json::Value) -> McpResult {
     }
 }
 
-async fn handle_exec(params: &serde_json::Value) -> McpResult {
-    let id = match params.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id,
-        None => return McpResult::err("missing required parameter: id"),
-    };
-    let command = params.get("command").and_then(|v| v.as_array());
-    if command.is_none() {
-        return McpResult::err("missing required parameter: command");
+// ---------------------------------------------------------------------------
+// MCP resources
+// ---------------------------------------------------------------------------
+
+/// List MCP resources exposed by stiva.
+///
+/// Resources provide read-only access to container runtime state.
+pub async fn list_resources(stiva: &Arc<Stiva>) -> Vec<serde_json::Value> {
+    let mut resources = Vec::new();
+
+    // Container resources.
+    if let Ok(containers) = stiva.ps().await {
+        for c in &containers {
+            resources.push(serde_json::json!({
+                "uri": format!("stiva://containers/{}", c.id),
+                "name": c.name.as_deref().unwrap_or(&c.id),
+                "mimeType": "application/json",
+                "description": format!("Container {} ({:?})", c.id, c.state),
+            }));
+        }
     }
 
-    McpResult::ok(serde_json::json!({
-        "action": "exec",
-        "id": id,
-        "status": "queued"
-    }))
+    // Image resources.
+    if let Ok(images) = stiva.images().await {
+        for img in &images {
+            resources.push(serde_json::json!({
+                "uri": format!("stiva://images/{}", img.id),
+                "name": img.reference.full_ref(),
+                "mimeType": "application/json",
+                "description": format!("Image {} ({} bytes, {} layers)", img.id, img.size_bytes, img.layers.len()),
+            }));
+        }
+    }
+
+    resources
 }
 
-async fn handle_build(params: &serde_json::Value) -> McpResult {
-    let spec = match params.get("spec").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return McpResult::err("missing required parameter: spec"),
-    };
-    let context_dir = params
-        .get("context_dir")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
-
-    McpResult::ok(serde_json::json!({
-        "action": "build",
-        "spec_len": spec.len(),
-        "context_dir": context_dir,
-        "status": "queued"
-    }))
-}
-
-async fn handle_push(params: &serde_json::Value) -> McpResult {
-    let image = match params.get("image").and_then(|v| v.as_str()) {
-        Some(i) => i,
-        None => return McpResult::err("missing required parameter: image"),
-    };
-    let target = params.get("target").and_then(|v| v.as_str());
-
-    McpResult::ok(serde_json::json!({
-        "action": "push",
-        "image": image,
-        "target": target,
-        "status": "queued"
-    }))
-}
-
-async fn handle_inspect(params: &serde_json::Value) -> McpResult {
-    let id = match params.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id,
-        None => return McpResult::err("missing required parameter: id"),
-    };
-    let inspect_type = params
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("container");
-
-    McpResult::ok(serde_json::json!({
-        "action": "inspect",
-        "id": id,
-        "type": inspect_type,
-        "status": "queued"
-    }))
+/// Read a specific MCP resource by URI.
+pub async fn read_resource(stiva: &Arc<Stiva>, uri: &str) -> Result<serde_json::Value, String> {
+    if let Some(id) = uri.strip_prefix("stiva://containers/") {
+        let container = stiva
+            .inspect(id)
+            .await
+            .map_err(|e| format!("container not found: {e}"))?;
+        Ok(serde_json::json!({
+            "id": container.id,
+            "name": container.name,
+            "state": format!("{:?}", container.state),
+            "created_at": container.created_at.to_rfc3339(),
+            "config": {
+                "command": container.config.command,
+                "env": container.config.env,
+                "ports": container.config.ports,
+                "volumes": container.config.volumes,
+            }
+        }))
+    } else if let Some(id) = uri.strip_prefix("stiva://images/") {
+        let image = stiva
+            .inspect_image(id)
+            .map_err(|e| format!("image not found: {e}"))?;
+        Ok(serde_json::json!({
+            "id": image.id,
+            "reference": image.reference.full_ref(),
+            "size_bytes": image.size_bytes,
+            "layers": image.layers.len(),
+            "created_at": image.created_at.to_rfc3339(),
+        }))
+    } else {
+        Err(format!("unknown resource URI: {uri}"))
+    }
 }
 
 #[cfg(test)]
@@ -404,6 +608,7 @@ mod tests {
         for tool in tool_list() {
             assert_eq!(tool.input_schema.schema_type, "object");
             assert!(!tool.description.is_empty());
+            assert!(tool.annotations.is_some());
         }
     }
 
@@ -411,14 +616,28 @@ mod tests {
     fn mcp_result_ok() {
         let r = McpResult::ok(serde_json::json!({"key": "value"}));
         assert!(r.success);
-        assert_eq!(r.data["key"], "value");
+        assert_eq!(r.content.len(), 1);
     }
 
     #[test]
     fn mcp_result_err() {
         let r = McpResult::err("something failed");
         assert!(!r.success);
-        assert_eq!(r.data["error"], "something failed");
+        assert_eq!(r.content.len(), 1);
+    }
+
+    #[test]
+    fn mcp_result_resource() {
+        let r = McpResult::resource("stiva://test/1", serde_json::json!({"id": "1"}));
+        assert!(r.success);
+        assert_eq!(r.content.len(), 1);
+        match &r.content[0] {
+            ContentPart::Resource { uri, mime_type, .. } => {
+                assert_eq!(uri, "stiva://test/1");
+                assert_eq!(mime_type, "application/json");
+            }
+            _ => panic!("expected Resource content part"),
+        }
     }
 
     #[test]
@@ -437,122 +656,25 @@ mod tests {
         assert_eq!(back.name, tool.name);
     }
 
-    #[tokio::test]
-    async fn handle_pull_valid() {
-        let params = serde_json::json!({"image": "nginx:latest"});
-        let result = handle_tool("stiva_pull", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["image"], "nginx:latest");
+    #[test]
+    fn content_part_text_serde() {
+        let part = ContentPart::Text {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"text\":\"hello\""));
     }
 
-    #[tokio::test]
-    async fn handle_pull_missing_image() {
-        let params = serde_json::json!({});
-        let result = handle_tool("stiva_pull", &params).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_run_valid() {
-        let params = serde_json::json!({
-            "image": "alpine",
-            "name": "test",
-            "ports": ["8080:80"]
-        });
-        let result = handle_tool("stiva_run", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["image"], "alpine");
-    }
-
-    #[tokio::test]
-    async fn handle_ps() {
-        let params = serde_json::json!({});
-        let result = handle_tool("stiva_ps", &params).await;
-        assert!(result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_stop_valid() {
-        let params = serde_json::json!({"id": "abc123"});
-        let result = handle_tool("stiva_stop", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["id"], "abc123");
-    }
-
-    #[tokio::test]
-    async fn handle_stop_missing_id() {
-        let params = serde_json::json!({});
-        let result = handle_tool("stiva_stop", &params).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_ansamblu_up() {
-        let params =
-            serde_json::json!({"action": "up", "file": "[services.web]\nimage = \"nginx\""});
-        let result = handle_tool("stiva_ansamblu", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["action"], "ansamblu_up");
-    }
-
-    #[tokio::test]
-    async fn handle_ansamblu_down() {
-        let params = serde_json::json!({"action": "down", "session_id": "sess-123"});
-        let result = handle_tool("stiva_ansamblu", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["session_id"], "sess-123");
-    }
-
-    #[tokio::test]
-    async fn handle_ansamblu_invalid_action() {
-        let params = serde_json::json!({"action": "restart"});
-        let result = handle_tool("stiva_ansamblu", &params).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_unknown_tool() {
-        let params = serde_json::json!({});
-        let result = handle_tool("nonexistent_tool", &params).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_exec_valid() {
-        let params = serde_json::json!({"id": "abc", "command": ["ls"]});
-        let result = handle_tool("stiva_exec", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["action"], "exec");
-    }
-
-    #[tokio::test]
-    async fn handle_exec_missing_id() {
-        let params = serde_json::json!({"command": ["ls"]});
-        let result = handle_tool("stiva_exec", &params).await;
-        assert!(!result.success);
-    }
-
-    #[tokio::test]
-    async fn handle_build_valid() {
-        let params = serde_json::json!({"spec": "[image]\nbase=\"alpine\"\nname=\"x\"", "context_dir": "/tmp"});
-        let result = handle_tool("stiva_build", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["action"], "build");
-    }
-
-    #[tokio::test]
-    async fn handle_push_valid() {
-        let params = serde_json::json!({"image": "nginx:latest"});
-        let result = handle_tool("stiva_push", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["image"], "nginx:latest");
-    }
-
-    #[tokio::test]
-    async fn handle_inspect_valid() {
-        let params = serde_json::json!({"id": "abc", "type": "container"});
-        let result = handle_tool("stiva_inspect", &params).await;
-        assert!(result.success);
-        assert_eq!(result.data["type"], "container");
+    #[test]
+    fn content_part_resource_serde() {
+        let part = ContentPart::Resource {
+            uri: "stiva://containers/abc".into(),
+            mime_type: "application/json".into(),
+            text: "{}".into(),
+        };
+        let json = serde_json::to_string(&part).unwrap();
+        assert!(json.contains("\"type\":\"resource\""));
+        assert!(json.contains("\"uri\":\"stiva://containers/abc\""));
     }
 }

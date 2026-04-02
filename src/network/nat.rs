@@ -3,7 +3,6 @@
 use crate::error::StivaError;
 use nein::bridge::{BridgeConfig, PortMapping};
 use nein::nat::NatRule;
-use nein::rule::Protocol;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
@@ -103,16 +102,10 @@ fn parse_port(s: &str) -> Result<u16, StivaError> {
 /// Convert a PortSpec to a nein PortMapping.
 #[must_use]
 pub fn to_nein_port_mapping(spec: &PortSpec, container_ip: Ipv4Addr) -> PortMapping {
-    let protocol = match spec.protocol {
-        PortProtocol::Tcp => Protocol::Tcp,
-        PortProtocol::Udp => Protocol::Udp,
-    };
-
-    PortMapping {
-        host_port: spec.host_port,
-        container_addr: container_ip.to_string(),
-        container_port: spec.container_port,
-        protocol,
+    let addr = container_ip.to_string();
+    match spec.protocol {
+        PortProtocol::Tcp => PortMapping::tcp(spec.host_port, &addr, spec.container_port),
+        PortProtocol::Udp => PortMapping::udp(spec.host_port, &addr, spec.container_port),
     }
 }
 

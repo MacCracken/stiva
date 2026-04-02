@@ -10,6 +10,10 @@ All notable changes to stiva are documented here.
 - **CVE-2024-21626 mitigation** — fd cleanup (`close(3..1024)`) in `pre_exec` hook and `stdin(null)` in `exec_in_container()` and kavach's `execute_with_timeout()`/`spawn_process()`/`build_command()` to prevent container escape via leaked host file descriptors
 - **Manifest digest verification** — `Docker-Content-Digest` header checked against computed SHA-256 on manifest pull (defense-in-depth against registry MITM)
 - **CPU cgroup enforcement** — `apply_cgroup_limits()` now writes `cpu.max` (quota/period) in addition to `memory.max` and `pids.max`
+- **Structured MCP output** — `McpResult` now returns `content` array with typed `ContentPart` variants (`Text`, `Resource`) per MCP 2025-03-26; resource URIs use `stiva://containers/{id}` and `stiva://images/{id}` scheme
+- **Live MCP tool dispatch** — `handle_tool()` now takes `Arc<Stiva>` and calls real runtime operations (pull, run, ps, stop, exec, push, inspect) instead of returning stubs
+- **MCP resources** — `list_resources()` and `read_resource()` expose containers and images as MCP resources with `stiva://` URIs
+- **Container annotations** — `ContainerConfig.annotations` field for OCI key-value metadata
 - **Security audit log** — `docs/security-audit-log.md` tracking CVE reviews and remediation
 - **Spec compliance tracker** — `docs/spec-compliance.md` tracking OCI, MCP, CRIU, and networking spec conformance
 - **Roadmap** — `docs/development/roadmap.md` with prioritized work items
