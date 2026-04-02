@@ -55,7 +55,7 @@ hex = "0.4"
 kavach = { version = ">=1.0", features = ["process", "oci"] }
 
 # Queue / scheduling (majra provides fleet primitives)
-majra = { version = ">=0.22", features = ["queue", "heartbeat", "pubsub"] }
+majra = { version = ">=1.0", features = ["queue", "heartbeat", "pubsub"] }
 
 # Container filesystem
 flate2 = "1"
@@ -63,10 +63,10 @@ zstd = "0.13"
 tar = "0.4"
 
 # Firewall / NAT (nein provides nftables rules)
-nein = { version = ">=0.22", features = ["nat", "bridge", "apply"] }
+nein = { version = ">=0.90", features = ["nat", "bridge", "apply"] }
 
 # Encrypted / verified storage (optional — agnosys LUKS + dm-verity)
-agnosys = { git = "https://github.com/MacCracken/agnosys", features = ["luks", "dmverity"], optional = true }
+agnosys = { git = "https://github.com/MacCracken/agnosys", tag = "0.50.0", features = ["luks", "dmverity"], optional = true }
 
 # Linux-specific
 [target.'cfg(target_os = "linux")'.dependencies]
