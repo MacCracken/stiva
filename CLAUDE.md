@@ -87,7 +87,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 421 tests, 20 criterion benchmarks. Keep adding.
+- **Tests + benchmarks are the way.** 434 tests, 20 criterion benchmarks. Keep adding.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -105,7 +105,7 @@ Stiva uses these kavach features — keep them wired:
 
 | Category | Count |
 |----------|-------|
-| Library unit tests | 410 |
+| Library unit tests | 423 |
 | Integration tests | 10 |
 | Doc-tests | 1 |
 | Criterion benchmarks | 20 |

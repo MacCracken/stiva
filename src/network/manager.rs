@@ -189,6 +189,7 @@ impl NetworkManager {
 
         let cn = ContainerNetwork {
             ip,
+            ipv6: None,
             network_name: network_name.to_string(),
             host_veth,
             container_veth,

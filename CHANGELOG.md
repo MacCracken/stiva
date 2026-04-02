@@ -19,6 +19,10 @@ All notable changes to stiva are documented here.
 - **ID-mapped mounts** — `X-mount.idmap=` option added to bind mounts when `rootless=true` (OCI runtime-spec v1.2.0) for proper UID/GID mapping in rootless containers
 - **Descriptor annotations** — `Descriptor.annotations` field for per-layer/config metadata
 - **Constructor helpers** — `Descriptor::new()`, `Descriptor::foreign()`, `OciManifest::new()` for cleaner construction
+- **IPv6 networking** — `Ipv6Pool` for IPv6 address allocation, `DualStackPool` for dual-stack networks, `ContainerNetwork.ipv6` field for assigned IPv6 addresses
+- **Network policy** — `NetworkPolicy` type with egress/ingress allow/deny lists, port restrictions, and rate limiting; `to_nft_rules()` generates nftables rules
+- **Container DNS resolution** — `DnsRegistry` for container-to-container name resolution within ansamblu sessions; `inject_into()` writes service names to container `/etc/hosts`
+- **CNI-compatible types** — network policy and dual-stack types align with CNI spec patterns
 - **Security audit log** — `docs/security-audit-log.md` tracking CVE reviews and remediation
 - **Spec compliance tracker** — `docs/spec-compliance.md` tracking OCI, MCP, CRIU, and networking spec conformance
 - **Roadmap** — `docs/development/roadmap.md` with prioritized work items

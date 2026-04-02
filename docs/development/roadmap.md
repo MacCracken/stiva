@@ -6,15 +6,6 @@ Last updated: 2026-04-02
 
 ---
 
-## P3 — Networking
-
-- [ ] IPv6 support — dual-stack IP pool, IPv6 NAT/masquerade via nein
-- [ ] CNI plugin interface — optional CNI compatibility layer for external network plugins
-- [ ] Network policy — per-container egress/ingress rules via nein
-- [ ] DNS resolution — container-to-container DNS within ansamblu sessions
-
----
-
 ## P4 — Storage & Images
 
 - [ ] Layer build cache — content-addressable build step cache keyed by (base image digest + step hash), with digest verification on reuse
