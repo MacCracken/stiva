@@ -1,6 +1,6 @@
 # CLI Reference
 
-Stiva provides a `stiva` binary with 28 subcommands.
+Stiva provides a `stiva` binary with 34 subcommands.
 
 ## Global Options
 
@@ -52,6 +52,11 @@ Stiva provides a `stiva` binary with 28 subcommands.
 | `stiva checkpoint <ID> [--leave-running]` | CRIU checkpoint a running container |
 | `stiva restore <ID> <DIR>` | Restore container from CRIU checkpoint |
 | `stiva convert <FILE> [-f FORMAT] [-o OUT]` | Convert YAML to TOML (compose or dockerfile) |
+| `stiva rename <ID> <NAME>` | Rename a container |
+| `stiva gc` | Garbage-collect unreferenced image blobs and layers |
+| `stiva events` | Stream container lifecycle events in real time |
+| `stiva diff <ID>` | Show filesystem changes in a container vs its image |
+| `stiva completions <SHELL>` | Generate shell completions (bash, zsh, fish) |
 | `stiva info` | Show system information and security score |
 
 ## `stiva run` Flags
@@ -121,6 +126,7 @@ user = "nobody"
 | `env` | `key`, `value` | Set environment variable |
 | `workdir` | `path` | Set working directory |
 | `label` | `key`, `value` | Add metadata label |
+| `from_stage` | `stage`, `source`, `destination` | Copy from named build stage (multi-stage) |
 
 ## Examples
 

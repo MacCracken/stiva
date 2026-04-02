@@ -2,7 +2,7 @@
 
 All notable changes to stiva are documented here.
 
-## [1.1.0] — 2026-04-02
+## [2.0.0] — 2026-04-02
 
 ### Added
 - **OCI runtime-spec v1.2.0** — `domainname` field on `ContainerConfig` and `RuntimeSpec` for UTS namespace domain name; wired through kavach with `sethostname`/`setdomainname` in pre_exec (after UTS namespace, before seccomp)

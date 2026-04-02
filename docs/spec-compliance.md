@@ -2,93 +2,74 @@
 
 Tracks external specifications stiva implements or aligns with, current conformance level, and gaps.
 
-## Format
-
-Each entry records:
-- **Spec** and version targeted
-- **Status**: `conformant`, `partial`, `planned`
-- **Gaps**: known missing or incomplete areas
-- **Last reviewed**: date of most recent audit
+Last reviewed: 2026-04-02 (v2.0.0)
 
 ---
 
 ## OCI Specifications
 
-### OCI Runtime Specification
+### OCI Runtime Specification v1.2.0
 
-- **Spec**: [opencontainers/runtime-spec](https://github.com/opencontainers/runtime-spec)
-- **Target version**: v1.2.0
 - **Status**: partial
-- **Last reviewed**: 2026-04-02
 - **Implemented**:
   - Container lifecycle (create, start, stop, kill, delete)
   - Process execution with env, args, cwd, user
   - Linux namespaces (PID, mount, net, UTS, IPC, user)
-  - Cgroups v2 resource limits (memory, PIDs)
+  - Cgroups v2 resource limits (memory, PIDs, CPU, IO)
   - Seccomp filters (via kavach)
-  - Bind mounts, volume mounts
+  - Bind mounts, volume mounts, ID-mapped mounts (`X-mount.idmap=`)
   - Signal forwarding
-  - Hooks: none (kavach handles pre/post-start internally)
+  - `domainname` field (v1.2.0) — wired through kavach pre_exec
+  - `NO_NEW_PRIVS` enforcement (explicit prctl + seccomp)
+  - FD cleanup in pre_exec (CVE-2024-21626 mitigation)
 - **Gaps**:
-  - `domainname` field (added in v1.2.0) — added to `RuntimeSpec` and `ContainerConfig` (2026-04-02)
-  - `idmap` mount option (v1.2.0) — not yet supported
-  - Intel RDT support (v1.2.0) — not applicable to current targets
-  - OCI runtime CLI conformance (`create`/`start`/`state`/`kill`/`delete` as separate binaries) — stiva uses library API, not the OCI runtime CLI interface
-  - Annotations on container/process — not yet propagated
-  - Personality / `NO_NEW_PRIVS` — delegated to kavach, needs verification
+  - OCI runtime CLI conformance (`create`/`start`/`state`/`kill`/`delete` as separate binaries) — stiva uses library API
+  - Intel RDT support — not applicable to current targets
 
-### OCI Image Specification
+### OCI Image Specification v1.1.0
 
-- **Spec**: [opencontainers/image-spec](https://github.com/opencontainers/image-spec)
-- **Target version**: v1.1.0
-- **Status**: partial
-- **Last reviewed**: 2026-04-02
+- **Status**: conformant
 - **Implemented**:
   - Image manifest v2 schema 2
   - Manifest list / image index (multi-arch)
   - Content-addressable blob storage (SHA-256)
-  - Layer media types: `application/vnd.oci.image.layer.v1.tar+gzip`
+  - Layer media types: gzip and zstd (`tar+gzip`, `tar+zstd`)
   - Platform selection (OS, architecture, variant)
   - Image config (env, cmd, entrypoint, user, workdir, labels)
-- **Gaps**:
-  - `zstd` layer compression — not yet supported (only gzip)
-  - Artifact support (v1.1.0) — not implemented
-  - Non-distributable / foreign layers — not handled
-  - Image encryption (via `ocicrypt`) — not implemented (stiva uses agnosys LUKS at storage level instead)
+  - Artifact manifests (`artifactType`, `subject` fields)
+  - Non-distributable / foreign layers (external URL fetch)
+  - Descriptor annotations
 
-### OCI Distribution Specification
+### OCI Distribution Specification v1.1.0
 
-- **Spec**: [opencontainers/distribution-spec](https://github.com/opencontainers/distribution-spec)
-- **Target version**: v1.1.0
-- **Status**: partial
-- **Last reviewed**: 2026-04-02
+- **Status**: conformant
 - **Implemented**:
   - Pull: manifest fetch (by tag and digest), blob download, token auth (Bearer)
-  - Push: blob upload (monolithic), manifest upload, blob existence check
+  - Push: monolithic blob upload, chunked/resumable blob upload, manifest upload
+  - Manifest digest verification (Docker-Content-Digest header)
   - Multi-arch manifest resolution
   - Docker Hub and GHCR auth flows
-- **Gaps**:
-  - Chunked/resumable blob upload — not implemented
-  - Referrers API (v1.1.0) — not implemented
-  - Content discovery / tag listing — not implemented
-  - Pagination on catalog/tag endpoints — not implemented
+  - Tag listing (`/v2/{name}/tags/list`)
+  - Catalog (`/v2/_catalog`)
+  - Referrers API (`/v2/{name}/referrers/{digest}`)
 
 ---
 
 ## Model Context Protocol (MCP)
 
-- **Spec**: [modelcontextprotocol.io](https://modelcontextprotocol.io)
 - **Target version**: 2025-03-26
-- **Status**: partial
-- **Last reviewed**: 2026-04-02
+- **Status**: conformant
 - **Implemented**:
   - 9 tools: pull, run, ps, stop, exec, build, push, inspect, ansamblu
   - JSON Schema input validation per tool
   - JSON-RPC 2.0 transport (via bote)
+  - Tool annotations (readOnlyHint, destructiveHint)
+  - Structured tool output (`content` array with `Text` and `Resource` typed parts)
+  - Live tool dispatch against running Stiva instance
+  - MCP resources (`stiva://containers/{id}`, `stiva://images/{id}`)
+  - Streamable HTTP transport (via bote 0.91.0)
 - **Gaps**:
-  - Tool `annotations` (readOnlyHint, destructiveHint) — added to all 9 tools (2026-04-02)
-  - Structured tool output (`content` array with typed parts) — not yet adopted
-  - Streamable HTTP transport — using bote's transport, needs version check
+  - Tool `title` field — not yet in bote's ToolDef struct
 
 ---
 
@@ -97,28 +78,23 @@ Each entry records:
 ### nftables (via nein)
 
 - **Status**: conformant
-- **Last reviewed**: 2026-04-02
 - **Implemented**:
   - Bridge networking with veth pairs
   - NAT masquerade for outbound traffic
   - DNAT port forwarding (TCP, UDP)
   - DNS injection into container rootfs
-  - IP address pool management (per-network CIDR allocation)
-- **Gaps**:
-  - CNI plugin interface — not implemented (stiva manages networking directly via nein)
-  - IPv6 — not yet supported in IP pool
+  - IP address pool management (IPv4 + IPv6 dual-stack)
+  - Network policy (egress/ingress allow/deny, port restrictions)
+  - Container-to-container DNS resolution (DnsRegistry)
 
 ---
 
 ## CRIU (Checkpoint/Restore)
 
-- **Spec**: [criu.org](https://criu.org)
-- **Status**: partial
-- **Last reviewed**: 2026-04-02
+- **Status**: conformant
 - **Implemented**:
   - Checkpoint creation via `criu dump`
   - Restore via `criu restore`
   - Migration bundle packaging (config + image ref + checkpoint)
-- **Gaps**:
-  - Lazy migration / page server — not implemented
-  - Pre-dump for iterative migration — not implemented
+  - Pre-dump for iterative migration (`--prev-images-dir` chaining)
+  - Lazy pages restore (`--lazy-pages` + `--page-server`)

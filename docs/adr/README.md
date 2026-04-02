@@ -10,6 +10,9 @@
 | [0006](0006-majra-pubsub-lifecycle-events.md) | Lifecycle events via majra pub/sub |
 | [0007](0007-cgroups-v2-only.md) | Cgroups v2 only (no v1 support) |
 | [0008](0008-library-first-with-cli.md) | Library-first design with thin CLI |
+| [0009](0009-mcp-structured-output.md) | MCP structured output with typed content parts |
+| [0010](0010-content-addressable-build-cache.md) | Content-addressable build cache |
+| [0011](0011-dual-stack-networking.md) | IPv6 dual-stack networking |
 
 ## Adding ADRs
 

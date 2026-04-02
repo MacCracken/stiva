@@ -5,9 +5,9 @@
 **Stiva** (Romanian: stack) — OCI container runtime — image management, container lifecycle, orchestration
 
 - **Type**: Crate with library + CLI binary (`stiva`)
-- **License**: GPL-3.0
+- **License**: GPL-3.0-or-later
 - **MSRV**: 1.89
-- **Version**: SemVer, currently 1.0.0
+- **Version**: SemVer, currently 2.0.0
 
 ## Stack
 
@@ -16,6 +16,7 @@
 | kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) |
 | majra | Job queue, heartbeat FSM, pub/sub |
 | nein | nftables firewall, NAT, port mapping |
+| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) |
 | agnosys | LUKS + dm-verity (optional, `encrypted` feature) |
 
 All AGNOS crates are patched to local paths in `[patch.crates-io]`.
@@ -24,26 +25,28 @@ All AGNOS crates are patched to local paths in `[patch.crates-io]`.
 
 daimon (container management), sutra (fleet deployment)
 
-## Modules (18)
+## Modules (16)
 
 | Module | Purpose |
 |--------|---------|
-| `image` | OCI image pull, push, build, store, layer management |
-| `container` | Container lifecycle, state persistence, events, restart |
-| `runtime` | OCI spec, kavach integration, cgroups, CRIU, exec, signals, export/import, copy |
-| `network/` | Bridge, NAT, DNS, IP pools, port mapping (5 submodules) |
-| `storage` | Overlay FS, volume mounts, layer unpacking |
-| `registry` | OCI distribution client (pull + push), token auth |
-| `build` | TOML-based image builds (Stivafile) |
-| `ansamblu` | Multi-container orchestration, DAG ordering |
+| `image` | OCI image pull, push, build, store, layer management, GC |
+| `container` | Container lifecycle, state persistence, events, restart, rename, update |
+| `runtime` | OCI spec, kavach integration, cgroups (CPU/mem/PID/IO), CRIU (checkpoint/pre-dump/lazy), exec, signals, export/import, copy |
+| `network/` | Bridge, NAT, DNS, IP pools (IPv4+IPv6), port mapping, network policy, container DNS registry (6 submodules) |
+| `storage` | Overlay FS, volume mounts, layer unpacking (gzip + zstd) |
+| `registry` | OCI distribution client (pull + push + chunked upload), token auth, credential store, tag listing, catalog, referrers API |
+| `build` | TOML-based image builds (Stivafile), multi-stage builds, build cache |
+| `ansamblu` | Multi-container orchestration, DAG ordering, rolling updates, scaling, service logs |
 | `health` | Heartbeat monitoring, restart policies |
-| `fleet` | Edge fleet scheduling (spread, bin-pack, pinned) |
+| `fleet` | Edge fleet scheduling (spread, bin-pack, pinned), health monitoring, rollback planning |
 | `agent` | Daimon agent registration |
-| `mcp` | 9 MCP tools for AI agent integration |
+| `mcp` | 9 MCP tools with structured output, live dispatch, resource exposure |
+| `convert` | Docker Compose YAML and Dockerfile to Stivafile TOML conversion |
 | `encrypted` | LUKS + dm-verity (feature-gated) |
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
-| `main` | CLI binary (28 subcommands) |
+
+CLI binary: `stiva` with 34 subcommands (see `docs/cli.md`).
 
 ## kavach Integration
 
@@ -52,10 +55,13 @@ Stiva uses these kavach features — keep them wired:
 - **Sandbox** — `Sandbox::create`, `exec`, `spawn`, `destroy`
 - **SpawnedProcess** — daemon containers (pid, wait, kill, try_wait)
 - **SandboxPolicy** — memory, CPU, PID limits, seccomp, network
+- **SandboxConfig** — hostname, domainname (UTS namespace, OCI v1.2.0)
 - **CredentialProxy / SecretRef** — secret injection via env var / file
 - **StrengthScore / score_backend** — security scoring in inspect/info
 - **ExternalizationGate** — output scanning for secrets/PII in exec/logs
 - **User namespaces** — rootless containers (UID/GID mapping)
+- **NO_NEW_PRIVS** — explicit `prctl(PR_SET_NO_NEW_PRIVS)` in pre_exec
+- **FD cleanup** — `close(3..1024)` in pre_exec (CVE-2024-21626 mitigation)
 
 ## Development Process
 
