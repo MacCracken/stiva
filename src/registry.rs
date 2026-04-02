@@ -147,6 +147,97 @@ pub struct RegistryConfig {
     pub password: Option<String>,
 }
 
+/// Persistent credential store for registry authentication.
+///
+/// Stores credentials as JSON at `~/.stiva/credentials.json`.
+/// Each entry is keyed by registry hostname.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CredentialStore {
+    /// Registry hostname → credentials.
+    pub registries: HashMap<String, RegistryCredential>,
+}
+
+/// A stored credential for a registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryCredential {
+    /// Username.
+    pub username: String,
+    /// Password or token (stored in plaintext — use OS keyring for production).
+    pub password: String,
+}
+
+impl CredentialStore {
+    /// Default path for the credential store.
+    #[must_use]
+    pub fn default_path() -> std::path::PathBuf {
+        dirs_path().join("credentials.json")
+    }
+
+    /// Load credentials from disk.
+    pub fn load() -> Result<Self, StivaError> {
+        let path = Self::default_path();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let data = std::fs::read(&path)
+            .map_err(|e| StivaError::Registry(format!("failed to read credentials: {e}")))?;
+        serde_json::from_slice(&data)
+            .map_err(|e| StivaError::Registry(format!("invalid credentials file: {e}")))
+    }
+
+    /// Save credentials to disk.
+    pub fn save(&self) -> Result<(), StivaError> {
+        let path = Self::default_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(self)?;
+        std::fs::write(&path, &data)?;
+        Ok(())
+    }
+
+    /// Store credentials for a registry.
+    pub fn set(&mut self, registry: &str, username: &str, password: &str) {
+        self.registries.insert(
+            registry.to_string(),
+            RegistryCredential {
+                username: username.to_string(),
+                password: password.to_string(),
+            },
+        );
+    }
+
+    /// Get credentials for a registry.
+    #[must_use]
+    pub fn get(&self, registry: &str) -> Option<&RegistryCredential> {
+        self.registries.get(registry)
+    }
+
+    /// Remove credentials for a registry.
+    pub fn remove(&mut self, registry: &str) -> bool {
+        self.registries.remove(registry).is_some()
+    }
+
+    /// Convert to a RegistryConfig for a specific registry.
+    #[must_use]
+    pub fn to_config(&self, registry: &str) -> RegistryConfig {
+        match self.get(registry) {
+            Some(cred) => RegistryConfig {
+                username: Some(cred.username.clone()),
+                password: Some(cred.password.clone()),
+            },
+            None => RegistryConfig::default(),
+        }
+    }
+}
+
+/// Stiva config directory path (`~/.stiva/`).
+fn dirs_path() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".stiva"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.stiva"))
+}
+
 /// Fetched manifest — either a single manifest or an index.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

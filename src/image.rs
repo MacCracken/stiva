@@ -418,6 +418,60 @@ impl ImageStore {
         self.save_index(&images)
     }
 
+    /// Garbage-collect unreferenced blobs and unpacked layers.
+    ///
+    /// Walks the image index to build a set of referenced digests,
+    /// then removes any blob or layer directory not in that set.
+    /// Returns `(blobs_removed, layers_removed)`.
+    pub fn gc(&self) -> Result<(u32, u32), StivaError> {
+        info!("running image garbage collection");
+        let images = self.load_index()?;
+
+        // Build referenced digest set from all images.
+        let referenced: std::collections::HashSet<String> = images
+            .iter()
+            .flat_map(|i| {
+                let mut digests = vec![i.id.clone()];
+                digests.extend(i.layers.iter().map(|l| l.digest.clone()));
+                digests
+            })
+            .collect();
+
+        let referenced_hex: std::collections::HashSet<String> = referenced
+            .iter()
+            .filter_map(|d| d.strip_prefix("sha256:").map(|s| s.to_string()))
+            .collect();
+
+        // Remove unreferenced blobs.
+        let mut blobs_removed = 0u32;
+        let blobs_dir = self.root.join("blobs").join("sha256");
+        if let Ok(entries) = std::fs::read_dir(&blobs_dir) {
+            for entry in entries.flatten() {
+                let hex = entry.file_name().to_string_lossy().to_string();
+                if !referenced_hex.contains(&hex) {
+                    let _ = std::fs::remove_file(entry.path());
+                    blobs_removed += 1;
+                }
+            }
+        }
+
+        // Remove unreferenced unpacked layer directories.
+        let mut layers_removed = 0u32;
+        let layers_dir = self.root.join("layers");
+        if let Ok(entries) = std::fs::read_dir(&layers_dir) {
+            for entry in entries.flatten() {
+                let hex = entry.file_name().to_string_lossy().to_string();
+                if !referenced_hex.contains(&hex) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                    layers_removed += 1;
+                }
+            }
+        }
+
+        info!(blobs_removed, layers_removed, "garbage collection complete");
+        Ok((blobs_removed, layers_removed))
+    }
+
     /// Get image storage root.
     #[inline]
     #[must_use]

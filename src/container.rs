@@ -862,6 +862,72 @@ impl ContainerManager {
         Ok(self.containers.read().await.values().cloned().collect())
     }
 
+    /// Rename a container.
+    pub async fn rename(&self, id: &str, new_name: &str) -> Result<(), StivaError> {
+        let mut containers = self.containers.write().await;
+        let container = containers
+            .get_mut(id)
+            .ok_or_else(|| StivaError::ContainerNotFound(id.to_string()))?;
+
+        info!(container = id, old_name = ?container.name, new_name, "renaming container");
+        container.name = Some(new_name.to_string());
+        drop(containers);
+        self.persist_state().await;
+        Ok(())
+    }
+
+    /// Update resource limits on a running container.
+    ///
+    /// Writes new cgroup limits for the container's process. Only updates
+    /// non-zero values — pass 0 to leave a limit unchanged.
+    pub async fn update(
+        &self,
+        id: &str,
+        memory_limit: u64,
+        cpu_shares: u64,
+        max_pids: u32,
+    ) -> Result<(), StivaError> {
+        let pid = self
+            .require_pid(id, &[ContainerState::Running], "update")
+            .await?;
+
+        info!(container = id, pid, "updating container resource limits");
+
+        // Build a minimal spec with only the limits to update.
+        let spec = crate::runtime::RuntimeSpec {
+            rootfs: std::path::PathBuf::new(),
+            command: vec![],
+            env: vec![],
+            namespaces: vec![],
+            memory_limit_bytes: if memory_limit > 0 {
+                Some(memory_limit)
+            } else {
+                None
+            },
+            cpu_shares: if cpu_shares > 0 {
+                Some(cpu_shares)
+            } else {
+                None
+            },
+            max_pids: if max_pids > 0 { Some(max_pids) } else { None },
+            user: None,
+            workdir: String::new(),
+            read_only_rootfs: false,
+            mounts: vec![],
+            rootless: false,
+            secrets: vec![],
+            scan_policy: None,
+            timeout_ms: 0,
+            backend: None,
+            min_isolation_score: None,
+            io_max_bytes_per_sec: None,
+            agent_id: None,
+            domainname: None,
+        };
+        crate::runtime::apply_cgroup_limits(pid, &spec).await;
+        Ok(())
+    }
+
     /// Checkpoint a running daemon container.
     ///
     /// Creates a snapshot of the container's process state that can be

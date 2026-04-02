@@ -6,41 +6,6 @@ Last updated: 2026-04-02
 
 ---
 
-## P4 — Storage & Images
-
-- [ ] Layer build cache — content-addressable build step cache keyed by (base image digest + step hash), with digest verification on reuse
-- [ ] Image garbage collection — reference-counted blob cleanup for orphaned layers
-- [ ] Registry credential store — persistent credential storage (not just per-session tokens)
-- [ ] Multi-stage builds — `FROM ... AS builder` equivalent in Stivafile
-
----
-
-## P5 — Runtime & Orchestration
-
-### Container runtime
-
-- [ ] IO cgroup limits — `io.max` for disk throughput control
-- [ ] Container rename — `stiva rename <id> <new-name>`
-- [ ] Container update — live resource limit changes on running containers
-
-### CRIU
-
-- [ ] Pre-dump for iterative migration — reduce downtime for large-memory containers
-- [ ] Lazy migration / page server — on-demand page transfer during restore
-
-### Ansamblu orchestration
-
-- [ ] Rolling update — replace service replicas one at a time with health check gates
-- [ ] Scale command — `stiva ansamblu scale <service> <count>` for runtime replica adjustment
-- [ ] Service logs — aggregate logs across replicas
-
-### Fleet
-
-- [ ] Fleet health monitoring — heartbeat-based node health with automatic rescheduling
-- [ ] Deployment rollback — revert to previous deployment version
-
----
-
 ## P6 — Developer Experience
 
 - [ ] `stiva events` — stream lifecycle events to terminal

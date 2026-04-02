@@ -290,6 +290,61 @@ pub fn select_migration_target(
     Ok(best.id.clone())
 }
 
+// ---------------------------------------------------------------------------
+// Fleet health monitoring
+// ---------------------------------------------------------------------------
+
+/// Check fleet node health based on heartbeat timestamps.
+///
+/// Nodes that haven't been seen within `timeout` are marked NotReady.
+/// Returns the IDs of nodes whose status changed.
+pub fn check_fleet_health(nodes: &mut [FleetNode], timeout: chrono::Duration) -> Vec<String> {
+    let cutoff = chrono::Utc::now() - timeout;
+    let mut changed = Vec::new();
+
+    for node in nodes.iter_mut() {
+        if node.status == NodeStatus::Ready && node.last_seen < cutoff {
+            info!(
+                node = %node.id,
+                last_seen = %node.last_seen,
+                "node heartbeat expired, marking NotReady"
+            );
+            node.status = NodeStatus::NotReady;
+            changed.push(node.id.clone());
+        }
+    }
+
+    changed
+}
+
+/// Plan a rollback: reschedule containers from failed nodes to healthy ones.
+///
+/// Returns a list of `(source_node, target_node)` pairs for container migration.
+pub fn plan_rollback(
+    nodes: &[FleetNode],
+    constraints: &DeploymentConstraints,
+) -> Vec<(String, String)> {
+    let failed: Vec<&FleetNode> = nodes
+        .iter()
+        .filter(|n| n.status == NodeStatus::NotReady && n.capacity.running_containers > 0)
+        .collect();
+
+    let mut migrations = Vec::new();
+
+    for failed_node in &failed {
+        // Find a healthy target for each container on the failed node.
+        for _ in 0..failed_node.capacity.running_containers {
+            if let Ok(target) = select_migration_target(nodes, constraints)
+                && target != failed_node.id
+            {
+                migrations.push((failed_node.id.clone(), target));
+            }
+        }
+    }
+
+    migrations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

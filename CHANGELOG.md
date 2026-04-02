@@ -23,6 +23,20 @@ All notable changes to stiva are documented here.
 - **Network policy** — `NetworkPolicy` type with egress/ingress allow/deny lists, port restrictions, and rate limiting; `to_nft_rules()` generates nftables rules
 - **Container DNS resolution** — `DnsRegistry` for container-to-container name resolution within ansamblu sessions; `inject_into()` writes service names to container `/etc/hosts`
 - **CNI-compatible types** — network policy and dual-stack types align with CNI spec patterns
+- **Image garbage collection** — `ImageStore::gc()` removes unreferenced blobs and unpacked layer directories; `Stiva::gc()` top-level API
+- **Container rename** — `ContainerManager::rename()` and `Stiva::rename()` for changing container names
+- **Container update** — `ContainerManager::update()` and `Stiva::update()` for live resource limit changes (memory, CPU, PIDs) on running containers
+- **IO cgroup limits** — `RuntimeSpec.io_max_bytes_per_sec` field; `apply_cgroup_limits()` writes `io.max` for disk throughput control
+- **Rolling updates** — `RollingUpdateConfig` (max_surge, max_unavailable, delay), `plan_rolling_update()` for ansamblu service updates
+- **Ansamblu scale** — `compute_scale()` computes add/remove actions, `Stiva::ansamblu_scale()` adjusts replica count at runtime
+- **Service logs** — `Stiva::service_logs()` aggregates logs across all replicas of an ansamblu service
+- **Fleet health monitoring** — `check_fleet_health()` marks nodes NotReady when heartbeat expires
+- **Deployment rollback** — `plan_rollback()` identifies failed nodes and plans container migrations to healthy targets
+- **Layer build cache** — content-addressable cache keyed by `sha256(base_digest + step_index + step_json)`; `check_build_cache()` / `record_build_cache()` skip redundant step execution
+- **Multi-stage builds** — `BuildStage` type and `FromStage` build step variant for copying artifacts between named stages (equivalent to `FROM ... AS builder`)
+- **Registry credential store** — `CredentialStore` persists credentials to `~/.stiva/credentials.json` with per-registry `set()` / `get()` / `remove()` and `to_config()` for `RegistryClient`
+- **CRIU pre-dump** — `pre_dump_container()` captures dirty pages incrementally with `--prev-images-dir` chaining for iterative migration
+- **CRIU lazy pages** — `restore_lazy()` restores with `--lazy-pages` and `--page-server` for on-demand page transfer during live migration
 - **Security audit log** — `docs/security-audit-log.md` tracking CVE reviews and remediation
 - **Spec compliance tracker** — `docs/spec-compliance.md` tracking OCI, MCP, CRIU, and networking spec conformance
 - **Roadmap** — `docs/development/roadmap.md` with prioritized work items

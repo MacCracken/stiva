@@ -598,6 +598,104 @@ impl Stiva {
         }
         Ok(())
     }
+
+    /// Rename a container.
+    pub async fn rename(&self, id: &str, new_name: &str) -> Result<(), StivaError> {
+        info!(container = id, new_name, "stiva rename");
+        self.containers.rename(id, new_name).await
+    }
+
+    /// Update resource limits on a running container.
+    pub async fn update(
+        &self,
+        id: &str,
+        memory_limit: u64,
+        cpu_shares: u64,
+        max_pids: u32,
+    ) -> Result<(), StivaError> {
+        info!(container = id, "stiva update");
+        self.containers
+            .update(id, memory_limit, cpu_shares, max_pids)
+            .await
+    }
+
+    /// Garbage-collect unreferenced image blobs and layers.
+    pub fn gc(&self) -> Result<(u32, u32), StivaError> {
+        info!("stiva gc");
+        self.image_store.gc()
+    }
+
+    /// Scale a service within an ansamblu session.
+    ///
+    /// Adjusts the replica count by creating or removing containers.
+    /// Returns updated container ID list for the service.
+    #[cfg(feature = "ansamblu")]
+    pub async fn ansamblu_scale(
+        &self,
+        session: &mut ansamblu::AnsambluSession,
+        service_name: &str,
+        service: &ansamblu::ServiceDef,
+        desired: u32,
+    ) -> Result<Vec<String>, StivaError> {
+        info!(service = service_name, desired, "stiva ansamblu scale");
+        let (to_add, to_remove) = ansamblu::compute_scale(session, service_name, desired);
+
+        // Remove excess replicas.
+        for id in &to_remove {
+            let _ = self.containers.stop(id).await;
+            let _ = self.containers.remove(id).await;
+        }
+        if let Some(ids) = session.services.get_mut(service_name) {
+            ids.retain(|id| !to_remove.contains(id));
+        }
+
+        // Add new replicas.
+        let current_count = session
+            .services
+            .get(service_name)
+            .map(|ids| ids.len() as u32)
+            .unwrap_or(0);
+
+        for i in 0..to_add {
+            let config = ansamblu::service_to_config(service_name, service, current_count + i);
+            let img = self.pull(&service.image).await?;
+            let container = self.containers.create(&img, config).await?;
+            let _ = self.containers.start(&container.id).await;
+            session
+                .services
+                .entry(service_name.to_string())
+                .or_default()
+                .push(container.id);
+        }
+
+        Ok(session
+            .services
+            .get(service_name)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Get aggregated logs for all replicas of a service.
+    #[cfg(feature = "ansamblu")]
+    pub async fn service_logs(
+        &self,
+        session: &ansamblu::AnsambluSession,
+        service_name: &str,
+    ) -> Result<String, StivaError> {
+        let ids = ansamblu::service_container_ids(session, service_name);
+        let mut combined = String::new();
+        for id in &ids {
+            match self.containers.logs(id).await {
+                Ok(logs) => {
+                    combined.push_str(&format!("=== {id} ===\n{logs}\n"));
+                }
+                Err(e) => {
+                    combined.push_str(&format!("=== {id} === (error: {e})\n"));
+                }
+            }
+        }
+        Ok(combined)
+    }
 }
 
 #[cfg(test)]

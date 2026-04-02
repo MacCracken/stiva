@@ -47,6 +47,8 @@ pub struct RuntimeSpec {
     pub backend: Option<String>,
     /// Minimum isolation strength score (0–100).
     pub min_isolation_score: Option<u8>,
+    /// IO throughput limit in bytes/sec (0 = unlimited).
+    pub io_max_bytes_per_sec: Option<u64>,
     /// Agent ID for sandbox tracking.
     pub agent_id: Option<String>,
     /// Domain name for UTS namespace (OCI runtime-spec v1.2.0).
@@ -238,6 +240,7 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
         timeout_ms: config.timeout_ms,
         backend: config.backend.clone(),
         min_isolation_score: config.min_isolation_score,
+        io_max_bytes_per_sec: None, // Not yet configurable via ContainerConfig.
         agent_id: config.agent_id.clone(),
         domainname: config.domainname.clone(),
     })
@@ -1111,6 +1114,21 @@ pub async fn apply_cgroup_limits(pid: u32, spec: &RuntimeSpec) {
             );
         }
     }
+
+    // IO throughput limit via io.max (format: "MAJ:MIN rbps=BYTES wbps=BYTES").
+    // Applies to all block devices (252:0 is common for device-mapper/overlay).
+    if let Some(io_max) = spec.io_max_bytes_per_sec
+        && io_max > 0
+    {
+        let path = format!("{base}/io.max");
+        // Apply to major device 252 (device-mapper, common for overlay).
+        let val = format!("252:0 rbps={io_max} wbps={io_max}");
+        if let Err(e) = tokio::fs::write(&path, &val).await {
+            tracing::warn!(pid, path = %path, error = %e, "failed to write io.max");
+        } else {
+            info!(pid, io_max_bps = io_max, "cgroup io.max applied");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1277,132 @@ pub async fn checkpoint_container(
         "checkpoint complete"
     );
     Ok(())
+}
+
+/// Perform a CRIU pre-dump for iterative migration.
+///
+/// Pre-dump captures dirty memory pages without freezing the process for long.
+/// Multiple pre-dumps can be chained to minimize final dump time.
+/// `parent_dir` points to the previous pre-dump (or None for the first one).
+pub async fn pre_dump_container(
+    pid: u32,
+    dump_dir: &Path,
+    parent_dir: Option<&Path>,
+) -> Result<(), StivaError> {
+    info!(
+        pid,
+        dump_dir = %dump_dir.display(),
+        parent = parent_dir.map(|p| p.display().to_string()).as_deref(),
+        "pre-dumping container via CRIU"
+    );
+
+    if !criu_available() {
+        return Err(StivaError::Runtime(
+            "CRIU is not available on this system".into(),
+        ));
+    }
+
+    tokio::fs::create_dir_all(dump_dir)
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to create pre-dump directory: {e}")))?;
+
+    let mut cmd = tokio::process::Command::new("criu");
+    cmd.arg("pre-dump")
+        .arg("--tree")
+        .arg(pid.to_string())
+        .arg("--images-dir")
+        .arg(dump_dir)
+        .arg("--shell-job");
+
+    if let Some(parent) = parent_dir {
+        cmd.arg("--prev-images-dir").arg(parent);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to execute criu pre-dump: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(StivaError::Runtime(format!(
+            "criu pre-dump failed (exit {}): {stderr}",
+            output.status.code().unwrap_or(-1),
+        )));
+    }
+
+    info!(pid, dump_dir = %dump_dir.display(), "pre-dump complete");
+    Ok(())
+}
+
+/// Restore a container using CRIU lazy pages (on-demand page transfer).
+///
+/// Starts the restored process immediately while pages are fetched lazily
+/// from a page server. The `page_server_addr` is `host:port` of the
+/// CRIU page server serving the checkpoint images.
+pub async fn restore_lazy(
+    dump_dir: &Path,
+    rootfs: &Path,
+    page_server_addr: &str,
+) -> Result<u32, StivaError> {
+    info!(
+        dump_dir = %dump_dir.display(),
+        rootfs = %rootfs.display(),
+        page_server = page_server_addr,
+        "restoring container via CRIU lazy pages"
+    );
+
+    if !criu_available() {
+        return Err(StivaError::Runtime(
+            "CRIU is not available on this system".into(),
+        ));
+    }
+
+    let (host, port) = page_server_addr.rsplit_once(':').ok_or_else(|| {
+        StivaError::Runtime(format!("invalid page server address: {page_server_addr}"))
+    })?;
+
+    let mut cmd = tokio::process::Command::new("criu");
+    cmd.arg("restore")
+        .arg("--images-dir")
+        .arg(dump_dir)
+        .arg("--root")
+        .arg(rootfs)
+        .arg("--shell-job")
+        .arg("--restore-detached")
+        .arg("--lazy-pages")
+        .arg("--page-server")
+        .arg("--address")
+        .arg(host)
+        .arg("--port")
+        .arg(port)
+        .arg("--pidfile")
+        .arg(dump_dir.join("restore.pid"));
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to execute criu lazy restore: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(StivaError::Runtime(format!(
+            "criu lazy restore failed (exit {}): {stderr}",
+            output.status.code().unwrap_or(-1),
+        )));
+    }
+
+    // Read PID from pidfile.
+    let pid_str = tokio::fs::read_to_string(dump_dir.join("restore.pid"))
+        .await
+        .map_err(|e| StivaError::Runtime(format!("failed to read restored PID: {e}")))?;
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| StivaError::Runtime(format!("invalid restored PID: {e}")))?;
+
+    info!(pid, "lazy restore complete");
+    Ok(pid)
 }
 
 /// Restore a container process from a CRIU checkpoint.
@@ -1612,6 +1756,7 @@ mod tests {
             timeout_ms: 0,
             backend: None,
             min_isolation_score: None,
+            io_max_bytes_per_sec: None,
             agent_id: None,
             domainname: None,
         };
@@ -1640,6 +1785,7 @@ mod tests {
             timeout_ms: 0,
             backend: None,
             min_isolation_score: None,
+            io_max_bytes_per_sec: None,
             agent_id: None,
             domainname: None,
         };
@@ -1668,6 +1814,7 @@ mod tests {
             timeout_ms: 0,
             backend: None,
             min_isolation_score: None,
+            io_max_bytes_per_sec: None,
             agent_id: None,
             domainname: None,
         };

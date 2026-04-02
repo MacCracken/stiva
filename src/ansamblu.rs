@@ -110,6 +110,122 @@ pub struct AnsambluSession {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Rolling update configuration for a service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollingUpdateConfig {
+    /// Maximum number of replicas that can be created above the desired count.
+    #[serde(default = "default_max_surge")]
+    pub max_surge: u32,
+    /// Maximum number of replicas that can be unavailable during update.
+    #[serde(default = "default_max_unavailable")]
+    pub max_unavailable: u32,
+    /// Delay between replacing replicas (seconds).
+    #[serde(default = "default_update_delay")]
+    pub delay_secs: u64,
+}
+
+fn default_max_surge() -> u32 {
+    1
+}
+fn default_max_unavailable() -> u32 {
+    1
+}
+fn default_update_delay() -> u64 {
+    10
+}
+
+impl Default for RollingUpdateConfig {
+    fn default() -> Self {
+        Self {
+            max_surge: 1,
+            max_unavailable: 1,
+            delay_secs: 10,
+        }
+    }
+}
+
+/// Plan for a rolling update — describes which replicas to create/destroy.
+#[derive(Debug, Clone)]
+pub struct RollingUpdatePlan {
+    /// Service being updated.
+    pub service_name: String,
+    /// Old container IDs to remove (in order).
+    pub old_containers: Vec<String>,
+    /// Number of new replicas to create.
+    pub new_replica_count: u32,
+    /// New image reference.
+    pub new_image: String,
+    /// Rolling update settings.
+    pub config: RollingUpdateConfig,
+}
+
+/// Plan a rolling update for a service.
+///
+/// Compares the current session state with a new service definition
+/// and produces a plan describing which containers to replace.
+#[must_use = "rolling update plan should be executed"]
+pub fn plan_rolling_update(
+    session: &AnsambluSession,
+    service_name: &str,
+    new_service: &ServiceDef,
+) -> Result<RollingUpdatePlan, StivaError> {
+    let old_containers = session
+        .services
+        .get(service_name)
+        .cloned()
+        .unwrap_or_default();
+
+    let new_count = replica_count(new_service);
+
+    Ok(RollingUpdatePlan {
+        service_name: service_name.to_string(),
+        old_containers,
+        new_replica_count: new_count,
+        new_image: new_service.image.clone(),
+        config: RollingUpdateConfig::default(),
+    })
+}
+
+/// Compute scale actions for a service.
+///
+/// Returns `(to_add, to_remove)` — number of replicas to create/destroy.
+#[must_use]
+pub fn compute_scale(
+    session: &AnsambluSession,
+    service_name: &str,
+    desired: u32,
+) -> (u32, Vec<String>) {
+    let current = session
+        .services
+        .get(service_name)
+        .map(|ids| ids.len() as u32)
+        .unwrap_or(0);
+
+    if desired > current {
+        (desired - current, vec![])
+    } else if desired < current {
+        let remove_count = (current - desired) as usize;
+        let to_remove: Vec<String> = session
+            .services
+            .get(service_name)
+            .map(|ids| ids.iter().rev().take(remove_count).cloned().collect())
+            .unwrap_or_default();
+        (0, to_remove)
+    } else {
+        (0, vec![])
+    }
+}
+
+/// Aggregate logs from all replicas of a service.
+#[must_use]
+pub fn service_container_ids(session: &AnsambluSession, service_name: &str) -> Vec<String> {
+    session
+        .services
+        .get(service_name)
+        .cloned()
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
