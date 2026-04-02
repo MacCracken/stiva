@@ -14,6 +14,11 @@ All notable changes to stiva are documented here.
 - **Live MCP tool dispatch** — `handle_tool()` now takes `Arc<Stiva>` and calls real runtime operations (pull, run, ps, stop, exec, push, inspect) instead of returning stubs
 - **MCP resources** — `list_resources()` and `read_resource()` expose containers and images as MCP resources with `stiva://` URIs
 - **Container annotations** — `ContainerConfig.annotations` field for OCI key-value metadata
+- **OCI artifact manifests** — `OciManifest.artifact_type` and `subject` fields for OCI v1.1.0 artifact support (signatures, SBOMs, attestations); `is_artifact()` helper method
+- **Foreign layer support** — `Descriptor.urls` field for non-distributable layers; pull pipeline fetches from external URLs when present instead of registry blob API
+- **ID-mapped mounts** — `X-mount.idmap=` option added to bind mounts when `rootless=true` (OCI runtime-spec v1.2.0) for proper UID/GID mapping in rootless containers
+- **Descriptor annotations** — `Descriptor.annotations` field for per-layer/config metadata
+- **Constructor helpers** — `Descriptor::new()`, `Descriptor::foreign()`, `OciManifest::new()` for cleaner construction
 - **Security audit log** — `docs/security-audit-log.md` tracking CVE reviews and remediation
 - **Spec compliance tracker** — `docs/spec-compliance.md` tracking OCI, MCP, CRIU, and networking spec conformance
 - **Roadmap** — `docs/development/roadmap.md` with prioritized work items

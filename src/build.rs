@@ -794,16 +794,14 @@ arg = "baz"
         let config_data = br#"{"os":"linux"}"#;
         let config_digest = sha256_digest(config_data);
 
-        let manifest = crate::registry::OciManifest {
-            schema_version: 2,
-            media_type: None,
-            config: crate::registry::Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![],
-        };
+        let manifest = crate::registry::OciManifest::new(
+            crate::registry::Descriptor::new(
+                "application/vnd.oci.image.config.v1+json",
+                &config_digest,
+                config_data.len() as u64,
+            ),
+            vec![],
+        );
 
         Mock::given(method("GET"))
             .and(path("/v2/library/alpine/manifests/3.19"))

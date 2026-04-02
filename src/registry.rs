@@ -16,6 +16,9 @@ use tracing::{debug, warn};
 // ---------------------------------------------------------------------------
 
 /// OCI manifest (v2, schema 2).
+///
+/// Also supports OCI artifact manifests (v1.1.0) where `artifact_type`
+/// is set and `config.mediaType` is `application/vnd.oci.empty.v1+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OciManifest {
     #[serde(rename = "schemaVersion")]
@@ -24,6 +27,17 @@ pub struct OciManifest {
     pub media_type: Option<String>,
     pub config: Descriptor,
     pub layers: Vec<Descriptor>,
+    /// OCI artifact type (v1.1.0). Present when this manifest describes
+    /// a non-container artifact (e.g., signatures, SBOMs, attestations).
+    #[serde(
+        rename = "artifactType",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artifact_type: Option<String>,
+    /// Subject descriptor — links this artifact to a parent manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Descriptor>,
 }
 
 /// OCI content descriptor.
@@ -33,6 +47,64 @@ pub struct Descriptor {
     pub media_type: String,
     pub digest: String,
     pub size: u64,
+    /// External URLs for non-distributable (foreign) layers.
+    /// When present, the blob should be fetched from these URLs
+    /// instead of the registry blob API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urls: Option<Vec<String>>,
+    /// Annotations on this descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<HashMap<String, String>>,
+}
+
+impl Descriptor {
+    /// Create a new descriptor with required fields only.
+    #[must_use]
+    pub fn new(media_type: &str, digest: &str, size: u64) -> Self {
+        Self {
+            media_type: media_type.to_string(),
+            digest: digest.to_string(),
+            size,
+            urls: None,
+            annotations: None,
+        }
+    }
+
+    /// Create a foreign layer descriptor with external URLs.
+    #[must_use]
+    pub fn foreign(media_type: &str, digest: &str, size: u64, urls: Vec<String>) -> Self {
+        Self {
+            urls: Some(urls),
+            ..Self::new(media_type, digest, size)
+        }
+    }
+}
+
+impl OciManifest {
+    /// Create a standard image manifest.
+    #[must_use]
+    pub fn new(config: Descriptor, layers: Vec<Descriptor>) -> Self {
+        Self {
+            schema_version: 2,
+            media_type: None,
+            config,
+            layers,
+            artifact_type: None,
+            subject: None,
+        }
+    }
+}
+
+/// Media type for empty OCI config (used in artifact manifests).
+pub(crate) const MEDIA_OCI_EMPTY: &str = "application/vnd.oci.empty.v1+json";
+
+impl OciManifest {
+    /// Returns true if this manifest represents an OCI artifact (v1.1.0)
+    /// rather than a container image.
+    #[must_use]
+    pub fn is_artifact(&self) -> bool {
+        self.artifact_type.is_some() || self.config.media_type == MEDIA_OCI_EMPTY
+    }
 }
 
 /// OCI image index (manifest list) for multi-arch images.
@@ -79,7 +151,7 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ManifestResponse {
-    Manifest(OciManifest),
+    Manifest(Box<OciManifest>),
     Index(OciIndex),
 }
 
@@ -233,7 +305,7 @@ impl RegistryClient {
             Ok(ManifestResponse::Index(index))
         } else {
             let manifest: OciManifest = serde_json::from_slice(&body)?;
-            Ok(ManifestResponse::Manifest(manifest))
+            Ok(ManifestResponse::Manifest(Box::new(manifest)))
         }
     }
 
@@ -244,7 +316,7 @@ impl RegistryClient {
     pub async fn resolve_manifest(&self, image: &ImageRef) -> Result<OciManifest, StivaError> {
         debug!(image = %image.full_ref(), "resolving manifest for current platform");
         match self.fetch_manifest(image).await? {
-            ManifestResponse::Manifest(m) => Ok(m),
+            ManifestResponse::Manifest(m) => Ok(*m),
             ManifestResponse::Index(index) => {
                 let target = current_platform();
                 let entry = select_platform(&index, &target)?;
@@ -256,7 +328,7 @@ impl RegistryClient {
                     digest: Some(entry.digest.clone()),
                 };
                 match self.fetch_manifest(&pinned).await? {
-                    ManifestResponse::Manifest(m) => Ok(m),
+                    ManifestResponse::Manifest(m) => Ok(*m),
                     ManifestResponse::Index(_) => Err(StivaError::Registry(
                         "nested manifest list not supported".into(),
                     )),
@@ -1107,17 +1179,15 @@ mod tests {
 
     #[test]
     fn manifest_response_variants() {
-        let manifest = OciManifest {
-            schema_version: 2,
-            media_type: None,
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: "sha256:abc".into(),
-                size: 100,
-            },
-            layers: vec![],
-        };
-        let resp = ManifestResponse::Manifest(manifest);
+        let manifest = OciManifest::new(
+            Descriptor::new(
+                "application/vnd.oci.image.config.v1+json",
+                "sha256:abc",
+                100,
+            ),
+            vec![],
+        );
+        let resp = ManifestResponse::Manifest(Box::new(manifest));
         assert!(matches!(resp, ManifestResponse::Manifest(_)));
 
         let index = OciIndex {
@@ -1147,11 +1217,11 @@ mod tests {
 
     #[test]
     fn descriptor_serde_round_trip() {
-        let desc = Descriptor {
-            media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-            digest: "sha256:abc123".into(),
-            size: 1_048_576,
-        };
+        let desc = Descriptor::new(
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+            "sha256:abc123",
+            1_048_576,
+        );
         let json = serde_json::to_string(&desc).unwrap();
         let back: Descriptor = serde_json::from_str(&json).unwrap();
         assert_eq!(back.digest, "sha256:abc123");
@@ -1193,25 +1263,26 @@ mod tests {
     #[test]
     fn manifest_serde_round_trip() {
         let manifest = OciManifest {
-            schema_version: 2,
             media_type: Some(MEDIA_OCI_MANIFEST.into()),
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: "sha256:config".into(),
-                size: 512,
-            },
-            layers: vec![
-                Descriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                    digest: "sha256:layer1".into(),
-                    size: 10_000,
-                },
-                Descriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                    digest: "sha256:layer2".into(),
-                    size: 20_000,
-                },
-            ],
+            ..OciManifest::new(
+                Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    "sha256:config",
+                    512,
+                ),
+                vec![
+                    Descriptor::new(
+                        "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "sha256:layer1",
+                        10_000,
+                    ),
+                    Descriptor::new(
+                        "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "sha256:layer2",
+                        20_000,
+                    ),
+                ],
+            )
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: OciManifest = serde_json::from_str(&json).unwrap();
@@ -1395,18 +1466,19 @@ mod tests {
     /// Helper: JSON body for a simple OCI manifest.
     fn test_manifest_json() -> String {
         serde_json::to_string(&OciManifest {
-            schema_version: 2,
             media_type: Some(MEDIA_OCI_MANIFEST.into()),
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: "sha256:cfgaaa".into(),
-                size: 64,
-            },
-            layers: vec![Descriptor {
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                digest: "sha256:layeraaa".into(),
-                size: 128,
-            }],
+            ..OciManifest::new(
+                Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    "sha256:cfgaaa",
+                    64,
+                ),
+                vec![Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "sha256:layeraaa",
+                    128,
+                )],
+            )
         })
         .unwrap()
     }
@@ -2283,18 +2355,19 @@ mod tests {
                 .unwrap();
 
         let manifest = OciManifest {
-            schema_version: 2,
             media_type: Some(MEDIA_OCI_MANIFEST.to_string()),
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: "sha256:config".into(),
-                size: 100,
-            },
-            layers: vec![Descriptor {
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                digest: "sha256:layer1".into(),
-                size: 4096,
-            }],
+            ..OciManifest::new(
+                Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    "sha256:config",
+                    100,
+                ),
+                vec![Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "sha256:layer1",
+                    4096,
+                )],
+            )
         };
 
         client.push_manifest(&image, &manifest).await.unwrap();

@@ -136,13 +136,22 @@ fn standard_mounts() -> Vec<SpecMount> {
 }
 
 /// Convert volume specs into SpecMount entries.
-fn volume_mounts(volumes: &[String]) -> Result<Vec<SpecMount>, StivaError> {
+///
+/// When `rootless` is true, adds `X-mount.idmap=` option (OCI runtime-spec v1.2.0)
+/// to enable user namespace ID-mapped mounts so bind mounts work correctly
+/// with UID/GID remapping.
+fn volume_mounts(volumes: &[String], rootless: bool) -> Result<Vec<SpecMount>, StivaError> {
     let mut mounts = Vec::new();
     for spec in volumes {
         let vol = crate::storage::parse_volume(spec)?;
         let mut options = vec!["rbind".into()];
         if vol.read_only {
             options.push("ro".into());
+        }
+        // OCI runtime-spec v1.2.0: ID-mapped mounts for rootless containers.
+        // Maps host UIDs/GIDs to container namespace so bind mounts are accessible.
+        if rootless {
+            options.push("X-mount.idmap=".into());
         }
         mounts.push(SpecMount {
             source: Some(vol.source),
@@ -194,7 +203,7 @@ pub fn generate_spec(container: &Container, rootfs: &Path) -> Result<RuntimeSpec
 
     // Build mount list: standard mounts + user volumes.
     let mut mounts = standard_mounts();
-    mounts.extend(volume_mounts(&config.volumes)?);
+    mounts.extend(volume_mounts(&config.volumes, config.rootless)?);
 
     let mut namespaces = vec![
         Namespace::Pid,
@@ -1474,18 +1483,26 @@ mod tests {
     #[test]
     fn volume_mounts_conversion() {
         let specs = vec!["/a:/b".into(), "/c:/d:ro".into()];
-        let mounts = volume_mounts(&specs).unwrap();
+        let mounts = volume_mounts(&specs, false).unwrap();
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[0].mount_type, "bind");
         assert!(mounts[0].options.contains(&"rbind".to_string()));
         assert!(!mounts[0].options.contains(&"ro".to_string()));
         assert!(mounts[1].options.contains(&"ro".to_string()));
+
+        // Rootless adds idmap option.
+        let mounts_rootless = volume_mounts(&specs, true).unwrap();
+        assert!(
+            mounts_rootless[0]
+                .options
+                .contains(&"X-mount.idmap=".to_string())
+        );
     }
 
     #[test]
     fn volume_mounts_invalid() {
         let specs = vec!["nocolon".into()];
-        assert!(volume_mounts(&specs).is_err());
+        assert!(volume_mounts(&specs, false).is_err());
     }
 
     #[test]

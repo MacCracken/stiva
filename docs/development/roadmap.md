@@ -6,19 +6,6 @@ Last updated: 2026-04-02
 
 ---
 
-## P1 — OCI Spec Compliance
-
-### Runtime spec v1.2.0
-
-- [ ] `idmap` mount option — user namespace ID-mapped mounts for rootless containers
-
-### Image spec v1.1.0
-
-- [ ] Artifact support — OCI artifact manifest type for non-container content
-- [ ] Non-distributable / foreign layers — handle layers with external URLs
-
----
-
 ## P3 — Networking
 
 - [ ] IPv6 support — dual-stack IP pool, IPv6 NAT/masquerade via nein

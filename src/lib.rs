@@ -777,20 +777,18 @@ mod tests {
         let layer_data = b"layer";
         let layer_digest = test_digest(layer_data);
 
-        let manifest = registry::OciManifest {
-            schema_version: 2,
-            media_type: None,
-            config: registry::Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![registry::Descriptor {
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                digest: layer_digest.clone(),
-                size: layer_data.len() as u64,
-            }],
-        };
+        let manifest = registry::OciManifest::new(
+            registry::Descriptor::new(
+                "application/vnd.oci.image.config.v1+json",
+                &config_digest,
+                config_data.len() as u64,
+            ),
+            vec![registry::Descriptor::new(
+                "application/vnd.oci.image.layer.v1.tar+gzip",
+                &layer_digest,
+                layer_data.len() as u64,
+            )],
+        );
 
         Mock::given(method("GET"))
             .and(path("/v2/library/alpine/manifests/latest"))
@@ -830,16 +828,14 @@ mod tests {
         let config_data = br#"{"os":"linux"}"#;
         let config_digest = test_digest(config_data);
 
-        let manifest = registry::OciManifest {
-            schema_version: 2,
-            media_type: None,
-            config: registry::Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![],
-        };
+        let manifest = registry::OciManifest::new(
+            registry::Descriptor::new(
+                "application/vnd.oci.image.config.v1+json",
+                &config_digest,
+                config_data.len() as u64,
+            ),
+            vec![],
+        );
 
         Mock::given(method("GET"))
             .and(path("/v2/library/alpine/manifests/latest"))

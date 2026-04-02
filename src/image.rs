@@ -176,9 +176,18 @@ impl ImageStore {
             .map(|layer| {
                 let digest = layer.digest.clone();
                 let size = layer.size;
+                let urls = layer.urls.clone();
                 async move {
                     info!(digest = %digest, size, "pulling layer");
-                    let data = client.fetch_blob(reference, &digest).await?;
+                    let data = if let Some(ref urls) = urls
+                        && !urls.is_empty()
+                    {
+                        // Foreign/non-distributable layer: fetch from external URL.
+                        info!(digest = %digest, url = %urls[0], "fetching foreign layer");
+                        fetch_foreign_layer(urls).await?
+                    } else {
+                        client.fetch_blob(reference, &digest).await?
+                    };
                     self.store_blob(&digest, &data)?;
                     Ok(())
                 }
@@ -342,22 +351,21 @@ impl ImageStore {
 
         // 3. Build and push manifest.
         let manifest = crate::registry::OciManifest {
-            schema_version: 2,
             media_type: Some(crate::registry::MEDIA_OCI_MANIFEST.to_string()),
-            config: crate::registry::Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: image.id.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: image
-                .layers
-                .iter()
-                .map(|l| crate::registry::Descriptor {
-                    media_type: l.media_type.clone(),
-                    digest: l.digest.clone(),
-                    size: l.size_bytes,
-                })
-                .collect(),
+            ..crate::registry::OciManifest::new(
+                crate::registry::Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    &image.id,
+                    config_data.len() as u64,
+                ),
+                image
+                    .layers
+                    .iter()
+                    .map(|l| {
+                        crate::registry::Descriptor::new(&l.media_type, &l.digest, l.size_bytes)
+                    })
+                    .collect(),
+            )
         };
 
         client.push_manifest(target, &manifest).await?;
@@ -421,6 +429,32 @@ impl ImageStore {
 // ---------------------------------------------------------------------------
 // Digest helpers
 // ---------------------------------------------------------------------------
+
+/// Fetch a foreign (non-distributable) layer from external URLs.
+///
+/// Tries each URL in order until one succeeds. This handles layers
+/// where the registry does not host the blob and instead provides
+/// external download URLs in the descriptor.
+async fn fetch_foreign_layer(urls: &[String]) -> Result<bytes::Bytes, StivaError> {
+    let client = reqwest::Client::new();
+    for url in urls {
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return resp
+                    .bytes()
+                    .await
+                    .map_err(|e| StivaError::Registry(format!("foreign layer read failed: {e}")));
+            }
+            Ok(resp) => {
+                tracing::warn!(url, status = %resp.status(), "foreign layer URL failed, trying next");
+            }
+            Err(e) => {
+                tracing::warn!(url, error = %e, "foreign layer URL failed, trying next");
+            }
+        }
+    }
+    Err(StivaError::Registry("all foreign layer URLs failed".into()))
+}
 
 /// Compute `sha256:{hex}` digest for data.
 #[must_use]
@@ -964,18 +998,19 @@ mod tests {
         let layer_digest = test_digest(layer_data);
 
         let manifest = OciManifest {
-            schema_version: 2,
             media_type: Some(MEDIA_OCI_MANIFEST.into()),
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![Descriptor {
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                digest: layer_digest.clone(),
-                size: layer_data.len() as u64,
-            }],
+            ..OciManifest::new(
+                Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    &config_digest,
+                    config_data.len() as u64,
+                ),
+                vec![Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    &layer_digest,
+                    layer_data.len() as u64,
+                )],
+            )
         };
 
         // Manifest endpoint.
@@ -1054,18 +1089,19 @@ mod tests {
         let layer_digest = test_digest(layer_data);
 
         let manifest = OciManifest {
-            schema_version: 2,
             media_type: Some(MEDIA_OCI_MANIFEST.into()),
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![Descriptor {
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                digest: layer_digest.clone(),
-                size: layer_data.len() as u64,
-            }],
+            ..OciManifest::new(
+                Descriptor::new(
+                    "application/vnd.oci.image.config.v1+json",
+                    &config_digest,
+                    config_data.len() as u64,
+                ),
+                vec![Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    &layer_digest,
+                    layer_data.len() as u64,
+                )],
+            )
         };
 
         Mock::given(method("GET"))
@@ -1125,32 +1161,30 @@ mod tests {
         let layer3_data = b"layer-three-data";
         let layer3_digest = test_digest(layer3_data);
 
-        let manifest = OciManifest {
-            schema_version: 2,
-            media_type: None,
-            config: Descriptor {
-                media_type: "application/vnd.oci.image.config.v1+json".into(),
-                digest: config_digest.clone(),
-                size: config_data.len() as u64,
-            },
-            layers: vec![
-                Descriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                    digest: layer1_digest.clone(),
-                    size: layer1_data.len() as u64,
-                },
-                Descriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                    digest: layer2_digest.clone(),
-                    size: layer2_data.len() as u64,
-                },
-                Descriptor {
-                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
-                    digest: layer3_digest.clone(),
-                    size: layer3_data.len() as u64,
-                },
+        let manifest = OciManifest::new(
+            Descriptor::new(
+                "application/vnd.oci.image.config.v1+json",
+                &config_digest,
+                config_data.len() as u64,
+            ),
+            vec![
+                Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    &layer1_digest,
+                    layer1_data.len() as u64,
+                ),
+                Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    &layer2_digest,
+                    layer2_data.len() as u64,
+                ),
+                Descriptor::new(
+                    "application/vnd.oci.image.layer.v1.tar+gzip",
+                    &layer3_digest,
+                    layer3_data.len() as u64,
+                ),
             ],
-        };
+        );
 
         Mock::given(method("GET"))
             .and(path("/v2/myapp/manifests/v1"))
