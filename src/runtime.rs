@@ -528,7 +528,9 @@ pub async fn exec_in_container(
     // container escape via /proc/self/fd/N pointing to host resources.
     unsafe {
         cmd.pre_exec(|| {
-            for fd in 3..1024 {
+            let max_fd = libc::sysconf(libc::_SC_OPEN_MAX) as i32;
+            let max_fd = if max_fd > 0 { max_fd } else { 1024 };
+            for fd in 3..max_fd {
                 libc::close(fd);
             }
             Ok(())
@@ -694,6 +696,7 @@ pub async fn container_top(pid: u32) -> Result<Vec<ProcessInfo>, StivaError> {
 }
 
 /// Check if `child` is a descendant of `ancestor` by walking the PPID chain.
+#[inline]
 fn is_descendant_of(child: u32, ancestor: u32) -> bool {
     if child == ancestor {
         return true;
@@ -992,10 +995,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), StivaError> {
 #[cfg(target_os = "linux")]
 pub fn send_signal(pid: u32, signal: i32) -> Result<(), StivaError> {
     info!(pid, signal, "sending signal to container");
-    let nix_signal = nix::sys::signal::Signal::try_from(signal)
-        .map_err(|e| StivaError::Runtime(format!("invalid signal {signal}: {e}")))?;
-    let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-    nix::sys::signal::kill(nix_pid, nix_signal).map_err(|e| {
+    let sig = rustix::process::Signal::from_named_raw(signal)
+        .ok_or_else(|| StivaError::Runtime(format!("invalid signal {signal}")))?;
+    let target = rustix::process::Pid::from_raw(pid as i32)
+        .ok_or_else(|| StivaError::Runtime(format!("invalid PID {pid}")))?;
+    rustix::process::kill_process(target, sig).map_err(|e| {
         StivaError::Runtime(format!("failed to send signal {signal} to PID {pid}: {e}"))
     })
 }

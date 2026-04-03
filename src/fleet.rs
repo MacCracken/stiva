@@ -298,6 +298,7 @@ pub fn select_migration_target(
 ///
 /// Nodes that haven't been seen within `timeout` are marked NotReady.
 /// Returns the IDs of nodes whose status changed.
+#[must_use = "returns IDs of nodes whose status changed"]
 pub fn check_fleet_health(nodes: &mut [FleetNode], timeout: chrono::Duration) -> Vec<String> {
     let cutoff = chrono::Utc::now() - timeout;
     let mut changed = Vec::new();
@@ -320,6 +321,7 @@ pub fn check_fleet_health(nodes: &mut [FleetNode], timeout: chrono::Duration) ->
 /// Plan a rollback: reschedule containers from failed nodes to healthy ones.
 ///
 /// Returns a list of `(source_node, target_node)` pairs for container migration.
+#[must_use = "returns migration pairs"]
 pub fn plan_rollback(
     nodes: &[FleetNode],
     constraints: &DeploymentConstraints,

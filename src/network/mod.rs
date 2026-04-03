@@ -5,6 +5,7 @@ pub mod dns;
 pub mod manager;
 pub mod nat;
 pub mod pool;
+pub mod rootless;
 
 use crate::error::StivaError;
 use serde::{Deserialize, Serialize};

@@ -183,18 +183,20 @@ pub fn setup_overlay(
             .join(":");
 
         let opts = format!(
-            "lowerdir={},upperdir={},workdir={}",
+            "lowerdir={},upperdir={},workdir={}\0",
             lowerdir,
             upper.display(),
             work.display()
         );
+        let opts_cstr = std::ffi::CStr::from_bytes_with_nul(opts.as_bytes())
+            .map_err(|e| StivaError::Overlay(format!("invalid overlay options: {e}")))?;
 
-        nix::mount::mount(
-            Some("overlay"),
+        rustix::mount::mount(
+            "overlay",
             &merged,
-            Some("overlay"),
-            nix::mount::MsFlags::empty(),
-            Some(opts.as_str()),
+            "overlay",
+            rustix::mount::MountFlags::empty(),
+            Some(opts_cstr),
         )
         .map_err(|e| StivaError::Overlay(format!("mount overlay failed: {e}")))?;
 
@@ -220,7 +222,8 @@ pub fn teardown_overlay(paths: &OverlayPaths) -> Result<(), StivaError> {
     {
         // Unmount merged directory. MNT_DETACH allows lazy unmount if busy.
         if paths.merged.exists()
-            && let Err(e) = nix::mount::umount2(&paths.merged, nix::mount::MntFlags::MNT_DETACH)
+            && let Err(e) =
+                rustix::mount::unmount(&paths.merged, rustix::mount::UnmountFlags::DETACH)
         {
             tracing::warn!(path = %paths.merged.display(), "overlay umount failed: {e}");
         }
@@ -259,25 +262,20 @@ pub fn mount_volumes(
 
         std::fs::create_dir_all(&target_in_rootfs)?;
 
-        let mut flags = nix::mount::MsFlags::MS_BIND;
+        let mut flags = rustix::mount::MountFlags::BIND;
         if vol.read_only {
-            flags |= nix::mount::MsFlags::MS_RDONLY;
+            flags |= rustix::mount::MountFlags::RDONLY;
         }
 
-        nix::mount::mount(
-            Some(vol.source.as_path()),
-            &target_in_rootfs,
-            None::<&str>,
-            flags,
-            None::<&str>,
-        )
-        .map_err(|e| {
-            StivaError::Storage(format!(
-                "bind mount {} → {} failed: {e}",
-                vol.source.display(),
-                target_in_rootfs.display()
-            ))
-        })?;
+        rustix::mount::mount(vol.source.as_path(), &target_in_rootfs, "", flags, None).map_err(
+            |e| {
+                StivaError::Storage(format!(
+                    "bind mount {} → {} failed: {e}",
+                    vol.source.display(),
+                    target_in_rootfs.display()
+                ))
+            },
+        )?;
 
         mounts.push(vol);
     }

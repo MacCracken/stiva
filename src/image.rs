@@ -89,6 +89,7 @@ impl ImageRef {
     }
 
     /// Full reference string.
+    #[inline]
     #[must_use]
     pub fn full_ref(&self) -> String {
         format!("{}/{}:{}", self.registry, self.repository, self.tag)
@@ -379,6 +380,7 @@ impl ImageStore {
     }
 
     /// List locally stored images.
+    #[must_use = "returns the list of images"]
     pub fn list(&self) -> Result<Vec<Image>, StivaError> {
         self.load_index()
     }

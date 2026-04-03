@@ -54,6 +54,7 @@
 pub mod agent;
 #[cfg(feature = "ansamblu")]
 pub mod ansamblu;
+pub mod audit;
 pub mod build;
 pub mod container;
 pub mod convert;
@@ -64,6 +65,7 @@ pub mod image;
 pub mod intents;
 pub mod mcp;
 pub mod network;
+pub mod oci;
 pub mod registry;
 pub mod runtime;
 pub mod storage;
@@ -79,6 +81,7 @@ pub struct Stiva {
     image_store: Arc<image::ImageStore>,
     registry_client: Arc<registry::RegistryClient>,
     containers: Arc<container::ContainerManager>,
+    audit: Option<Arc<audit::AuditLog>>,
     #[allow(dead_code)]
     config: StivaConfig,
 }
@@ -99,6 +102,10 @@ pub struct StivaConfig {
 
     /// Maximum concurrent containers.
     pub max_containers: usize,
+
+    /// Path to the audit log file. `None` disables audit logging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_log: Option<std::path::PathBuf>,
 }
 
 impl Default for StivaConfig {
@@ -108,6 +115,7 @@ impl Default for StivaConfig {
             image_path: std::path::PathBuf::from("/var/lib/agnos/images"),
             default_network: network::NetworkMode::Bridge,
             max_containers: 64,
+            audit_log: None,
         }
     }
 }
@@ -127,11 +135,17 @@ impl Stiva {
             Arc::clone(&image_store),
         )?);
         let registry_client = Arc::new(registry::RegistryClient::new());
+        let audit = config
+            .audit_log
+            .as_ref()
+            .map(|p| audit::AuditLog::new(p).map(Arc::new))
+            .transpose()?;
 
         Ok(Self {
             image_store,
             registry_client,
             containers,
+            audit,
             config,
         })
     }
@@ -147,11 +161,17 @@ impl Stiva {
             Arc::clone(&image_store),
         )?);
         let registry_client = Arc::new(registry::RegistryClient::with_config(registry_config));
+        let audit = config
+            .audit_log
+            .as_ref()
+            .map(|p| audit::AuditLog::new(p).map(Arc::new))
+            .transpose()?;
 
         Ok(Self {
             image_store,
             registry_client,
             containers,
+            audit,
             config,
         })
     }
@@ -159,7 +179,16 @@ impl Stiva {
     /// Pull an OCI image from a registry.
     pub async fn pull(&self, reference: &str) -> Result<image::Image, StivaError> {
         let parsed = image::ImageRef::parse(reference)?;
-        self.image_store.pull(&parsed, &self.registry_client).await
+        let result = self.image_store.pull(&parsed, &self.registry_client).await;
+        self.emit_audit(audit::AuditEntry::image(
+            audit::AuditOperation::Pull,
+            reference,
+            match &result {
+                Ok(_) => audit::AuditResult::Success,
+                Err(e) => audit::AuditResult::Failed(e.to_string()),
+            },
+        ));
+        result
     }
 
     /// Create and start a container.
@@ -192,13 +221,31 @@ impl Stiva {
     /// Stop a container.
     pub async fn stop(&self, id: &str) -> Result<(), StivaError> {
         info!(container = id, "stiva stop");
-        self.containers.stop(id).await
+        let result = self.containers.stop(id).await;
+        self.emit_audit(audit::AuditEntry::container(
+            audit::AuditOperation::Stop,
+            id,
+            match &result {
+                Ok(()) => audit::AuditResult::Success,
+                Err(e) => audit::AuditResult::Failed(e.to_string()),
+            },
+        ));
+        result
     }
 
     /// Remove a container.
     pub async fn rm(&self, id: &str) -> Result<(), StivaError> {
         info!(container = id, "stiva rm");
-        self.containers.remove(id).await
+        let result = self.containers.remove(id).await;
+        self.emit_audit(audit::AuditEntry::container(
+            audit::AuditOperation::Remove,
+            id,
+            match &result {
+                Ok(()) => audit::AuditResult::Success,
+                Err(e) => audit::AuditResult::Failed(e.to_string()),
+            },
+        ));
+        result
     }
 
     /// Restart a stopped container.
@@ -209,7 +256,19 @@ impl Stiva {
 
     /// Send a signal to a running container.
     pub async fn signal(&self, id: &str, signal: i32) -> Result<(), StivaError> {
-        self.containers.signal(id, signal).await
+        let result = self.containers.signal(id, signal).await;
+        self.emit_audit(
+            audit::AuditEntry::container(
+                audit::AuditOperation::Kill,
+                id,
+                match &result {
+                    Ok(()) => audit::AuditResult::Success,
+                    Err(e) => audit::AuditResult::Failed(e.to_string()),
+                },
+            )
+            .with_metadata(serde_json::json!({"signal": signal})),
+        );
+        result
     }
 
     /// Pause a running container via cgroups freezer.
@@ -436,7 +495,19 @@ impl Stiva {
         command: &[String],
     ) -> Result<runtime::ContainerExecResult, StivaError> {
         info!(container = id, command = ?command, "stiva exec");
-        self.containers.exec(id, command).await
+        let result = self.containers.exec(id, command).await;
+        self.emit_audit(
+            audit::AuditEntry::container(
+                audit::AuditOperation::Exec,
+                id,
+                match &result {
+                    Ok(_) => audit::AuditResult::Success,
+                    Err(e) => audit::AuditResult::Failed(e.to_string()),
+                },
+            )
+            .with_metadata(serde_json::json!({"command": command})),
+        );
+        result
     }
 
     /// Read container logs.
@@ -685,6 +756,21 @@ impl Stiva {
             .unwrap_or_default())
     }
 
+    /// Access the audit log (if configured).
+    #[must_use]
+    pub fn audit(&self) -> Option<&audit::AuditLog> {
+        self.audit.as_deref()
+    }
+
+    /// Emit an audit entry (no-op if audit is disabled).
+    fn emit_audit(&self, entry: audit::AuditEntry) {
+        if let Some(ref log) = self.audit
+            && let Err(e) = log.log(&entry)
+        {
+            tracing::warn!(error = %e, "failed to write audit entry");
+        }
+    }
+
     /// Get aggregated logs for all replicas of a service.
     #[cfg(feature = "ansamblu")]
     pub async fn service_logs(
@@ -760,6 +846,7 @@ mod tests {
         let reg_config = registry::RegistryConfig {
             username: Some("user".into()),
             password: Some("pass".into()),
+            ..Default::default()
         };
         let stiva = Stiva::with_registry(config, reg_config).await.unwrap();
         assert!(stiva.images().await.unwrap().is_empty());
@@ -808,6 +895,7 @@ mod tests {
             image_path: "/custom/images".into(),
             default_network: network::NetworkMode::Host,
             max_containers: 128,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: StivaConfig = serde_json::from_str(&json).unwrap();
@@ -867,6 +955,7 @@ mod tests {
             image_store,
             registry_client,
             containers,
+            audit: None,
             config: StivaConfig {
                 root_path: dir.path().join("containers"),
                 image_path: dir.path().join("images"),

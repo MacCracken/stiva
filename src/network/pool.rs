@@ -91,12 +91,14 @@ impl IpPool {
     }
 
     /// Maximum number of allocatable addresses (excluding network + gateway + broadcast).
+    #[inline]
     fn max_hosts(&self) -> u32 {
         let total = 1u32 << (32 - self.prefix_len);
         total.saturating_sub(3) // minus network addr, gateway, broadcast
     }
 
     /// Broadcast address.
+    #[inline]
     fn broadcast(&self) -> u32 {
         self.base + (1u32 << (32 - self.prefix_len)) - 1
     }

@@ -366,6 +366,12 @@ pub async fn build_image(
                 // unpacked layers. For now, treat as a copy from context with
                 // stage prefix.
                 let stage_dir = context_dir.join(stage.as_str());
+                // Prevent path traversal — stage_dir must stay under context_dir.
+                if !stage_dir.starts_with(context_dir) {
+                    return Err(StivaError::InvalidState(format!(
+                        "from_stage path escapes context directory: {stage}"
+                    )));
+                }
                 if stage_dir.exists() {
                     let layer = build_copy_layer(&stage_dir, source, destination)?;
                     let digest = store_layer(image_store, &layer)?;
@@ -388,8 +394,9 @@ pub async fn build_image(
     let _ = running_digest;
 
     // 3. Build OCI image config.
-    let mut all_layers = base_image.layers.clone();
-    all_layers.extend(new_layers.iter().cloned());
+    let mut all_layers = Vec::with_capacity(base_image.layers.len() + new_layers.len());
+    all_layers.extend_from_slice(&base_image.layers);
+    all_layers.extend(new_layers);
 
     let diff_ids: Vec<String> = all_layers.iter().map(|l| l.digest.clone()).collect();
 

@@ -68,6 +68,18 @@ pub enum StivaError {
     #[error("migration error: {0}")]
     Migration(String),
 
+    #[error("audit error: {0}")]
+    Audit(String),
+
+    #[error("encryption error: {0}")]
+    Encryption(String),
+
+    #[error("oci bundle error: {0}")]
+    OciBundle(String),
+
+    #[error("rootless network error: {0}")]
+    RootlessNetwork(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

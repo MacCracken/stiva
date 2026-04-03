@@ -19,7 +19,7 @@ image = []
 network = []
 ansamblu = ["runtime"]
 registry = []
-encrypted = ["dep:agnosys"]
+encrypted = ["dep:agnosys", "dep:aes-gcm", "dep:getrandom"]
 full = ["runtime", "image", "network", "ansamblu", "registry"]
 
 [dependencies]
@@ -36,7 +36,7 @@ bytes = "1"
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "io-util", "process", "sync", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 futures = "0.3"
 
 # Logging
@@ -68,9 +68,13 @@ nein = { version = ">=0.90", features = ["nat", "bridge", "apply"] }
 # Encrypted / verified storage (optional — agnosys LUKS + dm-verity)
 agnosys = { git = "https://github.com/MacCracken/agnosys", tag = "0.50.0", features = ["luks", "dmverity"], optional = true }
 
+# OCI image layer encryption (optional — behind `encrypted` feature)
+aes-gcm = { version = "0.10", optional = true }
+getrandom = { version = "0.3", optional = true }
+
 # Linux-specific
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.29", features = ["sched", "mount", "process", "signal", "resource", "fs", "user"] }
+rustix = { version = "1.1", features = ["mount", "process"] }
 libc = "0.2"
 
 [dev-dependencies]

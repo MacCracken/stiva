@@ -145,6 +145,19 @@ pub struct RegistryConfig {
     pub username: Option<String>,
     /// Optional password / personal access token.
     pub password: Option<String>,
+    /// Registry mirror configuration — maps registry hostnames to mirror URLs.
+    pub mirrors: MirrorConfig,
+}
+
+/// Registry mirror/proxy configuration for pull-through caching.
+///
+/// Maps registry hostnames (e.g., `"docker.io"`) to ordered lists of
+/// mirror URLs. Mirrors are tried first; the original registry is the fallback.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MirrorConfig {
+    /// Registry hostname → ordered list of mirror base URLs.
+    #[serde(default)]
+    pub mirrors: HashMap<String, Vec<String>>,
 }
 
 /// Persistent credential store for registry authentication.
@@ -225,6 +238,7 @@ impl CredentialStore {
             Some(cred) => RegistryConfig {
                 username: Some(cred.username.clone()),
                 password: Some(cred.password.clone()),
+                ..Default::default()
             },
             None => RegistryConfig::default(),
         }
@@ -337,6 +351,28 @@ impl RegistryClient {
             return base.clone();
         }
         format!("https://{}", registry_host(&image.registry))
+    }
+
+    /// Return mirror URLs (if any) followed by the original registry URL.
+    #[allow(dead_code)]
+    fn api_bases(&self, image: &ImageRef) -> Vec<String> {
+        let mut bases = Vec::new();
+        if let Some(mirrors) = self.config.mirrors.mirrors.get(&image.registry) {
+            bases.extend(mirrors.iter().cloned());
+        }
+        // Also check the normalized registry host.
+        let host = registry_host(&image.registry);
+        if host != image.registry
+            && let Some(mirrors) = self.config.mirrors.mirrors.get(host)
+        {
+            for m in mirrors {
+                if !bases.contains(m) {
+                    bases.push(m.clone());
+                }
+            }
+        }
+        bases.push(self.api_base(image));
+        bases
     }
 
     // -- public API ---------------------------------------------------------
@@ -1196,6 +1232,7 @@ mod tests {
         let config = RegistryConfig {
             username: Some("user".to_string()),
             password: Some("pass".to_string()),
+            ..Default::default()
         };
         let _client = RegistryClient::with_config(config);
     }
@@ -2278,6 +2315,7 @@ mod tests {
         client.config = RegistryConfig {
             username: Some("user".into()),
             password: Some("pass".into()),
+            ..Default::default()
         };
 
         let image = mock_image(&server);
