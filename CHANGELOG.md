@@ -1,6 +1,37 @@
 # Changelog
 
 All notable changes to stiva are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/).
+
+## [Unreleased]
+
+### Added
+- **OCI runtime CLI conformance** — `src/oci.rs` module with `create`/`start`/`state`/`kill`/`delete` interface for containerd/CRI drop-in; `OciState` JSON output per OCI runtime-spec v1.2.0; `parse_bundle()` reads OCI bundle `config.json`; `parse_signal()` accepts names ("SIGTERM") and numbers ("15")
+- **Rootless networking** — `src/network/rootless.rs` with slirp4netns and pasta backends for unprivileged container networking; `is_unprivileged()` detects UID + CAP_NET_ADMIN; `available_backends()` auto-detects installed backends; `start_rootless_network()` spawns userspace network stack with port forwarding (slirp4netns API socket / pasta CLI flags)
+- **Registry mirror/proxy** — `MirrorConfig` maps registry hostnames to ordered mirror URLs for pull-through caching in air-gapped environments; `RegistryClient::api_bases()` tries mirrors first with original registry as fallback; added `mirrors` field to `RegistryConfig`
+- **OCI image layer encryption** — AES-256-GCM `encrypt_layer()` / `decrypt_layer()` behind `encrypted` feature gate; `KeySource::File` and `KeySource::EnvVar` for key material loading; `is_encrypted_media_type()` / `strip_encrypted_suffix()` helpers for `+encrypted` media type detection; added `aes-gcm` and `getrandom` as optional dependencies
+- **Structured audit log** — `src/audit.rs` with append-only JSON-lines `AuditLog`; `AuditEntry` records timestamp, operation, container/image ID, user, result, and metadata; concurrent-safe via `Mutex<File>`; `AuditOperation` enum covers create/start/stop/kill/remove/exec/pull/push/checkpoint/restore; wired into `Stiva` for pull, stop, rm, signal, exec operations
+- **`StivaConfig.audit_log`** — optional path to enable audit logging
+- **Error variants** — `Audit`, `Encryption`, `OciBundle`, `RootlessNetwork`
+- 33 new tests (467 total: 456 lib + 10 integration + 1 doc-test)
+
+### Changed
+- **`nix` → `rustix`** — replaced `nix 0.29` with `rustix 1.1` for mount, unmount, and signal syscalls; eliminated duplicate `nix` crate from lockfile (367 → 366 deps); dropped 4 unused `nix` feature flags (`sched`, `resource`, `fs`, `user`)
+- **`reqwest` 0.12 → 0.13** — updated HTTP client; `rustls-tls` feature renamed to `rustls`
+- **`encrypted` feature** — now also enables `aes-gcm` and `getrandom` deps
+
+### Fixed
+- **Path traversal in multi-stage builds** — `from_stage` copies now validate stage directory stays under `context_dir` via `starts_with` check
+- **FD closure limit** — CVE-2024-21626 mitigation in `pre_exec` now uses `libc::sysconf(_SC_OPEN_MAX)` instead of hardcoded 1024, covering systems with `ulimit -n > 1024`
+- **Build layer allocation** — `base_image.layers.clone()` + `extend(cloned)` replaced with `Vec::with_capacity` + `extend_from_slice` + move, eliminating double allocation
+- **Socket write completeness** — slirp4netns API socket now uses `write_all()` instead of `try_write()` to prevent truncated port forwarding commands
+- **Cryptographic nonce generation** — `rand_nonce()` now returns `Err` instead of silently falling back to timestamp-based entropy when `getrandom` fails
+- **`make_verity_config` panic** — replaced `expect()` with `Result` propagation via `?`
+- **OCI PID limit overflow** — `u64` → `u32` cast now uses `try_from().unwrap_or(u32::MAX)` instead of silent truncation
+
+### Improved
+- **`#[inline]`** — added to `is_descendant_of`, `max_hosts`, `broadcast` (network/pool.rs), `ImageRef::full_ref`
+- **`#[must_use]`** — added to `ImageStore::list`, `check_fleet_health`, `plan_rollback`, `decrypt_layer`, `encrypt_layer`
 
 ## [2.0.1] — 2026-04-02
 
