@@ -1,6 +1,7 @@
 //! Criterion benchmarks for stiva hot paths.
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
 // Image reference parsing
@@ -10,24 +11,36 @@ fn bench_imageref_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("imageref");
 
     group.bench_function("simple", |b| {
-        b.iter(|| stiva::image::ImageRef::parse("nginx").unwrap());
+        b.iter(|| black_box(stiva::image::ImageRef::parse(black_box("nginx")).unwrap()));
     });
 
     group.bench_function("tagged", |b| {
-        b.iter(|| stiva::image::ImageRef::parse("nginx:1.25").unwrap());
+        b.iter(|| black_box(stiva::image::ImageRef::parse(black_box("nginx:1.25")).unwrap()));
     });
 
     group.bench_function("full_registry", |b| {
-        b.iter(|| stiva::image::ImageRef::parse("ghcr.io/maccracken/agnosticos:latest").unwrap());
+        b.iter(|| {
+            black_box(
+                stiva::image::ImageRef::parse(black_box("ghcr.io/maccracken/agnosticos:latest"))
+                    .unwrap(),
+            )
+        });
     });
 
     group.bench_function("with_port", |b| {
-        b.iter(|| stiva::image::ImageRef::parse("localhost:5000/myapp:v1").unwrap());
+        b.iter(|| {
+            black_box(stiva::image::ImageRef::parse(black_box("localhost:5000/myapp:v1")).unwrap())
+        });
     });
 
     group.bench_function("digest", |b| {
         b.iter(|| {
-            stiva::image::ImageRef::parse("nginx@sha256:abcdef1234567890abcdef1234567890").unwrap()
+            black_box(
+                stiva::image::ImageRef::parse(black_box(
+                    "nginx@sha256:abcdef1234567890abcdef1234567890",
+                ))
+                .unwrap(),
+            )
         });
     });
 
@@ -42,11 +55,13 @@ fn bench_volume_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("volume");
 
     group.bench_function("rw", |b| {
-        b.iter(|| stiva::storage::parse_volume("/data:/mnt/data").unwrap());
+        b.iter(|| black_box(stiva::storage::parse_volume(black_box("/data:/mnt/data")).unwrap()));
     });
 
     group.bench_function("ro", |b| {
-        b.iter(|| stiva::storage::parse_volume("/config:/etc/config:ro").unwrap());
+        b.iter(|| {
+            black_box(stiva::storage::parse_volume(black_box("/config:/etc/config:ro")).unwrap())
+        });
     });
 
     group.finish();
@@ -60,15 +75,21 @@ fn bench_port_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("port");
 
     group.bench_function("simple", |b| {
-        b.iter(|| stiva::network::nat::parse_port_spec("8080:80").unwrap());
+        b.iter(|| black_box(stiva::network::nat::parse_port_spec(black_box("8080:80")).unwrap()));
     });
 
     group.bench_function("with_proto", |b| {
-        b.iter(|| stiva::network::nat::parse_port_spec("8080:80/tcp").unwrap());
+        b.iter(|| {
+            black_box(stiva::network::nat::parse_port_spec(black_box("8080:80/tcp")).unwrap())
+        });
     });
 
     group.bench_function("with_bind", |b| {
-        b.iter(|| stiva::network::nat::parse_port_spec("127.0.0.1:3000:3000/tcp").unwrap());
+        b.iter(|| {
+            black_box(
+                stiva::network::nat::parse_port_spec(black_box("127.0.0.1:3000:3000/tcp")).unwrap(),
+            )
+        });
     });
 
     group.finish();
@@ -96,7 +117,11 @@ fn bench_blob_store(c: &mut Criterion) {
             let hex = digest.strip_prefix("sha256:").unwrap();
             let path = dir.path().join("blobs").join("sha256").join(hex);
             let _ = std::fs::remove_file(&path);
-            store.store_blob(&digest, &data).unwrap();
+            black_box(
+                store
+                    .store_blob(black_box(&digest), black_box(&data))
+                    .unwrap(),
+            );
         });
     });
 
@@ -114,7 +139,11 @@ fn bench_blob_store(c: &mut Criterion) {
             let hex = digest.strip_prefix("sha256:").unwrap();
             let path = dir.path().join("blobs").join("sha256").join(hex);
             let _ = std::fs::remove_file(&path);
-            store.store_blob(&digest, &data).unwrap();
+            black_box(
+                store
+                    .store_blob(black_box(&digest), black_box(&data))
+                    .unwrap(),
+            );
         });
     });
 
@@ -129,7 +158,7 @@ fn bench_blob_store(c: &mut Criterion) {
         };
         store.store_blob(&digest, data).unwrap();
 
-        b.iter(|| store.has_blob(&digest));
+        b.iter(|| black_box(store.has_blob(black_box(&digest))));
     });
 
     group.finish();
@@ -146,7 +175,7 @@ fn bench_ip_pool(c: &mut Criterion) {
         b.iter_batched(
             || stiva::network::pool::IpPool::new("10.0.0.0/24").unwrap(),
             |mut pool| {
-                pool.allocate().unwrap();
+                black_box(pool.allocate().unwrap());
             },
             criterion::BatchSize::SmallInput,
         );
@@ -156,7 +185,7 @@ fn bench_ip_pool(c: &mut Criterion) {
         let mut pool = stiva::network::pool::IpPool::new("10.0.0.0/24").unwrap();
         b.iter(|| {
             let ip = pool.allocate().unwrap();
-            pool.release(&ip);
+            pool.release(black_box(&ip));
         });
     });
 
@@ -198,7 +227,7 @@ fn bench_fleet_schedule(c: &mut Criterion) {
             strategy: DeploymentStrategy::Spread,
             created_at: chrono::Utc::now(),
         };
-        b.iter(|| schedule(&deployment, &nodes).unwrap());
+        b.iter(|| black_box(schedule(black_box(&deployment), black_box(&nodes)).unwrap()));
     });
 
     group.bench_function("binpack_10_replicas", |b| {
@@ -211,7 +240,7 @@ fn bench_fleet_schedule(c: &mut Criterion) {
             strategy: DeploymentStrategy::BinPack,
             created_at: chrono::Utc::now(),
         };
-        b.iter(|| schedule(&deployment, &nodes).unwrap());
+        b.iter(|| black_box(schedule(black_box(&deployment), black_box(&nodes)).unwrap()));
     });
 
     group.finish();
@@ -253,7 +282,7 @@ user = "nobody"
 "#;
 
     c.bench_function("build/parse_spec", |b| {
-        b.iter(|| stiva::build::parse_build_spec(spec).unwrap());
+        b.iter(|| black_box(stiva::build::parse_build_spec(black_box(spec)).unwrap()));
     });
 }
 
@@ -306,11 +335,13 @@ USER nobody
     let mut group = c.benchmark_group("convert");
 
     group.bench_function("compose_yaml_to_toml", |b| {
-        b.iter(|| stiva::convert::compose_yaml_to_toml(compose_yaml).unwrap());
+        b.iter(|| {
+            black_box(stiva::convert::compose_yaml_to_toml(black_box(compose_yaml)).unwrap())
+        });
     });
 
     group.bench_function("dockerfile_to_toml", |b| {
-        b.iter(|| stiva::convert::dockerfile_to_toml(dockerfile).unwrap());
+        b.iter(|| black_box(stiva::convert::dockerfile_to_toml(black_box(dockerfile)).unwrap()));
     });
 
     group.finish();
