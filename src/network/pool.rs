@@ -281,7 +281,7 @@ impl DualStackPool {
         }
     }
 
-    /// Allocate both addresses. Returns (v4, Option<v6>).
+    /// Allocate both addresses. Returns (v4, `Option<v6>`).
     pub fn allocate(&mut self) -> Result<(Ipv4Addr, Option<Ipv6Addr>), StivaError> {
         let v4 = self.v4.allocate()?;
         let v6 = self.allocate_v6()?;
