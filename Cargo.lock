@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agnosys"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "hex",
  "libc",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "bote"
-version = "0.91.0"
+version = "0.92.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2534,7 +2534,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
