@@ -6,14 +6,10 @@ targets = []
 features = ["full"]
 
 [advisories]
-ignore = [
-    # proc-macro-error2 is unmaintained with no safe upgrade. It is a
-    # BUILD-TIME proc-macro pulled transitively via getset → oci-spec →
-    # kavach (git-pinned 2.0.0) — codegen only, no runtime attack surface,
-    # and not changeable without forking kavach's deps. Re-evaluate when
-    # kavach's oci-spec/getset chain moves off it.
-    "RUSTSEC-2026-0173",
-]
+# No ignores: the formerly-unmaintained proc-macro-error2 (RUSTSEC-2026-0173)
+# was dropped entirely by updating its parent getset 0.1.6 → 0.1.7 (build-time
+# proc-macro under oci-spec → kavach), so no advisory needs suppressing.
+ignore = []
 
 [licenses]
 allow = [
