@@ -1,68 +1,68 @@
 # Benchmarks
 
-Latest: **2026-04-03T05:05:23Z** — commit `8c8e85a`
+Latest: **2026-06-23T19:30:15Z** — commit `a8b4784`
 
-Tracking: `3783676` (baseline) → `8c8e85a` (optimized) → `8c8e85a` (current)
+Tracking: `3783676` (baseline) → `8c8e85a` (optimized) → `a8b4784` (current)
 
 ## imageref
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `simple` | 103.4 ns | 85.36 ns **-17%** | 75.80 ns **-27%** |
-| `tagged` | 110.0 ns | 91.80 ns **-17%** | 85.81 ns **-22%** |
-| `full_registry` | 222.6 ns | 178.5 ns **-20%** | 163.3 ns **-27%** |
-| `with_port` | 247.3 ns | 206.0 ns **-17%** | 167.3 ns **-32%** |
-| `digest` | 116.7 ns | 110.6 ns **-5%** | 84.91 ns **-27%** |
+| `simple` | 103.4 ns | 85.36 ns **-17%** | 71.47 ns **-31%** |
+| `tagged` | 110.0 ns | 91.80 ns **-17%** | 82.22 ns **-25%** |
+| `full_registry` | 222.6 ns | 178.5 ns **-20%** | 155.9 ns **-30%** |
+| `with_port` | 247.3 ns | 206.0 ns **-17%** | 162.3 ns **-34%** |
+| `digest` | 116.7 ns | 110.6 ns **-5%** | 98.29 ns **-16%** |
 
 ## volume
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `rw` | 62.40 ns | 56.52 ns **-9%** | 46.97 ns **-25%** |
-| `ro` | 81.29 ns | 67.09 ns **-17%** | 56.28 ns **-31%** |
+| `rw` | 62.40 ns | 56.52 ns **-9%** | 45.95 ns **-26%** |
+| `ro` | 81.29 ns | 67.09 ns **-17%** | 57.35 ns **-29%** |
 
 ## port
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `simple` | 58.73 ns | 48.49 ns **-17%** | 50.13 ns **-15%** |
-| `with_proto` | 79.33 ns | 55.90 ns **-30%** | 59.75 ns **-25%** |
-| `with_bind` | 113.1 ns | 88.00 ns **-22%** | 96.34 ns **-15%** |
+| `simple` | 58.73 ns | 48.49 ns **-17%** | 40.86 ns **-30%** |
+| `with_proto` | 79.33 ns | 55.90 ns **-30%** | 51.23 ns **-35%** |
+| `with_bind` | 113.1 ns | 88.00 ns **-22%** | 76.89 ns **-32%** |
 
 ## blob
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `store_1kb` | 28525.0 ns | 25007.0 ns **-12%** | 24599.0 ns **-14%** |
-| `store_1mb` | 1187.3 µs | 971400.0 ns **-18%** | 964180.0 ns **-19%** |
-| `has_blob` | 1890.6 ns | 1864.3 ns | 1594.2 ns **-16%** |
+| `store_1kb` | 28525.0 ns | 25007.0 ns **-12%** | 18921.0 ns **-34%** |
+| `store_1mb` | 1187.3 µs | 971400.0 ns **-18%** | 574620.0 ns **-52%** |
+| `has_blob` | 1890.6 ns | 1864.3 ns | 1401.0 ns **-26%** |
 
 ## ippool
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `allocate` | 42.27 ns | 51.51 ns +22% | 35.34 ns **-16%** |
-| `allocate_release_cycle` | 32.26 ns | 32.98 ns | 28.96 ns **-10%** |
+| `allocate` | 42.27 ns | 51.51 ns +22% | 34.21 ns **-19%** |
+| `allocate_release_cycle` | 32.26 ns | 32.98 ns | 26.69 ns **-17%** |
 
 ## fleet
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `spread_10_replicas` | 3264.9 ns | 2455.6 ns **-25%** | 2308.9 ns **-29%** |
-| `binpack_10_replicas` | 1912.1 ns | 1434.3 ns **-25%** | 1386.0 ns **-28%** |
+| `spread_10_replicas` | 3264.9 ns | 2455.6 ns **-25%** | 2178.2 ns **-33%** |
+| `binpack_10_replicas` | 1912.1 ns | 1434.3 ns **-25%** | 1254.0 ns **-34%** |
 
 ## build
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `parse_spec` | 14644.0 ns | 12255.0 ns **-16%** | 12142.0 ns **-17%** |
+| `parse_spec` | 14644.0 ns | 12255.0 ns **-16%** | 6016.5 ns **-59%** |
 
 ## convert
 
-| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`8c8e85a`) |
+| Benchmark | Baseline (`3783676`) | Mid (`8c8e85a`) | Current (`a8b4784`) |
 |-----------|------|------|------|
-| `compose_yaml_to_toml` | — | 29130.0 ns | 29058.0 ns |
-| `dockerfile_to_toml` | — | 1587.2 ns | 1428.9 ns |
+| `compose_yaml_to_toml` | — | 29130.0 ns | 25325.0 ns |
+| `dockerfile_to_toml` | — | 1587.2 ns | 1411.5 ns |
 
 ---
 

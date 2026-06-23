@@ -6,7 +6,14 @@ targets = []
 features = ["full"]
 
 [advisories]
-ignore = []
+ignore = [
+    # proc-macro-error2 is unmaintained with no safe upgrade. It is a
+    # BUILD-TIME proc-macro pulled transitively via getset → oci-spec →
+    # kavach (git-pinned 2.0.0) — codegen only, no runtime attack surface,
+    # and not changeable without forking kavach's deps. Re-evaluate when
+    # kavach's oci-spec/getset chain moves off it.
+    "RUSTSEC-2026-0173",
+]
 
 [licenses]
 allow = [
@@ -32,4 +39,11 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# AGNOS crates whose required Rust versions were never published to crates.io
+# (the repos moved to Cyrius). Pinned by tag in Cargo.toml; Cargo.lock records
+# the exact commit. kavach = tag 2.0.0; agnosys = tag 0.50.0 in the renamed
+# agnodrm repo (the `encrypted` feature only).
+allow-git = [
+    "https://github.com/MacCracken/kavach",
+    "https://github.com/MacCracken/agnodrm",
+]
