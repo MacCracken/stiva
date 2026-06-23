@@ -45,7 +45,8 @@ dependencies = [
 
 [[package]]
 name = "agnosys"
-version = "0.51.0"
+version = "0.50.0"
+source = "git+https://github.com/MacCracken/agnodrm?tag=0.50.0#f71cd9e50fb07dd1e95092fdfd42b46864705194"
 dependencies = [
  "hex",
  "libc",
@@ -254,6 +255,8 @@ dependencies = [
 [[package]]
 name = "bote"
 version = "0.92.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb9ccde49767181b64ef196090c82d32fd6bb27acac9dea2c1fbb1f1bc467fbe"
 dependencies = [
  "serde",
  "serde_json",
@@ -1490,6 +1493,7 @@ dependencies = [
 [[package]]
 name = "kavach"
 version = "2.0.0"
+source = "git+https://github.com/MacCracken/kavach?tag=2.0.0#ffed6c1e6347babb0cf0f58360e112e773e6bc13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1590,6 +1594,8 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "majra"
 version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ff655afaba78bd00d672ff802d37636848c5f81dfaa4601ae9a624f3d519b55"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1641,6 +1647,8 @@ dependencies = [
 [[package]]
 name = "nein"
 version = "0.90.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc85474f173d53ff9821150775b226ef7ee1d876cd24bebae0d12081b0a526ea"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2534,7 +2542,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

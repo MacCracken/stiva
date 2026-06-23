@@ -2,7 +2,7 @@
 name = "stiva"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.96"
 license = "GPL-3.0-or-later"
 description = "OCI-compatible container runtime — image management, container lifecycle, and orchestration for AGNOS"
 homepage = "https://github.com/MacCracken/stiva"
@@ -51,8 +51,12 @@ clap_complete = "4"
 sha2 = "0.11"
 hex = "0.4"
 
-# Sandbox (kavach provides isolation)
-kavach = { version = ">=2.0.0", features = ["process", "oci"] }
+# Sandbox (kavach provides isolation).
+# Pinned to git tag 2.0.0 — the last Rust kavach (3.x are the Cyrius port).
+# crates.io only has the older Rust 1.0.1, which predates the 2.x API stiva
+# uses (SecretRef, ExternalizationPolicy, Backend::resolve_min_strength), so
+# pin the git tag rather than crates.io.
+kavach = { git = "https://github.com/MacCracken/kavach", tag = "2.0.0", features = ["process", "oci"] }
 
 # Queue / scheduling (majra provides fleet primitives)
 majra = { version = ">=1.0", features = ["queue", "heartbeat", "pubsub"] }
@@ -65,8 +69,11 @@ tar = "0.4"
 # Firewall / NAT (nein provides nftables rules)
 nein = { version = ">=0.90", features = ["nat", "bridge", "apply"] }
 
-# Encrypted / verified storage (optional — agnosys LUKS + dm-verity)
-agnosys = { git = "https://github.com/MacCracken/agnosys", tag = "0.50.0", features = ["luks", "dmverity"], optional = true }
+# Encrypted / verified storage (optional — agnosys LUKS + dm-verity).
+# Repo was renamed agnosys → agnodrm (2026-06-19); the crate is still named
+# `agnosys` at tag 0.50.0 (the last Rust version before the decomposition), so
+# pin the renamed repo URL at that tag.
+agnosys = { git = "https://github.com/MacCracken/agnodrm", tag = "0.50.0", features = ["luks", "dmverity"], optional = true }
 
 # OCI image layer encryption (optional — behind `encrypted` feature)
 aes-gcm = { version = "0.10", optional = true }
@@ -87,11 +94,8 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 name = "benchmarks"
 harness = false
 
-[patch.crates-io]
-bote = { path = "../bote" }
-kavach = { path = "../kavach" }
-majra = { path = "../majra" }
-nein = { path = "../nein" }
-
-[patch."https://github.com/MacCracken/agnosys"]
-agnosys = { path = "../agnosys" }
+# Public AGNOS deps (bote, kavach, majra, nein) resolve from crates.io via the
+# version specs above — no local-path patches. agnosys stays on its pre-decomp
+# git tag 0.50.0 (the last version that exposed the Rust luks/dmverity API; the
+# 2026-06-19 agnosys→agnodrm decomposition moved/dropped that surface, so the
+# `encrypted` feature pins the old working tag rather than tracking agnodrm).
