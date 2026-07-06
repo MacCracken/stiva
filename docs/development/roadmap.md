@@ -22,12 +22,22 @@ Port stiva from Rust to Cyrius, following the AGNOS ecosystem port pattern
 The Rust→Cyrius backlog is the GA gate for a sovereign, Cyrius-native ecosystem;
 this is stiva's leg of it.
 
-- [ ] Scaffold the port (`cyrius port`) — preserve Rust at `rust-old/` as the parity oracle
-- [ ] Module-by-module port of the 16 modules (image, container, runtime, network, storage, registry, build, ansamblu, health, fleet, agent, mcp, convert, encrypted, intents, error)
-- [ ] Re-wire AGNOS deps to Cyrius-native crates (kavach, majra, nein, bote, agnodrm)
-- [ ] Port the `stiva` CLI (34 subcommands) onto the Cyrius binary surface
-- [ ] Parity validation — cross-check every module against the Rust implementation; record accepted divergences as ADRs
-- [ ] Test + benchmark parity — port the suite (434 tests / 20 benches) and prove no regression
+- [x] **Scaffold the port** (`cyrius port`) — Rust moved to `rust-old/` (18,622 lines, the parity oracle); Cyrius skeleton + `cyrius.cyml` + CI in place. Toolchain pinned 6.4.10.
+- [x] **Foundation** — multi-module structure (kavach model): `src/lib.cyr` aggregation header, `src/main.cyr` program entry, `[lib].modules` + honest opt-in `[deps].stdlib`, `.gitignore` for `lib/`/`build/`, `tests/stiva.tcyr` harness. Green: build (no warnings) + 31 tests + bench + `fmt --check` + `lint`.
+- [x] **Agent-orchestrated porting harness** — `scripts/port-workflow.js`: per-module port (rust-old oracle → `src/*.cyr`) + adversarial parity verify. Cyrius-idiom playbook embedded; batches passed as args.
+
+Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracle):
+
+- [x] `error` — StivaError → STIVA_ERR_* enum + name/print (all 28 kinds, exact display strings)
+- [x] `oci` — leaf surface (OciStatus, OCI_VERSION, parse_signal); OciState/to_oci_status/build_state/parse_bundle DEFERRED with `container`
+- [ ] `intents`, `audit`, `convert` — dep-free, error-only coupling (first workflow batch, in flight)
+- [ ] dep-free next: `agent`, `build`, `fleet`, `image`, `registry`, `storage`, `network/{bridge,dns,mod,pool,rootless}`
+- [ ] dep-heavy (need AGNOS dep wiring): `runtime`+`main`→kavach · `container`→kavach/majra · `ansamblu`+`health`→majra · `network/{nat,manager}`→nein · `mcp`→bote · `encrypted`→agnodrm · `lib`→kavach/majra/nein
+- [ ] **Re-wire AGNOS deps** to the Cyrius `dist/*.cyr` bundles (kavach 3.7.0, majra 2.5.0, nein 1.6.2, bote 3.0.0, agnodrm 1.4.5). Recipe derived from `dist/*.deps` sidecars; wired per-consuming-module + transitive git deps (sigil/libro/sakshi) + stdlib union. Probe-build before the first consuming module.
+- [ ] **Port the `stiva` CLI** (34 subcommands) onto `src/main.cyr` (`args.cyr` dispatch)
+- [ ] **Parity validation** — every module cross-checked vs Rust (the workflow's verify stage); record accepted divergences as ADRs
+- [ ] **Test + benchmark parity** — port the suite (434 tests / 20 benches) and prove no regression
+- [ ] **Cleanup** — `distlib` → `dist/stiva.cyr`; remove `rust-old/` after full parity (kavach precedent); version → 3.0.0; zugot recipe
 
 ---
 

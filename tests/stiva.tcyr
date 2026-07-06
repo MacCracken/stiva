@@ -1,0 +1,84 @@
+# stiva test suite — Cyrius port
+# Mirrors the rust-old/ #[cfg(test)] modules for the ported surface.
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+
+# ── error.cyr (rust-old/src/error.rs) ────────────────────────────
+fn test_error_names() {
+    test_group("error_names");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_OK), "ok"), 1, "ok");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_IMAGE_NOT_FOUND), "image not found"), 1, "image not found");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_CONTAINER_NOT_FOUND), "container not found"), 1, "container not found");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_ALREADY_RUNNING), "container already running"), 1, "already running");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_INVALID_STATE), "invalid state"), 1, "invalid state");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_DIGEST_MISMATCH), "digest mismatch"), 1, "digest mismatch");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_AUTH_FAILED), "authentication failed"), 1, "auth failed");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_UNSUPPORTED_PLATFORM), "unsupported platform"), 1, "unsupported platform");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_ANSAMBLU), "ansamblu error"), 1, "ansamblu error");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_SCAN_BLOCKED), "scan blocked"), 1, "scan blocked");
+    assert_eq(streq(stiva_err_name(STIVA_ERR_HTTP), "http error"), 1, "http error");
+    # last-defined boundary + unknown fallback
+    assert_eq(STIVA_ERR_HTTP, 28, "http code is 28");
+    assert_eq(streq(stiva_err_name(999), "unknown error"), 1, "unknown fallback");
+    return 0;
+}
+
+# ── oci.cyr (rust-old/src/oci.rs) ────────────────────────────────
+fn test_oci_version() {
+    test_group("oci_version");
+    assert_eq(streq(oci_version(), "1.2.0"), 1, "oci version 1.2.0");
+    return 0;
+}
+
+fn test_oci_status_names() {
+    test_group("oci_status_names");
+    assert_eq(streq(oci_status_name(OCI_STATUS_CREATING), "creating"), 1, "creating");
+    assert_eq(streq(oci_status_name(OCI_STATUS_CREATED), "created"), 1, "created");
+    assert_eq(streq(oci_status_name(OCI_STATUS_RUNNING), "running"), 1, "running");
+    assert_eq(streq(oci_status_name(OCI_STATUS_STOPPED), "stopped"), 1, "stopped");
+    return 0;
+}
+
+fn test_parse_signal_numeric() {
+    test_group("parse_signal_numeric");
+    assert_eq(parse_signal("15"), 15, "15 -> 15");
+    assert_eq(parse_signal("9"), 9, "9 -> 9");
+    assert_eq(parse_signal("1"), 1, "1 -> 1");
+    return 0;
+}
+
+fn test_parse_signal_names() {
+    test_group("parse_signal_names");
+    assert_eq(parse_signal("SIGTERM"), 15, "SIGTERM -> 15");
+    assert_eq(parse_signal("SIGKILL"), 9, "SIGKILL -> 9");
+    assert_eq(parse_signal("TERM"), 15, "TERM -> 15");
+    assert_eq(parse_signal("HUP"), 1, "HUP -> 1");
+    assert_eq(parse_signal("SIGUSR1"), 10, "SIGUSR1 -> 10");
+    assert_eq(parse_signal("ABORT"), 6, "ABORT alias -> 6");
+    assert_eq(parse_signal("CHILD"), 17, "CHILD alias -> 17");
+    return 0;
+}
+
+fn test_parse_signal_invalid() {
+    test_group("parse_signal_invalid");
+    assert_eq(parse_signal("SIGFOO"), 0 - 1, "SIGFOO -> -1");
+    assert_eq(parse_signal("0"), 0 - 1, "0 -> -1");
+    assert_eq(parse_signal("999"), 0 - 1, "999 -> -1");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_error_names();
+    test_oci_version();
+    test_oci_status_names();
+    test_parse_signal_numeric();
+    test_parse_signal_names();
+    test_parse_signal_invalid();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

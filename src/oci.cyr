@@ -1,0 +1,99 @@
+# stiva — OCI runtime spec conformance (leaf surface)
+# Ported from rust-old/src/oci.rs.
+#
+# This module carries the parts of oci.rs with no intra-crate coupling:
+# the OCI runtime-spec version, the OciStatus enum + its serde names, and
+# `parse_signal`. The container-coupled helpers from oci.rs
+# (`to_oci_status`, `build_state`, `parse_bundle`) depend on
+# container.rs's `Container` / `ContainerState` / `ContainerConfig` and
+# land with src/container.cyr — see the DEFERRED block at the bottom.
+
+# OCI runtime spec version we conform to (rust-old: OCI_VERSION).
+#[must_use]
+fn oci_version() {
+    return "1.2.0";
+}
+
+# OCI container status — spec-defined values (rust-old: enum OciStatus).
+# Prefixed OCI_STATUS_* for global enum-member uniqueness (see error.cyr).
+enum OciStatus {
+    OCI_STATUS_CREATING = 0;
+    OCI_STATUS_CREATED = 1;
+    OCI_STATUS_RUNNING = 2;
+    OCI_STATUS_STOPPED = 3;
+}
+
+# Serde wire name for an OciStatus (the `#[serde(rename = "...")]` values).
+#[must_use]
+fn oci_status_name(status) {
+    if (status == OCI_STATUS_CREATING) { return "creating"; }
+    if (status == OCI_STATUS_CREATED) { return "created"; }
+    if (status == OCI_STATUS_RUNNING) { return "running"; }
+    if (status == OCI_STATUS_STOPPED) { return "stopped"; }
+    return "unknown";
+}
+
+# True (1) iff every byte of NUL-terminated `s` is an ASCII digit and `s`
+# is non-empty. Used to decide the numeric-vs-name branch in parse_signal.
+#[must_use]
+fn _sig_is_numeric(s) {
+    if (load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Parse a signal string — accepts numbers ("15"), names ("TERM"), and
+# SIG-prefixed names ("SIGTERM"). Returns the signal number (1..64) on
+# success, or -1 on an invalid/unknown signal (rust-old returned
+# Err(StivaError::OciBundle(...)); the caller maps -1 → STIVA_ERR_OCI_BUNDLE).
+#[must_use]
+fn parse_signal(s) {
+    # Numeric first — valid range is 1..64 inclusive (rust-old: 0 < n < 65).
+    if (_sig_is_numeric(s) == 1) {
+        var n = atoi(s);
+        if (n > 0 && n < 65) { return n; }
+        return 0 - 1;
+    }
+
+    # Strip an optional "SIG" prefix.
+    var name = s;
+    if (strlen(s) >= 3 && memeq(s, "SIG", 3) == 1) { name = s + 3; }
+
+    if (streq(name, "HUP") == 1) { return 1; }
+    if (streq(name, "INT") == 1) { return 2; }
+    if (streq(name, "QUIT") == 1) { return 3; }
+    if (streq(name, "ILL") == 1) { return 4; }
+    if (streq(name, "TRAP") == 1) { return 5; }
+    if (streq(name, "ABRT") == 1 || streq(name, "ABORT") == 1) { return 6; }
+    if (streq(name, "BUS") == 1) { return 7; }
+    if (streq(name, "FPE") == 1) { return 8; }
+    if (streq(name, "KILL") == 1) { return 9; }
+    if (streq(name, "USR1") == 1) { return 10; }
+    if (streq(name, "SEGV") == 1) { return 11; }
+    if (streq(name, "USR2") == 1) { return 12; }
+    if (streq(name, "PIPE") == 1) { return 13; }
+    if (streq(name, "ALRM") == 1 || streq(name, "ALARM") == 1) { return 14; }
+    if (streq(name, "TERM") == 1) { return 15; }
+    if (streq(name, "STKFLT") == 1) { return 16; }
+    if (streq(name, "CHLD") == 1 || streq(name, "CHILD") == 1) { return 17; }
+    if (streq(name, "CONT") == 1) { return 18; }
+    if (streq(name, "STOP") == 1) { return 19; }
+    if (streq(name, "TSTP") == 1) { return 20; }
+    if (streq(name, "TTIN") == 1) { return 21; }
+    if (streq(name, "TTOU") == 1) { return 22; }
+    return 0 - 1;
+}
+
+# ── DEFERRED (land with src/container.cyr) ───────────────────────
+# rust-old/src/oci.rs also defines, coupled to container.rs types:
+#   struct OciState { oci_version, id, status, pid, bundle, annotations }
+#   fn to_oci_status(state: ContainerState) -> OciStatus
+#   fn build_state(container: &Container, bundle_path) -> OciState
+#   fn parse_bundle(bundle_path) -> Result<ContainerConfig, StivaError>
+# These reference Container / ContainerState / ContainerConfig and are
+# ported alongside container.cyr for parity. Tracked in the roadmap.

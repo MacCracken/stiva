@@ -1,6 +1,20 @@
 # Build artifacts
 /target/
-Cargo.lock
+/build/
+
+# Resolved deps — `cyrius deps` / `cyrius lib sync` populate lib/ from
+# cyrius.cyml [deps].stdlib + the [deps.*] git bundles. lib/ is reproducible
+# from the manifest + lockfile and is NOT committed.
+/lib/
+
+# Cyrius toolchain artifacts pulled into the workspace by the installer flow
+# (release tarball + source archive). CI extracts these under $HOME/.cyrius,
+# but ad-hoc local installs sometimes land them at the repo root.
+cyrius-*.tar.gz
+cyrius-[0-9]*/
+
+# Frozen Rust source (the parity oracle) — keep the tree, ignore its build.
+/rust-old/target/
 
 # Editor / IDE
 *.swp
@@ -21,21 +35,18 @@ core.*
 
 # Coverage
 lcov.info
-tarpaulin-report.html
 coverage/
-
-# Benchmark output
-criterion/
-benches/history.log
-
-# Fuzz artifacts
-fuzz/target/
-fuzz/corpus/
-fuzz/artifacts/
-
-# cargo-vet downloads
-supply-chain/.cache/
 
 # Environment / secrets
 .env
 .env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Claude Code
+.claude/
+
+# Logs
+*.log

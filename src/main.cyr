@@ -1,0 +1,30 @@
+# stiva — OCI container runtime (Cyrius port)
+# Cyrius port from rust-old/ (18622 lines of Rust; the parity oracle).
+#
+# In-tree program entry: the domain `src/*.cyr` modules (in dependency
+# order, mirroring src/lib.cyr and cyrius.cyml [lib].modules), then the CLI
+# dispatch + `main()`. The 34-subcommand CLI (rust-old/src/main.rs) is
+# ported incrementally alongside its backing modules.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+
+# ── CLI ──────────────────────────────────────────────────────────
+# Ported bottom-up as modules land. For now, a version banner + a smoke
+# path exercising the foundation modules. Full clap-style dispatch of the
+# 34 subcommands (rust-old/src/main.rs) is tracked in the roadmap.
+
+fn _print_banner() {
+    var banner = "stiva 2.0.0 — OCI container runtime (Cyrius port)\n";
+    sys_write(1, banner, strlen(banner));
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    _print_banner();
+    return 0;
+}
+
+var _rc = main();
+syscall(SYS_EXIT, _rc);

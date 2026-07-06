@@ -1,0 +1,70 @@
+[package]
+name = "stiva"
+version = "${file:VERSION}"
+description = "Stiva — OCI container runtime: image management, container lifecycle, orchestration. Cyrius port of Rust v2.x."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/MacCracken/stiva"
+language = "cyrius"
+cyrius = "6.4.10"
+
+[build]
+entry = "src/main.cyr"
+output = "build/stiva"
+
+# ── Library surface ──────────────────────────────────────────────
+# stiva is consumable at the source level as a single-file bundle,
+# `dist/stiva.cyr` (built by `cyrius distlib`). `[lib].modules` lists the
+# domain `src/*.cyr` files, in dependency order, that distlib concatenates
+# to (re)build that bundle. It is the generator's single source of truth;
+# `src/lib.cyr` mirrors this order as the human-facing aggregation header.
+#
+# src/main.cyr is INTENTIONALLY excluded — it is the in-tree program entry
+# (its own `main()` + CLI dispatch + top-level `syscall(SYS_EXIT)`).
+# src/lib.cyr is also excluded: it is a pure aggregation header (only
+# `include` directives).
+#
+# Modules are ported bottom-up from rust-old/ (the parity oracle). This
+# list grows as each module lands — keep it in dependency order.
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/oci.cyr",
+]
+
+# ── Dependencies ─────────────────────────────────────────────────
+# Stdlib is OPT-IN: declare exactly what the project + every active [deps.*]
+# needs (each dep's `dist/<name>.deps` sidecar is the authoritative list).
+# This is the FOUNDATION set for the leaf modules (error, oci). It grows as
+# dep-consuming modules land — see the AGNOS deps note below.
+[deps]
+stdlib = [
+    "alloc",
+    "assert",
+    "bench",
+    "string",
+    "syscalls",
+    "vec",
+]
+# NOTE: this is the honest minimal set for the current ported surface
+# (error, oci + the test/bench/fuzz harnesses). As each module lands, add
+# the stdlib modules it actually references and re-run `cyrius lib sync`
+# (which vendors the declared subset from the pin into ./lib/). Common
+# additions coming with the heavy modules: str, vec, fmt, io, fs, hashmap,
+# chrono, result, tagged, slice, net, process, random, bayan, fnptr.
+
+# ── AGNOS first-party deps (already ported to Cyrius) ─────────────
+# Wired INCREMENTALLY as the first consuming module lands, so the foundation
+# doesn't force premature resolution of the full transitive tree. Each ships
+# a consumable dist/*.cyr bundle; their transitive git deps (sigil→keccak/ct,
+# bote→libro/majra, nein→bote-core, …) and the union of their stdlib leaves
+# must be declared here too (model on daimon + aethersafha cyrius.cyml).
+#
+#   kavach  3.7.0  → runtime (Sandbox, SandboxPolicy/Config, SecretRef,
+#                    StrengthScore, ExternalizationGate)
+#   majra   2.5.0  → fleet / health (queue, heartbeat FSM, pub/sub)
+#   nein    1.6.2  → network (nftables firewall, NAT, port mapping)
+#   bote    3.0.0  → mcp (JSON-RPC 2.0, tool registry, structured output)
+#   agnodrm 1.4.5  → encrypted (LUKS + dm-verity)
+#
+# The full validated [deps.*] blocks + stdlib union are added in the
+# AGNOS-dep-wiring step (probe-built before any consuming module ports).

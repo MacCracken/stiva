@@ -1,0 +1,517 @@
+# stiva — Dockerfile / docker-compose → Stivafile (TOML) migration.
+# Ported from rust-old/src/convert.rs.
+#
+# Two public conversions in the oracle:
+#   compose_yaml_to_toml(yaml) -> Result<String, StivaError>   (DEFERRED)
+#   dockerfile_to_toml(dockerfile) -> Result<String, StivaError>
+#
+# `dockerfile_to_toml` is pure string processing and ports faithfully
+# here. `compose_yaml_to_toml` is built entirely on a full YAML parser
+# (serde_saphyr) plus the serde_json `Value` object model — neither of
+# which exists in the ported base — so it lands in the DEFERRED block at
+# the bottom rather than being reinvented (same pattern as src/oci.cyr).
+#
+# Error mapping (mirrors error.cyr): the Rust `Err(StivaError::InvalidState
+# (...))` on a Dockerfile with no FROM maps to the integer sentinel `0`
+# (null cstr) — the caller reports it via
+# stiva_err_print(STIVA_ERR_INVALID_STATE, "Dockerfile has no FROM
+# instruction"). A successful conversion returns a heap cstr pointer.
+
+# ── small cstr helpers (parity-exact byte handling) ──────────────
+
+# True (1) iff byte `c` is ASCII whitespace stripped by Rust's str::trim
+# (space, tab, CR, LF). Rust trims Unicode whitespace; Dockerfiles are
+# ASCII in practice, so we match the ASCII subset the tests exercise.
+#[must_use]
+fn _cv_is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# Copy bytes [start, end) of `src` into a fresh NUL-terminated cstr.
+# Returns the heap pointer (empty cstr if end <= start).
+#[must_use]
+fn _cv_slice(src, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, src + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Trim leading+trailing ASCII whitespace, returning a fresh cstr.
+#[must_use]
+fn _cv_trim(s) {
+    var len = strlen(s);
+    var start = 0;
+    while (start < len) {
+        if (_cv_is_ws(load8(s + start)) == 0) { break; }
+        start = start + 1;
+    }
+    var end = len;
+    while (end > start) {
+        if (_cv_is_ws(load8(s + end - 1)) == 0) { break; }
+        end = end - 1;
+    }
+    return _cv_slice(s, start, end);
+}
+
+# Rust `line.trim_end_matches('\\').trim()` — strip trailing backslashes
+# then re-trim. Returns a fresh cstr.
+#[must_use]
+fn _cv_strip_cont(s) {
+    var len = strlen(s);
+    var end = len;
+    while (end > 0) {
+        if (load8(s + end - 1) != 92) { break; }
+        end = end - 1;
+    }
+    var stripped = _cv_slice(s, 0, end);
+    return _cv_trim(stripped);
+}
+
+# If `s` starts with `prefix`, return a pointer just past it (into `s`);
+# otherwise 0. Mirrors str::strip_prefix.
+#[must_use]
+fn _cv_strip_prefix(s, prefix) {
+    var plen = strlen(prefix);
+    if (strlen(s) < plen) { return 0; }
+    if (memeq(s, prefix, plen) == 0) { return 0; }
+    return s + plen;
+}
+
+# Trim a single matching leading+trailing `quote` byte if BOTH ends carry
+# it — approximates Rust `str::trim_matches('"')` for the double-quote
+# used by ENV/LABEL value parsing. Returns a fresh cstr.
+#[must_use]
+fn _cv_trim_quotes(s) {
+    var len = strlen(s);
+    var start = 0;
+    var end = len;
+    while (end > start) {
+        if (load8(s + start) != 34) { break; }
+        if (load8(s + end - 1) != 34) { break; }
+        start = start + 1;
+        end = end - 1;
+    }
+    return _cv_slice(s, start, end);
+}
+
+# Index of the first `byte` in `s`, or -1 (mirrors split_once/find).
+#[must_use]
+fn _cv_find(s, byte) {
+    var len = strlen(s);
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# True (1) iff `s` (already-trimmed line) is empty or a comment (`#`).
+#[must_use]
+fn _cv_skip_line(s) {
+    if (load8(s) == 0) { return 1; }
+    if (load8(s) == 35) { return 1; }
+    return 0;
+}
+
+# ── string-builder step emitters ─────────────────────────────────
+# Each appends one rendered TOML fragment to `sb`. Kept small so the
+# main function reads as a 1:1 mirror of the Rust match arms.
+
+# `[[steps]]\ntype = "run"\ncommand = ["/bin/sh", "-c", "<cmd>"]`
+# where `<cmd>` has every `"` replaced with `\"` (Rust rest.replace).
+fn _cv_emit_run(sb, rest) {
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"run\"\ncommand = [\"/bin/sh\", \"-c\", \"");
+    var len = strlen(rest);
+    var i = 0;
+    while (i < len) {
+        var c = load8(rest + i);
+        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        else { str_builder_putc(sb, c); }
+        i = i + 1;
+    }
+    str_builder_add_cstr(sb, "\"]");
+    return 0;
+}
+
+# `[[steps]]\ntype = "copy"\nsource = "<s>"\ndestination = "<d>"`
+fn _cv_emit_copy(sb, src, dst) {
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"copy\"\nsource = \"");
+    str_builder_add_cstr(sb, src);
+    str_builder_add_cstr(sb, "\"\ndestination = \"");
+    str_builder_add_cstr(sb, dst);
+    str_builder_add_cstr(sb, "\"");
+    return 0;
+}
+
+# `[[steps]]\ntype = "env"\nkey = "<k>"\nvalue = "<v>"`
+fn _cv_emit_env(sb, k, v) {
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"env\"\nkey = \"");
+    str_builder_add_cstr(sb, k);
+    str_builder_add_cstr(sb, "\"\nvalue = \"");
+    str_builder_add_cstr(sb, v);
+    str_builder_add_cstr(sb, "\"");
+    return 0;
+}
+
+# `[[steps]]\ntype = "workdir"\npath = "<p>"`
+fn _cv_emit_workdir(sb, p) {
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"workdir\"\npath = \"");
+    str_builder_add_cstr(sb, p);
+    str_builder_add_cstr(sb, "\"");
+    return 0;
+}
+
+# `[[steps]]\ntype = "label"\nkey = "<k>"\nvalue = "<v>"`
+fn _cv_emit_label(sb, k, v) {
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"label\"\nkey = \"");
+    str_builder_add_cstr(sb, k);
+    str_builder_add_cstr(sb, "\"\nvalue = \"");
+    str_builder_add_cstr(sb, v);
+    str_builder_add_cstr(sb, "\"");
+    return 0;
+}
+
+# ── ENV / LABEL "k = v" parsing ──────────────────────────────────
+# Rust: `rest.split_once('=')` → (k.trim(), v.trim().trim_matches('"')).
+# For ENV, if there is no '=', fall back to `rest.split_once(' ')`
+# → (k.trim(), v.trim()) (no quote-strip). Emits into `sb`; returns 1
+# if a step was emitted, 0 otherwise (matches Rust's conditional push).
+fn _cv_parse_env(sb, rest) {
+    var eq = _cv_find(rest, 61);
+    if (eq >= 0) {
+        var k = _cv_trim(_cv_slice(rest, 0, eq));
+        var vraw = _cv_slice(rest, eq + 1, strlen(rest));
+        var v = _cv_trim_quotes(_cv_trim(vraw));
+        _cv_emit_env(sb, k, v);
+        return 1;
+    }
+    var sp = _cv_find(rest, 32);
+    if (sp >= 0) {
+        var k2 = _cv_trim(_cv_slice(rest, 0, sp));
+        var v2 = _cv_trim(_cv_slice(rest, sp + 1, strlen(rest)));
+        _cv_emit_env(sb, k2, v2);
+        return 1;
+    }
+    return 0;
+}
+
+# Rust LABEL arm: only the '=' form; value trimmed + trim_matches('"').
+fn _cv_parse_label(sb, rest) {
+    var eq = _cv_find(rest, 61);
+    if (eq < 0) { return 0; }
+    var k = _cv_trim(_cv_slice(rest, 0, eq));
+    var vraw = _cv_slice(rest, eq + 1, strlen(rest));
+    var v = _cv_trim_quotes(_cv_trim(vraw));
+    _cv_emit_label(sb, k, v);
+    return 1;
+}
+
+# COPY arm: `rest.splitn(2, ' ')`; only emit if exactly two parts.
+# Returns 1 if emitted.
+fn _cv_parse_copy(sb, rest) {
+    var sp = _cv_find(rest, 32);
+    if (sp < 0) { return 0; }
+    var src = _cv_slice(rest, 0, sp);
+    var dst = _cv_slice(rest, sp + 1, strlen(rest));
+    # splitn(2, ' ') keeps the remainder (including any further spaces)
+    # as parts[1] verbatim — _cv_slice to end already does that.
+    _cv_emit_copy(sb, src, dst);
+    return 1;
+}
+
+# ── main Dockerfile converter ────────────────────────────────────
+# Convert a Dockerfile cstr to a Stivafile TOML cstr.
+#
+# Handles FROM, RUN, COPY, ENV, WORKDIR, LABEL, EXPOSE, ENTRYPOINT,
+# USER (CMD/ADD/ARG/SHELL are skipped, as in the oracle).
+#
+# Returns a heap cstr on success, or 0 on the no-FROM error (caller maps
+# 0 → StivaError::InvalidState "Dockerfile has no FROM instruction").
+#[must_use]
+fn dockerfile_to_toml(dockerfile) {
+    # Accumulators mirroring the Rust locals.
+    var base = "";
+    var user = "";
+    var workdir_config = "";
+    # entrypoint: a vec of quoted-token cstrs already `"..."`-wrapped for
+    # the final `entrypoint = [...]`; empty ⇒ omit the line.
+    var entrypoint = vec_new();
+    # expose: a vec of port ints (u16 in Rust); empty ⇒ omit the line.
+    var expose = vec_new();
+    # steps: builder accumulating the rendered `[[steps]]` blocks (each
+    # already separated by "\n\n"); we count via step_count.
+    var steps_sb = str_builder_new();
+    var step_count = 0;
+
+    var dlen = strlen(dockerfile);
+    var lstart = 0;
+    var pos = 0;
+    while (pos <= dlen) {
+        var at_end = 0;
+        if (pos == dlen) { at_end = 1; }
+        var is_nl = 0;
+        if (at_end == 0) { if (load8(dockerfile + pos) == 10) { is_nl = 1; } }
+        if (is_nl == 1 || at_end == 1) {
+            var raw = _cv_slice(dockerfile, lstart, pos);
+            var line = _cv_trim(raw);
+            if (_cv_skip_line(line) == 0) {
+                # Strip line continuations then re-trim (Rust does this
+                # for every non-comment line, before the prefix checks).
+                line = _cv_strip_cont(line);
+
+                var rest = _cv_strip_prefix(line, "FROM ");
+                if (rest != 0) {
+                    base = _cv_trim(rest);
+                } else {
+                    rest = _cv_strip_prefix(line, "RUN ");
+                    if (rest != 0) {
+                        if (step_count > 0) { str_builder_add_cstr(steps_sb, "\n\n"); }
+                        _cv_emit_run(steps_sb, rest);
+                        step_count = step_count + 1;
+                    } else {
+                        rest = _cv_strip_prefix(line, "COPY ");
+                        if (rest != 0) {
+                            var tmp_sb = str_builder_new();
+                            if (_cv_parse_copy(tmp_sb, rest) == 1) {
+                                if (step_count > 0) { str_builder_add_cstr(steps_sb, "\n\n"); }
+                                str_builder_add(steps_sb, str_builder_build(tmp_sb));
+                                step_count = step_count + 1;
+                            }
+                        } else {
+                            rest = _cv_strip_prefix(line, "ENV ");
+                            if (rest != 0) {
+                                var env_sb = str_builder_new();
+                                if (_cv_parse_env(env_sb, rest) == 1) {
+                                    if (step_count > 0) { str_builder_add_cstr(steps_sb, "\n\n"); }
+                                    str_builder_add(steps_sb, str_builder_build(env_sb));
+                                    step_count = step_count + 1;
+                                }
+                            } else {
+                                rest = _cv_strip_prefix(line, "WORKDIR ");
+                                if (rest != 0) {
+                                    var wd = _cv_trim(rest);
+                                    if (step_count > 0) { str_builder_add_cstr(steps_sb, "\n\n"); }
+                                    _cv_emit_workdir(steps_sb, wd);
+                                    step_count = step_count + 1;
+                                    workdir_config = wd;
+                                } else {
+                                    rest = _cv_strip_prefix(line, "LABEL ");
+                                    if (rest != 0) {
+                                        var lbl_sb = str_builder_new();
+                                        if (_cv_parse_label(lbl_sb, rest) == 1) {
+                                            if (step_count > 0) { str_builder_add_cstr(steps_sb, "\n\n"); }
+                                            str_builder_add(steps_sb, str_builder_build(lbl_sb));
+                                            step_count = step_count + 1;
+                                        }
+                                    } else {
+                                        rest = _cv_strip_prefix(line, "EXPOSE ");
+                                        if (rest != 0) {
+                                            _cv_parse_expose(expose, rest);
+                                        } else {
+                                            rest = _cv_strip_prefix(line, "ENTRYPOINT ");
+                                            if (rest != 0) {
+                                                _cv_parse_entrypoint(entrypoint, _cv_trim(rest));
+                                            } else {
+                                                rest = _cv_strip_prefix(line, "USER ");
+                                                if (rest != 0) {
+                                                    user = _cv_trim(rest);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            lstart = pos + 1;
+        }
+        pos = pos + 1;
+    }
+
+    # No FROM ⇒ error sentinel (Rust: Err(InvalidState)).
+    if (strlen(base) == 0) { return 0; }
+
+    # Assemble the output document.
+    var out = str_builder_new();
+    str_builder_add_cstr(out, "[image]\n");
+    str_builder_add_cstr(out, "base = \"");
+    str_builder_add_cstr(out, base);
+    str_builder_add_cstr(out, "\"\n");
+    str_builder_add_cstr(out, "name = \"converted\"\n");
+    str_builder_add_cstr(out, "tag = \"latest\"\n");
+    str_builder_add_cstr(out, "\n");
+
+    # Each step block is followed by a blank line (Rust writes the step
+    # then an empty writeln! per iteration).
+    if (step_count > 0) {
+        str_builder_add(out, str_builder_build(steps_sb));
+        str_builder_add_cstr(out, "\n\n");
+    }
+
+    str_builder_add_cstr(out, "[config]\n");
+
+    if (vec_len(entrypoint) > 0) {
+        str_builder_add_cstr(out, "entrypoint = [");
+        var ei = 0;
+        while (ei < vec_len(entrypoint)) {
+            if (ei > 0) { str_builder_add_cstr(out, ", "); }
+            str_builder_add_cstr(out, vec_get(entrypoint, ei));
+            ei = ei + 1;
+        }
+        str_builder_add_cstr(out, "]\n");
+    }
+
+    if (vec_len(expose) > 0) {
+        str_builder_add_cstr(out, "expose = [");
+        var pi = 0;
+        while (pi < vec_len(expose)) {
+            if (pi > 0) { str_builder_add_cstr(out, ", "); }
+            str_builder_add_int(out, vec_get(expose, pi));
+            pi = pi + 1;
+        }
+        str_builder_add_cstr(out, "]\n");
+    }
+
+    if (strlen(user) > 0) {
+        str_builder_add_cstr(out, "user = \"");
+        str_builder_add_cstr(out, user);
+        str_builder_add_cstr(out, "\"\n");
+    }
+
+    if (strlen(workdir_config) > 0) {
+        str_builder_add_cstr(out, "workdir = \"");
+        str_builder_add_cstr(out, workdir_config);
+        str_builder_add_cstr(out, "\"\n");
+    }
+
+    var built = str_builder_build(out);
+    return str_cstr(built);
+}
+
+# EXPOSE arm: split on whitespace, strip `/proto` suffix, parse each
+# token as a decimal port and push valid ones (0..65535 → Rust u16
+# parse) onto `expose`. Invalid tokens are skipped (Rust `if let Ok`).
+fn _cv_parse_expose(expose, rest) {
+    var len = strlen(rest);
+    var i = 0;
+    while (i < len) {
+        # Skip whitespace.
+        while (i < len) {
+            if (_cv_is_ws(load8(rest + i)) == 0) { break; }
+            i = i + 1;
+        }
+        if (i >= len) { break; }
+        var tok_start = i;
+        while (i < len) {
+            if (_cv_is_ws(load8(rest + i)) == 1) { break; }
+            i = i + 1;
+        }
+        var tok = _cv_slice(rest, tok_start, i);
+        # Strip protocol suffix: everything before the first '/'.
+        var slash = _cv_find(tok, 47);
+        var port_str = tok;
+        if (slash >= 0) { port_str = _cv_slice(tok, 0, slash); }
+        if (_cv_parse_u16(port_str) == 1) {
+            vec_push(expose, atoi(port_str));
+        }
+    }
+    return 0;
+}
+
+# True (1) iff `s` is a non-empty all-digit string whose value fits u16
+# (0..=65535), matching Rust `port_str.parse::<u16>()`. Leading '+'/'-'
+# and empties fail (Rust u16 parse rejects them).
+#[must_use]
+fn _cv_parse_u16(s) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        i = i + 1;
+    }
+    if (atoi(s) > 65535) { return 0; }
+    return 1;
+}
+
+# ENTRYPOINT arm: JSON-array form `[...]` → parse the quoted string
+# elements; shell form → `["/bin/sh", "-c", "<rest>"]`. Each element is
+# pushed onto `entrypoint` already wrapped as `"<elem>"` (ready for the
+# `entrypoint = [...]` join). `rest` is the trimmed remainder.
+fn _cv_parse_entrypoint(entrypoint, rest) {
+    if (load8(rest) == 91) {
+        # JSON array form. The oracle uses serde_json to parse a
+        # Vec<String>; we do a minimal quoted-token scan sufficient for
+        # the well-formed arrays a Dockerfile ENTRYPOINT carries.
+        # On a malformed array the Rust `if let Ok(arr)` leaves
+        # entrypoint empty — our scan simply pushes whatever complete
+        # `"..."` tokens it finds.
+        var len = strlen(rest);
+        var i = 0;
+        while (i < len) {
+            if (load8(rest + i) == 34) {
+                var estart = i + 1;
+                var j = estart;
+                while (j < len) {
+                    if (load8(rest + j) == 34) { break; }
+                    j = j + 1;
+                }
+                if (j >= len) { break; }
+                var elem = _cv_slice(rest, estart, j);
+                var wrapped = _cv_wrap_quote(elem);
+                vec_push(entrypoint, wrapped);
+                i = j + 1;
+            } else {
+                i = i + 1;
+            }
+        }
+        return 0;
+    }
+    # Shell form → ["/bin/sh", "-c", "<rest>"].
+    vec_push(entrypoint, "\"/bin/sh\"");
+    vec_push(entrypoint, "\"-c\"");
+    vec_push(entrypoint, _cv_wrap_quote(rest));
+    return 0;
+}
+
+# Wrap `s` as `"<s>"` in a fresh cstr (no interior escaping — matches the
+# oracle's `format!("\"{s}\"")`).
+#[must_use]
+fn _cv_wrap_quote(s) {
+    var len = strlen(s);
+    var out = alloc(len + 3);
+    store8(out, 34);
+    memcpy(out + 1, s, len);
+    store8(out + 1 + len, 34);
+    store8(out + 2 + len, 0);
+    return out;
+}
+
+# ── DEFERRED (needs a YAML parser + JSON Value model) ────────────
+# rust-old/src/convert.rs also defines:
+#   #[must_use]
+#   fn compose_yaml_to_toml(yaml: &str) -> Result<String, StivaError>
+#
+# It parses the docker-compose YAML into a serde_json `Value` (via
+# serde_saphyr), then walks `services` (image/command/environment/ports/
+# volumes/depends_on/restart), top-level `networks` (driver, ipam →
+# subnet), and top-level `volumes` (driver), emitting stiva compose TOML.
+# Invalid YAML ⇒ Err(StivaError::InvalidState("invalid YAML: ...")).
+#
+# This is built entirely on a full YAML deserializer and the serde_json
+# object model — neither exists in the ported base — so it is deferred
+# until a Cyrius YAML/Value layer lands. The rendering logic (the
+# `writeln!` shape) ports mechanically once a parsed document tree is
+# available. Tracked in the roadmap.

@@ -1,0 +1,96 @@
+# stiva — error codes
+# Ported from rust-old/src/error.rs (enum StivaError).
+#
+# The Rust `StivaError` variants each carry a `String` context payload; in
+# Cyrius the idiom (mirroring kavach's error.cyr) is an integer code enum
+# plus a `stiva_err_print(code, detail)` where the caller supplies the
+# context cstr. Functions return the code; callers carry the detail.
+#
+# Members are namespaced `STIVA_ERR_*` — Cyrius hoists enum members to
+# global constants under "last definition wins", so bare generic names
+# (`OK`, `RUNTIME`, `IO_ERROR`) would silently collide with any dep minting
+# the same name. The `STIVA_ERR_*` prefix keeps every member globally
+# unique. (Same convention as kavach `KAVACH_ERR_*`.)
+
+enum StivaError {
+    STIVA_ERR_OK = 0;
+    STIVA_ERR_IMAGE_NOT_FOUND = 1;
+    STIVA_ERR_PULL_FAILED = 2;
+    STIVA_ERR_CONTAINER_NOT_FOUND = 3;
+    STIVA_ERR_ALREADY_RUNNING = 4;
+    STIVA_ERR_INVALID_STATE = 5;
+    STIVA_ERR_RUNTIME = 6;
+    STIVA_ERR_NETWORK = 7;
+    STIVA_ERR_STORAGE = 8;
+    STIVA_ERR_REGISTRY = 9;
+    STIVA_ERR_INVALID_REFERENCE = 10;
+    STIVA_ERR_DIGEST_MISMATCH = 11;
+    STIVA_ERR_AUTH_FAILED = 12;
+    STIVA_ERR_UNSUPPORTED_PLATFORM = 13;
+    STIVA_ERR_ANSAMBLU = 14;
+    STIVA_ERR_LAYER_UNPACK = 15;
+    STIVA_ERR_OVERLAY = 16;
+    STIVA_ERR_PORT_MAPPING = 17;
+    STIVA_ERR_SANDBOX = 18;
+    STIVA_ERR_SCAN_BLOCKED = 19;
+    STIVA_ERR_FLEET = 20;
+    STIVA_ERR_MIGRATION = 21;
+    STIVA_ERR_AUDIT = 22;
+    STIVA_ERR_ENCRYPTION = 23;
+    STIVA_ERR_OCI_BUNDLE = 24;
+    STIVA_ERR_ROOTLESS_NETWORK = 25;
+    STIVA_ERR_IO = 26;
+    STIVA_ERR_JSON = 27;
+    STIVA_ERR_HTTP = 28;
+}
+
+# Human-readable message for an error code — matches the Rust
+# `#[error("...")]` display strings (context payload elided; append `detail`
+# at the call site via stiva_err_print).
+#[must_use]
+fn stiva_err_name(code) {
+    if (code == STIVA_ERR_OK) { return "ok"; }
+    if (code == STIVA_ERR_IMAGE_NOT_FOUND) { return "image not found"; }
+    if (code == STIVA_ERR_PULL_FAILED) { return "image pull failed"; }
+    if (code == STIVA_ERR_CONTAINER_NOT_FOUND) { return "container not found"; }
+    if (code == STIVA_ERR_ALREADY_RUNNING) { return "container already running"; }
+    if (code == STIVA_ERR_INVALID_STATE) { return "invalid state"; }
+    if (code == STIVA_ERR_RUNTIME) { return "runtime error"; }
+    if (code == STIVA_ERR_NETWORK) { return "network error"; }
+    if (code == STIVA_ERR_STORAGE) { return "storage error"; }
+    if (code == STIVA_ERR_REGISTRY) { return "registry error"; }
+    if (code == STIVA_ERR_INVALID_REFERENCE) { return "invalid image reference"; }
+    if (code == STIVA_ERR_DIGEST_MISMATCH) { return "digest mismatch"; }
+    if (code == STIVA_ERR_AUTH_FAILED) { return "authentication failed"; }
+    if (code == STIVA_ERR_UNSUPPORTED_PLATFORM) { return "unsupported platform"; }
+    if (code == STIVA_ERR_ANSAMBLU) { return "ansamblu error"; }
+    if (code == STIVA_ERR_LAYER_UNPACK) { return "layer unpack error"; }
+    if (code == STIVA_ERR_OVERLAY) { return "overlay error"; }
+    if (code == STIVA_ERR_PORT_MAPPING) { return "port mapping error"; }
+    if (code == STIVA_ERR_SANDBOX) { return "sandbox error"; }
+    if (code == STIVA_ERR_SCAN_BLOCKED) { return "scan blocked"; }
+    if (code == STIVA_ERR_FLEET) { return "fleet error"; }
+    if (code == STIVA_ERR_MIGRATION) { return "migration error"; }
+    if (code == STIVA_ERR_AUDIT) { return "audit error"; }
+    if (code == STIVA_ERR_ENCRYPTION) { return "encryption error"; }
+    if (code == STIVA_ERR_OCI_BUNDLE) { return "oci bundle error"; }
+    if (code == STIVA_ERR_ROOTLESS_NETWORK) { return "rootless network error"; }
+    if (code == STIVA_ERR_IO) { return "io error"; }
+    if (code == STIVA_ERR_JSON) { return "json error"; }
+    if (code == STIVA_ERR_HTTP) { return "http error"; }
+    return "unknown error";
+}
+
+# Diagnostics to stderr (fd 2): "stiva: <name>[: <detail>]\n". `detail` is
+# a NUL-terminated cstr or 0 for none.
+fn stiva_err_print(code, detail) {
+    var name = stiva_err_name(code);
+    sys_write(2, "stiva: ", 7);
+    sys_write(2, name, strlen(name));
+    if (detail != 0) {
+        sys_write(2, ": ", 2);
+        sys_write(2, detail, strlen(detail));
+    }
+    sys_write(2, "\n", 1);
+    return 0;
+}

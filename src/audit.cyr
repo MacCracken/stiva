@@ -1,0 +1,497 @@
+# stiva — structured audit log (append-only JSON-lines runtime-op log)
+# Ported from rust-old/src/audit.rs.
+#
+# Each entry records a timestamp, operation type, target (container/image),
+# result, and optional metadata for compliance and forensics. Entries are
+# serialized one-per-line as JSON and appended under a file lock (the Rust
+# used a Mutex<File>; here the append is serialized by an flock, which is
+# the cross-process-safe analogue).
+#
+# Enum members are namespaced (AUDIT_OP_*, AUDIT_RESULT_*) — Cyrius hoists
+# enum members to global constants under "last definition wins", so bare
+# names would silently collide across modules (see error.cyr).
+#
+# Parity notes vs Rust:
+#   - AuditResult::Failed(String) — the failure message is carried on the
+#     entry as `result_msg` (0 / "" when result == AUDIT_RESULT_SUCCESS).
+#   - metadata: serde_json::Value — carried as a pre-serialized JSON cstr
+#     (0 / "" == null; skipped from output when null, matching
+#     `skip_serializing_if = "Value::is_null"`).
+#   - timestamp: chrono::DateTime<Utc> — rendered ISO-8601 "…Z" via
+#     chrono.cyr's iso8601 (second precision; Rust rfc3339 may carry
+#     fractional seconds, elided here — the wire shape is otherwise equal).
+#   - read_entries: reverse-of-lines, take(limit), skip unparseable lines.
+
+# ── AuditOperation ────────────────────────────────────────────────
+# Runtime operation that was performed (rust-old: enum AuditOperation).
+enum AuditOperation {
+    AUDIT_OP_CREATE = 0;
+    AUDIT_OP_START = 1;
+    AUDIT_OP_STOP = 2;
+    AUDIT_OP_KILL = 3;
+    AUDIT_OP_REMOVE = 4;
+    AUDIT_OP_EXEC = 5;
+    AUDIT_OP_PULL = 6;
+    AUDIT_OP_PUSH = 7;
+    AUDIT_OP_CHECKPOINT = 8;
+    AUDIT_OP_RESTORE = 9;
+}
+
+# Display string for an operation (rust-old: impl Display for AuditOperation).
+#[must_use]
+fn audit_op_name(op) {
+    if (op == AUDIT_OP_CREATE) { return "create"; }
+    if (op == AUDIT_OP_START) { return "start"; }
+    if (op == AUDIT_OP_STOP) { return "stop"; }
+    if (op == AUDIT_OP_KILL) { return "kill"; }
+    if (op == AUDIT_OP_REMOVE) { return "remove"; }
+    if (op == AUDIT_OP_EXEC) { return "exec"; }
+    if (op == AUDIT_OP_PULL) { return "pull"; }
+    if (op == AUDIT_OP_PUSH) { return "push"; }
+    if (op == AUDIT_OP_CHECKPOINT) { return "checkpoint"; }
+    if (op == AUDIT_OP_RESTORE) { return "restore"; }
+    return "unknown";
+}
+
+# Serde wire name for an operation. serde's default enum representation for
+# a fieldless variant is the PascalCase variant name string. The Rust type
+# derives Serialize/Deserialize with no rename, so the JSON value is
+# "Create", "Start", … (NOT the Display lowercase form). Kept distinct from
+# audit_op_name so both round-trip and human display stay faithful.
+#[must_use]
+fn audit_op_serde(op) {
+    if (op == AUDIT_OP_CREATE) { return "Create"; }
+    if (op == AUDIT_OP_START) { return "Start"; }
+    if (op == AUDIT_OP_STOP) { return "Stop"; }
+    if (op == AUDIT_OP_KILL) { return "Kill"; }
+    if (op == AUDIT_OP_REMOVE) { return "Remove"; }
+    if (op == AUDIT_OP_EXEC) { return "Exec"; }
+    if (op == AUDIT_OP_PULL) { return "Pull"; }
+    if (op == AUDIT_OP_PUSH) { return "Push"; }
+    if (op == AUDIT_OP_CHECKPOINT) { return "Checkpoint"; }
+    if (op == AUDIT_OP_RESTORE) { return "Restore"; }
+    return "Create";
+}
+
+# Inverse of audit_op_serde: parse a serde variant name to an op code.
+# Returns -1 on an unknown name (caller treats as unparseable line).
+#[must_use]
+fn audit_op_from_serde(s) {
+    if (streq(s, "Create") == 1) { return AUDIT_OP_CREATE; }
+    if (streq(s, "Start") == 1) { return AUDIT_OP_START; }
+    if (streq(s, "Stop") == 1) { return AUDIT_OP_STOP; }
+    if (streq(s, "Kill") == 1) { return AUDIT_OP_KILL; }
+    if (streq(s, "Remove") == 1) { return AUDIT_OP_REMOVE; }
+    if (streq(s, "Exec") == 1) { return AUDIT_OP_EXEC; }
+    if (streq(s, "Pull") == 1) { return AUDIT_OP_PULL; }
+    if (streq(s, "Push") == 1) { return AUDIT_OP_PUSH; }
+    if (streq(s, "Checkpoint") == 1) { return AUDIT_OP_CHECKPOINT; }
+    if (streq(s, "Restore") == 1) { return AUDIT_OP_RESTORE; }
+    return 0 - 1;
+}
+
+# ── AuditResult ───────────────────────────────────────────────────
+# Outcome of the audited operation (rust-old: enum AuditResult).
+# Success carries no data; Failed carries a String message (on the entry).
+enum AuditResult {
+    AUDIT_RESULT_SUCCESS = 0;
+    AUDIT_RESULT_FAILED = 1;
+}
+
+# ── AuditEntry ────────────────────────────────────────────────────
+# A single audit log entry (rust-old: struct AuditEntry).
+#   timestamp     — ISO-8601 cstr ("…Z")
+#   operation     — AuditOperation code
+#   container_id  — cstr, or 0 for None (skip_serializing_if is_none)
+#   image_ref     — cstr, or 0 for None (skip_serializing_if is_none)
+#   user          — cstr (current effective user)
+#   result        — AuditResult code
+#   result_msg    — failure message cstr for AUDIT_RESULT_FAILED (else 0)
+#   metadata      — pre-serialized JSON cstr, or 0 for Null (skip when null)
+#derive(accessors)
+struct AuditEntry {
+    timestamp;
+    operation;
+    container_id;
+    image_ref;
+    user;
+    result;
+    result_msg;
+    metadata;
+}
+
+# Build an audit entry for a container operation (rust-old: AuditEntry::container).
+# result is a code; result_msg is 0 for Success or the failure cstr for Failed.
+#[must_use]
+fn audit_entry_container(operation, container_id, result, result_msg) {
+    var e = alloc(64);
+    AuditEntry_set_timestamp(e, iso8601_now());
+    AuditEntry_set_operation(e, operation);
+    AuditEntry_set_container_id(e, container_id);
+    AuditEntry_set_image_ref(e, 0);
+    AuditEntry_set_user(e, current_user());
+    AuditEntry_set_result(e, result);
+    AuditEntry_set_result_msg(e, result_msg);
+    AuditEntry_set_metadata(e, 0);
+    return e;
+}
+
+# Build an audit entry for an image operation (rust-old: AuditEntry::image).
+#[must_use]
+fn audit_entry_image(operation, image_ref, result, result_msg) {
+    var e = alloc(64);
+    AuditEntry_set_timestamp(e, iso8601_now());
+    AuditEntry_set_operation(e, operation);
+    AuditEntry_set_container_id(e, 0);
+    AuditEntry_set_image_ref(e, image_ref);
+    AuditEntry_set_user(e, current_user());
+    AuditEntry_set_result(e, result);
+    AuditEntry_set_result_msg(e, result_msg);
+    AuditEntry_set_metadata(e, 0);
+    return e;
+}
+
+# Attach metadata to this entry (rust-old: AuditEntry::with_metadata).
+# `metadata` is a pre-serialized JSON cstr. Mutates in place and returns
+# the entry (builder-style, mirroring the Rust `mut self -> Self`).
+#[must_use]
+fn audit_entry_with_metadata(entry, metadata) {
+    AuditEntry_set_metadata(entry, metadata);
+    return entry;
+}
+
+# ── JSON escaping (RFC-8259 minimal) ──────────────────────────────
+# Worst-case each byte becomes \uXXXX (6 bytes); +1 for NUL. Emits a heap
+# cstr with quotes/backslashes/control chars escaped. Used for the string
+# fields (container_id, image_ref, user, result_msg) which are
+# caller-controllable.
+#[must_use]
+fn _audit_json_escape(s) {
+    var n = strlen(s);
+    var out = alloc(n * 6 + 1);
+    var i = 0;
+    var pos = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c == 34) {
+            store8(out + pos, 92); store8(out + pos + 1, 34); pos = pos + 2;
+        } elif (c == 92) {
+            store8(out + pos, 92); store8(out + pos + 1, 92); pos = pos + 2;
+        } elif (c == 8) {
+            store8(out + pos, 92); store8(out + pos + 1, 98); pos = pos + 2;
+        } elif (c == 12) {
+            store8(out + pos, 92); store8(out + pos + 1, 102); pos = pos + 2;
+        } elif (c == 10) {
+            store8(out + pos, 92); store8(out + pos + 1, 110); pos = pos + 2;
+        } elif (c == 13) {
+            store8(out + pos, 92); store8(out + pos + 1, 114); pos = pos + 2;
+        } elif (c == 9) {
+            store8(out + pos, 92); store8(out + pos + 1, 116); pos = pos + 2;
+        } elif (c < 32) {
+            var hex = "0123456789abcdef";
+            store8(out + pos, 92); store8(out + pos + 1, 117);
+            store8(out + pos + 2, 48); store8(out + pos + 3, 48);
+            store8(out + pos + 4, load8(hex + ((c >> 4) & 15)));
+            store8(out + pos + 5, load8(hex + (c & 15)));
+            pos = pos + 6;
+        } else {
+            store8(out + pos, c); pos = pos + 1;
+        }
+        i = i + 1;
+    }
+    store8(out + pos, 0);
+    return out;
+}
+
+# ── Serialization ─────────────────────────────────────────────────
+# Serialize an entry as one JSON line (no trailing newline). Field order
+# mirrors the Rust struct: timestamp, operation, container_id?, image_ref?,
+# user, result, metadata?. Optional fields (container_id/image_ref/metadata)
+# are omitted when absent, matching serde's skip_serializing_if.
+#
+# result is serialized as serde's externally-tagged enum form:
+#   Success        -> "Success"
+#   Failed(msg)    -> {"Failed":"<msg>"}
+#[must_use]
+fn audit_entry_to_json(entry) {
+    var sb = str_builder_new();
+
+    str_builder_add_cstr(sb, "{\"timestamp\":\"");
+    str_builder_add_cstr(sb, _audit_json_escape(AuditEntry_timestamp(entry)));
+    str_builder_add_cstr(sb, "\",\"operation\":\"");
+    str_builder_add_cstr(sb, audit_op_serde(AuditEntry_operation(entry)));
+    str_builder_add_cstr(sb, "\"");
+
+    var cid = AuditEntry_container_id(entry);
+    if (cid != 0) {
+        str_builder_add_cstr(sb, ",\"container_id\":\"");
+        str_builder_add_cstr(sb, _audit_json_escape(cid));
+        str_builder_add_cstr(sb, "\"");
+    }
+
+    var iref = AuditEntry_image_ref(entry);
+    if (iref != 0) {
+        str_builder_add_cstr(sb, ",\"image_ref\":\"");
+        str_builder_add_cstr(sb, _audit_json_escape(iref));
+        str_builder_add_cstr(sb, "\"");
+    }
+
+    str_builder_add_cstr(sb, ",\"user\":\"");
+    str_builder_add_cstr(sb, _audit_json_escape(AuditEntry_user(entry)));
+    str_builder_add_cstr(sb, "\",\"result\":");
+    if (AuditEntry_result(entry) == AUDIT_RESULT_SUCCESS) {
+        str_builder_add_cstr(sb, "\"Success\"");
+    } else {
+        var msg = AuditEntry_result_msg(entry);
+        if (msg == 0) { msg = ""; }
+        str_builder_add_cstr(sb, "{\"Failed\":\"");
+        str_builder_add_cstr(sb, _audit_json_escape(msg));
+        str_builder_add_cstr(sb, "\"}");
+    }
+
+    var meta = AuditEntry_metadata(entry);
+    if (meta != 0) {
+        if (strlen(meta) > 0) {
+            str_builder_add_cstr(sb, ",\"metadata\":");
+            str_builder_add_cstr(sb, meta);
+        }
+    }
+
+    str_builder_add_cstr(sb, "}");
+    var s = str_builder_build(sb);
+    return str_data(s);
+}
+
+# ── AuditLog ──────────────────────────────────────────────────────
+# Append-only audit logger backed by a file (rust-old: struct AuditLog).
+#derive(accessors)
+struct AuditLog {
+    path;
+}
+
+# Open or create an append-only audit log at `path` (rust-old: AuditLog::new).
+# Best-effort creates the parent directory (mirroring create_dir_all(parent)).
+# The Rust also opened the file eagerly with create+append; here the file is
+# created lazily on the first `log` via file_append_locked (O_CREAT). Returns
+# the AuditLog handle, or 0 on allocation failure (documented sentinel).
+fn audit_log_new(path) {
+    _audit_ensure_parent(path);
+    var log = alloc(8);
+    AuditLog_set_path(log, path);
+    return log;
+}
+
+# Best-effort mkdir of the parent directory of `path`. A single-level mkdir
+# (parity's create_dir_all recurses, but the audit path is a file inside an
+# already-existing runtime dir in practice). Failure is ignored — the
+# subsequent open surfaces any real error. mode 0700.
+fn _audit_ensure_parent(path) {
+    var n = strlen(path);
+    var last = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) { last = i; }
+        i = i + 1;
+    }
+    if (last <= 0) { return 0; }
+    var parent = alloc(last + 1);
+    memcpy(parent, path, last);
+    store8(parent + last, 0);
+    sys_mkdir(parent, 448);
+    return 0;
+}
+
+# Append an audit entry to the log (rust-old: AuditLog::log).
+# Serializes to JSON, appends "\n", writes under an flock. Returns
+# STIVA_ERR_OK on success or STIVA_ERR_AUDIT on write failure.
+fn audit_log_log(log, entry) {
+    var json = audit_entry_to_json(entry);
+    var jlen = strlen(json);
+    var line = alloc(jlen + 2);
+    memcpy(line, json, jlen);
+    store8(line + jlen, 10);        # '\n'
+    store8(line + jlen + 1, 0);
+
+    var path = AuditLog_path(log);
+    if (file_append_locked(path, line, jlen + 1) < 0) {
+        stiva_err_print(STIVA_ERR_AUDIT, "failed to write audit entry");
+        return STIVA_ERR_AUDIT;
+    }
+    return STIVA_ERR_OK;
+}
+
+# Read the most recent entries, up to `limit` (rust-old: AuditLog::read_entries).
+# Reads the whole file, splits on '\n', walks lines in reverse taking up to
+# `limit`, and parses each. Unparseable lines are skipped (filter_map .ok()).
+# Returns a Vec of AuditEntry (most-recent first), or 0 on read failure.
+# An absent/empty file yields an empty Vec (parity: read_to_string of an
+# empty log gives no lines).
+fn audit_log_read_entries(log, limit) {
+    var path = AuditLog_path(log);
+    var buf = alloc(1048576);        # 1 MiB read cap
+    var n = file_read_all(path, buf, 1048576);
+    var out = vec_new();
+    if (n <= 0) { return out; }
+
+    # Collect line [start,end) offsets, then walk them in reverse.
+    var starts = vec_new();
+    var ends = vec_new();
+    var ls = 0;
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + i) == 10) {
+            if (i > ls) { vec_push(starts, ls); vec_push(ends, i); }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    if (n > ls) { vec_push(starts, ls); vec_push(ends, n); }
+
+    var nlines = vec_len(starts);
+    var taken = 0;
+    var li = nlines - 1;
+    while (li >= 0) {
+        if (taken >= limit) { break; }
+        var s = vec_get(starts, li);
+        var e = vec_get(ends, li);
+        var linelen = e - s;
+        var line = alloc(linelen + 1);
+        memcpy(line, buf + s, linelen);
+        store8(line + linelen, 0);
+        var entry = _audit_parse_line(line);
+        if (entry != 0) {
+            vec_push(out, entry);
+            taken = taken + 1;
+        }
+        li = li - 1;
+    }
+    return out;
+}
+
+# Parse one JSON audit line into an AuditEntry. Returns 0 on any parse
+# failure (mirrors serde_json::from_str(...).ok() dropping the line).
+# Minimal field extraction sufficient for round-trip parity: pulls the
+# string values for timestamp/operation/container_id/image_ref/user and the
+# result tag. Metadata is preserved as its raw JSON tail is NOT reconstructed
+# (read_entries in Rust only inspects operation/container_id/image_ref/result
+# in tests); metadata is left null on parse.
+fn _audit_parse_line(line) {
+    var op_s = _audit_json_field(line, "\"operation\":\"");
+    if (op_s == 0) { return 0; }
+    var op = audit_op_from_serde(op_s);
+    if (op < 0) { return 0; }
+
+    var e = alloc(64);
+    AuditEntry_set_operation(e, op);
+
+    var ts = _audit_json_field(line, "\"timestamp\":\"");
+    if (ts == 0) { ts = ""; }
+    AuditEntry_set_timestamp(e, ts);
+
+    AuditEntry_set_container_id(e, _audit_json_field(line, "\"container_id\":\""));
+    AuditEntry_set_image_ref(e, _audit_json_field(line, "\"image_ref\":\""));
+
+    var user = _audit_json_field(line, "\"user\":\"");
+    if (user == 0) { user = ""; }
+    AuditEntry_set_user(e, user);
+
+    # result: either "Success" or {"Failed":"<msg>"}
+    if (_audit_contains(line, "\"result\":\"Success\"") == 1) {
+        AuditEntry_set_result(e, AUDIT_RESULT_SUCCESS);
+        AuditEntry_set_result_msg(e, 0);
+    } else {
+        AuditEntry_set_result(e, AUDIT_RESULT_FAILED);
+        AuditEntry_set_result_msg(e, _audit_json_field(line, "\"Failed\":\""));
+    }
+
+    AuditEntry_set_metadata(e, 0);
+    return e;
+}
+
+# True (1) if cstr `hay` contains cstr `needle`.
+#[must_use]
+fn _audit_contains(hay, needle) {
+    if (strstr(hay, needle) != 0) { return 1; }
+    return 0;
+}
+
+# Find `key` (e.g. "\"operation\":\"") in `line` and return a fresh heap cstr
+# holding the following JSON string value up to the next unescaped quote,
+# with the six standard escapes decoded. Returns 0 if `key` is absent.
+#[must_use]
+fn _audit_json_field(line, key) {
+    var at = strstr(line, key);
+    if (at == 0) { return 0; }
+    var p = at + strlen(key);
+    var cap = strlen(p) + 1;
+    var out = alloc(cap);
+    var pos = 0;
+    while (load8(p) != 0) {
+        var c = load8(p);
+        if (c == 34) { break; }
+        if (c == 92) {
+            p = p + 1;
+            var d = load8(p);
+            if (d == 0) { break; }
+            if (d == 110) { store8(out + pos, 10); }
+            elif (d == 116) { store8(out + pos, 9); }
+            elif (d == 114) { store8(out + pos, 13); }
+            elif (d == 98) { store8(out + pos, 8); }
+            elif (d == 102) { store8(out + pos, 12); }
+            elif (d == 117) {
+                # \uXXXX — take low byte only (control chars we emit are ASCII)
+                var h = _audit_hex4(p + 1);
+                store8(out + pos, h & 255);
+                p = p + 4;
+            } else { store8(out + pos, d); }
+            pos = pos + 1;
+        } else {
+            store8(out + pos, c); pos = pos + 1;
+        }
+        p = p + 1;
+    }
+    store8(out + pos, 0);
+    return out;
+}
+
+# Decode four hex digits at `p` to an int (0 on a non-hex digit).
+#[must_use]
+fn _audit_hex4(p) {
+    var v = 0;
+    var i = 0;
+    while (i < 4) {
+        var c = load8(p + i);
+        var d = 0;
+        if (c >= 48 && c <= 57) { d = c - 48; }
+        elif (c >= 97 && c <= 102) { d = c - 87; }
+        elif (c >= 65 && c <= 70) { d = c - 55; }
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    return v;
+}
+
+# Path to the audit log file (rust-old: AuditLog::path).
+#[must_use]
+#[inline]
+fn audit_log_path(log) {
+    return AuditLog_path(log);
+}
+
+# ── current_user ──────────────────────────────────────────────────
+# Current effective user name, best-effort (rust-old: current_user).
+# Tries $USER, then $LOGNAME, then falls back to "uid:<euid>".
+#[inline]
+fn current_user() {
+    var u = getenv("USER");
+    if (u != 0) { if (strlen(u) > 0) { return u; } }
+    var l = getenv("LOGNAME");
+    if (l != 0) { if (strlen(l) > 0) { return l; } }
+    var buf[24];
+    var len = fmt_int_buf(sys_getuid(), &buf);
+    var out = alloc(len + 5);
+    memcpy(out, "uid:", 4);
+    memcpy(out + 4, &buf, len);
+    store8(out + 4 + len, 0);
+    return out;
+}

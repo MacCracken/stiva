@@ -1,0 +1,28 @@
+# lib.cyr — stiva public library aggregation header
+#
+# OCI container runtime — image management, container lifecycle,
+# orchestration. Cyrius port of the Rust v2.x crate (rust-old/).
+#
+# This is the LIBRARY header: the domain `src/*.cyr` modules in dependency
+# order WITHOUT the program surface (no `main()`, no CLI dispatch, no
+# top-level `syscall(SYS_EXIT)`) — that lives in `src/main.cyr`, the in-tree
+# program entry, intentionally NOT part of the library.
+#
+# Consumers do NOT include this file directly. They depend on the committed
+# single-file bundle:
+#
+#     [deps.stiva]
+#     git     = "https://github.com/MacCracken/stiva.git"
+#     path    = "../stiva"
+#     tag     = "<VERSION>"
+#     modules = ["dist/stiva.cyr"]
+#
+# `cyrius deps` materializes that bundle into the consumer's lib/stiva.cyr.
+#
+# The module ORDER below mirrors `[lib].modules` in cyrius.cyml, which is
+# what `cyrius distlib` reads to (re)build dist/stiva.cyr. Keep the two in
+# the same order. Modules are ported bottom-up from rust-old/ (the parity
+# oracle); this list grows as each lands.
+
+include "src/error.cyr"
+include "src/oci.cyr"

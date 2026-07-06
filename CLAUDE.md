@@ -13,6 +13,38 @@
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
+## ⚠️ Porting Status — v3.0.0: Rust → Cyrius (IN PROGRESS)
+
+Stiva is being ported from Rust to the **Cyrius** language, following the AGNOS
+ecosystem port pattern (kavach, majra, nein, bote, agnodrm, vidya are done).
+
+- **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
+  bar for every ported module is "matches what the Rust did." Do NOT edit it.
+- **Use the Cyrius toolchain, NOT cargo.** The sections below that reference
+  `cargo` / `clippy` / `rustc` / `cargo-audit` / `cargo-deny` describe the
+  pre-port Rust flow and are STALE for the project. Rust survives only as the
+  `rust-old/` oracle. The live commands are:
+
+  | Action | Command |
+  |---|---|
+  | Resolve deps | `cyrius deps` |
+  | Vendor stdlib subset into `lib/` | `cyrius lib sync` (run after changing `[deps].stdlib`) |
+  | Build | `cyrius build src/main.cyr build/stiva` |
+  | Run tests | `cyrius test tests/stiva.tcyr` |
+  | Bench | `cyrius bench tests/stiva.bcyr` |
+  | Format / lint | `cyrius fmt <file> --check` · `cyrius lint <file>` (per-file) |
+  | Audit sweep | `cyrius audit` |
+
+- **Structure**: one domain `src/*.cyr` module per Rust module (kavach model);
+  `src/lib.cyr` = aggregation header; `src/main.cyr` = program entry (includes +
+  CLI); `cyrius.cyml` `[lib].modules` drives `cyrius distlib` → `dist/stiva.cyr`.
+- **Port process & sequencing**: `docs/development/roadmap.md` (v3.0.0). Ported
+  modules and the module-by-module workflow live there; `scripts/port-workflow.js`
+  is the agent-orchestrated porting harness. Canonical Cyrius exemplars to copy:
+  `src/error.cyr`, `src/oci.cyr`.
+- **AGNOS deps** are consumed as Cyrius `dist/*.cyr` bundles (kavach/majra/nein/
+  bote/agnodrm), wired in `cyrius.cyml` `[deps.*]` as their consuming modules land.
+
 ## Stack
 
 | Crate | Role |

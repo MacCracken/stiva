@@ -1,0 +1,84 @@
+# stiva — Agnoshi intent system (stub for future NL→intent parsing)
+# Ported from rust-old/src/intents.rs.
+#
+# The agnoshi project does not exist yet. This module defines the intent
+# kind constants that stiva will support once NL intent parsing is
+# available. In Rust `Intent` and `AnsambluAction` are data-carrying
+# `#[non_exhaustive]` enums exercised only via serde round-tripping; the
+# sole behaviour is `parse_intent`, which always errors. We port the
+# discriminants as module-prefixed enums (Cyrius hoists members to global
+# constants under last-def-wins, so prefixes keep them unique — see
+# error.cyr) plus the not-implemented parse, and defer the field-carrying
+# variant payloads until a real parser lands.
+
+
+# Parsed container intent kind (rust-old: enum Intent variants).
+# The Rust variants carry fields (Run{image,name}, Stop{id}, ...); here we
+# port just the discriminant, prefixed INTENT_* for global uniqueness.
+enum IntentKind {
+    INTENT_KIND_RUN = 0;
+    INTENT_KIND_STOP = 1;
+    INTENT_KIND_PULL = 2;
+    INTENT_KIND_ANSAMBLU = 3;
+    INTENT_KIND_SCALE = 4;
+    INTENT_KIND_INSPECT = 5;
+}
+
+# Serde wire tag for an IntentKind (matches the derived serde enum tag =
+# the variant identifier). Used by future NL parsing / display.
+#[must_use]
+fn intent_kind_name(kind) {
+    if (kind == INTENT_KIND_RUN) { return "Run"; }
+    if (kind == INTENT_KIND_STOP) { return "Stop"; }
+    if (kind == INTENT_KIND_PULL) { return "Pull"; }
+    if (kind == INTENT_KIND_ANSAMBLU) { return "Ansamblu"; }
+    if (kind == INTENT_KIND_SCALE) { return "Scale"; }
+    if (kind == INTENT_KIND_INSPECT) { return "Inspect"; }
+    return "unknown";
+}
+
+# Ansamblu sub-action (rust-old: enum AnsambluAction).
+# Prefixed ANSAMBLU_ACTION_* for global enum-member uniqueness.
+enum AnsambluAction {
+    ANSAMBLU_ACTION_UP = 0;
+    ANSAMBLU_ACTION_DOWN = 1;
+    ANSAMBLU_ACTION_RESTART = 2;
+}
+
+# Serde wire tag for an AnsambluAction (the derived variant identifiers).
+#[must_use]
+fn ansamblu_action_name(action) {
+    if (action == ANSAMBLU_ACTION_UP) { return "Up"; }
+    if (action == ANSAMBLU_ACTION_DOWN) { return "Down"; }
+    if (action == ANSAMBLU_ACTION_RESTART) { return "Restart"; }
+    return "unknown";
+}
+
+# Parse a natural language intent into a structured Intent.
+#
+# Placeholder — actual NL parsing requires the agnoshi project, which does
+# not exist yet. Mirrors rust-old `parse_intent`, which always returns
+# `Err(StivaError::Runtime("agnoshi intent parsing not yet implemented"))`.
+# Following the oci.cyr `parse_signal` sentinel idiom, we return the
+# negated error code `-(STIVA_ERR_RUNTIME)` (= -6) — never a valid intent
+# handle — so every call fails. The caller maps it back to STIVA_ERR_RUNTIME
+# and supplies the detail string via `stiva_err_print(STIVA_ERR_RUNTIME,
+# "agnoshi intent parsing not yet implemented")`. STIVA_ERR_RUNTIME is 6
+# (see error.cyr); inlined here to keep this a zero-include leaf module.
+#[must_use]
+fn parse_intent(text) {
+    return 0 - 6;
+}
+
+# ── DEFERRED (land with a real agnoshi NL parser) ────────────────
+# rust-old/src/intents.rs models each Intent variant with payload fields:
+#   Intent::Run { image: String, name: Option<String> }
+#   Intent::Stop { id: String }
+#   Intent::Pull { image: String }
+#   Intent::Ansamblu { action: AnsambluAction }
+#   Intent::Scale { service: String, replicas: u32 }
+#   Intent::Inspect { target: String }
+# The variant payloads (and their serde round-trip, tested in Rust) are
+# meaningful only once `parse_intent` actually produces them. Until the
+# agnoshi project exists, only the not-implemented sentinel above is live;
+# the field-carrying Intent value type ports alongside that parser.
