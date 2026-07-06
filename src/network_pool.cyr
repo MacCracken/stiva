@@ -1,0 +1,752 @@
+# stiva — IP address pool: allocate and release IPs within a subnet.
+# Ported from rust-old/src/network/pool.rs.
+#
+# Three public types:
+#   IpPool        — IPv4 pool over a CIDR subnet (HashSet of allocated addrs)
+#   Ipv6Pool      — IPv6 pool over a CIDR subnet
+#   DualStackPool — { v4: IpPool, v6: Option<Ipv6Pool> }
+#
+# i64-everywhere representation:
+#   * IPv4 addresses are the 32-bit host value carried in an i64 (0 .. 2^32-1).
+#   * IPv6 addresses are 16-byte big-endian buffers on the heap; an address is
+#     an i64 pointer to that buffer. u128 does not fit i64, so byte buffers +
+#     memeq/byte-increment stand in for u128 compare/add.
+#   * The `allocated` HashSet is a `vec` of addresses (i64 host value for v4,
+#     i64 buffer pointer for v6) with linear membership scan — same
+#     contains/insert/remove semantics the Rust HashSet provided.
+#
+# Error mapping (mirrors error.cyr): every Rust `Err(StivaError::Network(...))`
+# maps to the integer sentinel `0` returned from a constructor / a negative
+# sentinel from an allocator; the caller reports it via
+# stiva_err_print(STIVA_ERR_NETWORK, detail). Constructors return a heap
+# pointer to the pool struct on success, or 0 on failure.
+#
+# `alloc_init()` must have been called once before any pool is created.
+
+# ── IPv4 struct layout ────────────────────────
+# base       : network-aligned base address (u32 host value)
+# prefix_len : subnet prefix length
+# gateway    : first usable address (base + 1)
+# allocated  : vec of allocated u32 host values
+# next       : next candidate for allocation
+struct IpPool {
+    base;
+    prefix_len;
+    gateway;
+    allocated;
+    next;
+}
+
+# ── IPv6 struct layout ────────────────────────
+# base       : ptr to 16-byte network-aligned base (big-endian)
+# prefix_len : subnet prefix length
+# gateway    : ptr to 16-byte gateway (base + 1)
+# allocated  : vec of ptrs to 16-byte allocated addresses
+# next       : ptr to 16-byte next candidate
+struct Ipv6Pool {
+    base;
+    prefix_len;
+    gateway;
+    allocated;
+    next;
+}
+
+# ── DualStack struct layout ──────────────────────
+# v4 : ptr to IpPool (always present)
+# v6 : ptr to Ipv6Pool, or 0 when v4-only
+struct DualStackPool {
+    v4;
+    v6;
+}
+
+# ── IPv4 address parse / format ─────────────────────
+
+# Parse a single decimal octet [start,end) of cstr `s`. Returns the value
+# (0..255) via store at `out`, and 1 on success / 0 on invalid (empty,
+# non-digit, or >255). Rust's Ipv4Addr parse rejects these.
+#[must_use]
+fn _np_parse_octet(s, start, end, out) {
+    if (end <= start) { return 0; }
+    # Rust Ipv4Addr::from_str rejects an octet with a leading zero ("010",
+    # "00", "172.017.0.0") — only a bare "0" is a valid zero octet.
+    if (end - start > 1 && load8(s + start) == 48) { return 0; }
+    var val = 0;
+    var i = start;
+    while (i < end) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        if (val > 255) { return 0; }
+        i = i + 1;
+    }
+    store64(out, val);
+    return 1;
+}
+
+# Parse a dotted-quad IPv4 address cstr into its u32 host value. Returns 1
+# on success (value stored at `out`), 0 on invalid (wrong dot count, bad
+# octet). Mirrors Rust `addr_str.parse::<Ipv4Addr>()`.
+#[must_use]
+fn _np_parse_ipv4(s, out) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+    var octets = 0;
+    var seg_start = 0;
+    var cell = alloc(8);
+    var value = 0;
+    var i = 0;
+    while (i <= len) {
+        var c = 0;
+        if (i < len) { c = load8(s + i); }
+        if (i == len || c == 46) {   # '.' or end
+            if (_np_parse_octet(s, seg_start, i, cell) == 0) { return 0; }
+            var oct = load64(cell);
+            value = value * 256 + oct;
+            octets = octets + 1;
+            seg_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (octets != 4) { return 0; }
+    store64(out, value);
+    return 1;
+}
+
+# Format a u32 host value into a fresh dotted-quad cstr. Mirrors Rust
+# `Ipv4Addr::from(v)` Display.
+#[must_use]
+fn _np_fmt_ipv4(v) {
+    var sb = str_builder_new();
+    var b0 = (v / 16777216) % 256;
+    var b1 = (v / 65536) % 256;
+    var b2 = (v / 256) % 256;
+    var b3 = v % 256;
+    str_builder_add_int(sb, b0);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b1);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b2);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b3);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# Parse a decimal prefix-length cstr into its value. Returns 1 on success
+# (value stored at `out`), 0 on invalid (empty / non-digit).
+#[must_use]
+fn _np_parse_prefix(s, out) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+    var val = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        i = i + 1;
+    }
+    store64(out, val);
+    return 1;
+}
+
+# Find the byte index of the first '/' in `s`, or -1 if absent. Mirrors
+# Rust `str::split_once('/')`.
+#[must_use]
+fn _np_find_slash(s) {
+    var len = strlen(s);
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == 47) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ── IpPool (IPv4) ─────────────────────────
+
+# Create a new IPv4 pool for a CIDR subnet (e.g. "172.17.0.0/16").
+# Returns a heap IpPool pointer on success, or 0 on any parse/validation
+# error (Rust: Err(StivaError::Network(...))). The gateway is the first
+# usable address (.1); allocation starts from .2.
+#[must_use]
+fn ip_pool_new(subnet) {
+    var slash = _np_find_slash(subnet);
+    if (slash < 0) { return 0; }                 # invalid subnet CIDR
+
+    # addr_str = subnet[0..slash] ; prefix_str = subnet[slash+1..]
+    var addr_str = alloc(slash + 1);
+    memcpy(addr_str, subnet, slash);
+    store8(addr_str + slash, 0);
+
+    var addr_cell = alloc(8);
+    if (_np_parse_ipv4(addr_str, addr_cell) == 0) { return 0; }  # invalid addr
+    var addr = load64(addr_cell);
+
+    var prefix_str = subnet + slash + 1;
+    var pfx_cell = alloc(8);
+    if (_np_parse_prefix(prefix_str, pfx_cell) == 0) { return 0; }  # invalid prefix
+    var prefix_len = load64(pfx_cell);
+
+    if (prefix_len > 30) { return 0; }           # prefix too small for a pool
+
+    # mask = prefix_len == 0 ? 0 : !((1 << (32 - prefix_len)) - 1)
+    var mask = 0;
+    if (prefix_len == 0) {
+        mask = 0;
+    } else {
+        var host_bits = 32 - prefix_len;
+        var span = 1 << host_bits;
+        # 32-bit complement of (span - 1): keep low 32 bits.
+        mask = (~(span - 1)) & 4294967295;
+    }
+    var base = addr & mask;                       # network-aligned
+
+    var pool = alloc(40);
+    var p: IpPool = pool;
+    p.base = base;
+    p.prefix_len = prefix_len;
+    p.gateway = base + 1;
+    p.allocated = vec_new();
+    p.next = base + 2;                           # start allocation from .2
+    return pool;
+}
+
+# Gateway address (u32 host value) for this pool.
+#[must_use]
+fn ip_pool_gateway(pool) {
+    var p: IpPool = pool;
+    return p.gateway;
+}
+
+# Subnet prefix length.
+#[must_use]
+fn ip_pool_prefix_len(pool) {
+    var p: IpPool = pool;
+    return p.prefix_len;
+}
+
+# Subnet string in CIDR notation ("base/prefix"). Fresh heap cstr.
+#[must_use]
+fn ip_pool_subnet(pool) {
+    var p: IpPool = pool;
+    var addr = _np_fmt_ipv4(p.base);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, addr);
+    str_builder_putc(sb, 47);
+    str_builder_add_int(sb, p.prefix_len);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# Number of allocated addresses.
+#[must_use]
+fn ip_pool_allocated_count(pool) {
+    var p: IpPool = pool;
+    return vec_len(p.allocated);
+}
+
+# Maximum allocatable addresses (total minus network + gateway + broadcast).
+#[must_use]
+fn _ip_pool_max_hosts(pool) {
+    var p: IpPool = pool;
+    var total = 1 << (32 - p.prefix_len);
+    if (total < 3) { return 0; }                 # saturating_sub(3)
+    return total - 3;
+}
+
+# Broadcast address (u32 host value).
+#[must_use]
+fn _ip_pool_broadcast(pool) {
+    var p: IpPool = pool;
+    return p.base + (1 << (32 - p.prefix_len)) - 1;
+}
+
+# True (1) iff u32 host value `ip` is in the pool's allocated set.
+#[must_use]
+fn _ip_pool_contains(pool, ip) {
+    var p: IpPool = pool;
+    var set = p.allocated;
+    var n = vec_len(set);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(set, i) == ip) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Allocate the next available IPv4 address. Returns the u32 host value on
+# success, or -1 on exhaustion (Rust: Err(StivaError::Network(...));
+# caller maps -1 → STIVA_ERR_NETWORK).
+#[must_use]
+fn ip_pool_allocate(pool) {
+    var p: IpPool = pool;
+    if (vec_len(p.allocated) >= _ip_pool_max_hosts(pool)) {
+        return 0 - 1;                            # IP pool exhausted for subnet
+    }
+
+    var broadcast = _ip_pool_broadcast(pool);
+    var start = p.next;
+
+    while (1) {
+        if (p.next >= broadcast) {
+            p.next = p.base + 2;                 # wrap around
+        }
+
+        var candidate = p.next;
+        p.next = p.next + 1;
+
+        # Skip gateway and already-allocated.
+        if (candidate == p.gateway || _ip_pool_contains(pool, candidate) == 1) {
+            if (p.next == start) { return 0 - 1; }   # wrapped to start → full
+            continue;
+        }
+
+        vec_push(p.allocated, candidate);
+        return candidate;
+    }
+    return 0 - 1;
+}
+
+# Release an IPv4 address (u32 host value) back to the pool. Returns 1 iff
+# the address was present (Rust HashSet::remove bool).
+#[must_use]
+fn ip_pool_release(pool, ip) {
+    var p: IpPool = pool;
+    var set = p.allocated;
+    var idx = vec_find(set, ip);
+    if (idx < 0) { return 0; }
+    vec_remove(set, idx);
+    return 1;
+}
+
+# ── IPv6 address parse / format ─────────────────────
+
+# Parse a hex nibble byte `c`, returning 0..15, or -1 if not a hex digit.
+#[must_use]
+fn _np_hex_nibble(c) {
+    if (c >= 48 && c <= 57) { return c - 48; }        # 0-9
+    if (c >= 97 && c <= 102) { return c - 97 + 10; }  # a-f
+    if (c >= 65 && c <= 70) { return c - 65 + 10; }   # A-F
+    return 0 - 1;
+}
+
+# Parse an IPv6 address cstr into a fresh 16-byte big-endian buffer.
+# Supports the "::" zero-compression form. Returns the buffer pointer on
+# success, or 0 on invalid (mirrors Rust `addr_str.parse::<Ipv6Addr>()`).
+#[must_use]
+fn _np_parse_ipv6(s) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+
+    # Collect groups before and after "::" separately.
+    var head = vec_new();        # 16-bit group values before "::"
+    var tail = vec_new();        # 16-bit group values after "::"
+    var seen_dc = 0;             # have we passed the "::" ?
+    var cur = tail;              # current target vec (head until "::" seen)
+    cur = head;
+
+    var i = 0;
+    var group_val = 0;
+    var group_digits = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c == 58) {                            # ':'
+            # Look for "::"
+            var next_c = 0;
+            if (i + 1 < len) { next_c = load8(s + i + 1); }
+            if (i + 1 < len && next_c == 58) {
+                # Flush a pending group (leading "::" has none).
+                if (group_digits > 0) {
+                    vec_push(cur, group_val);
+                    group_val = 0;
+                    group_digits = 0;
+                }
+                if (seen_dc == 1) { return 0; }   # two "::" is invalid
+                seen_dc = 1;
+                cur = tail;
+                i = i + 2;
+                continue;
+            }
+            # Single ':' — group separator. A group must precede it.
+            if (group_digits == 0) { return 0; }
+            vec_push(cur, group_val);
+            group_val = 0;
+            group_digits = 0;
+            i = i + 1;
+            continue;
+        }
+        var nib = _np_hex_nibble(c);
+        if (nib < 0) { return 0; }                # non-hex char
+        group_val = group_val * 16 + nib;
+        group_digits = group_digits + 1;
+        if (group_digits > 4) { return 0; }       # group > 16 bits
+        i = i + 1;
+    }
+    # Flush trailing group (unless the string ended on a ':' handled above,
+    # which would have left group_digits == 0 and is only valid after "::").
+    if (group_digits > 0) {
+        vec_push(cur, group_val);
+    } else {
+        # A dangling single ':' at the end (not "::") is invalid: it means
+        # the last char was ':' with no "::" compression to justify it.
+        if (len > 0 && load8(s + len - 1) == 58) {
+            var last2 = 0;
+            if (len >= 2) { last2 = load8(s + len - 2); }
+            if (last2 != 58) { return 0; }
+        }
+    }
+
+    var nhead = vec_len(head);
+    var ntail = vec_len(tail);
+
+    var buf = alloc(16);
+    memset(buf, 0, 16);
+
+    if (seen_dc == 1) {
+        # Compressed: head groups at front, tail groups at back, zeros in
+        # between. Total groups must be < 8 (else "::" compresses nothing).
+        if (nhead + ntail > 7) { return 0; }
+        var g = 0;
+        while (g < nhead) {
+            var val = vec_get(head, g);
+            store8(buf + g * 2, (val / 256) % 256);
+            store8(buf + g * 2 + 1, val % 256);
+            g = g + 1;
+        }
+        var t = 0;
+        while (t < ntail) {
+            var val2 = vec_get(tail, t);
+            var slot = 8 - ntail + t;
+            store8(buf + slot * 2, (val2 / 256) % 256);
+            store8(buf + slot * 2 + 1, val2 % 256);
+            t = t + 1;
+        }
+        return buf;
+    }
+
+    # No compression: must be exactly 8 groups.
+    if (nhead != 8) { return 0; }
+    var g2 = 0;
+    while (g2 < 8) {
+        var val3 = vec_get(head, g2);
+        store8(buf + g2 * 2, (val3 / 256) % 256);
+        store8(buf + g2 * 2 + 1, val3 % 256);
+        g2 = g2 + 1;
+    }
+    return buf;
+}
+
+# Format a 16-byte big-endian IPv6 buffer into a fresh cstr, using the
+# canonical "::" compression of the longest run of zero groups. Mirrors
+# Rust `Ipv6Addr` Display (RFC 5952).
+#[must_use]
+fn _np_fmt_ipv6(buf) {
+    # Read 8 groups.
+    var groups = alloc(8 * 8);
+    var i = 0;
+    while (i < 8) {
+        var hi = load8(buf + i * 2);
+        var lo = load8(buf + i * 2 + 1);
+        store64(groups + i * 8, hi * 256 + lo);
+        i = i + 1;
+    }
+
+    # Find longest run of consecutive zero groups (length >= 2 to compress).
+    var best_start = 0 - 1;
+    var best_len = 0;
+    var run_start = 0 - 1;
+    var run_len = 0;
+    var j = 0;
+    while (j < 8) {
+        if (load64(groups + j * 8) == 0) {
+            if (run_start < 0) { run_start = j; run_len = 0; }
+            run_len = run_len + 1;
+            if (run_len > best_len) { best_len = run_len; best_start = run_start; }
+        } else {
+            run_start = 0 - 1;
+            run_len = 0;
+        }
+        j = j + 1;
+    }
+    if (best_len < 2) { best_start = 0 - 1; }
+
+    # Emit groups. The compressed run [best_start, best_start+best_len) is
+    # replaced by "::". A leading run yields a leading "::" (e.g. "::1"); a
+    # trailing run yields a trailing "::" (e.g. "fd00::"). Mirrors RFC 5952.
+    var sb = str_builder_new();
+    var k = 0;
+    while (k < 8) {
+        if (best_start >= 0 && k == best_start) {
+            # A colon before the gap (unless the gap starts at index 0).
+            if (k > 0) { str_builder_putc(sb, 58); }
+            str_builder_putc(sb, 58);            # the gap's own colon
+            k = k + best_len;
+            # If the run reached the end, we already have the trailing "::".
+            continue;
+        }
+        if (k > 0) { str_builder_putc(sb, 58); }
+        _np_fmt_hex16(sb, load64(groups + k * 8));
+        k = k + 1;
+    }
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# Append a 16-bit group as lowercase hex without leading zeros.
+fn _np_fmt_hex16(sb, val) {
+    if (val == 0) { str_builder_putc(sb, 48); return 0; }
+    # Collect nibbles high-to-low, skipping leading zeros.
+    var started = 0;
+    var shift = 12;
+    while (shift >= 0) {
+        var nib = (val >> shift) & 15;
+        if (nib != 0 || started == 1 || shift == 0) {
+            started = 1;
+            var d = 48 + nib;
+            if (nib >= 10) { d = 97 + nib - 10; }
+            str_builder_putc(sb, d);
+        }
+        shift = shift - 4;
+    }
+    return 0;
+}
+
+# Compare two 16-byte IPv6 buffers. Returns 1 iff equal.
+#[must_use]
+fn _np_ipv6_eq(a, b) {
+    return memeq(a, b, 16);
+}
+
+# Copy a 16-byte IPv6 buffer into a fresh heap buffer.
+#[must_use]
+fn _np_ipv6_dup(src) {
+    var out = alloc(16);
+    memcpy(out, src, 16);
+    return out;
+}
+
+# In-place increment of a 16-byte big-endian IPv6 buffer by 1 (wraps).
+fn _np_ipv6_inc(buf) {
+    var i = 15;
+    while (i >= 0) {
+        var v = load8(buf + i) + 1;
+        store8(buf + i, v % 256);
+        if (v < 256) { return 0; }               # no carry
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Apply the /prefix network mask to a 16-byte buffer in place (zero the
+# host bits). Mirrors Rust `base & mask` over u128.
+fn _np_ipv6_mask(buf, prefix_len) {
+    var bit = 0;
+    while (bit < 128) {
+        if (bit >= prefix_len) {
+            var byte_idx = bit / 8;
+            var bit_in_byte = 7 - (bit % 8);
+            var cur = load8(buf + byte_idx);
+            var m = 255 & (~(1 << bit_in_byte));
+            store8(buf + byte_idx, cur & m);
+        }
+        bit = bit + 1;
+    }
+    return 0;
+}
+
+# ── Ipv6Pool ───────────────────────────
+
+# Create a new IPv6 pool for a CIDR subnet (e.g. "fd00::/64"). Returns a
+# heap Ipv6Pool pointer on success, or 0 on error (Rust:
+# Err(StivaError::Network(...))). Gateway is base+1; allocation starts at
+# base+2.
+#[must_use]
+fn ipv6_pool_new(subnet) {
+    var slash = _np_find_slash(subnet);
+    if (slash < 0) { return 0; }                 # invalid IPv6 subnet CIDR
+
+    var addr_str = alloc(slash + 1);
+    memcpy(addr_str, subnet, slash);
+    store8(addr_str + slash, 0);
+
+    var base = _np_parse_ipv6(addr_str);
+    if (base == 0) { return 0; }                 # invalid IPv6 address
+
+    var prefix_str = subnet + slash + 1;
+    var pfx_cell = alloc(8);
+    if (_np_parse_prefix(prefix_str, pfx_cell) == 0) { return 0; }  # invalid prefix
+    var prefix_len = load64(pfx_cell);
+
+    if (prefix_len > 126) { return 0; }          # prefix too small for a pool
+
+    _np_ipv6_mask(base, prefix_len);             # network-align in place
+
+    var gateway = _np_ipv6_dup(base);
+    _np_ipv6_inc(gateway);                       # base + 1
+
+    var next = _np_ipv6_dup(base);
+    _np_ipv6_inc(next);
+    _np_ipv6_inc(next);                          # base + 2
+
+    var pool = alloc(40);
+    var p: Ipv6Pool = pool;
+    p.base = base;
+    p.prefix_len = prefix_len;
+    p.gateway = gateway;
+    p.allocated = vec_new();
+    p.next = next;
+    return pool;
+}
+
+# Gateway address (ptr to 16-byte buffer) for this pool.
+#[must_use]
+fn ipv6_pool_gateway(pool) {
+    var p: Ipv6Pool = pool;
+    return p.gateway;
+}
+
+# Subnet string in CIDR notation ("base/prefix"). Fresh heap cstr.
+#[must_use]
+fn ipv6_pool_subnet(pool) {
+    var p: Ipv6Pool = pool;
+    var addr = _np_fmt_ipv6(p.base);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, addr);
+    str_builder_putc(sb, 47);
+    str_builder_add_int(sb, p.prefix_len);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# True (1) iff the 16-byte address `ip` is in the pool's allocated set.
+#[must_use]
+fn _ipv6_pool_contains(pool, ip) {
+    var p: Ipv6Pool = pool;
+    var set = p.allocated;
+    var n = vec_len(set);
+    var i = 0;
+    while (i < n) {
+        if (_np_ipv6_eq(vec_get(set, i), ip) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Allocate the next available IPv6 address. Returns a ptr to a fresh
+# 16-byte buffer on success, or 0 on exhaustion (Rust:
+# Err(StivaError::Network(...))). Scan is capped at 65534 like the oracle.
+#[must_use]
+fn ipv6_pool_allocate(pool) {
+    var p: Ipv6Pool = pool;
+    var max_scan = 65534;
+    var iter = 0;
+    while (iter < max_scan) {
+        var candidate = _np_ipv6_dup(p.next);
+        _np_ipv6_inc(p.next);                    # advance next
+
+        if (_np_ipv6_eq(candidate, p.gateway) == 1 || _ipv6_pool_contains(pool, candidate) == 1) {
+            iter = iter + 1;
+            continue;
+        }
+
+        vec_push(p.allocated, candidate);
+        return candidate;
+    }
+    # Shouldn't happen for /64 pools, but handle gracefully. (Rust resets
+    # next to `start`; the value is recomputed on next call so we leave it.)
+    return 0;                                     # IPv6 pool exhausted
+}
+
+# Release an IPv6 address (16-byte buffer ptr) back to the pool. Returns 1
+# iff the address was present.
+#[must_use]
+fn ipv6_pool_release(pool, ip) {
+    var p: Ipv6Pool = pool;
+    var set = p.allocated;
+    var n = vec_len(set);
+    var i = 0;
+    while (i < n) {
+        if (_np_ipv6_eq(vec_get(set, i), ip) == 1) {
+            vec_remove(set, i);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── DualStackPool ─────────────────────────
+
+# Create a dual-stack pool with only IPv4. Returns a heap DualStackPool
+# pointer on success, or 0 if the v4 subnet is invalid.
+#[must_use]
+fn dual_stack_v4_only(subnet) {
+    var v4 = ip_pool_new(subnet);
+    if (v4 == 0) { return 0; }
+    var pool = alloc(16);
+    var d: DualStackPool = pool;
+    d.v4 = v4;
+    d.v6 = 0;
+    return pool;
+}
+
+# Create a dual-stack pool with both IPv4 and IPv6. Returns 0 if either
+# subnet is invalid.
+#[must_use]
+fn dual_stack_dual(v4_subnet, v6_subnet) {
+    var v4 = ip_pool_new(v4_subnet);
+    if (v4 == 0) { return 0; }
+    var v6 = ipv6_pool_new(v6_subnet);
+    if (v6 == 0) { return 0; }
+    var pool = alloc(16);
+    var d: DualStackPool = pool;
+    d.v4 = v4;
+    d.v6 = v6;
+    return pool;
+}
+
+# Allocate an IPv4 address. Returns the u32 host value, or -1 on exhaustion.
+#[must_use]
+fn dual_stack_allocate_v4(pool) {
+    var d: DualStackPool = pool;
+    return ip_pool_allocate(d.v4);
+}
+
+# Allocate an IPv6 address if the IPv6 pool exists. Returns:
+#   ptr to 16-byte buffer — allocated v6 address
+#   0                     — no IPv6 pool (Rust Ok(None)) OR exhausted
+# Rust distinguishes None from Err; here both surface as 0. Callers that
+# need the distinction check `d.v6 == 0` first (no pool) vs a failed
+# allocate (pool present).
+#[must_use]
+fn dual_stack_allocate_v6(pool) {
+    var d: DualStackPool = pool;
+    if (d.v6 == 0) { return 0; }                 # Ok(None)
+    return ipv6_pool_allocate(d.v6);
+}
+
+# Allocate both addresses. Stores the v4 host value at `out_v4` and the v6
+# buffer ptr (or 0 for none) at `out_v6`. Returns 1 on success, 0 if the v4
+# allocation was exhausted (Rust `?` short-circuits on the v4 error).
+#[must_use]
+fn dual_stack_allocate(pool, out_v4, out_v6) {
+    var d: DualStackPool = pool;
+    var v4 = ip_pool_allocate(d.v4);
+    if (v4 < 0) { return 0; }
+    store64(out_v4, v4);
+    var v6 = dual_stack_allocate_v6(pool);
+    store64(out_v6, v6);                          # 0 when no v6 pool
+    return 1;
+}
+
+# Release both addresses. `v6` is a 16-byte buffer ptr or 0 for none.
+fn dual_stack_release(pool, v4, v6) {
+    var d: DualStackPool = pool;
+    ip_pool_release(d.v4, v4);
+    if (d.v6 != 0 && v6 != 0) {
+        ipv6_pool_release(d.v6, v6);
+    }
+    return 0;
+}

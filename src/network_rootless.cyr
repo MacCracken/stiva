@@ -1,0 +1,402 @@
+# stiva — rootless networking: userspace stack for unprivileged containers.
+# Ported from rust-old/src/network/rootless.rs.
+#
+# The oracle uses slirp4netns or pasta to provide networking without
+# CAP_NET_ADMIN, auto-detecting available backends. This port carries the
+# self-contained, non-async surface:
+#   - RootlessNetworkBackend enum (+ serde wire names, default)
+#   - PortMapping struct
+#   - parse_port_mappings  (pure string parsing)
+#   - is_unprivileged      (getuid + /proc/self/status CapEff parse)
+#   - which                (PATH split + is_file)
+#   - available_backends   (which pasta / which slirp4netns)
+#   - select_backend       (preference resolution)
+#
+# The async process-spawning surface (RootlessNetworkHandle wrapping a
+# tokio::process::Child, start_rootless_network, stop_rootless_network,
+# start_slirp4netns, start_pasta, add_slirp_port_forwards) depends on the
+# async process runtime, UNIX-socket JSON RPC (serde_json) and filesystem
+# cleanup that are not in the ported base — they land in the DEFERRED
+# block at the bottom (same pattern as src/oci.cyr).
+#
+# Error mapping (mirrors error.cyr): the Rust
+# `Err(StivaError::RootlessNetwork(...))` maps to the integer code
+# STIVA_ERR_ROOTLESS_NETWORK; fallible functions return a sentinel and the
+# caller reports the context via
+# stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, detail).
+
+# ── RootlessNetworkBackend ──────────────────────
+
+# Rootless network backend selection (rust-old: enum RootlessNetworkBackend).
+# `Auto` is the serde/Default value (Rust `#[default]`). Prefixed
+# NETWORK_ROOTLESS_BACKEND_* for global enum-member uniqueness (see error.cyr).
+enum RootlessNetworkBackend {
+    NETWORK_ROOTLESS_BACKEND_AUTO = 0;
+    NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS = 1;
+    NETWORK_ROOTLESS_BACKEND_PASTA = 2;
+}
+
+# Default backend (rust-old: `#[default] Auto`).
+#[must_use]
+fn network_rootless_backend_default() {
+    return NETWORK_ROOTLESS_BACKEND_AUTO;
+}
+
+# Serde wire name for a backend — the enum-variant names serde serializes
+# by default (no `#[serde(rename)]` in the oracle, so PascalCase variant
+# names). Used by the serde round-trip parity test.
+#[must_use]
+fn network_rootless_backend_name(backend) {
+    if (backend == NETWORK_ROOTLESS_BACKEND_AUTO) { return "Auto"; }
+    if (backend == NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS) { return "Slirp4netns"; }
+    if (backend == NETWORK_ROOTLESS_BACKEND_PASTA) { return "Pasta"; }
+    return "Auto";
+}
+
+# Parse a backend serde wire name back to the enum value; -1 if unknown.
+#[must_use]
+fn network_rootless_backend_from_name(name) {
+    if (streq(name, "Auto") == 1) { return NETWORK_ROOTLESS_BACKEND_AUTO; }
+    if (streq(name, "Slirp4netns") == 1) { return NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS; }
+    if (streq(name, "Pasta") == 1) { return NETWORK_ROOTLESS_BACKEND_PASTA; }
+    return 0 - 1;
+}
+
+# ── PortMapping ──────────────────────────
+
+# Port mapping for rootless containers (rust-old: struct PortMapping).
+# host_port / container_port are u16 in Rust (0..65535); protocol is a
+# heap cstr ("tcp" / "udp").
+struct PortMapping {
+    host_port;
+    container_port;
+    protocol;
+}
+
+# Accessors mirroring a #derive(accessors) surface (see kavach audit.cyr).
+#[must_use]
+fn PortMapping_host_port(p) { var pp: PortMapping = p; return pp.host_port; }
+#[must_use]
+fn PortMapping_container_port(p) { var pp: PortMapping = p; return pp.container_port; }
+#[must_use]
+fn PortMapping_protocol(p) { var pp: PortMapping = p; return pp.protocol; }
+
+# Allocate a PortMapping on the heap and return its pointer.
+#[must_use]
+fn port_mapping_new(host_port, container_port, protocol) {
+    var p = alloc(24);
+    var pp: PortMapping = p;
+    pp.host_port = host_port;
+    pp.container_port = container_port;
+    pp.protocol = protocol;
+    return p;
+}
+
+# ── small cstr helpers (parity-exact byte handling) ──────────────
+
+# Copy bytes [start, end) of `src` into a fresh NUL-terminated cstr.
+#[must_use]
+fn _rl_slice(src, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, src + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Index of the LAST `byte` in `s`, or -1 (mirrors str::rsplit_once).
+#[must_use]
+fn _rl_rfind(s, byte) {
+    var len = strlen(s);
+    var i = len - 1;
+    while (i >= 0) {
+        if (load8(s + i) == byte) { return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+# Index of the FIRST `byte` in `s`, or -1 (mirrors str::split_once).
+#[must_use]
+fn _rl_find(s, byte) {
+    var len = strlen(s);
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Parse a NUL-terminated decimal cstr as a u16 (0..=65535). Returns the
+# value on success, or -1 on empty / non-digit / out-of-range — mirrors
+# Rust `str::parse::<u16>()`, which accepts an optional leading '+' ("+80"
+# → 80) but rejects '-', empty, and overflow.
+#[must_use]
+fn _rl_parse_u16(s) {
+    var len = strlen(s);
+    if (len == 0) { return 0 - 1; }
+    var i = 0;
+    if (load8(s) == 43) { i = 1; }   # optional leading '+'
+    if (i >= len) { return 0 - 1; }  # a lone '+' has no digits
+    var acc = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        acc = acc * 10 + (c - 48);
+        if (acc > 65535) { return 0 - 1; }
+        i = i + 1;
+    }
+    return acc;
+}
+
+# ── parse_port_mappings ───────────────────────
+
+# Parse port specs (e.g., "8080:80/tcp") into a vec of PortMapping
+# pointers. Format: [host_port:]container_port[/protocol].
+#
+# `specs` is a vec of cstrs; returns a vec of PortMapping pointers on
+# success, or 0 (null) on any invalid spec — the caller reports it via
+# stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, detail). This mirrors the
+# Rust `Result<Vec<PortMapping>, StivaError>`: the four distinct Rust
+# error strings ("invalid host port: {h}", "invalid container port: {c}",
+# "invalid port: {port_part}") all funnel to STIVA_ERR_ROOTLESS_NETWORK.
+#[must_use]
+fn parse_port_mappings(specs) {
+    var mappings = vec_new();
+    var si = 0;
+    while (si < vec_len(specs)) {
+        var spec = vec_get(specs, si);
+
+        # rsplit_once('/') → (port_part, protocol), else (spec, "tcp").
+        var port_part = spec;
+        var protocol = "tcp";
+        var slash = _rl_rfind(spec, 47);
+        if (slash >= 0) {
+            port_part = _rl_slice(spec, 0, slash);
+            protocol = _rl_slice(spec, slash + 1, strlen(spec));
+        }
+
+        # split_once(':') → (host, container), else single port for both.
+        var host_port = 0;
+        var container_port = 0;
+        var colon = _rl_find(port_part, 58);
+        if (colon >= 0) {
+            var h = _rl_slice(port_part, 0, colon);
+            var c = _rl_slice(port_part, colon + 1, strlen(port_part));
+            var hp = _rl_parse_u16(h);
+            if (hp < 0) { return 0; }
+            var cp = _rl_parse_u16(c);
+            if (cp < 0) { return 0; }
+            host_port = hp;
+            container_port = cp;
+        } else {
+            var p = _rl_parse_u16(port_part);
+            if (p < 0) { return 0; }
+            host_port = p;
+            container_port = p;
+        }
+
+        vec_push(mappings, port_mapping_new(host_port, container_port, protocol));
+        si = si + 1;
+    }
+    return mappings;
+}
+
+# ── is_unprivileged ─────────────────────────
+
+# Parse a hex substring [start, end) of `buf` (after any trim) into an
+# i64 — mirrors Rust `u64::from_str_radix(hex.trim(), 16)`. Returns the
+# value, or -1 on a non-hex byte / empty range.
+#[must_use]
+fn _rl_parse_hex(buf, start, end) {
+    if (end <= start) { return 0 - 1; }
+    var i = start;
+    var acc = 0;
+    while (i < end) {
+        var c = load8(buf + i);
+        var d = 0 - 1;
+        if (c >= 48 && c <= 57) { d = c - 48; }
+        elif (c >= 97 && c <= 102) { d = c - 97 + 10; }
+        elif (c >= 65 && c <= 70) { d = c - 65 + 10; }
+        if (d < 0) { return 0 - 1; }
+        acc = acc * 16 + d;
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Check if we're running unprivileged (not root and no CAP_NET_ADMIN).
+# Returns 1 (unprivileged) or 0 (privileged) — mirrors the Rust bool.
+#
+# root ⇒ privileged (0). Otherwise read /proc/self/status, find the
+# "CapEff:\t<hex>" line, and test bit 12 (CAP_NET_ADMIN): set ⇒ privileged
+# (0), clear ⇒ unprivileged (1). If CapEff can't be read/found, assume
+# unprivileged (1) — matches the Rust `true` fallbacks.
+#[must_use]
+fn is_unprivileged() {
+    var uid = sys_getuid();
+    if (uid == 0) { return 0; }
+
+    var buf = alloc(8192);
+    var n = file_read_all("/proc/self/status", buf, 8191);
+    if (n <= 0) { return 1; }
+    store8(buf + n, 0);
+
+    # Scan line by line for the "CapEff:\t" prefix.
+    var pos = 0;
+    while (pos < n) {
+        # Find end of this line.
+        var eol = pos;
+        while (eol < n && load8(buf + eol) != 10) { eol = eol + 1; }
+
+        # Match prefix "CapEff:\t" (8 bytes: C a p E f f : \t).
+        var is_capeff = 0;
+        if (eol - pos >= 8) {
+            if (memeq(buf + pos, "CapEff:\t", 8) == 1) { is_capeff = 1; }
+        }
+        if (is_capeff == 1) {
+            # hex spans [pos+8, eol); trim trailing whitespace (Rust .trim()).
+            var hs = pos + 8;
+            var he = eol;
+            while (he > hs) {
+                var tc = load8(buf + he - 1);
+                if (tc == 32 || tc == 9 || tc == 13) { he = he - 1; }
+                else { break; }
+            }
+            var caps = _rl_parse_hex(buf, hs, he);
+            if (caps < 0) { return 1; }
+            # bit 12 = CAP_NET_ADMIN. Clear ⇒ unprivileged (1).
+            if ((caps & 4096) == 0) { return 1; }
+            return 0;
+        }
+
+        pos = eol + 1;
+    }
+    # CapEff not found — assume unprivileged.
+    return 1;
+}
+
+# ── which / available_backends / select_backend ───────────────
+
+# Check if binary `name` is available in PATH (rust-old: fn which).
+# Splits $PATH on ':' and tests each `dir/name` for existence.
+# Returns 1 if found, 0 otherwise (including no PATH set).
+#[must_use]
+fn which(name) {
+    var path = getenv("PATH");
+    if (path == 0) { return 0; }
+    var plen = strlen(path);
+    if (plen == 0) { return 0; }
+    var nlen = strlen(name);
+
+    var start = 0;
+    var i = 0;
+    while (i <= plen) {
+        var at_sep = 0;
+        if (i == plen) { at_sep = 1; }
+        elif (load8(path + i) == 58) { at_sep = 1; }
+        if (at_sep == 1) {
+            var dlen = i - start;
+            if (dlen > 0) {
+                # Build "<dir>/<name>".
+                var cand = alloc(dlen + 1 + nlen + 1);
+                memcpy(cand, path + start, dlen);
+                store8(cand + dlen, 47);
+                memcpy(cand + dlen + 1, name, nlen);
+                store8(cand + dlen + 1 + nlen, 0);
+                if (file_exists(cand) == 1) { return 1; }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Detect which rootless network backends are available on the system.
+# Returns a vec of backend enum values, in the same push order as the
+# oracle: pasta first (if present), then slirp4netns (rust-old:
+# fn available_backends).
+#[must_use]
+fn available_backends() {
+    var backends = vec_new();
+    if (which("pasta") == 1) {
+        vec_push(backends, NETWORK_ROOTLESS_BACKEND_PASTA);
+    }
+    if (which("slirp4netns") == 1) {
+        vec_push(backends, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS);
+    }
+    return backends;
+}
+
+# True (1) iff `backends` vec contains `backend`.
+#[must_use]
+fn _rl_contains(backends, backend) {
+    var i = 0;
+    while (i < vec_len(backends)) {
+        if (vec_get(backends, i) == backend) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Select the best available backend, respecting user preference
+# (rust-old: fn select_backend).
+#
+# For Auto: prefer pasta, then slirp4netns; if neither, return -1 — the
+# caller reports stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, "no rootless
+# network backend found (install pasta or slirp4netns)").
+# For a specific preference: return it if available, else -1 — the caller
+# reports "{preference:?} not found in PATH".
+#
+# Returns the resolved backend enum value on success, or -1 on failure.
+#[must_use]
+fn select_backend(preference) {
+    var available = available_backends();
+
+    if (preference == NETWORK_ROOTLESS_BACKEND_AUTO) {
+        if (_rl_contains(available, NETWORK_ROOTLESS_BACKEND_PASTA) == 1) {
+            return NETWORK_ROOTLESS_BACKEND_PASTA;
+        }
+        if (_rl_contains(available, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS) == 1) {
+            return NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS;
+        }
+        return 0 - 1;
+    }
+
+    if (_rl_contains(available, preference) == 1) {
+        return preference;
+    }
+    return 0 - 1;
+}
+
+# ── DEFERRED (land with the async process-runtime port) ──────────
+# rust-old/src/network/rootless.rs also defines the async, OS-process-
+# coupled surface — these wrap tokio::process::Child, UNIX-socket JSON
+# RPC (serde_json), std::env::temp_dir and filesystem cleanup, none of
+# which exist in the ported base yet:
+#
+#   struct RootlessNetworkHandle { child, backend, api_socket }
+#   impl RootlessNetworkHandle { fn backend(&self) -> &RootlessNetworkBackend }
+#
+#   async fn start_rootless_network(
+#       backend: &RootlessNetworkBackend,
+#       container_pid: u32,
+#       port_mappings: &[PortMapping],
+#   ) -> Result<RootlessNetworkHandle, StivaError>
+#
+#   async fn stop_rootless_network(
+#       handle: &mut RootlessNetworkHandle,
+#   ) -> Result<(), StivaError>
+#
+#   async fn start_slirp4netns(pid: u32, port_mappings: &[PortMapping])
+#       -> Result<RootlessNetworkHandle, StivaError>
+#   async fn add_slirp_port_forwards(sock_path: &Path,
+#       port_mappings: &[PortMapping]) -> Result<(), StivaError>
+#   async fn start_pasta(pid: u32, port_mappings: &[PortMapping])
+#       -> Result<RootlessNetworkHandle, StivaError>
+#
+# All fallible paths map to STIVA_ERR_ROOTLESS_NETWORK. Tracked in the
+# roadmap alongside the async/process-spawn runtime port.

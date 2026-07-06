@@ -1,0 +1,343 @@
+# stiva — Linux bridge + veth pair management via `ip` (iproute2)
+# Ported from rust-old/src/network/bridge.rs.
+#
+# All operations shell out to `ip` / `sysctl` / `nsenter`, matching the Rust
+# (which avoids a large netlink dependency, per agnos-sys). Each Rust fn
+# returned `Result<(), StivaError::Network(String)>`; here we return an
+# integer sentinel: 0 (STIVA_ERR_OK) on success, STIVA_ERR_NETWORK on
+# failure. The Rust context strings (`format!("`ip {}` failed: ...")`) are
+# elided from the return value — the caller carries detail via
+# stiva_err_print(STIVA_ERR_NETWORK, detail), matching error.cyr's idiom.
+#
+# IPv4 addresses (`std::net::Ipv4Addr` in Rust) are represented here as a
+# packed 32-bit i64 in host order: (a << 24) | (b << 16) | (c << 8) | d,
+# i.e. a.b.c.d. `_ipv4_fmt` renders dotted-decimal for the `ip` argv. The
+# real `Ipv4Addr`-carrying network types land with src/network.cyr (see the
+# DEFERRED note); the packed-i64 convention is the port's local encoding.
+
+# ── command-runner helpers ──────────────────────
+# Absolute paths for the shelled-out tools (execve needs a resolved path;
+# exec_vec does no $PATH lookup). iproute2 installs `ip` at /usr/bin/ip on
+# modern distros (/sbin/ip on older ones); nsenter + sysctl at /usr/bin.
+#[must_use]
+fn _ip_bin() {
+    if (file_exists("/usr/bin/ip") == 1) { return "/usr/bin/ip"; }
+    if (file_exists("/sbin/ip") == 1) { return "/sbin/ip"; }
+    if (file_exists("/bin/ip") == 1) { return "/bin/ip"; }
+    return "ip";
+}
+
+#[must_use]
+fn _sysctl_bin() {
+    if (file_exists("/usr/sbin/sysctl") == 1) { return "/usr/sbin/sysctl"; }
+    if (file_exists("/sbin/sysctl") == 1) { return "/sbin/sysctl"; }
+    if (file_exists("/usr/bin/sysctl") == 1) { return "/usr/bin/sysctl"; }
+    return "sysctl";
+}
+
+#[must_use]
+fn _nsenter_bin() {
+    if (file_exists("/usr/bin/nsenter") == 1) { return "/usr/bin/nsenter"; }
+    if (file_exists("/bin/nsenter") == 1) { return "/bin/nsenter"; }
+    return "nsenter";
+}
+
+# exec_vec (lib/process.cyr) returns the child's exit code directly, which
+# is exactly the boolean success/fail these ops need (Rust checked
+# `output.status.success()`). We discard stdout/stderr — iproute2 chatter on
+# the happy path is uninteresting, and the argv vecs are small enough that a
+# full pipe is not a concern. `_ip_last_rc` holds the most recent exit code
+# for the runners to translate into the STIVA_ERR_* sentinel.
+var _ip_last_rc = 0;
+
+# ── `ip <args...>` — one runner per arity used below ─────────────
+# Cyrius has no varargs; the Rust `ip(&["a","b",...])` calls each expand to
+# a fixed argv here. Every argv element is a cstr (literal or built).
+fn _ip3(a1, a2, a3) {
+    var args = vec_new();
+    vec_push(args, _ip_bin());
+    vec_push(args, a1);
+    vec_push(args, a2);
+    vec_push(args, a3);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+fn _ip4(a1, a2, a3, a4) {
+    var args = vec_new();
+    vec_push(args, _ip_bin());
+    vec_push(args, a1);
+    vec_push(args, a2);
+    vec_push(args, a3);
+    vec_push(args, a4);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+fn _ip5(a1, a2, a3, a4, a5) {
+    var args = vec_new();
+    vec_push(args, _ip_bin());
+    vec_push(args, a1);
+    vec_push(args, a2);
+    vec_push(args, a3);
+    vec_push(args, a4);
+    vec_push(args, a5);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+# `ip link add <name> type veth peer name <peer>` — 8-element argv.
+fn _ip_veth_add(host, peer) {
+    var args = vec_new();
+    vec_push(args, _ip_bin());
+    vec_push(args, "link");
+    vec_push(args, "add");
+    vec_push(args, host);
+    vec_push(args, "type");
+    vec_push(args, "veth");
+    vec_push(args, "peer");
+    vec_push(args, "name");
+    vec_push(args, peer);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+# ── IPv4 formatting ─────────────────────────
+# Append dotted-decimal `a.b.c.d` for a packed 32-bit host-order addr to a
+# str_builder. Rust used `{gateway}` / `container_ip.to_string()`.
+fn _ipv4_fmt(sb, addr) {
+    var a = (addr / 16777216) % 256;
+    var b = (addr / 65536) % 256;
+    var c = (addr / 256) % 256;
+    var d = addr % 256;
+    str_builder_add_int(sb, a);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, c);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, d);
+    return 0;
+}
+
+# Build a cstr "a.b.c.d/<prefix>" for `ip addr add`.
+#[must_use]
+fn _ipv4_cidr_cstr(addr, prefix_len) {
+    var sb = str_builder_new();
+    _ipv4_fmt(sb, addr);
+    str_builder_putc(sb, 47);           # '/'
+    str_builder_add_int(sb, prefix_len);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# Build a cstr "a.b.c.d" (bare address) for `ip route add ... via <gw>`.
+#[must_use]
+fn _ipv4_cstr(addr) {
+    var sb = str_builder_new();
+    _ipv4_fmt(sb, addr);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# Decimal cstr for an integer (pid) — for `ip link set <veth> netns <pid>`.
+#[must_use]
+fn _int_cstr(n) {
+    var s = str_from_int(n);
+    return str_cstr(s);
+}
+
+# ── sysctl ────────────────────────────
+# `sysctl -w <key>=<value>`. Returns STIVA_ERR_OK / STIVA_ERR_NETWORK.
+fn _sysctl(key, value) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, key);
+    str_builder_putc(sb, 61);           # '='
+    str_builder_add_cstr(sb, value);
+    var kv = str_cstr(str_builder_build(sb));
+
+    var args = vec_new();
+    vec_push(args, _sysctl_bin());
+    vec_push(args, "-w");
+    vec_push(args, kv);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+# ── public surface ─────────────────────────
+
+# Enable IPv4 forwarding (needed for NAT). rust-old: enable_ip_forward.
+fn enable_ip_forward() {
+    return _sysctl("net.ipv4.ip_forward", "1");
+}
+
+# Create a Linux bridge interface with an IP address. rust-old: create_bridge.
+# `gateway` is a packed IPv4 (see header). Returns STIVA_ERR_OK on success,
+# else the first failing step's STIVA_ERR_NETWORK (Rust `?`-early-return).
+fn create_bridge(name, gateway, prefix_len) {
+    # ip link add <name> type bridge
+    var r1 = _ip5("link", "add", name, "type", "bridge");
+    if (r1 != STIVA_ERR_OK) { return r1; }
+
+    # ip addr add <gateway>/<prefix_len> dev <name>
+    var cidr = _ipv4_cidr_cstr(gateway, prefix_len);
+    var r2 = _ip5("addr", "add", cidr, "dev", name);
+    if (r2 != STIVA_ERR_OK) { return r2; }
+
+    # ip link set <name> up
+    var r3 = _ip4("link", "set", name, "up");
+    if (r3 != STIVA_ERR_OK) { return r3; }
+
+    # Enable IP forwarding for NAT.
+    return enable_ip_forward();
+}
+
+# Delete a bridge interface. rust-old: delete_bridge.
+# ip link set <name> down ; ip link delete <name> type bridge
+fn delete_bridge(name) {
+    var r1 = _ip4("link", "set", name, "down");
+    if (r1 != STIVA_ERR_OK) { return r1; }
+    return _ip5("link", "delete", name, "type", "bridge");
+}
+
+# Container-veth end name is always "eth0" (rust-old constant).
+#[must_use]
+fn container_veth_name() {
+    return "eth0";
+}
+
+# Build the host-side veth name: "ve-" + first up-to-12 chars of the
+# container id. Linux IFNAMSIZ = 16 (incl NUL) ⇒ max 15 chars; "ve-"(3) +
+# 12 = 15. rust-old: create_veth_pair's `host_veth`. Returns a cstr.
+#[must_use]
+fn host_veth_name(container_id) {
+    var n = strlen(container_id);
+    var take = n;
+    if (take > 12) { take = 12; }
+    var out = alloc(3 + take + 1);
+    store8(out + 0, 118);               # 'v'
+    store8(out + 1, 101);               # 'e'
+    store8(out + 2, 45);                # '-'
+    memcpy(out + 3, container_id, take);
+    store8(out + 3 + take, 0);
+    return out;
+}
+
+# Create a veth pair for a container. rust-old: create_veth_pair.
+# Returns the host-veth cstr on success (peer is always "eth0", available
+# via container_veth_name()), or 0 on failure. The Rust returned the
+# `(host_veth, container_veth)` tuple; here the caller reconstructs the
+# pair from host_veth_name(id) / container_veth_name().
+#[must_use]
+fn create_veth_pair(container_id) {
+    var host = host_veth_name(container_id);
+    var peer = container_veth_name();
+    # ip link add <host> type veth peer name <peer>
+    var r = _ip_veth_add(host, peer);
+    if (r != STIVA_ERR_OK) { return 0; }
+    return host;
+}
+
+# Attach a veth interface to a bridge. rust-old: attach_to_bridge.
+# ip link set <veth> master <bridge> ; ip link set <veth> up
+fn attach_to_bridge(veth, bridge) {
+    var r1 = _ip5("link", "set", veth, "master", bridge);
+    if (r1 != STIVA_ERR_OK) { return r1; }
+    return _ip4("link", "set", veth, "up");
+}
+
+# Move a veth interface into a network namespace (by PID).
+# rust-old: move_to_netns. ip link set <veth> netns <pid>
+fn move_to_netns(veth, pid) {
+    var pid_str = _int_cstr(pid);
+    return _ip5("link", "set", veth, "netns", pid_str);
+}
+
+# Delete a veth pair (deleting one end removes the other). rust-old:
+# delete_veth. Errors are intentionally ignored ("if already gone, ignore")
+# — always returns STIVA_ERR_OK, matching Rust's `let _ = ip(...); Ok(())`.
+fn delete_veth(host_veth) {
+    var _r = _ip3("link", "delete", host_veth);
+    return STIVA_ERR_OK;
+}
+
+# ── nsenter-based in-namespace config ───────────────────
+# `nsenter -t <pid> -n -- ip <args...>`. One runner per arity used.
+fn _nsenter_ip4(pid_str, a1, a2, a3, a4) {
+    var args = vec_new();
+    vec_push(args, _nsenter_bin());
+    vec_push(args, "-t");
+    vec_push(args, pid_str);
+    vec_push(args, "-n");
+    vec_push(args, "--");
+    vec_push(args, _ip_bin());
+    vec_push(args, a1);
+    vec_push(args, a2);
+    vec_push(args, a3);
+    vec_push(args, a4);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+fn _nsenter_ip5(pid_str, a1, a2, a3, a4, a5) {
+    var args = vec_new();
+    vec_push(args, _nsenter_bin());
+    vec_push(args, "-t");
+    vec_push(args, pid_str);
+    vec_push(args, "-n");
+    vec_push(args, "--");
+    vec_push(args, _ip_bin());
+    vec_push(args, a1);
+    vec_push(args, a2);
+    vec_push(args, a3);
+    vec_push(args, a4);
+    vec_push(args, a5);
+    _ip_last_rc = exec_vec(args);
+    if (_ip_last_rc == 0) { return STIVA_ERR_OK; }
+    return STIVA_ERR_NETWORK;
+}
+
+# Configure an interface inside a network namespace (by PID) using nsenter.
+# rust-old: configure_container_iface. `container_ip` / `gateway` are packed
+# IPv4. Returns STIVA_ERR_OK, else the first failing step's STIVA_ERR_NETWORK.
+fn configure_container_iface(pid, iface, container_ip, prefix_len, gateway) {
+    var pid_str = _int_cstr(pid);
+
+    # nsenter ... ip addr add <container_ip>/<prefix_len> dev <iface>
+    var cidr = _ipv4_cidr_cstr(container_ip, prefix_len);
+    var r1 = _nsenter_ip5(pid_str, "addr", "add", cidr, "dev", iface);
+    if (r1 != STIVA_ERR_OK) { return r1; }
+
+    # nsenter ... ip link set <iface> up
+    var r2 = _nsenter_ip4(pid_str, "link", "set", iface, "up");
+    if (r2 != STIVA_ERR_OK) { return r2; }
+
+    # nsenter ... ip link set lo up
+    var r3 = _nsenter_ip4(pid_str, "link", "set", "lo", "up");
+    if (r3 != STIVA_ERR_OK) { return r3; }
+
+    # nsenter ... ip route add default via <gateway>
+    var gw = _ipv4_cstr(gateway);
+    var r4 = _nsenter_ip5(pid_str, "route", "add", "default", "via", gw);
+    if (r4 != STIVA_ERR_OK) { return r4; }
+
+    return STIVA_ERR_OK;
+}
+
+# ── DEFERRED (land with src/network.cyr) ──────────────────
+# rust-old/src/network/bridge.rs is otherwise fully ported above. The
+# private Rust helpers `ip(&[&str])` and `sysctl(key, value)` are inlined
+# into the per-arity runners here (Cyrius has no varargs / closures), so
+# there is no standalone `ip`/`sysctl`/`nsenter` public symbol to port.
+#
+# The real `std::net::Ipv4Addr` type used by callers lives in
+# rust-old/src/network/mod.rs and lands with src/network.cyr; this module
+# encodes an address as a packed 32-bit host-order i64 (a.b.c.d) in the
+# meantime. When network.cyr lands, callers pass that same packed encoding
+# (or network.cyr adds an Ipv4 struct + a `_ipv4_pack` bridge helper).

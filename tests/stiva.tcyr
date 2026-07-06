@@ -7,6 +7,11 @@ include "src/oci.cyr"
 include "src/intents.cyr"
 include "src/audit.cyr"
 include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
 
 # ── error.cyr (rust-old/src/error.rs) ────────────────────────────
 fn test_error_names() {
@@ -269,6 +274,529 @@ fn test_convert_dockerfile_label() {
     return 0;
 }
 
+
+# ── network_mod.cyr (rust-old/src/network/mod.rs) ──
+fn test_network_mode_name() {
+    test_group("network_mode_name");
+    assert_eq(streq(network_mode_name(NETWORK_MODE_BRIDGE), "Bridge"), 1, "Bridge");
+    assert_eq(streq(network_mode_name(NETWORK_MODE_HOST), "Host"), 1, "Host");
+    assert_eq(streq(network_mode_name(NETWORK_MODE_NONE), "None"), 1, "None");
+    assert_eq(streq(network_mode_name(NETWORK_MODE_CONTAINER), "Container"), 1, "Container");
+    assert_eq(streq(network_mode_name(NETWORK_MODE_CUSTOM), "Custom"), 1, "Custom");
+    return 0;
+}
+
+fn test_network_mode_container() {
+    test_group("network_mode_container");
+    var a: NetworkModeVal = network_mode_new(NETWORK_MODE_CONTAINER, "abc123");
+    var b: NetworkModeVal = network_mode_new(NETWORK_MODE_CONTAINER, "abc123");
+    assert_eq(network_mode_eq(a, b), 1, "same payload equal");
+    var c: NetworkModeVal = network_mode_new(NETWORK_MODE_CONTAINER, "other");
+    assert_eq(network_mode_eq(a, c), 0, "diff payload not equal");
+    var d: NetworkModeVal = network_mode_new(NETWORK_MODE_CUSTOM, "abc123");
+    assert_eq(network_mode_eq(a, d), 0, "diff tag not equal");
+    var e: NetworkModeVal = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    var f: NetworkModeVal = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    assert_eq(network_mode_eq(e, f), 1, "bridge equal");
+    return 0;
+}
+
+fn test_network_struct() {
+    test_group("network_struct");
+    var net: Network = network_new("stiva-bridge0", "172.17.0.0/16", "172.17.0.1", NETWORK_DRIVER_BRIDGE);
+    assert_eq(streq(net.name, "stiva-bridge0"), 1, "name");
+    assert_eq(streq(net.subnet, "172.17.0.0/16"), 1, "subnet");
+    assert_eq(net.driver, NETWORK_DRIVER_BRIDGE, "driver");
+    return 0;
+}
+
+fn test_network_driver_variants() {
+    test_group("network_driver_variants");
+    assert_eq(streq(network_driver_name(NETWORK_DRIVER_BRIDGE), "Bridge"), 1, "Bridge");
+    assert_eq(streq(network_driver_name(NETWORK_DRIVER_OVERLAY), "Overlay"), 1, "Overlay");
+    assert_eq(streq(network_driver_name(NETWORK_DRIVER_MACVLAN), "Macvlan"), 1, "Macvlan");
+    return 0;
+}
+
+fn test_container_network() {
+    test_group("container_network");
+    var cn: ContainerNetwork = container_network_new("172.17.0.2", 0, "bridge", "veth-abc", "eth0");
+    assert_eq(streq(cn.ip, "172.17.0.2"), 1, "ip");
+    assert_eq(cn.ipv6, 0, "ipv6 none");
+    assert_eq(streq(cn.container_veth, "eth0"), 1, "container_veth");
+    var cn2: ContainerNetwork = container_network_new("172.17.0.2", "fd00::2", "bridge", "veth-abc", "eth0");
+    assert_eq(streq(cn2.ipv6, "fd00::2"), 1, "ipv6 some");
+    return 0;
+}
+
+fn test_network_policy_default_no_restrictions() {
+    test_group("network_policy_default_no_restrictions");
+    var policy: NetworkPolicy = network_policy_default();
+    assert_eq(network_policy_has_restrictions(policy), 0, "no restrictions");
+    return 0;
+}
+
+fn test_network_policy_with_deny() {
+    test_group("network_policy_with_deny");
+    var policy: NetworkPolicy = network_policy_default();
+    vec_push(policy.egress_deny, "10.0.0.0/8");
+    assert_eq(network_policy_has_restrictions(policy), 1, "has restrictions");
+    var rules = network_policy_to_nft_rules(policy, "172.17.0.2");
+    assert_eq(vec_len(rules), 1, "one rule");
+    var r0 = vec_get(rules, 0);
+    assert_eq(strstr(r0, "10.0.0.0/8") >= 0, 1, "contains cidr");
+    assert_eq(strstr(r0, "drop") >= 0, 1, "contains drop");
+    assert_eq(strstr(r0, "172.17.0.2") >= 0, 1, "contains ip");
+    return 0;
+}
+
+fn test_dns_registry_resolve() {
+    test_group("dns_registry_resolve");
+    var reg: DnsRegistry = dns_registry_new();
+    dns_registry_register(reg, "web", "172.17.0.2");
+    dns_registry_register(reg, "db", "172.17.0.3");
+    assert_eq(streq(dns_registry_resolve(reg, "web"), "172.17.0.2"), 1, "web");
+    assert_eq(streq(dns_registry_resolve(reg, "db"), "172.17.0.3"), 1, "db");
+    assert_eq(dns_registry_resolve(reg, "missing"), 0, "missing none");
+    return 0;
+}
+
+fn test_dns_registry_unregister() {
+    test_group("dns_registry_unregister");
+    var reg: DnsRegistry = dns_registry_new();
+    dns_registry_register(reg, "web", "172.17.0.2");
+    dns_registry_unregister(reg, "web");
+    assert_eq(dns_registry_resolve(reg, "web"), 0, "web removed");
+    return 0;
+}
+
+fn test_dns_registry_hosts_entries() {
+    test_group("dns_registry_hosts_entries");
+    var reg: DnsRegistry = dns_registry_new();
+    dns_registry_register(reg, "web", "172.17.0.2");
+    var hosts = dns_registry_to_hosts_entries(reg);
+    assert_eq(strstr(hosts, "172.17.0.2\tweb") >= 0, 1, "ip tab name");
+    return 0;
+}
+
+fn test_dns_registry_inject() {
+    test_group("dns_registry_inject");
+    var reg: DnsRegistry = dns_registry_new();
+    dns_registry_register(reg, "db", "172.17.0.3");
+    sys_mkdir("/tmp/nm_inject_test", 448);
+    var rc = dns_registry_inject_into(reg, "/tmp/nm_inject_test", "172.17.0.2", "web");
+    assert_eq(rc, STIVA_ERR_OK, "inject ok");
+    var buf = alloc(4096);
+    var n = file_read_all("/tmp/nm_inject_test/etc/hosts", buf, 4095);
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "172.17.0.2\tweb") >= 0, 1, "self entry");
+    assert_eq(strstr(buf, "172.17.0.3\tdb") >= 0, 1, "db entry");
+    assert_eq(strstr(buf, "127.0.0.1\tlocalhost") >= 0, 1, "localhost");
+    return 0;
+}
+
+# ── network_bridge.cyr (rust-old/src/network/bridge.rs) ──
+fn test_network_bridge_veth_name() {
+    test_group("network_bridge_veth_name");
+    var h = host_veth_name("abc123def456ghij");
+    assert_eq(streq(h, "ve-abc123def456"), 1, "ve- prefix + first 12 chars");
+    assert_eq(strlen(h), 15, "IFNAMSIZ-1 length");
+    var h2 = host_veth_name("short");
+    assert_eq(streq(h2, "ve-short"), 1, "short id untruncated");
+    var h3 = host_veth_name("0123456789ab");
+    assert_eq(streq(h3, "ve-0123456789ab"), 1, "exactly 12 chars");
+    assert_eq(streq(container_veth_name(), "eth0"), 1, "peer is eth0");
+    return 0;
+}
+
+fn test_network_bridge_ipv4_fmt() {
+    test_group("network_bridge_ipv4_fmt");
+    # 172.17.0.1 packed = (172<<24)|(17<<16)|(0<<8)|1
+    var gw = 2886795265;
+    var s = _ipv4_cstr(gw);
+    assert_eq(streq(s, "172.17.0.1"), 1, "dotted-decimal gateway");
+    var cidr = _ipv4_cidr_cstr(gw, 16);
+    assert_eq(streq(cidr, "172.17.0.1/16"), 1, "cidr with prefix");
+    # 10.0.0.255
+    var b = _ipv4_cstr(167772415);
+    assert_eq(streq(b, "10.0.0.255"), 1, "trailing 255 octet");
+    return 0;
+}
+
+# ── network_dns.cyr (rust-old/src/network/dns.rs) ──
+fn read_file_cstr(path) {
+    var cap = 65536;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap - 1);
+    if (n < 0) { store8(buf, 0); return buf; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+fn test_dns_parse_resolv_conf_basic() {
+    test_group("network_dns::parse_resolv_conf_basic");
+    var content = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
+    var servers = network_dns_parse_resolv_conf(content);
+    assert_eq(vec_len(servers), 2, "two servers");
+    assert_eq(vec_get(servers, 0), network_dns_parse_ipv4("8.8.8.8"), "first 8.8.8.8");
+    assert_eq(vec_get(servers, 1), network_dns_parse_ipv4("8.8.4.4"), "second 8.8.4.4");
+    return 0;
+}
+
+fn test_dns_parse_resolv_conf_with_comments() {
+    test_group("network_dns::parse_resolv_conf_with_comments");
+    var content = "# DNS\nnameserver 1.1.1.1\nsearch example.com\nnameserver 1.0.0.1\n";
+    var servers = network_dns_parse_resolv_conf(content);
+    assert_eq(vec_len(servers), 2, "two servers");
+    assert_eq(vec_get(servers, 0), network_dns_parse_ipv4("1.1.1.1"), "first 1.1.1.1");
+    return 0;
+}
+
+fn test_dns_parse_resolv_conf_empty() {
+    test_group("network_dns::parse_resolv_conf_empty");
+    var servers = network_dns_parse_resolv_conf("");
+    assert_eq(vec_len(servers), 0, "empty is empty");
+    return 0;
+}
+
+fn test_dns_parse_resolv_conf_ipv6_skipped() {
+    test_group("network_dns::parse_resolv_conf_ipv6_skipped");
+    var content = "nameserver 8.8.8.8\nnameserver ::1\n";
+    var servers = network_dns_parse_resolv_conf(content);
+    assert_eq(vec_len(servers), 1, "ipv6 skipped");
+    return 0;
+}
+
+fn test_dns_ipv4_to_str_canonical() {
+    test_group("network_dns::ipv4_to_str_canonical");
+    assert_eq(streq(str_cstr(network_dns_ipv4_to_str(0x08080808)), "8.8.8.8"), 1, "8.8.8.8");
+    assert_eq(streq(str_cstr(network_dns_ipv4_to_str(0xAC110002)), "172.17.0.2"), 1, "172.17.0.2");
+    return 0;
+}
+
+fn test_dns_parse_ipv4_reject() {
+    test_group("network_dns::parse_ipv4_reject");
+    assert_eq(network_dns_parse_ipv4("::1"), network_dns_ipv4_invalid(), "ipv6 rejected");
+    assert_eq(network_dns_parse_ipv4("1.2.3"), network_dns_ipv4_invalid(), "three octets");
+    assert_eq(network_dns_parse_ipv4("1.2.3.4.5"), network_dns_ipv4_invalid(), "five octets");
+    assert_eq(network_dns_parse_ipv4("256.0.0.1"), network_dns_ipv4_invalid(), "octet overflow");
+    assert_eq(network_dns_parse_ipv4("1.2.3.4 "), network_dns_ipv4_invalid(), "trailing space");
+    assert_eq(network_dns_parse_ipv4("0.0.0.0"), 0, "zero packs to 0");
+    return 0;
+}
+
+fn test_dns_inject_resolv_conf_to_rootfs() {
+    test_group("network_dns::inject_resolv_conf_to_rootfs");
+    var dir = "/tmp/stiva_nd_rc";
+    sys_mkdir(dir, 0x1ED);
+    var servers = vec_new();
+    vec_push(servers, network_dns_parse_ipv4("1.1.1.1"));
+    vec_push(servers, network_dns_parse_ipv4("1.0.0.1"));
+    assert_eq(network_dns_inject_resolv_conf(dir, servers), 0, "inject ok");
+    var content = read_file_cstr("/tmp/stiva_nd_rc/etc/resolv.conf");
+    assert_eq(strstr(content, "nameserver 1.1.1.1") >= 0, 1, "has 1.1.1.1");
+    assert_eq(strstr(content, "nameserver 1.0.0.1") >= 0, 1, "has 1.0.0.1");
+    return 0;
+}
+
+fn test_dns_inject_resolv_conf_defaults_when_empty() {
+    test_group("network_dns::inject_resolv_conf_defaults_when_empty");
+    var dir = "/tmp/stiva_nd_def";
+    sys_mkdir(dir, 0x1ED);
+    var empty = vec_new();
+    assert_eq(network_dns_inject_resolv_conf(dir, empty), 0, "inject ok");
+    var content = read_file_cstr("/tmp/stiva_nd_def/etc/resolv.conf");
+    assert_eq(strstr(content, "nameserver 8.8.8.8") >= 0, 1, "default 8.8.8.8");
+    return 0;
+}
+
+fn test_dns_inject_hosts_to_rootfs() {
+    test_group("network_dns::inject_hosts_to_rootfs");
+    var dir = "/tmp/stiva_nd_hosts";
+    sys_mkdir(dir, 0x1ED);
+    assert_eq(network_dns_inject_hosts(dir, network_dns_parse_ipv4("172.17.0.2"), "mycontainer"), 0, "inject ok");
+    var content = read_file_cstr("/tmp/stiva_nd_hosts/etc/hosts");
+    assert_eq(strstr(content, "127.0.0.1\tlocalhost") >= 0, 1, "localhost line");
+    assert_eq(strstr(content, "172.17.0.2\tmycontainer") >= 0, 1, "container line");
+    return 0;
+}
+
+fn test_dns_inject_hostname_to_rootfs() {
+    test_group("network_dns::inject_hostname_to_rootfs");
+    var dir = "/tmp/stiva_nd_hn";
+    sys_mkdir(dir, 0x1ED);
+    assert_eq(network_dns_inject_hostname(dir, "web-server"), 0, "inject ok");
+    var content = read_file_cstr("/tmp/stiva_nd_hn/etc/hostname");
+    assert_eq(streq(content, "web-server\n"), 1, "hostname content");
+    return 0;
+}
+
+fn test_dns_host_servers_returns_something() {
+    test_group("network_dns::host_dns_servers_returns_something");
+    var servers = network_dns_host_servers();
+    assert_eq(vec_len(servers) > 0, 1, "always at least defaults");
+    return 0;
+}
+
+# ── network_pool.cyr (rust-old/src/network/pool.rs) ──
+# ── network_pool.cyr (rust-old/src/network/pool.rs) ──────────────
+# IPv4 addresses are the u32 host value; IPv6 addresses are 16-byte
+# big-endian buffer pointers. All 16 oracle #[cfg(test)] cases mirrored.
+
+fn test_np_new_pool() {
+    test_group("np_new_pool");
+    var p = ip_pool_new("172.17.0.0/16");
+    assert(p != 0, "pool created");
+    assert_eq(ip_pool_gateway(p), 172*16777216 + 17*65536 + 1, "gateway 172.17.0.1");
+    assert_eq(ip_pool_prefix_len(p), 16, "prefix 16");
+    assert_eq(streq(ip_pool_subnet(p), "172.17.0.0/16"), 1, "subnet 172.17.0.0/16");
+    assert_eq(ip_pool_allocated_count(p), 0, "count 0");
+    return 0;
+}
+
+fn test_np_allocate_sequential() {
+    test_group("np_allocate_sequential");
+    var q = ip_pool_new("172.17.0.0/24");
+    var a1 = ip_pool_allocate(q);
+    var a2 = ip_pool_allocate(q);
+    var a3 = ip_pool_allocate(q);
+    assert_eq(a1, 172*16777216 + 17*65536 + 2, "ip1 172.17.0.2");
+    assert_eq(a2, 172*16777216 + 17*65536 + 3, "ip2 172.17.0.3");
+    assert_eq(a3, 172*16777216 + 17*65536 + 4, "ip3 172.17.0.4");
+    assert_eq(ip_pool_allocated_count(q), 3, "count 3");
+    return 0;
+}
+
+fn test_np_release_and_reuse() {
+    test_group("np_release_and_reuse");
+    var r = ip_pool_new("172.17.0.0/24");
+    var b1 = ip_pool_allocate(r);
+    var b2 = ip_pool_allocate(r);
+    assert_eq(ip_pool_allocated_count(r), 2, "count 2");
+    assert_eq(ip_pool_release(r, b1), 1, "release b1");
+    assert_eq(ip_pool_allocated_count(r), 1, "count 1");
+    var b3 = ip_pool_allocate(r);
+    assert_eq(b3, 172*16777216 + 17*65536 + 4, "ip3 172.17.0.4");
+    return 0;
+}
+
+fn test_np_release_nonexistent() {
+    test_group("np_release_nonexistent");
+    var r = ip_pool_new("172.17.0.0/24");
+    assert_eq(ip_pool_release(r, 172*16777216 + 17*65536 + 99), 0, "release nonexistent false");
+    return 0;
+}
+
+fn test_np_pool_exhaustion() {
+    test_group("np_pool_exhaustion");
+    var e = ip_pool_new("10.0.0.0/30");
+    var ei = ip_pool_allocate(e);
+    assert_eq(ei, 10*16777216 + 2, "10.0.0.2");
+    assert(ip_pool_allocate(e) < 0, "exhausted");
+    return 0;
+}
+
+fn test_np_skips_gateway() {
+    test_group("np_skips_gateway");
+    var g = ip_pool_new("10.0.0.0/30");
+    assert_eq(ip_pool_gateway(g), 10*16777216 + 1, "gateway 10.0.0.1");
+    return 0;
+}
+
+fn test_np_invalid_subnet() {
+    test_group("np_invalid_subnet");
+    assert_eq(ip_pool_new("not-a-cidr"), 0, "not-a-cidr");
+    assert_eq(ip_pool_new("172.17.0.0"), 0, "no slash");
+    assert_eq(ip_pool_new("172.17.0.0/31"), 0, "/31 too small");
+    assert_eq(ip_pool_new("172.17.0.0/32"), 0, "/32 too small");
+    return 0;
+}
+
+fn test_np_invalid_address() {
+    test_group("np_invalid_address");
+    assert_eq(ip_pool_new("999.999.999.999/24"), 0, "bad octets");
+    return 0;
+}
+
+fn test_np_large_pool() {
+    test_group("np_large_pool");
+    var lp = ip_pool_new("10.0.0.0/24");
+    var n = 0;
+    for (var k = 0; k < 253; k = k + 1) {
+        if (ip_pool_allocate(lp) >= 0) { n = n + 1; }
+    }
+    assert_eq(n, 253, "253 allocated");
+    assert_eq(ip_pool_allocated_count(lp), 253, "count 253");
+    assert(ip_pool_allocate(lp) < 0, "full");
+    return 0;
+}
+
+fn test_np_network_alignment() {
+    test_group("np_network_alignment");
+    var na = ip_pool_new("172.17.0.5/24");
+    assert_eq(streq(ip_pool_subnet(na), "172.17.0.0/24"), 1, "aligned to .0");
+    return 0;
+}
+
+fn test_np_ipv6_pool_new() {
+    test_group("np_ipv6_pool_new");
+    var v6 = ipv6_pool_new("fd00::/64");
+    assert(v6 != 0, "v6 created");
+    assert_eq(load8(ipv6_pool_gateway(v6) + 15), 1, "gateway fd00::1");
+    assert_eq(streq(ipv6_pool_subnet(v6), "fd00::/64"), 1, "subnet fd00::/64");
+    return 0;
+}
+
+fn test_np_ipv6_pool_allocate() {
+    test_group("np_ipv6_pool_allocate");
+    var w6 = ipv6_pool_new("fd00::/64");
+    var c1 = ipv6_pool_allocate(w6);
+    var c2 = ipv6_pool_allocate(w6);
+    assert(c1 != 0, "c1 alloc");
+    assert(c2 != 0, "c2 alloc");
+    assert_eq(load8(c1 + 15), 2, "fd00::2");
+    assert_eq(load8(c2 + 15), 3, "fd00::3");
+    return 0;
+}
+
+fn test_np_ipv6_pool_release() {
+    test_group("np_ipv6_pool_release");
+    var z6 = ipv6_pool_new("fd00::/64");
+    var zi = ipv6_pool_allocate(z6);
+    assert_eq(ipv6_pool_release(z6, zi), 1, "release allocated");
+    var fake = alloc(16);
+    memset(fake, 0, 16);
+    store8(fake + 0, 253);
+    store8(fake + 15, 99);
+    assert_eq(ipv6_pool_release(z6, fake), 0, "release nonexistent false");
+    return 0;
+}
+
+fn test_np_ipv6_pool_invalid() {
+    test_group("np_ipv6_pool_invalid");
+    assert_eq(ipv6_pool_new("not-a-cidr"), 0, "not-a-cidr");
+    assert_eq(ipv6_pool_new("fd00::"), 0, "no prefix");
+    assert_eq(ipv6_pool_new("fd00::/127"), 0, "/127 too small");
+    return 0;
+}
+
+fn test_np_dual_stack_v4_only() {
+    test_group("np_dual_stack_v4_only");
+    var d1 = dual_stack_v4_only("172.17.0.0/24");
+    assert(d1 != 0, "dual v4-only created");
+    var ov4 = alloc(8);
+    var ov6 = alloc(8);
+    assert_eq(dual_stack_allocate(d1, ov4, ov6), 1, "allocate ok");
+    assert_eq(load64(ov4), 172*16777216 + 17*65536 + 2, "v4 172.17.0.2");
+    assert_eq(load64(ov6), 0, "v6 none");
+    return 0;
+}
+
+fn test_np_dual_stack_both() {
+    test_group("np_dual_stack_both");
+    var d2 = dual_stack_dual("172.17.0.0/24", "fd00::/64");
+    assert(d2 != 0, "dual both created");
+    var pv4 = alloc(8);
+    var pv6 = alloc(8);
+    assert_eq(dual_stack_allocate(d2, pv4, pv6), 1, "allocate ok");
+    assert_eq(load64(pv4), 172*16777216 + 17*65536 + 2, "v4 172.17.0.2");
+    assert(load64(pv6) != 0, "v6 present");
+    assert_eq(load8(load64(pv6) + 15), 2, "v6 fd00::2");
+    return 0;
+}
+
+# ── network_rootless.cyr (rust-old/src/network/rootless.rs) ──
+fn test_rootless_backend_default_and_serde() {
+    test_group("rootless_backend_default_and_serde");
+    # Default is Auto (Rust #[default]).
+    assert_eq(network_rootless_backend_default(), NETWORK_ROOTLESS_BACKEND_AUTO, "default auto");
+    # Serde variant names (round-trip parity: name -> from_name).
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_AUTO), "Auto"), 1, "name auto");
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS), "Slirp4netns"), 1, "name slirp");
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_PASTA), "Pasta"), 1, "name pasta");
+    assert_eq(network_rootless_backend_from_name("Auto"), NETWORK_ROOTLESS_BACKEND_AUTO, "from auto");
+    assert_eq(network_rootless_backend_from_name("Pasta"), NETWORK_ROOTLESS_BACKEND_PASTA, "from pasta");
+    assert_eq(network_rootless_backend_from_name("Slirp4netns"), NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS, "from slirp");
+    assert_eq(network_rootless_backend_from_name("Nope"), 0 - 1, "from unknown -> -1");
+    return 0;
+}
+
+fn test_parse_port_mappings_simple() {
+    test_group("parse_port_mappings_simple");
+    var specs = vec_new();
+    vec_push(specs, "8080:80");
+    var mappings = parse_port_mappings(specs);
+    assert_eq(vec_len(mappings), 1, "len 1");
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 8080, "host 8080");
+    assert_eq(p.container_port, 80, "container 80");
+    assert_eq(streq(p.protocol, "tcp"), 1, "protocol tcp");
+    return 0;
+}
+
+fn test_parse_port_mappings_with_protocol() {
+    test_group("parse_port_mappings_with_protocol");
+    var specs = vec_new();
+    vec_push(specs, "5353:53/udp");
+    var mappings = parse_port_mappings(specs);
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 5353, "host 5353");
+    assert_eq(p.container_port, 53, "container 53");
+    assert_eq(streq(p.protocol, "udp"), 1, "protocol udp");
+    return 0;
+}
+
+fn test_parse_port_mappings_single_port() {
+    test_group("parse_port_mappings_single_port");
+    var specs = vec_new();
+    vec_push(specs, "80");
+    var mappings = parse_port_mappings(specs);
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 80, "host 80");
+    assert_eq(p.container_port, 80, "container 80");
+    return 0;
+}
+
+fn test_parse_port_mappings_invalid() {
+    test_group("parse_port_mappings_invalid");
+    var specs = vec_new();
+    vec_push(specs, "not-a-port");
+    # Rust returns Err(...); port returns 0 (null) sentinel.
+    assert_eq(parse_port_mappings(specs), 0, "invalid -> null");
+    return 0;
+}
+
+fn test_parse_port_mappings_overflow() {
+    test_group("parse_port_mappings_overflow");
+    var specs = vec_new();
+    vec_push(specs, "99999");
+    # u16 overflow: Rust str::parse::<u16>() errors; port returns 0.
+    assert_eq(parse_port_mappings(specs), 0, "overflow -> null");
+    return 0;
+}
+
+fn test_parse_port_mappings_multiple() {
+    test_group("parse_port_mappings_multiple");
+    var specs = vec_new();
+    vec_push(specs, "8080:80/tcp");
+    vec_push(specs, "5353:53/udp");
+    vec_push(specs, "443");
+    var mappings = parse_port_mappings(specs);
+    assert_eq(vec_len(mappings), 3, "len 3");
+    return 0;
+}
+
+fn test_rootless_runtime_probes() {
+    test_group("rootless_runtime_probes");
+    # is_unprivileged must not crash and returns a bounded 0/1.
+    var unp = is_unprivileged();
+    assert_eq(unp == 0 || unp == 1, 1, "is_unprivileged bool");
+    # available_backends returns 0..2 entries (system-dependent), no crash.
+    var backs = available_backends();
+    assert_eq(vec_len(backs) <= 2, 1, "backends <= 2");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     # error + oci
@@ -298,6 +826,55 @@ fn main() {
     test_convert_dockerfile_env_space_format();
     test_convert_dockerfile_expose_multiple();
     test_convert_dockerfile_label();
+    # network
+    test_network_mode_name();
+    test_network_mode_container();
+    test_network_struct();
+    test_network_driver_variants();
+    test_container_network();
+    test_network_policy_default_no_restrictions();
+    test_network_policy_with_deny();
+    test_dns_registry_resolve();
+    test_dns_registry_unregister();
+    test_dns_registry_hosts_entries();
+    test_dns_registry_inject();
+    test_network_bridge_veth_name();
+    test_network_bridge_ipv4_fmt();
+    test_dns_parse_resolv_conf_basic();
+    test_dns_parse_resolv_conf_with_comments();
+    test_dns_parse_resolv_conf_empty();
+    test_dns_parse_resolv_conf_ipv6_skipped();
+    test_dns_ipv4_to_str_canonical();
+    test_dns_parse_ipv4_reject();
+    test_dns_inject_resolv_conf_to_rootfs();
+    test_dns_inject_resolv_conf_defaults_when_empty();
+    test_dns_inject_hosts_to_rootfs();
+    test_dns_inject_hostname_to_rootfs();
+    test_dns_host_servers_returns_something();
+    test_np_new_pool();
+    test_np_allocate_sequential();
+    test_np_release_and_reuse();
+    test_np_release_nonexistent();
+    test_np_pool_exhaustion();
+    test_np_skips_gateway();
+    test_np_invalid_subnet();
+    test_np_invalid_address();
+    test_np_large_pool();
+    test_np_network_alignment();
+    test_np_ipv6_pool_new();
+    test_np_ipv6_pool_allocate();
+    test_np_ipv6_pool_release();
+    test_np_ipv6_pool_invalid();
+    test_np_dual_stack_v4_only();
+    test_np_dual_stack_both();
+    test_rootless_backend_default_and_serde();
+    test_parse_port_mappings_simple();
+    test_parse_port_mappings_with_protocol();
+    test_parse_port_mappings_single_port();
+    test_parse_port_mappings_invalid();
+    test_parse_port_mappings_overflow();
+    test_parse_port_mappings_multiple();
+    test_rootless_runtime_probes();
     return assert_summary();
 }
 

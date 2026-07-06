@@ -32,6 +32,11 @@ modules = [
     "src/intents.cyr",
     "src/audit.cyr",
     "src/convert.cyr",
+    "src/network_mod.cyr",
+    "src/network_bridge.cyr",
+    "src/network_dns.cyr",
+    "src/network_pool.cyr",
+    "src/network_rootless.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
@@ -46,7 +51,10 @@ stdlib = [
     "bench",
     "chrono",
     "fmt",
+    "fs",
+    "hashmap",
     "io",
+    "process",
     "str",
     "string",
     "syscalls",

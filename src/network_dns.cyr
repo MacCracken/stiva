@@ -1,0 +1,292 @@
+# stiva — container DNS config: resolv.conf / hosts / hostname injection
+# Ported from rust-old/src/network/dns.rs.
+#
+# Rust modeled DNS servers as Vec<Ipv4Addr>; Cyrius has no Ipv4Addr type, so a
+# parsed IPv4 is carried as a packed u32 (a.b.c.d -> (a<<24)|(b<<16)|(c<<8)|d).
+# network_dns_ipv4_invalid() (-1) is the "not a valid IPv4" sentinel — the parse
+# helpers reject anything that is not exactly four 0..255 dotted decimal octets,
+# which is precisely what Rust's `str::parse::<Ipv4Addr>()` accepts here (and it
+# is why the resolv.conf tests skip an "::1" IPv6 line). Packed u32 preserves
+# the parity the tests check: `servers[0] == "8.8.8.8".parse()` becomes an
+# integer equality on the packed value, and `network_dns_ipv4_to_str` renders
+# the canonical dotted-quad Rust's Display produces for `format!("nameserver {s}")`.
+#
+# The Rust functions return Result<(), StivaError> mapping fs errors via `?`;
+# here the fallible inject_* return an integer sentinel: 0 on success, or the
+# STIVA_ERR_IO code (from error.cyr) on a filesystem failure. Callers carry the
+# path context via stiva_err_print(STIVA_ERR_IO, detail).
+
+# Sentinel: a string that did not parse as a dotted-quad IPv4 (rust: parse err).
+# (Enum members must be integer literals in Cyrius, and -1 is not a literal, so
+# the invalid-IPv4 marker is a helper fn rather than an enum member.)
+#[must_use]
+fn network_dns_ipv4_invalid() {
+    return 0 - 1;
+}
+
+# Default DNS servers if the host resolv.conf is unavailable
+# (rust-old: const DEFAULT_DNS = ["8.8.8.8", "8.8.4.4"]).
+# 8.8.8.8 = 0x08080808 ; 8.8.4.4 = 0x08080404.
+#[must_use]
+fn network_dns_default_primary() {
+    return 0x08080808;
+}
+
+#[must_use]
+fn network_dns_default_secondary() {
+    return 0x08080404;
+}
+
+# ── IPv4 packing / parsing / formatting ──────────────────
+
+# Parse one 0..255 decimal octet starting at cstr `s`+`off`, stopping at a
+# '.' (46) or NUL. Returns two values: the octet value (0..255) and the number
+# of characters consumed, or (network_dns_ipv4_invalid(), 0) if the run of digits
+# is empty, non-numeric, has a leading-zero longer form, or exceeds 255.
+# (Rust's Ipv4Addr::from_str rejects empty octets, non-digits, >255, and — for
+# the std parser — multi-digit octets with a leading zero.)
+fn _network_dns_parse_octet(s, off) {
+    var i = 0;
+    var val = 0;
+    var digits = 0;
+    var lead_zero = 0;
+    var go = 1;
+    while (go == 1) {
+        var c = load8(s + off + i);
+        if (c == 46 || c == 0) { go = 0; }
+        else {
+            if (c < 48 || c > 57) { return (network_dns_ipv4_invalid(), 0); }
+            if (digits == 0 && c == 48) { lead_zero = 1; }
+            val = val * 10 + (c - 48);
+            digits = digits + 1;
+            if (val > 255) { return (network_dns_ipv4_invalid(), 0); }
+            i = i + 1;
+        }
+    }
+    if (digits == 0) { return (network_dns_ipv4_invalid(), 0); }
+    # Reject "01", "007" etc. — leading zero with more than one digit.
+    if (lead_zero == 1 && digits > 1) { return (network_dns_ipv4_invalid(), 0); }
+    return (val, i);
+}
+
+# Parse a NUL-terminated dotted-quad IPv4 cstr into a packed u32, or
+# network_dns_ipv4_invalid() if it is not exactly four valid octets separated by
+# three dots with nothing trailing (rust: `parse::<Ipv4Addr>().ok()`).
+#[must_use]
+fn network_dns_parse_ipv4(s) {
+    var pos = 0;
+    var packed = 0;
+    var k = 0;
+    while (k < 3) {
+        var v, l = _network_dns_parse_octet(s, pos);
+        if (v == network_dns_ipv4_invalid()) { return network_dns_ipv4_invalid(); }
+        packed = (packed << 8) | v;
+        pos = pos + l;
+        # Must sit on a '.' separator now.
+        if (load8(s + pos) != 46) { return network_dns_ipv4_invalid(); }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    var v4, l4 = _network_dns_parse_octet(s, pos);
+    if (v4 == network_dns_ipv4_invalid()) { return network_dns_ipv4_invalid(); }
+    packed = (packed << 8) | v4;
+    pos = pos + l4;
+    # Nothing may trail the last octet.
+    if (load8(s + pos) != 0) { return network_dns_ipv4_invalid(); }
+    return packed;
+}
+
+# Render a packed IPv4 u32 as its canonical dotted-quad Str
+# (matches Rust's Ipv4Addr Display used in `format!("nameserver {s}")`).
+#[must_use]
+fn network_dns_ipv4_to_str(packed) {
+    var a = (packed >> 24) & 255;
+    var b = (packed >> 16) & 255;
+    var c = (packed >> 8) & 255;
+    var d = packed & 255;
+    var sb = str_builder_new();
+    str_builder_add_int(sb, a);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, b);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, c);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, d);
+    return str_builder_build(sb);
+}
+
+# ── resolv.conf parsing ───────────────────────
+
+# In-place ASCII whitespace trim of the cstr region [start, end) of buffer
+# `buf` (space/tab/CR/LF). Returns two values: the new start offset and new end
+# offset (both relative to buf). Mirrors Rust's str::trim (we only strip ASCII
+# whitespace, which is all resolv.conf carries).
+fn _network_dns_trim_bounds(buf, start, end) {
+    var s = start;
+    var e = end;
+    while (s < e) {
+        var c2 = load8(buf + s);
+        if (c2 == 32 || c2 == 9 || c2 == 13 || c2 == 10) { s = s + 1; }
+        else { break; }
+    }
+    while (e > s) {
+        var c3 = load8(buf + e - 1);
+        if (c3 == 32 || c3 == 9 || c3 == 13 || c3 == 10) { e = e - 1; }
+        else { break; }
+    }
+    return (s, e);
+}
+
+# Copy the cstr region [start, end) of `buf` into a fresh NUL-terminated
+# heap buffer and return its address.
+fn _network_dns_slice_cstr(buf, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, buf + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Parse nameserver entries from a NUL-terminated resolv.conf `content` cstr.
+# Returns a vec of packed IPv4 u32 (rust-old: parse_resolv_conf -> Vec<Ipv4Addr>).
+# For each line: trim, and if it begins with "nameserver", trim the remainder
+# and parse as IPv4 — pushing only successfully-parsed (IPv4) addresses, so
+# IPv6 / malformed nameserver lines and all non-nameserver lines are skipped.
+#[must_use]
+fn network_dns_parse_resolv_conf(content) {
+    var out = vec_new();
+    var total = strlen(content);
+    var line_start = 0;
+    var i = 0;
+    var go = 1;
+    while (go == 1) {
+        var c = load8(content + i);
+        if (c == 10 || c == 0) {
+            # Line is [line_start, i).
+            var ls, le = _network_dns_trim_bounds(content, line_start, i);
+            var pref = "nameserver";
+            var pref_len = 10;
+            var has_pref = 0;
+            if (le - ls >= pref_len) {
+                has_pref = memeq(content + ls, pref, pref_len);
+            }
+            if (has_pref == 1) {
+                # Remainder after "nameserver", then trimmed.
+                var rs, re = _network_dns_trim_bounds(content, ls + pref_len, le);
+                var ipcstr = _network_dns_slice_cstr(content, rs, re);
+                var packed = network_dns_parse_ipv4(ipcstr);
+                if (packed != network_dns_ipv4_invalid()) {
+                    vec_push(out, packed);
+                }
+            }
+            if (c == 0) { go = 0; }
+            else { line_start = i + 1; }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Read DNS servers from the host's /etc/resolv.conf; on read failure fall back
+# to the two DEFAULT_DNS servers (rust-old: host_dns_servers -> Vec<Ipv4Addr>).
+# Returns a vec of packed IPv4 u32 (always non-empty: defaults guarantee ≥1).
+#[must_use]
+fn network_dns_host_servers() {
+    var cap = 65536;
+    var buf = alloc(cap);
+    var n = file_read_all("/etc/resolv.conf", buf, cap - 1);
+    if (n < 0) {
+        var out = vec_new();
+        vec_push(out, network_dns_default_primary());
+        vec_push(out, network_dns_default_secondary());
+        return out;
+    }
+    store8(buf + n, 0);
+    return network_dns_parse_resolv_conf(buf);
+}
+
+# ── injection into the container rootfs ──────────────────
+
+# mkdir "<rootfs>/etc" (create_dir_all analogue for the single "etc" level;
+# the parent rootfs is created by the caller). Returns the freshly-built
+# "<rootfs>/etc" Str; EEXIST is ignored (idempotent, matching create_dir_all).
+fn _network_dns_ensure_etc(rootfs) {
+    # rootfs is a raw cstr; path_join operates on Str fat pointers, so lift it.
+    var etc = path_join(str_from(rootfs), str_from("etc"));
+    # 0o755 = 0x1ED. sys_mkdir ignores an already-existing dir (EEXIST).
+    sys_mkdir(str_cstr(etc), 0x1ED);
+    return etc;
+}
+
+# Write /etc/resolv.conf into the container rootfs (rust-old: inject_resolv_conf).
+# `dns_servers` is a vec of packed IPv4 u32; when empty, the DEFAULT_DNS servers
+# are used. Content is "nameserver <ip>\n" per server. `rootfs` is a cstr path.
+# Returns 0 on success, or STIVA_ERR_IO on a filesystem failure.
+fn network_dns_inject_resolv_conf(rootfs, dns_servers) {
+    var etc = _network_dns_ensure_etc(rootfs);
+
+    # Choose the effective server list.
+    var servers = dns_servers;
+    if (vec_len(dns_servers) == 0) {
+        servers = vec_new();
+        vec_push(servers, network_dns_default_primary());
+        vec_push(servers, network_dns_default_secondary());
+    }
+
+    # Build "nameserver a.b.c.d\n" for each, joined (trailing "\n").
+    var sb = str_builder_new();
+    var count = vec_len(servers);
+    var i = 0;
+    while (i < count) {
+        str_builder_add_cstr(sb, "nameserver ");
+        str_builder_add(sb, network_dns_ipv4_to_str(vec_get(servers, i)));
+        str_builder_add_cstr(sb, "\n");
+        i = i + 1;
+    }
+    var content = str_builder_build(sb);
+
+    var path = path_join(etc, str_from("resolv.conf"));
+    var w = file_write_all(str_cstr(path), str_data(content), str_len(content));
+    if (w < 0) { return STIVA_ERR_IO; }
+    return 0;
+}
+
+# Write /etc/hosts into the container rootfs (rust-old: inject_hosts).
+# `container_ip` is a packed IPv4 u32; `hostname` is a cstr. Format matches Rust
+# exactly: localhost v4/v6 lines then "<ip>\t<hostname>\n". `rootfs` is a cstr.
+# Returns 0 on success, or STIVA_ERR_IO on a filesystem failure.
+fn network_dns_inject_hosts(rootfs, container_ip, hostname) {
+    var etc = _network_dns_ensure_etc(rootfs);
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "127.0.0.1\tlocalhost\n");
+    str_builder_add_cstr(sb, "::1\t\tlocalhost\n");
+    str_builder_add(sb, network_dns_ipv4_to_str(container_ip));
+    str_builder_add_cstr(sb, "\t");
+    str_builder_add_cstr(sb, hostname);
+    str_builder_add_cstr(sb, "\n");
+    var content = str_builder_build(sb);
+
+    var path = path_join(etc, str_from("hosts"));
+    var w = file_write_all(str_cstr(path), str_data(content), str_len(content));
+    if (w < 0) { return STIVA_ERR_IO; }
+    return 0;
+}
+
+# Write /etc/hostname into the container rootfs (rust-old: inject_hostname).
+# Content is "<hostname>\n". `rootfs` and `hostname` are cstrs.
+# Returns 0 on success, or STIVA_ERR_IO on a filesystem failure.
+fn network_dns_inject_hostname(rootfs, hostname) {
+    var etc = _network_dns_ensure_etc(rootfs);
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, hostname);
+    str_builder_add_cstr(sb, "\n");
+    var content = str_builder_build(sb);
+
+    var path = path_join(etc, str_from("hostname"));
+    var w = file_write_all(str_cstr(path), str_data(content), str_len(content));
+    if (w < 0) { return STIVA_ERR_IO; }
+    return 0;
+}

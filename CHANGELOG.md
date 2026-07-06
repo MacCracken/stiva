@@ -27,9 +27,18 @@ pattern). The Rust crate is frozen at `rust-old/` as the parity oracle. See
   read-with-limit, `current_user`.
 - **`src/convert.cyr`** — `dockerfile_to_toml` (all instruction arms);
   `compose_yaml_to_toml` deferred (needs a Cyrius YAML+Value layer).
+- **`src/network_*.cyr`** — the dep-free network surface: `network_mod`
+  (NetworkMode/NetworkDriver/Network/ContainerNetwork/NetworkPolicy+nft-rules/
+  DnsRegistry), `network_bridge` (bridge/veth via `ip`), `network_dns` (container
+  DNS registry + hosts injection), `network_pool` (IpPool/Ipv6Pool/DualStackPool
+  CIDR allocation; IPv6 as 16-byte buffers), `network_rootless` (backend detect +
+  port-mapping parse; async slirp4netns/pasta spawn deferred). `nat`/`manager`
+  wait on the nein dep.
 - **Agent-orchestrated porting harness** — `scripts/port-workflow.js`:
   per-module port from the oracle + adversarial parity verify against `rust-old/`.
-- **90 Cyrius tests** (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`
+  Its verify stage caught real gaps (ENTRYPOINT last-wins; a strstr index-vs-pointer
+  bug; IPv4 leading-zero + u16 leading-`+` parse divergences), all fixed.
+- **227 Cyrius tests** (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`
   modules; all green, plus `cyrius bench`/`fmt`/`lint` clean.
 
 ### Notes

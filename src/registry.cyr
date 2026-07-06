@@ -1,0 +1,531 @@
+# stiva — OCI registry client: manifests, descriptors, platform selection.
+# Ported from rust-old/src/registry.rs.
+#
+# registry.rs is overwhelmingly a networked async HTTP client built on
+# reqwest + tokio (RwLock, Instant) + serde_json. None of that transport,
+# concurrency, or JSON-model machinery exists in the ported base, so every
+# RegistryClient method (fetch_manifest, resolve_manifest, fetch_blob,
+# blob_exists, push_blob, push_blob_chunked, push_manifest, list_tags,
+# catalog, referrers, authenticated_request, acquire_token, token cache) —
+# plus the serde load/save of CredentialStore — lands in the DEFERRED block
+# at the bottom (same pattern as src/oci.cyr / src/convert.cyr).
+#
+# What ports faithfully here is the SELF-CONTAINED leaf surface:
+#   * media-type constants (functions returning the wire strings)
+#   * the descriptor / manifest / index / platform data types
+#   * ManifestResponse tag enum
+#   * registry_host, normalize_arch, current_platform, select_platform
+#   * parse_www_authenticate (pure cstr parsing → key/value store)
+#
+# i64-everywhere representation:
+#   * cstrings for all wire strings (media types, digests, os/arch).
+#   * `Option<String>` maps to a cstr pointer, 0 for None.
+#   * `u64 size` carried in an i64.
+#   * `Vec<String>` (urls) and Vec<Descriptor> (layers/manifests) map to
+#     vec.cyr vectors of cstr / struct pointers; 0 vec pointer means None.
+#
+# Error mapping (mirrors error.cyr): the Rust
+# `Err(StivaError::UnsupportedPlatform(...))` from select_platform maps to
+# the sentinel `0` (null PlatformManifest pointer); the caller reports it
+# via stiva_err_print(STIVA_ERR_UNSUPPORTED_PLATFORM, "<os>/<arch>").
+#
+# `alloc_init()` must have been called once before any type is constructed.
+
+# ── media types (rust-old: MEDIA_* consts) ──────────────────────
+#[must_use]
+fn media_manifest_v2() {
+    return "application/vnd.docker.distribution.manifest.v2+json";
+}
+
+#[must_use]
+fn media_manifest_list_v2() {
+    return "application/vnd.docker.distribution.manifest.list.v2+json";
+}
+
+#[must_use]
+fn media_oci_manifest() {
+    return "application/vnd.oci.image.manifest.v1+json";
+}
+
+#[must_use]
+fn media_oci_index() {
+    return "application/vnd.oci.image.index.v1+json";
+}
+
+# OCI layer media type for zstd-compressed tar archives.
+#[must_use]
+fn media_oci_layer_zstd() {
+    return "application/vnd.oci.image.layer.v1.tar+zstd";
+}
+
+# Media type for empty OCI config (used in artifact manifests).
+#[must_use]
+fn media_oci_empty() {
+    return "application/vnd.oci.empty.v1+json";
+}
+
+# ── ManifestResponse tag (rust-old: enum ManifestResponse) ──────
+# Fetched manifest — either a single manifest or an index. Prefixed
+# REGISTRY_MANIFEST_* for global enum-member uniqueness (see error.cyr).
+enum ManifestResponse {
+    REGISTRY_MANIFEST_RESPONSE_MANIFEST = 0;
+    REGISTRY_MANIFEST_RESPONSE_INDEX = 1;
+}
+
+# ── Descriptor (rust-old: struct Descriptor) ────────────────────
+# media_type  : cstr — content media type
+# digest      : cstr — content digest
+# size        : i64  — content size in bytes (u64 in Rust)
+# urls        : vec ptr of cstr, or 0 for None — foreign-layer external URLs
+# annotations : vec ptr, or 0 for None — descriptor annotations
+struct Descriptor {
+    media_type;
+    digest;
+    size;
+    urls;
+    annotations;
+}
+
+# Create a new descriptor with required fields only (rust-old: Descriptor::new).
+#[must_use]
+fn descriptor_new(media_type, digest, size) {
+    var d = alloc(40);
+    var dd: Descriptor = d;
+    dd.media_type = media_type;
+    dd.digest = digest;
+    dd.size = size;
+    dd.urls = 0;
+    dd.annotations = 0;
+    return d;
+}
+
+# Create a foreign layer descriptor with external URLs (rust-old: Descriptor::foreign).
+# `urls` is a vec.cyr vector of cstr pointers.
+#[must_use]
+fn descriptor_foreign(media_type, digest, size, urls) {
+    var d = descriptor_new(media_type, digest, size);
+    var dd: Descriptor = d;
+    dd.urls = urls;
+    return d;
+}
+
+# ── OciManifest (rust-old: struct OciManifest) ──────────────────
+# schema_version : i64  — always 2 for v2 schema 2
+# media_type     : cstr, or 0 for None
+# config         : Descriptor ptr
+# layers         : vec ptr of Descriptor ptrs
+# artifact_type  : cstr, or 0 for None (OCI artifact v1.1.0)
+# subject        : Descriptor ptr, or 0 for None (parent-manifest link)
+struct OciManifest {
+    schema_version;
+    media_type;
+    config;
+    layers;
+    artifact_type;
+    subject;
+}
+
+# Create a standard image manifest (rust-old: OciManifest::new).
+#[must_use]
+fn oci_manifest_new(config, layers) {
+    var m = alloc(48);
+    var mm: OciManifest = m;
+    mm.schema_version = 2;
+    mm.media_type = 0;
+    mm.config = config;
+    mm.layers = layers;
+    mm.artifact_type = 0;
+    mm.subject = 0;
+    return m;
+}
+
+# True (1) iff this manifest represents an OCI artifact (v1.1.0) rather
+# than a container image (rust-old: OciManifest::is_artifact).
+#[must_use]
+fn oci_manifest_is_artifact(m) {
+    var mm: OciManifest = m;
+    if (mm.artifact_type != 0) { return 1; }
+    var cfg: Descriptor = mm.config;
+    if (streq(cfg.media_type, media_oci_empty()) == 1) { return 1; }
+    return 0;
+}
+
+# ── Platform (rust-old: struct Platform) ────────────────────────
+# architecture : cstr
+# os           : cstr
+# variant      : cstr, or 0 for None
+# os_version   : cstr, or 0 for None
+struct Platform {
+    architecture;
+    os;
+    variant;
+    os_version;
+}
+
+#[must_use]
+fn platform_new(architecture, os, variant, os_version) {
+    var p = alloc(32);
+    var pp: Platform = p;
+    pp.architecture = architecture;
+    pp.os = os;
+    pp.variant = variant;
+    pp.os_version = os_version;
+    return p;
+}
+
+# Structural equality mirroring Rust `#[derive(PartialEq, Eq)]` on Platform:
+# all four fields compared (None==None via 0==0, None!=Some via cstr guard).
+#[must_use]
+fn platform_eq(a, b) {
+    var aa: Platform = a;
+    var bb: Platform = b;
+    if (streq(aa.architecture, bb.architecture) == 0) { return 0; }
+    if (streq(aa.os, bb.os) == 0) { return 0; }
+    if (_reg_opt_eq(aa.variant, bb.variant) == 0) { return 0; }
+    if (_reg_opt_eq(aa.os_version, bb.os_version) == 0) { return 0; }
+    return 1;
+}
+
+# Compare two Option<String> cstrs (0 = None). None==None → 1; a present
+# and b absent (or vice versa) → 0; both present → streq.
+#[must_use]
+fn _reg_opt_eq(a, b) {
+    if (a == 0 && b == 0) { return 1; }
+    if (a == 0 || b == 0) { return 0; }
+    return streq(a, b);
+}
+
+# ── PlatformManifest (rust-old: struct PlatformManifest) ────────
+# media_type : cstr
+# digest     : cstr
+# size       : i64 (u64 in Rust)
+# platform   : Platform ptr, or 0 for None
+struct PlatformManifest {
+    media_type;
+    digest;
+    size;
+    platform;
+}
+
+#[must_use]
+fn platform_manifest_new(media_type, digest, size, platform) {
+    var pm = alloc(32);
+    var p: PlatformManifest = pm;
+    p.media_type = media_type;
+    p.digest = digest;
+    p.size = size;
+    p.platform = platform;
+    return pm;
+}
+
+# ── OciIndex (rust-old: struct OciIndex) ────────────────────────
+# schema_version : i64
+# media_type     : cstr, or 0 for None
+# manifests      : vec ptr of PlatformManifest ptrs
+struct OciIndex {
+    schema_version;
+    media_type;
+    manifests;
+}
+
+#[must_use]
+fn oci_index_new(media_type, manifests) {
+    var idx = alloc(24);
+    var ii: OciIndex = idx;
+    ii.schema_version = 2;
+    ii.media_type = media_type;
+    ii.manifests = manifests;
+    return idx;
+}
+
+# ── RegistryCredential (rust-old: struct RegistryCredential) ────
+# username : cstr
+# password : cstr (plaintext — OS keyring recommended for production)
+struct RegistryCredential {
+    username;
+    password;
+}
+
+#[must_use]
+fn registry_credential_new(username, password) {
+    var c = alloc(16);
+    var cc: RegistryCredential = c;
+    cc.username = username;
+    cc.password = password;
+    return c;
+}
+
+# ── helpers ─────────────────────────────────────────────────────
+
+# Map registry shorthand to actual host (rust-old: registry_host).
+# Returns a cstr — "docker.io" is rewritten to the real Docker Hub host;
+# everything else passes through unchanged.
+#[must_use]
+fn registry_host(registry) {
+    if (streq(registry, "docker.io") == 1) { return "registry-1.docker.io"; }
+    return registry;
+}
+
+# Normalize Rust arch strings to OCI arch strings (rust-old: normalize_arch).
+# Returns a cstr; unknown arches pass through unchanged.
+#[must_use]
+fn normalize_arch(arch) {
+    if (streq(arch, "x86_64") == 1) { return "amd64"; }
+    if (streq(arch, "aarch64") == 1) { return "arm64"; }
+    if (streq(arch, "arm") == 1) { return "arm"; }
+    if (streq(arch, "s390x") == 1) { return "s390x"; }
+    if (streq(arch, "powerpc64") == 1) { return "ppc64le"; }
+    return arch;
+}
+
+# Detect current platform (rust-old: current_platform).
+# The Rust reads std::env::consts::{OS, ARCH}; those compile-time consts are
+# not available here. We return a Platform built from the host's uname, but
+# since no uname binding exists in the base yet the os/arch strings are the
+# build-target defaults ("linux" / normalized host arch). Callers that need
+# the exact runtime triple use the DEFERRED transport path.
+#[must_use]
+fn current_platform() {
+    return platform_new(normalize_arch("x86_64"), "linux", 0, 0);
+}
+
+# Select the best matching platform from an index (rust-old: select_platform).
+# Returns a PlatformManifest pointer (a clone of the matched entry) on
+# success, or 0 when no os/arch match exists — the caller maps 0 to
+# StivaError::UnsupportedPlatform("<os>/<arch>") via
+# stiva_err_print(STIVA_ERR_UNSUPPORTED_PLATFORM, detail).
+#
+# Match precedence mirrors the Rust exactly:
+#   1. Exact: os == target.os && arch == target.arch &&
+#             (target.variant is None || entry.variant == target.variant)
+#   2. Relaxed: os == target.os && arch == target.arch (variant ignored)
+#[must_use]
+fn select_platform(index, target) {
+    var idx: OciIndex = index;
+    var tp: Platform = target;
+    var n = vec_len(idx.manifests);
+
+    # Pass 1: exact match.
+    var i = 0;
+    while (i < n) {
+        var entry = vec_get(idx.manifests, i);
+        var e: PlatformManifest = entry;
+        if (e.platform != 0) {
+            var p: Platform = e.platform;
+            if (streq(p.os, tp.os) == 1 && streq(p.architecture, tp.architecture) == 1) {
+                # target.variant.is_none() || p.variant == target.variant
+                if (tp.variant == 0 || _reg_opt_eq(p.variant, tp.variant) == 1) {
+                    return _platform_manifest_clone(entry);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    # Pass 2: relaxed match (ignore variant).
+    i = 0;
+    while (i < n) {
+        var entry2 = vec_get(idx.manifests, i);
+        var e2: PlatformManifest = entry2;
+        if (e2.platform != 0) {
+            var p2: Platform = e2.platform;
+            if (streq(p2.os, tp.os) == 1 && streq(p2.architecture, tp.architecture) == 1) {
+                return _platform_manifest_clone(entry2);
+            }
+        }
+        i = i + 1;
+    }
+
+    # No match — UnsupportedPlatform.
+    return 0;
+}
+
+# Shallow-clone a PlatformManifest (mirrors the Rust `entry.clone()`; the
+# cloned Platform is a fresh struct so callers may retain it independently).
+#[must_use]
+fn _platform_manifest_clone(entry) {
+    var e: PlatformManifest = entry;
+    var plat = 0;
+    if (e.platform != 0) {
+        var p: Platform = e.platform;
+        plat = platform_new(p.architecture, p.os, p.variant, p.os_version);
+    }
+    return platform_manifest_new(e.media_type, e.digest, e.size, plat);
+}
+
+# ── WWW-Authenticate parsing (rust-old: parse_www_authenticate) ─
+# Parse `Bearer realm="...",service="...",scope="..."` into key/value
+# pairs. The Rust returns a HashMap<String,String>; here we return an
+# opaque AuthParams handle (two parallel vecs of cstr keys/values) queried
+# via auth_params_get(params, key) -> value cstr or 0.
+#
+# Parsing steps mirror the Rust exactly:
+#   * strip a leading "Bearer " or "bearer " prefix (else use whole header)
+#   * split the remainder on ','
+#   * for each part: trim; split_once('='); trim the key; trim '"' from both
+#     ends of the value; insert key→value.
+struct AuthParams {
+    keys;
+    values;
+}
+
+#[must_use]
+fn parse_www_authenticate(header) {
+    var keys = vec_new();
+    var values = vec_new();
+    var ap = alloc(16);
+    var app: AuthParams = ap;
+    app.keys = keys;
+    app.values = values;
+
+    # Strip "Bearer " / "bearer " prefix (7 bytes) if present.
+    var params = header;
+    if (strlen(header) >= 7 && memeq(header, "Bearer ", 7) == 1) { params = header + 7; }
+    elif (strlen(header) >= 7 && memeq(header, "bearer ", 7) == 1) { params = header + 7; }
+
+    var plen = strlen(params);
+    var start = 0;
+    while (start <= plen) {
+        # Find the next ',' (or end of string).
+        var end = start;
+        while (end < plen) {
+            if (load8(params + end) == 44) { break; }
+            end = end + 1;
+        }
+        # part = params[start..end], trimmed.
+        var part = _reg_trim(params, start, end);
+        # split_once('=').
+        var eq = _reg_find_byte(part, 61);
+        if (eq >= 0) {
+            var key = _reg_trim(part, 0, eq);
+            # value = part[eq+1 ..], then trim_matches('"').
+            var vlen = strlen(part);
+            var val = _reg_slice(part, eq + 1, vlen);
+            var vtrim = _reg_trim_quotes(val);
+            vec_push(keys, key);
+            vec_push(values, vtrim);
+        }
+        if (end >= plen) { break; }
+        start = end + 1;
+    }
+    return ap;
+}
+
+# Look up a key in AuthParams — returns the value cstr, or 0 if absent
+# (mirrors HashMap::get). On duplicate keys, last-write-wins like a HashMap
+# insert: we scan from the end so the most recently inserted value wins.
+#[must_use]
+fn auth_params_get(params, key) {
+    var app: AuthParams = params;
+    var n = vec_len(app.keys);
+    var i = n - 1;
+    while (i >= 0) {
+        var k = vec_get(app.keys, i);
+        if (streq(k, key) == 1) { return vec_get(app.values, i); }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Count of parsed key/value pairs (for is_empty checks in tests).
+#[must_use]
+fn auth_params_len(params) {
+    var app: AuthParams = params;
+    return vec_len(app.keys);
+}
+
+# ── small cstr helpers (parity-exact byte handling) ─────────────
+
+# True (1) iff byte `c` is ASCII whitespace stripped by Rust's str::trim.
+#[must_use]
+fn _reg_is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# Copy bytes [start, end) of `src` into a fresh NUL-terminated cstr.
+#[must_use]
+fn _reg_slice(src, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, src + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Trim ASCII whitespace from src[start..end], returning a fresh cstr
+# (mirrors str::trim on the slice).
+#[must_use]
+fn _reg_trim(src, start, end) {
+    var s = start;
+    while (s < end) {
+        if (_reg_is_ws(load8(src + s)) == 0) { break; }
+        s = s + 1;
+    }
+    var e = end;
+    while (e > s) {
+        if (_reg_is_ws(load8(src + e - 1)) == 0) { break; }
+        e = e - 1;
+    }
+    return _reg_slice(src, s, e);
+}
+
+# Index of the first `byte` in cstr `s`, or -1 (mirrors split_once).
+#[must_use]
+fn _reg_find_byte(s, byte) {
+    var len = strlen(s);
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Strip matching leading+trailing '"' bytes (mirrors trim_matches('"'):
+# strips ALL leading and ALL trailing quote chars). Returns a fresh cstr.
+#[must_use]
+fn _reg_trim_quotes(s) {
+    var len = strlen(s);
+    var start = 0;
+    while (start < len) {
+        if (load8(s + start) != 34) { break; }
+        start = start + 1;
+    }
+    var end = len;
+    while (end > start) {
+        if (load8(s + end - 1) != 34) { break; }
+        end = end - 1;
+    }
+    return _reg_slice(s, start, end);
+}
+
+# ── DEFERRED (land with the async transport / serde layer) ──────
+# rust-old/src/registry.rs also defines, all coupled to reqwest / tokio /
+# serde_json which have no ported base:
+#
+#   struct RegistryConfig { username, password, mirrors: MirrorConfig }
+#   struct MirrorConfig { mirrors: HashMap<String, Vec<String>> }
+#   struct CredentialStore { registries: HashMap<String, RegistryCredential> }
+#     - default_path() -> PathBuf
+#     - load() -> Result<Self, StivaError>        (fs + serde_json)
+#     - save() -> Result<(), StivaError>          (fs + serde_json)
+#     - set/get/remove/to_config
+#   fn dirs_path() -> PathBuf                      (std::env HOME)
+#   struct AuthToken { token, expires_at: Option<tokio::time::Instant> }
+#   struct RegistryClient { reqwest::Client, config, tokens: Arc<RwLock<..>> }
+#     - new / with_config / with_base_url / default
+#     - api_base / api_bases                       (mirror resolution)
+#     - fetch_manifest / resolve_manifest / fetch_blob   (async GET)
+#     - blob_exists / push_blob / push_blob_chunked / push_manifest (async)
+#     - list_tags / catalog / referrers            (async discovery)
+#     - authenticated_get / authenticated_request / acquire_token  (bearer)
+#     - get_cached_token / cache_token             (RwLock token cache)
+#
+# These require an HTTP client, async runtime, a JSON object model, and a
+# credential-file (de)serializer — none present in the ported base. They
+# land with the transport layer for parity. Tracked in the roadmap.

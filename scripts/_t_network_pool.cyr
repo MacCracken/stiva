@@ -1,0 +1,165 @@
+# ── network_pool.cyr (rust-old/src/network/pool.rs) ──────────────
+# IPv4 addresses are the u32 host value; IPv6 addresses are 16-byte
+# big-endian buffer pointers. All 16 oracle #[cfg(test)] cases mirrored.
+
+fn test_np_new_pool() {
+    test_group("np_new_pool");
+    var p = ip_pool_new("172.17.0.0/16");
+    assert(p != 0, "pool created");
+    assert_eq(ip_pool_gateway(p), 172*16777216 + 17*65536 + 1, "gateway 172.17.0.1");
+    assert_eq(ip_pool_prefix_len(p), 16, "prefix 16");
+    assert_eq(streq(ip_pool_subnet(p), "172.17.0.0/16"), 1, "subnet 172.17.0.0/16");
+    assert_eq(ip_pool_allocated_count(p), 0, "count 0");
+    return 0;
+}
+
+fn test_np_allocate_sequential() {
+    test_group("np_allocate_sequential");
+    var q = ip_pool_new("172.17.0.0/24");
+    var a1 = ip_pool_allocate(q);
+    var a2 = ip_pool_allocate(q);
+    var a3 = ip_pool_allocate(q);
+    assert_eq(a1, 172*16777216 + 17*65536 + 2, "ip1 172.17.0.2");
+    assert_eq(a2, 172*16777216 + 17*65536 + 3, "ip2 172.17.0.3");
+    assert_eq(a3, 172*16777216 + 17*65536 + 4, "ip3 172.17.0.4");
+    assert_eq(ip_pool_allocated_count(q), 3, "count 3");
+    return 0;
+}
+
+fn test_np_release_and_reuse() {
+    test_group("np_release_and_reuse");
+    var r = ip_pool_new("172.17.0.0/24");
+    var b1 = ip_pool_allocate(r);
+    var b2 = ip_pool_allocate(r);
+    assert_eq(ip_pool_allocated_count(r), 2, "count 2");
+    assert_eq(ip_pool_release(r, b1), 1, "release b1");
+    assert_eq(ip_pool_allocated_count(r), 1, "count 1");
+    var b3 = ip_pool_allocate(r);
+    assert_eq(b3, 172*16777216 + 17*65536 + 4, "ip3 172.17.0.4");
+    return 0;
+}
+
+fn test_np_release_nonexistent() {
+    test_group("np_release_nonexistent");
+    var r = ip_pool_new("172.17.0.0/24");
+    assert_eq(ip_pool_release(r, 172*16777216 + 17*65536 + 99), 0, "release nonexistent false");
+    return 0;
+}
+
+fn test_np_pool_exhaustion() {
+    test_group("np_pool_exhaustion");
+    var e = ip_pool_new("10.0.0.0/30");
+    var ei = ip_pool_allocate(e);
+    assert_eq(ei, 10*16777216 + 2, "10.0.0.2");
+    assert(ip_pool_allocate(e) < 0, "exhausted");
+    return 0;
+}
+
+fn test_np_skips_gateway() {
+    test_group("np_skips_gateway");
+    var g = ip_pool_new("10.0.0.0/30");
+    assert_eq(ip_pool_gateway(g), 10*16777216 + 1, "gateway 10.0.0.1");
+    return 0;
+}
+
+fn test_np_invalid_subnet() {
+    test_group("np_invalid_subnet");
+    assert_eq(ip_pool_new("not-a-cidr"), 0, "not-a-cidr");
+    assert_eq(ip_pool_new("172.17.0.0"), 0, "no slash");
+    assert_eq(ip_pool_new("172.17.0.0/31"), 0, "/31 too small");
+    assert_eq(ip_pool_new("172.17.0.0/32"), 0, "/32 too small");
+    return 0;
+}
+
+fn test_np_invalid_address() {
+    test_group("np_invalid_address");
+    assert_eq(ip_pool_new("999.999.999.999/24"), 0, "bad octets");
+    return 0;
+}
+
+fn test_np_large_pool() {
+    test_group("np_large_pool");
+    var lp = ip_pool_new("10.0.0.0/24");
+    var n = 0;
+    for (var k = 0; k < 253; k = k + 1) {
+        if (ip_pool_allocate(lp) >= 0) { n = n + 1; }
+    }
+    assert_eq(n, 253, "253 allocated");
+    assert_eq(ip_pool_allocated_count(lp), 253, "count 253");
+    assert(ip_pool_allocate(lp) < 0, "full");
+    return 0;
+}
+
+fn test_np_network_alignment() {
+    test_group("np_network_alignment");
+    var na = ip_pool_new("172.17.0.5/24");
+    assert_eq(streq(ip_pool_subnet(na), "172.17.0.0/24"), 1, "aligned to .0");
+    return 0;
+}
+
+fn test_np_ipv6_pool_new() {
+    test_group("np_ipv6_pool_new");
+    var v6 = ipv6_pool_new("fd00::/64");
+    assert(v6 != 0, "v6 created");
+    assert_eq(load8(ipv6_pool_gateway(v6) + 15), 1, "gateway fd00::1");
+    assert_eq(streq(ipv6_pool_subnet(v6), "fd00::/64"), 1, "subnet fd00::/64");
+    return 0;
+}
+
+fn test_np_ipv6_pool_allocate() {
+    test_group("np_ipv6_pool_allocate");
+    var w6 = ipv6_pool_new("fd00::/64");
+    var c1 = ipv6_pool_allocate(w6);
+    var c2 = ipv6_pool_allocate(w6);
+    assert(c1 != 0, "c1 alloc");
+    assert(c2 != 0, "c2 alloc");
+    assert_eq(load8(c1 + 15), 2, "fd00::2");
+    assert_eq(load8(c2 + 15), 3, "fd00::3");
+    return 0;
+}
+
+fn test_np_ipv6_pool_release() {
+    test_group("np_ipv6_pool_release");
+    var z6 = ipv6_pool_new("fd00::/64");
+    var zi = ipv6_pool_allocate(z6);
+    assert_eq(ipv6_pool_release(z6, zi), 1, "release allocated");
+    var fake = alloc(16);
+    memset(fake, 0, 16);
+    store8(fake + 0, 253);
+    store8(fake + 15, 99);
+    assert_eq(ipv6_pool_release(z6, fake), 0, "release nonexistent false");
+    return 0;
+}
+
+fn test_np_ipv6_pool_invalid() {
+    test_group("np_ipv6_pool_invalid");
+    assert_eq(ipv6_pool_new("not-a-cidr"), 0, "not-a-cidr");
+    assert_eq(ipv6_pool_new("fd00::"), 0, "no prefix");
+    assert_eq(ipv6_pool_new("fd00::/127"), 0, "/127 too small");
+    return 0;
+}
+
+fn test_np_dual_stack_v4_only() {
+    test_group("np_dual_stack_v4_only");
+    var d1 = dual_stack_v4_only("172.17.0.0/24");
+    assert(d1 != 0, "dual v4-only created");
+    var ov4 = alloc(8);
+    var ov6 = alloc(8);
+    assert_eq(dual_stack_allocate(d1, ov4, ov6), 1, "allocate ok");
+    assert_eq(load64(ov4), 172*16777216 + 17*65536 + 2, "v4 172.17.0.2");
+    assert_eq(load64(ov6), 0, "v6 none");
+    return 0;
+}
+
+fn test_np_dual_stack_both() {
+    test_group("np_dual_stack_both");
+    var d2 = dual_stack_dual("172.17.0.0/24", "fd00::/64");
+    assert(d2 != 0, "dual both created");
+    var pv4 = alloc(8);
+    var pv6 = alloc(8);
+    assert_eq(dual_stack_allocate(d2, pv4, pv6), 1, "allocate ok");
+    assert_eq(load64(pv4), 172*16777216 + 17*65536 + 2, "v4 172.17.0.2");
+    assert(load64(pv6) != 0, "v6 present");
+    assert_eq(load8(load64(pv6) + 15), 2, "v6 fd00::2");
+    return 0;
+}

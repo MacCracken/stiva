@@ -11,6 +11,11 @@ include "src/oci.cyr"
 include "src/intents.cyr"
 include "src/audit.cyr"
 include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
 
 # ── CLI ──────────────────────────
 # Ported bottom-up as modules land. For now, a version banner + a smoke

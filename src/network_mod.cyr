@@ -1,0 +1,317 @@
+# stiva — container networking types (network mode, driver, policy, DNS registry).
+# Ported from rust-old/src/network/mod.rs.
+#
+# rust-old/src/network/mod.rs is the module root: it declares the six
+# submodules (bridge, dns, manager, nat, pool, rootless — each their own
+# file, ported separately) and defines the leaf types shared across them:
+#   NetworkMode, Network, NetworkDriver, ContainerNetwork,
+#   NetworkPolicy (+ has_restrictions, to_nft_rules),
+#   DnsRegistry (+ register, unregister, resolve, to_hosts_entries, inject_into).
+# All of those are self-contained (only error.cyr + stdlib), so they port
+# in full here.
+#
+# Memory model: structs are heap objects. Constructors `alloc()` the struct
+# (8 bytes per field) and return the POINTER; callers bind it to a
+# `: TypeName`-annotated local so dot-access resolves (per the Cyrius guide,
+# pointer-to-struct dot-syntax needs the type annotation). This mirrors the
+# kavach port's struct convention.
+#
+# IP addresses: Rust used std::net::Ipv4Addr / Ipv6Addr. In Cyrius we carry
+# the canonical *display* form (a NUL-terminated cstr, e.g. "172.17.0.2"),
+# which is exactly what the serde wire form and every consumer path used.
+# The optional IPv6 (Option<Ipv6Addr>) maps to a cstr pointer or 0 (None).
+
+# ── NetworkMode (rust-old: enum NetworkMode) ────────────────
+# The tag values; Bridge/Host/None carry no payload, Container/Custom carry
+# a String. Members prefixed NETWORK_MODE_* for global enum-member
+# uniqueness (see error.cyr). Serde names below match derive(Serialize).
+enum NetworkMode {
+    NETWORK_MODE_BRIDGE = 0;
+    NETWORK_MODE_HOST = 1;
+    NETWORK_MODE_NONE = 2;
+    NETWORK_MODE_CONTAINER = 3;
+    NETWORK_MODE_CUSTOM = 4;
+}
+
+# A NetworkMode value: the tag plus (for Container/Custom) a payload cstr.
+# For Bridge/Host/None `value` is 0.
+struct NetworkModeVal {
+    tag;
+    value;
+}
+
+# Wrap a tag + optional payload cstr into a heap NetworkModeVal (pointer).
+fn network_mode_new(tag, value) {
+    var v: NetworkModeVal = alloc(16);
+    v.tag = tag;
+    v.value = value;
+    return v;
+}
+
+# Serde external-tag name for a bare NetworkMode tag (derive default:
+# unit variants serialize to their name "Bridge"/"Host"/"None"; the two
+# payload variants serialize to {"Container": "<s>"} / {"Custom": "<s>"}).
+# This returns the variant name string.
+#[must_use]
+fn network_mode_name(tag) {
+    if (tag == NETWORK_MODE_BRIDGE) { return "Bridge"; }
+    if (tag == NETWORK_MODE_HOST) { return "Host"; }
+    if (tag == NETWORK_MODE_NONE) { return "None"; }
+    if (tag == NETWORK_MODE_CONTAINER) { return "Container"; }
+    if (tag == NETWORK_MODE_CUSTOM) { return "Custom"; }
+    return "Bridge";
+}
+
+# 1 iff two NetworkModeVal (pointers) are equal (matches derive(PartialEq,
+# Eq)): same tag, and for payload variants the same payload string.
+#[must_use]
+fn network_mode_eq(a, b) {
+    var pa: NetworkModeVal = a;
+    var pb: NetworkModeVal = b;
+    if (pa.tag != pb.tag) { return 0; }
+    if (pa.tag == NETWORK_MODE_CONTAINER || pa.tag == NETWORK_MODE_CUSTOM) {
+        return streq(pa.value, pb.value);
+    }
+    return 1;
+}
+
+# ── NetworkDriver (rust-old: enum NetworkDriver) ───────────────
+enum NetworkDriver {
+    NETWORK_DRIVER_BRIDGE = 0;
+    NETWORK_DRIVER_OVERLAY = 1;
+    NETWORK_DRIVER_MACVLAN = 2;
+}
+
+# Serde name for a NetworkDriver (derive default: the variant name).
+#[must_use]
+fn network_driver_name(d) {
+    if (d == NETWORK_DRIVER_BRIDGE) { return "Bridge"; }
+    if (d == NETWORK_DRIVER_OVERLAY) { return "Overlay"; }
+    if (d == NETWORK_DRIVER_MACVLAN) { return "Macvlan"; }
+    return "Bridge";
+}
+
+# ── Network (rust-old: struct Network) ──────────────────
+# name/subnet/gateway are cstrs; driver is a NetworkDriver tag.
+struct Network {
+    name;
+    subnet;
+    gateway;
+    driver;
+}
+
+fn network_new(name, subnet, gateway, driver) {
+    var n: Network = alloc(32);
+    n.name = name;
+    n.subnet = subnet;
+    n.gateway = gateway;
+    n.driver = driver;
+    return n;
+}
+
+# ── ContainerNetwork (rust-old: struct ContainerNetwork) ─────────
+# ip / network_name / host_veth / container_veth are cstrs; ipv6 is a cstr
+# pointer or 0 for None (Option<Ipv6Addr>).
+struct ContainerNetwork {
+    ip;
+    ipv6;
+    network_name;
+    host_veth;
+    container_veth;
+}
+
+fn container_network_new(ip, ipv6, network_name, host_veth, container_veth) {
+    var cn: ContainerNetwork = alloc(40);
+    cn.ip = ip;
+    cn.ipv6 = ipv6;
+    cn.network_name = network_name;
+    cn.host_veth = host_veth;
+    cn.container_veth = container_veth;
+    return cn;
+}
+
+# ── NetworkPolicy (rust-old: struct NetworkPolicy) ──────────────
+# Each list field is a vec of cstrs (egress_ports is a vec of port ints).
+# egress_rate_limit is a u64 (bytes/sec, 0 = unlimited).
+struct NetworkPolicy {
+    egress_allow;
+    egress_deny;
+    ingress_allow;
+    ingress_deny;
+    egress_ports;
+    egress_rate_limit;
+}
+
+# Default NetworkPolicy — all empty vecs, rate limit 0 (rust-old: derive
+# Default). Requires alloc_init() beforehand for the backing vecs.
+fn network_policy_default() {
+    var p: NetworkPolicy = alloc(48);
+    p.egress_allow = vec_new();
+    p.egress_deny = vec_new();
+    p.ingress_allow = vec_new();
+    p.ingress_deny = vec_new();
+    p.egress_ports = vec_new();
+    p.egress_rate_limit = 0;
+    return p;
+}
+
+# True (1) iff any restriction is configured (rust-old: has_restrictions).
+#[must_use]
+fn network_policy_has_restrictions(pol) {
+    var p: NetworkPolicy = pol;
+    if (vec_len(p.egress_allow) > 0) { return 1; }
+    if (vec_len(p.egress_deny) > 0) { return 1; }
+    if (vec_len(p.ingress_allow) > 0) { return 1; }
+    if (vec_len(p.ingress_deny) > 0) { return 1; }
+    if (vec_len(p.egress_ports) > 0) { return 1; }
+    if (p.egress_rate_limit > 0) { return 1; }
+    return 0;
+}
+
+# Generate nftables rules for this policy (rust-old: to_nft_rules).
+# Returns a vec of rule cstrs. Emits a drop rule per egress_deny CIDR, then
+# a drop rule per ingress_deny CIDR — EXACT format strings preserved from
+# the Rust format! literals. `container_ip` is a cstr.
+#[must_use]
+fn network_policy_to_nft_rules(pol, container_ip) {
+    var p: NetworkPolicy = pol;
+    var rules = vec_new();
+
+    var n = vec_len(p.egress_deny);
+    var i = 0;
+    while (i < n) {
+        var cidr = vec_get(p.egress_deny, i);
+        # "add rule inet stiva-policy forward ip saddr {container_ip} ip daddr {cidr} drop"
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "add rule inet stiva-policy forward ip saddr ");
+        str_builder_add_cstr(sb, container_ip);
+        str_builder_add_cstr(sb, " ip daddr ");
+        str_builder_add_cstr(sb, cidr);
+        str_builder_add_cstr(sb, " drop");
+        vec_push(rules, str_cstr(str_builder_build(sb)));
+        i = i + 1;
+    }
+
+    var m = vec_len(p.ingress_deny);
+    var j = 0;
+    while (j < m) {
+        var scidr = vec_get(p.ingress_deny, j);
+        # "add rule inet stiva-policy forward ip saddr {cidr} ip daddr {container_ip} drop"
+        var sb2 = str_builder_new();
+        str_builder_add_cstr(sb2, "add rule inet stiva-policy forward ip saddr ");
+        str_builder_add_cstr(sb2, scidr);
+        str_builder_add_cstr(sb2, " ip daddr ");
+        str_builder_add_cstr(sb2, container_ip);
+        str_builder_add_cstr(sb2, " drop");
+        vec_push(rules, str_cstr(str_builder_build(sb2)));
+        j = j + 1;
+    }
+
+    return rules;
+}
+
+# ── DnsRegistry (rust-old: struct DnsRegistry) ────────────────
+# name → IPv4 (cstr) mapping for intra-session service discovery.
+struct DnsRegistry {
+    entries;
+}
+
+# New empty registry (rust-old: derive Default). cstr-keyed map (map_new) —
+# names are NUL-terminated cstrings, so the hash_str/streq (KeyTypeCstr)
+# path is correct; map_new_str is only for Str fat-pointer keys and would
+# mis-hash cstrings. Requires alloc_init() beforehand.
+fn dns_registry_new() {
+    var reg: DnsRegistry = alloc(8);
+    reg.entries = map_new();
+    return reg;
+}
+
+# Register a name→IP mapping (rust-old: register). `name` and `ip` are cstrs.
+fn dns_registry_register(r, name, ip) {
+    var reg: DnsRegistry = r;
+    map_set(reg.entries, name, ip);
+    return 0;
+}
+
+# Remove a mapping (rust-old: unregister).
+fn dns_registry_unregister(r, name) {
+    var reg: DnsRegistry = r;
+    map_delete(reg.entries, name);
+    return 0;
+}
+
+# Look up an IP by name (rust-old: resolve). Returns the IP cstr, or 0 for
+# None (no such entry).
+#[must_use]
+fn dns_registry_resolve(r, name) {
+    var reg: DnsRegistry = r;
+    return map_get(reg.entries, name);
+}
+
+# Generate /etc/hosts content for all registered entries (rust-old:
+# to_hosts_entries) — one "{ip}\t{name}\n" line per entry. Returns a heap
+# cstr. HashMap iteration order is unspecified in both Rust and here.
+#[must_use]
+fn dns_registry_to_hosts_entries(r) {
+    var reg: DnsRegistry = r;
+    var sb = str_builder_new();
+    var keys = map_keys(reg.entries);
+    var n = vec_len(keys);
+    var i = 0;
+    while (i < n) {
+        var name = vec_get(keys, i);
+        var ip = map_get(reg.entries, name);
+        str_builder_add_cstr(sb, ip);
+        str_builder_putc(sb, 9);        # '\t'
+        str_builder_add_cstr(sb, name);
+        str_builder_putc(sb, 10);       # '\n'
+        i = i + 1;
+    }
+    return str_cstr(str_builder_build(sb));
+}
+
+# Inject all entries into a container's /etc/hosts (rust-old: inject_into).
+# `rootfs` is a directory cstr; writes <rootfs>/etc/hosts with localhost
+# lines, the container's own {ip}\t{hostname}, then all registered service
+# names. Returns STIVA_ERR_OK on success, or STIVA_ERR_IO on write failure
+# (rust-old propagated std::io::Error via `?` → StivaError::Io).
+fn dns_registry_inject_into(reg, rootfs, container_ip, hostname) {
+    # Build "<rootfs>/etc" as a cstr (rootfs is a NUL-terminated cstr; we
+    # join with a literal '/' the way std::path::Path::join does — the extra
+    # slash on a "…/" rootfs is harmless to the kernel). path_join from
+    # fs.cyr takes Str fat-pointers, so we concatenate cstrs directly here.
+    var esb = str_builder_new();
+    str_builder_add_cstr(esb, rootfs);
+    str_builder_putc(esb, 47);      # '/'
+    str_builder_add_cstr(esb, "etc");
+    var etc = str_cstr(str_builder_build(esb));
+    sys_mkdir(etc, 448);        # 0700; create_dir_all — rootfs already exists
+
+    # Fixed prelude:
+    #   "127.0.0.1\tlocalhost\n"
+    #   "::1\t\tlocalhost\n"
+    #   "{container_ip}\t{hostname}\n"
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n");
+    str_builder_add_cstr(sb, container_ip);
+    str_builder_putc(sb, 9);        # '\t'
+    str_builder_add_cstr(sb, hostname);
+    str_builder_putc(sb, 10);       # '\n'
+
+    # All registered service names (container-to-container DNS).
+    var extra = dns_registry_to_hosts_entries(reg);
+    str_builder_add_cstr(sb, extra);
+
+    var content = str_cstr(str_builder_build(sb));
+
+    # "<etc>/hosts"
+    var hsb = str_builder_new();
+    str_builder_add_cstr(hsb, etc);
+    str_builder_putc(hsb, 47);      # '/'
+    str_builder_add_cstr(hsb, "hosts");
+    var hosts = str_cstr(str_builder_build(hsb));
+
+    var rc = file_write_all(hosts, content, strlen(content));
+    if (rc < 0) { return STIVA_ERR_IO; }
+    return STIVA_ERR_OK;
+}

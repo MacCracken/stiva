@@ -33,7 +33,12 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] `intents` — IntentKind/AnsambluAction enums + serde-tag names + not-implemented `parse_intent` sentinel; variant payloads DEFERRED with a real agnoshi NL parser
 - [x] `audit` — full AuditOperation/AuditResult/AuditEntry/AuditLog: JSON serialize + escape + line parse, flock append, reverse-read-with-limit, current_user
 - [x] `convert` — `dockerfile_to_toml` (FROM/RUN/COPY/ENV/WORKDIR/LABEL/EXPOSE/ENTRYPOINT/USER); `compose_yaml_to_toml` DEFERRED (needs a Cyrius YAML+Value layer)
-- [ ] dep-free next: `agent`, `build`, `fleet`, `image`, `registry`, `storage`, `network/{bridge,dns,mod,pool,rootless}`
+- [x] `network_mod` — shared types: NetworkMode(+payload)/NetworkDriver/Network/ContainerNetwork/NetworkPolicy(+nft rules)/DnsRegistry (full parity, runtime-verified)
+- [x] `network_bridge` — bridge/veth setup via `ip`/sysctl; Ipv4Addr-typed + varargs-nsenter internals DEFERRED
+- [x] `network_dns` — container DNS registry: register/resolve/hosts-entries/inject-into-rootfs (full parity)
+- [x] `network_pool` — IpPool/Ipv6Pool/DualStackPool CIDR alloc (u128 IPv6 as 16-byte buffers); leading-zero-octet reject fixed to match Rust
+- [x] `network_rootless` — RootlessNetworkBackend/PortMapping/parse_port_mappings/is_unprivileged/which/available_backends/select_backend; async slirp4netns/pasta spawn DEFERRED (needs async process runtime); `+`-sign u16 parse fixed
+- [ ] dep-free next: `image` + `registry` (mutually coupled), then `storage`, `build`; `agent`/`fleet` need `container`
 
 **Accepted divergences** (found by the verify stage; track to ADRs at parity-validation):
 - `audit` — `AuditLog::new` is *lazy* (file created on first append) vs Rust *eager* (create+append at construction): error surfaces at first `log`, not `new`. Also `metadata` on read is left null (round-trip inspects op/ids/result only, matching the Rust tests).

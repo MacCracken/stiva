@@ -1,0 +1,90 @@
+fn test_rootless_backend_default_and_serde() {
+    test_group("rootless_backend_default_and_serde");
+    # Default is Auto (Rust #[default]).
+    assert_eq(network_rootless_backend_default(), NETWORK_ROOTLESS_BACKEND_AUTO, "default auto");
+    # Serde variant names (round-trip parity: name -> from_name).
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_AUTO), "Auto"), 1, "name auto");
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS), "Slirp4netns"), 1, "name slirp");
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_PASTA), "Pasta"), 1, "name pasta");
+    assert_eq(network_rootless_backend_from_name("Auto"), NETWORK_ROOTLESS_BACKEND_AUTO, "from auto");
+    assert_eq(network_rootless_backend_from_name("Pasta"), NETWORK_ROOTLESS_BACKEND_PASTA, "from pasta");
+    assert_eq(network_rootless_backend_from_name("Slirp4netns"), NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS, "from slirp");
+    assert_eq(network_rootless_backend_from_name("Nope"), 0 - 1, "from unknown -> -1");
+    return 0;
+}
+
+fn test_parse_port_mappings_simple() {
+    test_group("parse_port_mappings_simple");
+    var specs = vec_new();
+    vec_push(specs, "8080:80");
+    var mappings = parse_port_mappings(specs);
+    assert_eq(vec_len(mappings), 1, "len 1");
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 8080, "host 8080");
+    assert_eq(p.container_port, 80, "container 80");
+    assert_eq(streq(p.protocol, "tcp"), 1, "protocol tcp");
+    return 0;
+}
+
+fn test_parse_port_mappings_with_protocol() {
+    test_group("parse_port_mappings_with_protocol");
+    var specs = vec_new();
+    vec_push(specs, "5353:53/udp");
+    var mappings = parse_port_mappings(specs);
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 5353, "host 5353");
+    assert_eq(p.container_port, 53, "container 53");
+    assert_eq(streq(p.protocol, "udp"), 1, "protocol udp");
+    return 0;
+}
+
+fn test_parse_port_mappings_single_port() {
+    test_group("parse_port_mappings_single_port");
+    var specs = vec_new();
+    vec_push(specs, "80");
+    var mappings = parse_port_mappings(specs);
+    var p: PortMapping = vec_get(mappings, 0);
+    assert_eq(p.host_port, 80, "host 80");
+    assert_eq(p.container_port, 80, "container 80");
+    return 0;
+}
+
+fn test_parse_port_mappings_invalid() {
+    test_group("parse_port_mappings_invalid");
+    var specs = vec_new();
+    vec_push(specs, "not-a-port");
+    # Rust returns Err(...); port returns 0 (null) sentinel.
+    assert_eq(parse_port_mappings(specs), 0, "invalid -> null");
+    return 0;
+}
+
+fn test_parse_port_mappings_overflow() {
+    test_group("parse_port_mappings_overflow");
+    var specs = vec_new();
+    vec_push(specs, "99999");
+    # u16 overflow: Rust str::parse::<u16>() errors; port returns 0.
+    assert_eq(parse_port_mappings(specs), 0, "overflow -> null");
+    return 0;
+}
+
+fn test_parse_port_mappings_multiple() {
+    test_group("parse_port_mappings_multiple");
+    var specs = vec_new();
+    vec_push(specs, "8080:80/tcp");
+    vec_push(specs, "5353:53/udp");
+    vec_push(specs, "443");
+    var mappings = parse_port_mappings(specs);
+    assert_eq(vec_len(mappings), 3, "len 3");
+    return 0;
+}
+
+fn test_rootless_runtime_probes() {
+    test_group("rootless_runtime_probes");
+    # is_unprivileged must not crash and returns a bounded 0/1.
+    var unp = is_unprivileged();
+    assert_eq(unp == 0 || unp == 1, 1, "is_unprivileged bool");
+    # available_backends returns 0..2 entries (system-dependent), no crash.
+    var backs = available_backends();
+    assert_eq(vec_len(backs) <= 2, 1, "backends <= 2");
+    return 0;
+}
