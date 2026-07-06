@@ -34,3 +34,6 @@ include "src/network_bridge.cyr"
 include "src/network_dns.cyr"
 include "src/network_pool.cyr"
 include "src/network_rootless.cyr"
+# image + registry ported but not wired (cycc unit-size blocker — see cyrius.cyml).
+# include "src/image.cyr"
+# include "src/registry.cyr"

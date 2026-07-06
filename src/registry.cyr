@@ -31,7 +31,7 @@
 #
 # `alloc_init()` must have been called once before any type is constructed.
 
-# ── media types (rust-old: MEDIA_* consts) ──────────────────────
+# ── media types (rust-old: MEDIA_* consts) ─────────────────
 #[must_use]
 fn media_manifest_v2() {
     return "application/vnd.docker.distribution.manifest.v2+json";
@@ -72,7 +72,7 @@ enum ManifestResponse {
     REGISTRY_MANIFEST_RESPONSE_INDEX = 1;
 }
 
-# ── Descriptor (rust-old: struct Descriptor) ────────────────────
+# ── Descriptor (rust-old: struct Descriptor) ────────────────
 # media_type  : cstr — content media type
 # digest      : cstr — content digest
 # size        : i64  — content size in bytes (u64 in Rust)
@@ -109,7 +109,7 @@ fn descriptor_foreign(media_type, digest, size, urls) {
     return d;
 }
 
-# ── OciManifest (rust-old: struct OciManifest) ──────────────────
+# ── OciManifest (rust-old: struct OciManifest) ────────────────
 # schema_version : i64  — always 2 for v2 schema 2
 # media_type     : cstr, or 0 for None
 # config         : Descriptor ptr
@@ -150,7 +150,7 @@ fn oci_manifest_is_artifact(m) {
     return 0;
 }
 
-# ── Platform (rust-old: struct Platform) ────────────────────────
+# ── Platform (rust-old: struct Platform) ──────────────────
 # architecture : cstr
 # os           : cstr
 # variant      : cstr, or 0 for None
@@ -218,7 +218,7 @@ fn platform_manifest_new(media_type, digest, size, platform) {
     return pm;
 }
 
-# ── OciIndex (rust-old: struct OciIndex) ────────────────────────
+# ── OciIndex (rust-old: struct OciIndex) ──────────────────
 # schema_version : i64
 # media_type     : cstr, or 0 for None
 # manifests      : vec ptr of PlatformManifest ptrs
@@ -255,7 +255,7 @@ fn registry_credential_new(username, password) {
     return c;
 }
 
-# ── helpers ─────────────────────────────────────────────────────
+# ── helpers ───────────────────────────
 
 # Map registry shorthand to actual host (rust-old: registry_host).
 # Returns a cstr — "docker.io" is rewritten to the real Docker Hub host;

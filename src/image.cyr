@@ -1,0 +1,428 @@
+# stiva — OCI image management: reference parsing, structs, blob store.
+# Ported from rust-old/src/image.rs.
+#
+# What ports cleanly here (self-contained or blob-store-only):
+#   struct ImageRef { registry, repository, tag, digest }  + parse + full_ref
+#   struct Layer    { digest, size_bytes, media_type }
+#   struct Image    { id, reference, size_bytes, layers, created_at }
+#   sha256_digest, digest_hex        (pure digest helpers)
+#   ImageStore::new / root / store_blob / has_blob / read_blob
+#     (the content-addressable blob store — no JSON, just files)
+#
+# What is DEFERRED (see the block at the bottom):
+#   * The `images.json` index — load_index / save_index / add_to_index /
+#     list / remove / gc / verify_integrity all round-trip a `Vec<Image>`
+#     (nested structs + chrono timestamps) through serde_json. The ported
+#     base has no JSON object-model serializer/parser, so — exactly like
+#     convert.cyr's compose deferral — these land with a JSON codec.
+#   * pull / push / verify_signature / fetch_foreign_layer are async and
+#     drive RegistryClient's network methods (reqwest/tokio), which are
+#     not part of the ported registry surface. They defer with those.
+#
+# Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
+# becomes an integer sentinel here — parse() returns 0 (null) on an
+# invalid reference; the caller reports it via
+# stiva_err_print(STIVA_ERR_INVALID_REFERENCE, detail). store_blob returns
+# 0 on a digest mismatch (caller: STIVA_ERR_DIGEST_MISMATCH). read_blob
+# returns 0 when the blob is absent (caller: STIVA_ERR_IMAGE_NOT_FOUND).
+
+# ── small cstr helpers (parity-exact byte handling) ──────────────
+
+# True (1) iff byte `c` is ASCII whitespace stripped by Rust str::trim
+# (space, tab, CR, LF). Image refs are ASCII in practice.
+#[must_use]
+fn _img_is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c == 9) { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    return 0;
+}
+
+# Copy bytes [start, end) of `src` into a fresh NUL-terminated cstr.
+# Returns the heap pointer (empty cstr if end <= start).
+#[must_use]
+fn _img_slice(src, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, src + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Fresh copy of a NUL-terminated cstr.
+#[must_use]
+fn _img_dup(s) {
+    return _img_slice(s, 0, strlen(s));
+}
+
+# Trim leading+trailing ASCII whitespace, returning a fresh cstr.
+#[must_use]
+fn _img_trim(s) {
+    var len = strlen(s);
+    var start = 0;
+    while (start < len) {
+        if (_img_is_ws(load8(s + start)) == 0) { break; }
+        start = start + 1;
+    }
+    var end = len;
+    while (end > start) {
+        if (_img_is_ws(load8(s + end - 1)) == 0) { break; }
+        end = end - 1;
+    }
+    return _img_slice(s, start, end);
+}
+
+# Index of the first `byte` in `s`, or -1 (mirrors str::find / split_once).
+#[must_use]
+fn _img_find(s, byte) {
+    var len = strlen(s);
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Index of the last `byte` in `s`, or -1 (mirrors str::rfind / rsplit_once).
+#[must_use]
+fn _img_rfind(s, byte) {
+    var len = strlen(s);
+    var i = len - 1;
+    while (i >= 0) {
+        if (load8(s + i) == byte) { return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+# True (1) iff `s` contains `byte` anywhere.
+#[must_use]
+fn _img_contains(s, byte) {
+    if (_img_find(s, byte) >= 0) { return 1; }
+    return 0;
+}
+
+# Concatenate two cstrs into a fresh heap cstr.
+#[must_use]
+fn _img_cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Concatenate three cstrs into a fresh heap cstr.
+#[must_use]
+fn _img_cat3(a, b, c) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var lc = strlen(c);
+    var out = alloc(la + lb + lc + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    memcpy(out + la + lb, c, lc);
+    store8(out + la + lb + lc, 0);
+    return out;
+}
+
+# ── ImageRef ───────────────────────────
+# A parsed image reference. `digest` is a cstr or 0 for None.
+struct ImageRef {
+    registry;
+    repository;
+    tag;
+    digest;
+}
+
+# Parse an image reference string (rust-old: ImageRef::parse).
+#
+# Supports: `nginx`, `nginx:1.25`, `user/repo:tag`, `ghcr.io/user/repo:tag`,
+# `localhost:5000/repo:tag`, `repo@sha256:...`.
+#
+# Returns a heap `ImageRef*` on success, or 0 on an empty reference /
+# empty repository (rust-old: Err(StivaError::InvalidReference(...))). The
+# caller reports the null via stiva_err_print(STIVA_ERR_INVALID_REFERENCE,
+# ...).
+#[must_use]
+fn image_ref_parse(reference) {
+    var trimmed = _img_trim(reference);
+    if (load8(trimmed) == 0) { return 0; }
+
+    # Handle digest references (repo@sha256:...).
+    var digest = 0;
+    var ref_wo_digest = trimmed;
+    var at = _img_find(trimmed, 64);
+    if (at >= 0) {
+        ref_wo_digest = _img_slice(trimmed, 0, at);
+        digest = _img_slice(trimmed, at + 1, strlen(trimmed));
+    }
+
+    # Split tag — but only if the colon comes after the last slash (so a
+    # port like localhost:5000 is not confused with a tag).
+    var ref_wo_tag = 0;
+    var tag = 0;
+    var slash_pos = _img_rfind(ref_wo_digest, 47);
+    if (slash_pos >= 0) {
+        var after_start = slash_pos + 1;
+        # after_slash = ref_wo_digest[slash_pos+1..]; look for its last ':'.
+        var after_len = strlen(ref_wo_digest) - after_start;
+        var colon_in_after = 0 - 1;
+        var j = after_start;
+        while (j < strlen(ref_wo_digest)) {
+            if (load8(ref_wo_digest + j) == 58) { colon_in_after = j; }
+            j = j + 1;
+        }
+        if (colon_in_after >= 0) {
+            # before = ref_wo_digest[..slash_pos+1]; name = after_slash up to colon.
+            ref_wo_tag = _img_slice(ref_wo_digest, 0, colon_in_after);
+            tag = _img_slice(ref_wo_digest, colon_in_after + 1, strlen(ref_wo_digest));
+        } else {
+            ref_wo_tag = _img_dup(ref_wo_digest);
+            tag = _img_dup("latest");
+        }
+    } else {
+        # No slash at all — simple name or name:tag (rsplit at last ':').
+        var last_colon = _img_rfind(ref_wo_digest, 58);
+        if (last_colon >= 0) {
+            ref_wo_tag = _img_slice(ref_wo_digest, 0, last_colon);
+            tag = _img_slice(ref_wo_digest, last_colon + 1, strlen(ref_wo_digest));
+        } else {
+            ref_wo_tag = _img_dup(ref_wo_digest);
+            tag = _img_dup("latest");
+        }
+    }
+
+    # Split registry from repository. A first component is a registry if it
+    # contains a dot or colon (port).
+    var registry = 0;
+    var repository = 0;
+    var first_slash = _img_find(ref_wo_tag, 47);
+    if (first_slash >= 0) {
+        var first = _img_slice(ref_wo_tag, 0, first_slash);
+        var rest = _img_slice(ref_wo_tag, first_slash + 1, strlen(ref_wo_tag));
+        if (_img_contains(first, 46) == 1 || _img_contains(first, 58) == 1) {
+            registry = first;
+            repository = rest;
+        } else {
+            # No dot/colon in first segment → Docker Hub user/repo.
+            registry = _img_dup("docker.io");
+            repository = _img_dup(ref_wo_tag);
+        }
+    } else {
+        # Bare name like "nginx" → docker.io/library/nginx.
+        registry = _img_dup("docker.io");
+        repository = _img_cat2("library/", ref_wo_tag);
+    }
+
+    if (load8(repository) == 0) { return 0; }
+
+    var r = alloc(32);
+    var rr: ImageRef = r;
+    rr.registry = registry;
+    rr.repository = repository;
+    rr.tag = tag;
+    rr.digest = digest;
+    return r;
+}
+
+# Full reference string "{registry}/{repository}:{tag}" (rust-old: full_ref).
+#[must_use]
+fn image_ref_full_ref(ref) {
+    var rr: ImageRef = ref;
+    var reg_slash = _img_cat2(rr.registry, "/");
+    var reg_repo = _img_cat2(reg_slash, rr.repository);
+    return _img_cat3(reg_repo, ":", rr.tag);
+}
+
+# ── Layer / Image ─────────────────────────
+
+# An image layer (rust-old: struct Layer).
+struct Layer {
+    digest;
+    size_bytes;
+    media_type;
+}
+
+fn layer_new(digest, size_bytes, media_type) {
+    var l = alloc(24);
+    var ll: Layer = l;
+    ll.digest = digest;
+    ll.size_bytes = size_bytes;
+    ll.media_type = media_type;
+    return l;
+}
+
+# A locally stored OCI image (rust-old: struct Image). `layers` is a vec
+# of Layer*; `created_at` is an epoch-seconds i64 (chrono::DateTime in Rust).
+struct Image {
+    id;
+    reference;
+    size_bytes;
+    layers;
+    created_at;
+}
+
+fn image_new(id, reference, size_bytes, layers, created_at) {
+    var im = alloc(40);
+    var ii: Image = im;
+    ii.id = id;
+    ii.reference = reference;
+    ii.size_bytes = size_bytes;
+    ii.layers = layers;
+    ii.created_at = created_at;
+    return im;
+}
+
+# ── Digest helpers ─────────────────────────
+
+# Compute `sha256:{hex}` digest for `len` bytes at `data`
+# (rust-old: sha256_digest). Returns a fresh heap cstr of length 7+64.
+#[must_use]
+fn sha256_digest(data, len) {
+    var hex = sha256_hex(data, len);   # 64-char lowercase hex cstr
+    return _img_cat2("sha256:", hex);
+}
+
+# Extract the hex portion from a `sha256:{hex}` digest (rust-old:
+# digest_hex). Returns a pointer INTO `digest` just past the "sha256:"
+# prefix when present, else `digest` itself (borrow, no allocation).
+#[must_use]
+fn digest_hex(digest) {
+    if (strlen(digest) >= 7 && memeq(digest, "sha256:", 7) == 1) {
+        return digest + 7;
+    }
+    return digest;
+}
+
+# ── ImageStore ──────────────────────────
+# Local image storage with content-addressable blob store. Only the
+# `root` path is held (rust-old: struct ImageStore { root }).
+#
+# The store is an 8-byte heap cell holding the root cstr pointer. A
+# SINGLE-field struct is deliberately NOT used: Cyrius miscompiles
+# field access through a pointer-annotated local for a 1-field struct
+# (it scalar-replaces the sole field into a register, so `s.root = v`
+# never reaches memory). We use explicit load64/store64 on the cell,
+# via the _img_store_root helper, to sidestep that.
+
+# Root cstr for a store cell.
+#[must_use]
+fn _img_store_root(store) {
+    return load64(store);
+}
+
+# Path "{root}/blobs/sha256/{hex}" for a `sha256:{hex}` digest.
+#[must_use]
+fn _img_blob_path(root, digest) {
+    var hex = digest_hex(digest);
+    var base = _img_cat2(root, "/blobs/sha256/");
+    return _img_cat2(base, hex);
+}
+
+# Open or create an image store (rust-old: ImageStore::new). Creates the
+# root and the blobs/sha256, manifests, and layers subdirectories
+# (create_dir_all analogues; EEXIST ignored — idempotent). Returns a
+# heap ImageStore*, or 0 if the root could not be created.
+fn image_store_new(root) {
+    # 0o755 = 493. create_dir_all recurses in Rust; here we create each
+    # level in order so nested paths succeed even from a fresh root.
+    sys_mkdir(root, 493);
+    var blobs = _img_cat2(root, "/blobs");
+    sys_mkdir(blobs, 493);
+    var blobs_sha = _img_cat2(root, "/blobs/sha256");
+    sys_mkdir(blobs_sha, 493);
+    var manifests = _img_cat2(root, "/manifests");
+    sys_mkdir(manifests, 493);
+    var layers = _img_cat2(root, "/layers");
+    sys_mkdir(layers, 493);
+
+    # Rust ImageStore::new propagates create_dir_all failures via `?`. sys_mkdir
+    # returns -EEXIST for an already-present dir (idempotent, fine) and other
+    # negatives for real failures — rather than decode errno, verify the three
+    # required dirs exist; if any is missing, creation genuinely failed → 0.
+    if (file_exists(blobs_sha) == 0) { return 0; }
+    if (file_exists(manifests) == 0) { return 0; }
+    if (file_exists(layers) == 0) { return 0; }
+
+    var s = alloc(8);
+    store64(s, _img_dup(root));
+    return s;
+}
+
+# Get image storage root (rust-old: root).
+#[must_use]
+fn image_store_root(store) {
+    return _img_store_root(store);
+}
+
+# Check whether a blob exists locally (rust-old: has_blob). Returns 1/0.
+#[must_use]
+fn image_store_has_blob(store, digest) {
+    var path = _img_blob_path(_img_store_root(store), digest);
+    return file_exists(path);
+}
+
+# Store a blob by its expected digest, verifying SHA-256
+# (rust-old: store_blob). On success returns the blob path cstr.
+# On a digest mismatch returns 0 (rust-old: Err(DigestMismatch); caller
+# maps to STIVA_ERR_DIGEST_MISMATCH). Dedup: if the path already exists,
+# returns the path without rewriting.
+fn image_store_store_blob(store, digest, data, len) {
+    var path = _img_blob_path(_img_store_root(store), digest);
+
+    # Dedup: skip if already present.
+    if (file_exists(path) == 1) { return path; }
+
+    # Verify digest.
+    var actual = sha256_digest(data, len);
+    if (streq(actual, digest) == 0) { return 0; }
+
+    # Write atomically via temp file + rename.
+    var tmp = _img_cat2(path, ".tmp");
+    if (file_write_all(tmp, data, len) < 0) { return 0; }
+    if (sys_rename(tmp, path) < 0) { return 0; }
+    return path;
+}
+
+# Read a blob from the store (rust-old: read_blob). Fills up to `maxlen`
+# bytes into `buf`; returns the byte count read, or -1 when the blob is
+# absent (rust-old: Err(ImageNotFound); caller maps -1 →
+# STIVA_ERR_IMAGE_NOT_FOUND) / on any read failure.
+fn image_store_read_blob(store, digest, buf, maxlen) {
+    var path = _img_blob_path(_img_store_root(store), digest);
+    if (file_exists(path) == 0) { return 0 - 1; }
+    return file_read_all(path, buf, maxlen);
+}
+
+# ── DEFERRED (land with a JSON codec + registry network layer) ───
+# rust-old/src/image.rs also defines, coupled to serde_json (Vec<Image>
+# index round-trip) and to async RegistryClient network methods:
+#
+#   ImageStore index (serde_json Vec<Image>, chrono timestamps):
+#     fn index_path(&self) -> PathBuf
+#     fn load_index(&self) -> Result<Vec<Image>, StivaError>
+#     fn save_index(&self, images: &[Image]) -> Result<(), StivaError>
+#     fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError>
+#     fn add_to_index(&self, image: &Image) -> Result<(), StivaError>
+#     fn list(&self) -> Result<Vec<Image>, StivaError>
+#     fn remove(&self, id: &str) -> Result<(), StivaError>
+#     fn gc(&self) -> Result<(u32, u32), StivaError>
+#     fn verify_integrity(&self) -> Result<Vec<String>, StivaError>
+#   (verify_integrity re-reads every blob and re-hashes it; remove/gc walk
+#    read_dir(blobs)/read_dir(layers) and unlink/rmdir unreferenced entries.
+#    Both need the index deserialized to know what's referenced.)
+#
+#   async network (RegistryClient reqwest/tokio; not in ported registry):
+#     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
+#     async fn push(&self, image: &Image, target, client) -> Result<()>
+#     async fn verify_signature(&self, image, client) -> Result<bool>
+#     async fn fetch_foreign_layer(urls: &[String]) -> Result<Bytes>
+#
+# These are ported alongside the JSON codec and the registry network layer
+# for parity. Tracked in the roadmap.
