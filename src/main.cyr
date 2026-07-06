@@ -8,8 +8,11 @@
 
 include "src/error.cyr"
 include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
 
-# ── CLI ──────────────────────────────────────────────────────────
+# ── CLI ──────────────────────────
 # Ported bottom-up as modules land. For now, a version banner + a smoke
 # path exercising the foundation modules. Full clap-style dispatch of the
 # 34 subcommands (rust-old/src/main.rs) is tracked in the roadmap.

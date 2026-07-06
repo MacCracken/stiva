@@ -4,6 +4,9 @@
 
 include "src/error.cyr"
 include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
 
 # ── error.cyr (rust-old/src/error.rs) ────────────────────────────
 fn test_error_names() {
@@ -19,7 +22,6 @@ fn test_error_names() {
     assert_eq(streq(stiva_err_name(STIVA_ERR_ANSAMBLU), "ansamblu error"), 1, "ansamblu error");
     assert_eq(streq(stiva_err_name(STIVA_ERR_SCAN_BLOCKED), "scan blocked"), 1, "scan blocked");
     assert_eq(streq(stiva_err_name(STIVA_ERR_HTTP), "http error"), 1, "http error");
-    # last-defined boundary + unknown fallback
     assert_eq(STIVA_ERR_HTTP, 28, "http code is 28");
     assert_eq(streq(stiva_err_name(999), "unknown error"), 1, "unknown fallback");
     return 0;
@@ -69,14 +71,233 @@ fn test_parse_signal_invalid() {
     return 0;
 }
 
+# ── intents.cyr (rust-old/src/intents.rs) ────────────────────────
+fn test_parse_intent_not_implemented() {
+    test_group("intents::parse_intent_not_implemented");
+    assert(parse_intent("run nginx") < 0, "ok");
+    assert_eq(parse_intent("run nginx"), 0 - 6, "eq");
+    assert(parse_intent("") < 0, "ok");
+    assert(parse_intent("stop abc123") < 0, "ok");
+    return 0;
+}
+
+fn test_intent_serde() {
+    test_group("intents::intent_serde");
+    assert(streq(intent_kind_name(INTENT_KIND_RUN), "Run") == 1, "ok");
+    assert(streq(intent_kind_name(INTENT_KIND_STOP), "Stop") == 1, "ok");
+    assert(streq(intent_kind_name(INTENT_KIND_PULL), "Pull") == 1, "ok");
+    assert(streq(intent_kind_name(INTENT_KIND_ANSAMBLU), "Ansamblu") == 1, "ok");
+    assert(streq(intent_kind_name(INTENT_KIND_SCALE), "Scale") == 1, "ok");
+    assert(streq(intent_kind_name(INTENT_KIND_INSPECT), "Inspect") == 1, "ok");
+    assert_eq(INTENT_KIND_RUN, 0, "eq");
+    assert_eq(INTENT_KIND_INSPECT, 5, "eq");
+    return 0;
+}
+
+fn test_ansamblu_action_serde() {
+    test_group("intents::ansamblu_action_serde");
+    assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_UP), "Up") == 1, "ok");
+    assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_DOWN), "Down") == 1, "ok");
+    assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_RESTART), "Restart") == 1, "ok");
+    assert_eq(ANSAMBLU_ACTION_UP, 0, "eq");
+    assert_eq(ANSAMBLU_ACTION_RESTART, 2, "eq");
+    return 0;
+}
+
+# ── audit.cyr (rust-old/src/audit.rs) ────────────────────────────
+fn test_audit_operation_display() {
+    test_group("audit_operation_display");
+    assert_eq(streq(audit_op_name(AUDIT_OP_CREATE), "create"), 1, "eq");
+    assert_eq(streq(audit_op_name(AUDIT_OP_CHECKPOINT), "checkpoint"), 1, "eq");
+    return 0;
+}
+
+fn test_audit_entry_container_serde() {
+    test_group("audit_entry_container_serde");
+    var entry = audit_entry_container(AUDIT_OP_CREATE, "abc123", AUDIT_RESULT_SUCCESS, 0);
+    var json = audit_entry_to_json(entry);
+    assert_eq(_audit_contains(json, "\"operation\":\"Create\""), 1, "eq");
+    assert_eq(_audit_contains(json, "\"container_id\":\"abc123\""), 1, "eq");
+    assert_eq(_audit_contains(json, "image_ref"), 0, "eq");
+    var back = _audit_parse_line(json);
+    assert_eq(AuditEntry_operation(back), AUDIT_OP_CREATE, "eq");
+    assert_eq(streq(AuditEntry_container_id(back), "abc123"), 1, "eq");
+    assert_eq(AuditEntry_image_ref(back), 0, "eq");
+    return 0;
+}
+
+fn test_audit_entry_image_serde() {
+    test_group("audit_entry_image_serde");
+    var entry = audit_entry_image(AUDIT_OP_PULL, "nginx:latest", AUDIT_RESULT_FAILED, "timeout");
+    var json = audit_entry_to_json(entry);
+    var back = _audit_parse_line(json);
+    assert_eq(AuditEntry_operation(back), AUDIT_OP_PULL, "eq");
+    assert_eq(streq(AuditEntry_image_ref(back), "nginx:latest"), 1, "eq");
+    assert_eq(AuditEntry_result(back), AUDIT_RESULT_FAILED, "eq");
+    assert_eq(streq(AuditEntry_result_msg(back), "timeout"), 1, "eq");
+    return 0;
+}
+
+fn test_audit_entry_with_metadata() {
+    test_group("audit_entry_with_metadata");
+    var entry = audit_entry_container(AUDIT_OP_KILL, "abc123", AUDIT_RESULT_SUCCESS, 0);
+    entry = audit_entry_with_metadata(entry, "{\"signal\":15}");
+    var json = audit_entry_to_json(entry);
+    assert_eq(_audit_contains(json, "\"signal\":15"), 1, "eq");
+    return 0;
+}
+
+fn test_audit_result_serde() {
+    test_group("audit_result_serde");
+    var s = audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0);
+    var sj = audit_entry_to_json(s);
+    assert_eq(_audit_contains(sj, "\"result\":\"Success\""), 1, "eq");
+    var f = audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_FAILED, "oops");
+    var fj = audit_entry_to_json(f);
+    assert_eq(_audit_contains(fj, "{\"Failed\":\"oops\"}"), 1, "eq");
+    var back = _audit_parse_line(fj);
+    assert_eq(AuditEntry_result(back), AUDIT_RESULT_FAILED, "eq");
+    assert_eq(streq(AuditEntry_result_msg(back), "oops"), 1, "eq");
+    return 0;
+}
+
+fn test_audit_log_write_and_read() {
+    test_group("audit_log_write_and_read");
+    var path = "/tmp/stiva_audit_test_wr.log";
+    xunlink(path);
+    var log = audit_log_new(path);
+    audit_log_log(log, audit_entry_container(AUDIT_OP_CREATE, "c1", AUDIT_RESULT_SUCCESS, 0));
+    audit_log_log(log, audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0));
+    audit_log_log(log, audit_entry_image(AUDIT_OP_PULL, "nginx", AUDIT_RESULT_SUCCESS, 0));
+    var entries = audit_log_read_entries(log, 10);
+    assert_eq(vec_len(entries), 3, "eq");
+    assert_eq(AuditEntry_operation(vec_get(entries, 0)), AUDIT_OP_PULL, "eq");
+    assert_eq(AuditEntry_operation(vec_get(entries, 2)), AUDIT_OP_CREATE, "eq");
+    xunlink(path);
+    return 0;
+}
+
+fn test_audit_log_read_limit() {
+    test_group("audit_log_read_limit");
+    var path = "/tmp/stiva_audit_test_lim.log";
+    xunlink(path);
+    var log = audit_log_new(path);
+    var i = 0;
+    while (i < 10) {
+        audit_log_log(log, audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0));
+        i = i + 1;
+    }
+    var entries = audit_log_read_entries(log, 3);
+    assert_eq(vec_len(entries), 3, "eq");
+    xunlink(path);
+    return 0;
+}
+
+fn test_audit_log_empty() {
+    test_group("audit_log_empty");
+    var path = "/tmp/stiva_audit_test_empty.log";
+    xunlink(path);
+    var log = audit_log_new(path);
+    var entries = audit_log_read_entries(log, 10);
+    assert_eq(vec_len(entries), 0, "eq");
+    xunlink(path);
+    return 0;
+}
+
+# ── convert.cyr (rust-old/src/convert.rs) ────────────────────────
+# Local: substring-present test. This stdlib strstr returns a 0-based INDEX
+# (>= 0 found, -1 absent), so `>= 0` is the correct "contains" test.
+fn _cv_contains(hay, needle) {
+    if (strstr(hay, needle) >= 0) { return 1; }
+    return 0;
+}
+
+fn test_convert_dockerfile_basic() {
+    test_group("convert_dockerfile_basic");
+    var df = "\nFROM alpine:3.19\nRUN apk add --no-cache curl\nCOPY ./app /app\nENV PORT=8080\nWORKDIR /app\nEXPOSE 8080\nENTRYPOINT [\"/app/start.sh\"]\nUSER nobody\n";
+    var toml = dockerfile_to_toml(df);
+    assert_neq(toml, 0, "non-null");
+    assert_eq(_cv_contains(toml, "base = \"alpine:3.19\""), 1, "base");
+    assert_eq(_cv_contains(toml, "type = \"run\""), 1, "run type");
+    assert_eq(_cv_contains(toml, "apk add --no-cache curl"), 1, "run cmd");
+    assert_eq(_cv_contains(toml, "type = \"copy\""), 1, "copy type");
+    assert_eq(_cv_contains(toml, "source = \"./app\""), 1, "copy source");
+    assert_eq(_cv_contains(toml, "type = \"env\""), 1, "env type");
+    assert_eq(_cv_contains(toml, "key = \"PORT\""), 1, "env key");
+    assert_eq(_cv_contains(toml, "type = \"workdir\""), 1, "workdir type");
+    assert_eq(_cv_contains(toml, "expose = [8080]"), 1, "expose");
+    assert_eq(_cv_contains(toml, "entrypoint = [\"/app/start.sh\"]"), 1, "entrypoint");
+    assert_eq(_cv_contains(toml, "user = \"nobody\""), 1, "user");
+    return 0;
+}
+
+fn test_convert_dockerfile_no_from() {
+    test_group("convert_dockerfile_no_from");
+    assert_eq(dockerfile_to_toml("RUN echo hello"), 0, "no from -> null");
+    return 0;
+}
+
+fn test_convert_dockerfile_comments_and_blanks() {
+    test_group("convert_dockerfile_comments_and_blanks");
+    var df = "# Comment\n\nFROM alpine\n\n# Another comment\nRUN echo hi";
+    var toml = dockerfile_to_toml(df);
+    assert_eq(_cv_contains(toml, "base = \"alpine\""), 1, "base");
+    assert_eq(_cv_contains(toml, "type = \"run\""), 1, "run type");
+    return 0;
+}
+
+fn test_convert_dockerfile_env_space_format() {
+    test_group("convert_dockerfile_env_space_format");
+    var toml = dockerfile_to_toml("FROM alpine\nENV APP_HOME /opt/app");
+    assert_eq(_cv_contains(toml, "key = \"APP_HOME\""), 1, "key");
+    assert_eq(_cv_contains(toml, "value = \"/opt/app\""), 1, "value");
+    return 0;
+}
+
+fn test_convert_dockerfile_expose_multiple() {
+    test_group("convert_dockerfile_expose_multiple");
+    var toml = dockerfile_to_toml("FROM alpine\nEXPOSE 80 443/tcp 8080");
+    assert_eq(_cv_contains(toml, "expose = [80, 443, 8080]"), 1, "expose multi");
+    return 0;
+}
+
+fn test_convert_dockerfile_label() {
+    test_group("convert_dockerfile_label");
+    var toml = dockerfile_to_toml("FROM alpine\nLABEL maintainer=\"test@example.com\"");
+    assert_eq(_cv_contains(toml, "type = \"label\""), 1, "label type");
+    assert_eq(_cv_contains(toml, "key = \"maintainer\""), 1, "label key");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    # error + oci
     test_error_names();
     test_oci_version();
     test_oci_status_names();
     test_parse_signal_numeric();
     test_parse_signal_names();
     test_parse_signal_invalid();
+    # intents
+    test_parse_intent_not_implemented();
+    test_intent_serde();
+    test_ansamblu_action_serde();
+    # audit
+    test_audit_operation_display();
+    test_audit_entry_container_serde();
+    test_audit_entry_image_serde();
+    test_audit_entry_with_metadata();
+    test_audit_result_serde();
+    test_audit_log_write_and_read();
+    test_audit_log_read_limit();
+    test_audit_log_empty();
+    # convert
+    test_convert_dockerfile_basic();
+    test_convert_dockerfile_no_from();
+    test_convert_dockerfile_comments_and_blanks();
+    test_convert_dockerfile_env_space_format();
+    test_convert_dockerfile_expose_multiple();
+    test_convert_dockerfile_label();
     return assert_summary();
 }
 

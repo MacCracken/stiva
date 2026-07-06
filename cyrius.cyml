@@ -29,6 +29,9 @@ output = "build/stiva"
 modules = [
     "src/error.cyr",
     "src/oci.cyr",
+    "src/intents.cyr",
+    "src/audit.cyr",
+    "src/convert.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
@@ -41,6 +44,10 @@ stdlib = [
     "alloc",
     "assert",
     "bench",
+    "chrono",
+    "fmt",
+    "io",
+    "str",
     "string",
     "syscalls",
     "vec",

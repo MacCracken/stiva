@@ -22,7 +22,7 @@
 #     fractional seconds, elided here — the wire shape is otherwise equal).
 #   - read_entries: reverse-of-lines, take(limit), skip unparseable lines.
 
-# ── AuditOperation ────────────────────────────────────────────────
+# ── AuditOperation ─────────────────────────
 # Runtime operation that was performed (rust-old: enum AuditOperation).
 enum AuditOperation {
     AUDIT_OP_CREATE = 0;
@@ -90,7 +90,7 @@ fn audit_op_from_serde(s) {
     return 0 - 1;
 }
 
-# ── AuditResult ───────────────────────────────────────────────────
+# ── AuditResult ──────────────────────────
 # Outcome of the audited operation (rust-old: enum AuditResult).
 # Success carries no data; Failed carries a String message (on the entry).
 enum AuditResult {
@@ -98,7 +98,7 @@ enum AuditResult {
     AUDIT_RESULT_FAILED = 1;
 }
 
-# ── AuditEntry ────────────────────────────────────────────────────
+# ── AuditEntry ──────────────────────────
 # A single audit log entry (rust-old: struct AuditEntry).
 #   timestamp     — ISO-8601 cstr ("…Z")
 #   operation     — AuditOperation code
@@ -160,7 +160,7 @@ fn audit_entry_with_metadata(entry, metadata) {
     return entry;
 }
 
-# ── JSON escaping (RFC-8259 minimal) ──────────────────────────────
+# ── JSON escaping (RFC-8259 minimal) ───────────────────
 # Worst-case each byte becomes \uXXXX (6 bytes); +1 for NUL. Emits a heap
 # cstr with quotes/backslashes/control chars escaped. Used for the string
 # fields (container_id, image_ref, user, result_msg) which are
@@ -203,7 +203,7 @@ fn _audit_json_escape(s) {
     return out;
 }
 
-# ── Serialization ─────────────────────────────────────────────────
+# ── Serialization ─────────────────────────
 # Serialize an entry as one JSON line (no trailing newline). Field order
 # mirrors the Rust struct: timestamp, operation, container_id?, image_ref?,
 # user, result, metadata?. Optional fields (container_id/image_ref/metadata)
@@ -262,7 +262,7 @@ fn audit_entry_to_json(entry) {
     return str_data(s);
 }
 
-# ── AuditLog ──────────────────────────────────────────────────────
+# ── AuditLog ───────────────────────────
 # Append-only audit logger backed by a file (rust-old: struct AuditLog).
 #derive(accessors)
 struct AuditLog {
@@ -408,10 +408,12 @@ fn _audit_parse_line(line) {
     return e;
 }
 
-# True (1) if cstr `hay` contains cstr `needle`.
+# True (1) if cstr `hay` contains cstr `needle`. NOTE: this stdlib `strstr`
+# returns a 0-based INDEX (>= 0 on match) or -1 when absent — NOT a C-style
+# pointer — so the found test is `>= 0`, and index 0 is a valid match.
 #[must_use]
 fn _audit_contains(hay, needle) {
-    if (strstr(hay, needle) != 0) { return 1; }
+    if (strstr(hay, needle) >= 0) { return 1; }
     return 0;
 }
 
@@ -420,9 +422,11 @@ fn _audit_contains(hay, needle) {
 # with the six standard escapes decoded. Returns 0 if `key` is absent.
 #[must_use]
 fn _audit_json_field(line, key) {
+    # strstr returns a 0-based INDEX (-1 = absent), NOT a pointer — so the
+    # value starts at `line + at + strlen(key)`.
     var at = strstr(line, key);
-    if (at == 0) { return 0; }
-    var p = at + strlen(key);
+    if (at < 0) { return 0; }
+    var p = line + at + strlen(key);
     var cap = strlen(p) + 1;
     var out = alloc(cap);
     var pos = 0;
@@ -478,15 +482,18 @@ fn audit_log_path(log) {
     return AuditLog_path(log);
 }
 
-# ── current_user ──────────────────────────────────────────────────
+# ── current_user ──────────────────────────
 # Current effective user name, best-effort (rust-old: current_user).
 # Tries $USER, then $LOGNAME, then falls back to "uid:<euid>".
 #[inline]
 fn current_user() {
+    # Rust: std::env::var("USER").or_else(|_| var("LOGNAME")). var() is Ok
+    # even for a set-but-empty value, so a set USER (even "") is returned
+    # verbatim; only an UNSET var (getenv → 0) falls through. Match that.
     var u = getenv("USER");
-    if (u != 0) { if (strlen(u) > 0) { return u; } }
+    if (u != 0) { return u; }
     var l = getenv("LOGNAME");
-    if (l != 0) { if (strlen(l) > 0) { return l; } }
+    if (l != 0) { return l; }
     var buf[24];
     var len = fmt_int_buf(sys_getuid(), &buf);
     var out = alloc(len + 5);

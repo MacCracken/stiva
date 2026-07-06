@@ -30,8 +30,15 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 
 - [x] `error` — StivaError → STIVA_ERR_* enum + name/print (all 28 kinds, exact display strings)
 - [x] `oci` — leaf surface (OciStatus, OCI_VERSION, parse_signal); OciState/to_oci_status/build_state/parse_bundle DEFERRED with `container`
-- [ ] `intents`, `audit`, `convert` — dep-free, error-only coupling (first workflow batch, in flight)
+- [x] `intents` — IntentKind/AnsambluAction enums + serde-tag names + not-implemented `parse_intent` sentinel; variant payloads DEFERRED with a real agnoshi NL parser
+- [x] `audit` — full AuditOperation/AuditResult/AuditEntry/AuditLog: JSON serialize + escape + line parse, flock append, reverse-read-with-limit, current_user
+- [x] `convert` — `dockerfile_to_toml` (FROM/RUN/COPY/ENV/WORKDIR/LABEL/EXPOSE/ENTRYPOINT/USER); `compose_yaml_to_toml` DEFERRED (needs a Cyrius YAML+Value layer)
 - [ ] dep-free next: `agent`, `build`, `fleet`, `image`, `registry`, `storage`, `network/{bridge,dns,mod,pool,rootless}`
+
+**Accepted divergences** (found by the verify stage; track to ADRs at parity-validation):
+- `audit` — `AuditLog::new` is *lazy* (file created on first append) vs Rust *eager* (create+append at construction): error surfaces at first `log`, not `new`. Also `metadata` on read is left null (round-trip inspects op/ids/result only, matching the Rust tests).
+- `convert` — ENTRYPOINT JSON-array parsing is a minimal quoted-token scan; interior `\"` escapes and malformed arrays diverge from serde_json (fine for well-formed Dockerfiles; needs a real JSON layer for full parity). ENTRYPOINT last-wins + shell-form were fixed to match.
+- **Idiom note**: this stdlib `strstr` returns a 0-based INDEX (`-1` absent), NOT a C pointer — the first audit port had a pointer-vs-index bug (`at + strlen(key)`) that only the integration build+test caught, not the agent's syntax-only `cyrius check`. Central build+test after each batch is mandatory.
 - [ ] dep-heavy (need AGNOS dep wiring): `runtime`+`main`→kavach · `container`→kavach/majra · `ansamblu`+`health`→majra · `network/{nat,manager}`→nein · `mcp`→bote · `encrypted`→agnodrm · `lib`→kavach/majra/nein
 - [ ] **Re-wire AGNOS deps** to the Cyrius `dist/*.cyr` bundles (kavach 3.7.0, majra 2.5.0, nein 1.6.2, bote 3.0.0, agnodrm 1.4.5). Recipe derived from `dist/*.deps` sidecars; wired per-consuming-module + transitive git deps (sigil/libro/sakshi) + stdlib union. Probe-build before the first consuming module.
 - [ ] **Port the `stiva` CLI** (34 subcommands) onto `src/main.cyr` (`args.cyr` dispatch)

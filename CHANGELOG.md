@@ -3,6 +3,42 @@
 All notable changes to stiva are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0] — Cyrius Port (in progress)
+
+Porting stiva from Rust to the **Cyrius** language (AGNOS ecosystem port
+pattern). The Rust crate is frozen at `rust-old/` as the parity oracle. See
+`docs/development/roadmap.md` (v3.0.0) for the module-by-module ledger.
+
+### Added
+- **Port scaffold** (`cyrius port`) — Rust → `rust-old/` (18,622 lines); Cyrius
+  skeleton, `cyrius.cyml`, CI; toolchain pinned 6.4.10.
+- **Foundation** — kavach-model multi-module layout: `src/lib.cyr` aggregation
+  header, `src/main.cyr` program entry, `[lib].modules` + honest opt-in
+  `[deps].stdlib`, Cyrius `.gitignore` (`lib/`, `build/`), `tests/stiva.tcyr`.
+- **`src/error.cyr`** — `StivaError` → `STIVA_ERR_*` enum (28 kinds) + name/print,
+  exact Rust display strings.
+- **`src/oci.cyr`** — leaf OCI surface: `OciStatus`, `oci_version` (1.2.0),
+  `parse_signal` (names + numbers). Container-coupled `OciState`/`build_state`/
+  `parse_bundle` deferred with `container`.
+- **`src/intents.cyr`** — `IntentKind`/`AnsambluAction` + serde-tag names +
+  not-implemented `parse_intent`; variant payloads deferred.
+- **`src/audit.cyr`** — full audit log: `AuditOperation`/`AuditResult`/
+  `AuditEntry`/`AuditLog`, JSON serialize+escape+parse, flock append, reverse
+  read-with-limit, `current_user`.
+- **`src/convert.cyr`** — `dockerfile_to_toml` (all instruction arms);
+  `compose_yaml_to_toml` deferred (needs a Cyrius YAML+Value layer).
+- **Agent-orchestrated porting harness** — `scripts/port-workflow.js`:
+  per-module port from the oracle + adversarial parity verify against `rust-old/`.
+- **90 Cyrius tests** (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`
+  modules; all green, plus `cyrius bench`/`fmt`/`lint` clean.
+
+### Notes
+- Migrated off cargo/clippy for the project — build/test/bench via the `cyrius`
+  toolchain (see the porting banner in `CLAUDE.md`). Rust survives only as the
+  `rust-old/` oracle.
+- Accepted divergences (audit eager-vs-lazy file open; convert ENTRYPOINT JSON
+  escapes) are tracked in the roadmap for ADRs at parity-validation.
+
 ## [Unreleased]
 
 ### Added

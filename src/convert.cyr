@@ -121,7 +121,7 @@ fn _cv_skip_line(s) {
     return 0;
 }
 
-# ── string-builder step emitters ─────────────────────────────────
+# ── string-builder step emitters ────────────────────
 # Each appends one rendered TOML fragment to `sb`. Kept small so the
 # main function reads as a 1:1 mirror of the Rust match arms.
 
@@ -179,7 +179,7 @@ fn _cv_emit_label(sb, k, v) {
     return 0;
 }
 
-# ── ENV / LABEL "k = v" parsing ──────────────────────────────────
+# ── ENV / LABEL "k = v" parsing ─────────────────────
 # Rust: `rest.split_once('=')` → (k.trim(), v.trim().trim_matches('"')).
 # For ENV, if there is no '=', fall back to `rest.split_once(' ')`
 # → (k.trim(), v.trim()) (no quote-strip). Emits into `sb`; returns 1
@@ -227,7 +227,7 @@ fn _cv_parse_copy(sb, rest) {
     return 1;
 }
 
-# ── main Dockerfile converter ────────────────────────────────────
+# ── main Dockerfile converter ─────────────────────
 # Convert a Dockerfile cstr to a Stivafile TOML cstr.
 #
 # Handles FROM, RUN, COPY, ENV, WORKDIR, LABEL, EXPOSE, ENTRYPOINT,
@@ -318,6 +318,9 @@ fn dockerfile_to_toml(dockerfile) {
                                         } else {
                                             rest = _cv_strip_prefix(line, "ENTRYPOINT ");
                                             if (rest != 0) {
+                                                # Last ENTRYPOINT wins (Rust: `entrypoint = ...`
+                                                # assignment, not append) — reset before parsing.
+                                                entrypoint = vec_new();
                                                 _cv_parse_entrypoint(entrypoint, _cv_trim(rest));
                                             } else {
                                                 rest = _cv_strip_prefix(line, "USER ");

@@ -26,3 +26,6 @@
 
 include "src/error.cyr"
 include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
