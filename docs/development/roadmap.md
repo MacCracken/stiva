@@ -38,28 +38,28 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] `network_dns` — container DNS registry: register/resolve/hosts-entries/inject-into-rootfs (full parity)
 - [x] `network_pool` — IpPool/Ipv6Pool/DualStackPool CIDR alloc (u128 IPv6 as 16-byte buffers); leading-zero-octet reject fixed to match Rust
 - [x] `network_rootless` — RootlessNetworkBackend/PortMapping/parse_port_mappings/is_unprivileged/which/available_backends/select_backend; async slirp4netns/pasta spawn DEFERRED (needs async process runtime); `+`-sign u16 parse fixed
-- [~] `image` — **ported** (src/image.cyr): ImageRef parse + full_ref, Layer/Image structs, sha256_digest (sigil sha256), content-addressable ImageStore (new/store_blob/has_blob/read_blob). JSON `images.json` index + async pull/push/verify DEFERRED (need a JSON codec + registry net layer). **NOT WIRED — see cycc blocker below.**
-- [~] `registry` — **ported** (src/registry.cyr): OCI ref/digest/manifest struct parsing (17 tests). Entire async HTTP client + auth + credential store + mirror config DEFERRED (need net/sandhi/TLS/JSON). **NOT WIRED — see cycc blocker below.**
-- [ ] dep-free next after unblock: `storage` (needs image), `build` (needs image+registry); `agent`/`fleet` need `container`
+- [x] `image` — ImageRef parse + full_ref, Layer/Image structs, sha256_digest (sigil sha256), content-addressable ImageStore (new/store_blob/has_blob/read_blob); mkdir-failure + digest-mismatch fixes. JSON `images.json` index + async pull/push/verify DEFERRED (need a JSON codec + registry net layer).
+- [x] `registry` — OCI media types, ref/digest/manifest/descriptor/platform struct parsing, `parse_www_authenticate`, `normalize_arch`, `registry_host`. Entire async HTTP client + auth + credential store + mirror config DEFERRED (need net/sandhi/TLS/JSON).
+- [ ] dep-free next: `storage` (needs image), `build` (needs image+registry); `agent`/`fleet` need `container`
 
-> **⚠️ cycc BLOCKER — image/registry ported but unwired. ROOT-CAUSED.**
-> Wiring image+registry grows the compilation unit so that one of their structs
-> lands on **struct-id 20 or 21**, whose type encoding `SLTYPE = -struct_id`
-> (-20 / -21) is **byte-identical to the legacy `f64v2` (-20) / `f64v4` (-21)
-> SIMD sentinels**. `parse_decl.cyr`'s field-access guard then mis-flags a
-> `var x: ThatStruct; x.field` as a SIMD vector → `error: SIMD vector has no
-> named fields`. struct-ids count ALL unit structs (explicit + enum/tagged +
-> Result/Option + generics + stdlib/dep bundles), so the collision lands on
-> whichever struct is 20th/21st overall — hence "adding a module breaks an
-> unrelated module's field access." Deterministic minimal repro (no stdlib):
-> **`docs/development/cycc-bug-struct-sid-20-21.cyr`** — 20 structs + access the
-> 20th → error; access the 19th → OK. Repro on cycc **6.4.10 and 6.4.11**.
-> Ruled out: total struct count (cap 1024, errors cleanly), per-fn local slots
-> (16384), stale bundles, version. **Fix is in cycc** (disambiguate struct sids
-> from the f64v2/f64v4 sentinels) — NOT in stiva; the port never edits the
-> language. **The 10-module aggregate is green (227 tests).** image/registry
-> stay on disk (lint-clean); re-enable the commented lines in `cyrius.cyml` /
-> `src/lib.cyr` / `src/main.cyr` + the `[deps.sigil]` block once cycc is fixed.
+> **✅ cycc struct-id/SIMD-sentinel blocker — RESOLVED in cyrius 6.4.14.**
+> Wiring image+registry had grown the unit so a struct landed on **struct-id
+> 20/21**, whose `SLTYPE = -struct_id` (-20/-21) was byte-identical to the legacy
+> `f64v2`/`f64v4` SIMD sentinels; `parse_decl.cyr`'s field-access guard then
+> mis-flagged `var x: ThatStruct; x.field` as a vector → "SIMD vector has no
+> named fields". Root-caused + filed to
+> `cyrius/docs/development/issues/2026-07-06-struct-sid-20-21-simd-sentinel-collision.md`
+> with a deterministic minimal repro (`docs/development/cycc-bug-struct-sid-20-21.cyr`,
+> kept for regression); fixed in the compiler at 6.4.14 (never touched the
+> language from stiva). All 12 modules now wire green — **315 tests**, build/lint/
+> fmt clean. Toolchain pin bumped to **6.4.14**.
+>
+> **sigil SHA-256 wiring:** pull the à-la-carte hashing chain via `[deps.sigil]
+> modules=["src/crypto_scratch.cyr","src/sha_ni.cyr","src/sha256.cyr","src/sha512.cyr","src/hex.cyr"]`
+> (+ stdlib `freelist`/`thread_local`/`atomic` for `cbank`/thread-local scratch),
+> NOT the full `dist/sigil.cyr` bundle (bigger; its `audit.cyr` redefines
+> `audit_log_new`). `sha512.cyr` is only pulled to satisfy hex.cyr's unused
+> `sha512_hex` and keep the build warning-free.
 
 **Accepted divergences** (found by the verify stage; track to ADRs at parity-validation):
 - `audit` — `AuditLog::new` is *lazy* (file created on first append) vs Rust *eager* (create+append at construction): error surfaces at first `log`, not `new`. Also `metadata` on read is left null (round-trip inspects op/ids/result only, matching the Rust tests).

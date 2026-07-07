@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.4.11"
+cyrius = "6.4.14"
 
 [build]
 entry = "src/main.cyr"
@@ -37,15 +37,8 @@ modules = [
     "src/network_dns.cyr",
     "src/network_pool.cyr",
     "src/network_rootless.cyr",
-    # image + registry are ported (src/image.cyr, src/registry.cyr) but NOT
-    # wired: adding them tips cycc past a compilation-unit limit — a struct-
-    # typed local (`var ii: OciIndex`) mis-resolves to a SIMD vector
-    # ("SIMD vector has no named fields") once the unit grows to ~12 modules.
-    # error+image+registry builds standalone; the full aggregate does not.
-    # Blocked on a cycc fix — see roadmap. Re-add these two lines (+ the
-    # [deps.sigil] block + includes in lib.cyr/main.cyr) once resolved.
-    # "src/image.cyr",
-    # "src/registry.cyr",
+    "src/image.cyr",
+    "src/registry.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
@@ -57,9 +50,11 @@ modules = [
 stdlib = [
     "alloc",
     "assert",
+    "atomic",
     "bench",
     "chrono",
     "fmt",
+    "freelist",
     "fs",
     "hashmap",
     "io",
@@ -67,19 +62,25 @@ stdlib = [
     "str",
     "string",
     "syscalls",
+    "thread_local",
     "vec",
 ]
 
 # sigil provides SHA-256 for image content digests (image.cyr). Pull ONLY the
 # three hashing modules (sha_ni + sha256 + hex) — NOT the full `dist/sigil.cyr`
-# bundle (its mldsa/ecdsa SIMD-vector modules corrupt struct-field parsing, and
-# its audit.cyr collides with our audit_log_new). Commented out with image.cyr
-# above until the cycc unit-size blocker is fixed and image/registry are wired.
-# [deps.sigil]
-# git = "https://github.com/MacCracken/sigil.git"
-# path = "../sigil"
-# tag = "3.10.0"
-# modules = ["src/sha_ni.cyr", "src/sha256.cyr", "src/hex.cyr"]
+# bundle (its mldsa/ecdsa SIMD-vector modules pull a large surface, and its
+# audit.cyr collides with our audit_log_new). These 3 are self-contained (no lib
+# includes, no SIMD-vector types): sha256_hex (hex.cyr) → sha256 (sha256.cyr) →
+# sha_ni.cyr (inline-asm SHA-NI, ifndef-guarded).
+[deps.sigil]
+git = "https://github.com/MacCracken/sigil.git"
+path = "../sigil"
+tag = "3.10.0"
+# sha256 + sha_ni use crypto_scratch's `cbank()` (thread-local scratch banks),
+# so crypto_scratch.cyr is pulled too. It needs thread_local + atomic (declared
+# in [deps].stdlib). This is the full à-la-carte SHA-256 chain — smaller and
+# collision-free vs the dist/sigil.cyr bundle (which redefines audit_log_new).
+modules = ["src/crypto_scratch.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/sha512.cyr", "src/hex.cyr"]
 # NOTE: this is the honest minimal set for the current ported surface
 # (error, oci + the test/bench/fuzz harnesses). As each module lands, add
 # the stdlib modules it actually references and re-run `cyrius lib sync`

@@ -34,12 +34,31 @@ pattern). The Rust crate is frozen at `rust-old/` as the parity oracle. See
   CIDR allocation; IPv6 as 16-byte buffers), `network_rootless` (backend detect +
   port-mapping parse; async slirp4netns/pasta spawn deferred). `nat`/`manager`
   wait on the nein dep.
+- **`src/image.cyr`** — OCI image: `ImageRef` parse (registry/repo/tag/digest,
+  docker.io normalization) + `full_ref`, `Layer`/`Image` structs, `sha256_digest`
+  (sigil SHA-256), content-addressable `ImageStore` (new/store_blob/has_blob/
+  read_blob with digest verification). JSON index + async pull/push deferred.
+- **`src/registry.cyr`** — OCI registry: media-type constants, `Descriptor`/
+  `OciManifest`/`Platform`/`OciIndex`/`RegistryCredential` parsing,
+  `parse_www_authenticate`, `normalize_arch`, `registry_host`, platform select.
+  Async HTTP client + auth + credential store + mirror config deferred.
 - **Agent-orchestrated porting harness** — `scripts/port-workflow.js`:
   per-module port from the oracle + adversarial parity verify against `rust-old/`.
   Its verify stage caught real gaps (ENTRYPOINT last-wins; a strstr index-vs-pointer
-  bug; IPv4 leading-zero + u16 leading-`+` parse divergences), all fixed.
-- **227 Cyrius tests** (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`
-  modules; all green, plus `cyrius bench`/`fmt`/`lint` clean.
+  bug; IPv4 leading-zero + u16 leading-`+` parse divergences; image mkdir-failure
+  propagation), all fixed.
+- **315 Cyrius tests** (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`
+  modules; all green (idempotent), plus `cyrius bench`/`fmt`/`lint` clean.
+- **SHA-256 via à-la-carte sigil** — `[deps.sigil]` pulls only the hashing chain
+  (`crypto_scratch`+`sha_ni`+`sha256`+`sha512`+`hex`) with `freelist`/`thread_local`/
+  `atomic`, not the full bundle.
+
+### Notes (cont.)
+- Porting image+registry surfaced a **cycc bug** (struct-id 20/21 collided with
+  the `f64v2`/`f64v4` SIMD sentinels → "SIMD vector has no named fields"). Root-
+  caused, filed upstream with a minimal repro (`docs/development/cycc-bug-struct-sid-20-21.cyr`,
+  kept for regression), and **fixed in cyrius 6.4.14**; toolchain pin bumped
+  6.4.10 → 6.4.14. The port never modified the language.
 
 ### Notes
 - Migrated off cargo/clippy for the project — build/test/bench via the `cyrius`
