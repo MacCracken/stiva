@@ -307,6 +307,7 @@ fn record_build_cache(store, cache_key, layer_digest) {
 fn store_layer(store, data, len) {
     var digest = sha256_digest(data, len);
     if (image_store_store_blob(store, digest, data, len) == 0) { return 0; }
+    sakshi_debug("layer stored", strlen("layer stored"));
     return digest;
 }
 
@@ -421,6 +422,7 @@ fn _bld_step_from_pairs(pairs) {
 # section or an unknown step type; otherwise the heap BuildSpec pointer.
 #[must_use]
 fn parse_build_spec(toml_str) {
+    sakshi_info("parsing build specification", strlen("parsing build specification"));
     var sections = bayan_toml_parse(str_from(toml_str));
 
     # ── [image] → ImageDef (required) ─────────────────
@@ -463,6 +465,7 @@ fn parse_build_spec(toml_str) {
 
     # ── stages: flat bayan model cannot re-nest per-stage steps; the
     # consuming tar.gz stage builder is deferred → empty vec (serde default).
+    sakshi_debug("build spec parsed", strlen("build spec parsed"));
     return build_spec_new(image, steps, config, vec_new());
 }
 

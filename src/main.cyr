@@ -160,6 +160,8 @@ fn _cli_deferred(verb_name) {
 
 fn main() {
     alloc_init();
+    kavach_init();               # register sandbox backends (idempotent; needed by the run path)
+    sakshi_set_level(SK_INFO);   # structured audit trail to stderr (SK_INFO default)
     var h = cmdit_new("stiva");
     # Global flags — bind before OR after the verb (rust-old: root_path/image_path).
     cmdit_str(h, 0, "root", 0, "Root directory for container data");

@@ -115,7 +115,10 @@ fn network_manager_create_network(m, name, subnet) {
     var br = create_bridge(name, ip_pool_gateway(pool), ip_pool_prefix_len(pool));
     var bridge_created = 0;
     if (br == STIVA_ERR_OK) {
+        sakshi_info("bridge network created", strlen("bridge network created"));
         bridge_created = 1;
+    } else {
+        sakshi_warn("bridge creation deferred (requires root):", strlen("bridge creation deferred (requires root):"));
     }
 
     map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
@@ -163,6 +166,7 @@ fn network_manager_delete_network(m, name) {
 
     map_delete(mgr.networks, name);
     var _r = delete_bridge(name);      # best-effort (Rust: `let _ = ...`)
+    sakshi_info("network deleted", strlen("network deleted"));
     return STIVA_ERR_OK;
 }
 
@@ -199,6 +203,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
     var container_veth = container_veth_name();      # always "eth0"
     if (host_veth == 0) {
         # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
+        sakshi_warn("veth creation deferred (requires root):", strlen("veth creation deferred (requires root):"));
         host_veth = host_veth_name(container_id);
     }
 
@@ -234,6 +239,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
         var fw = bf_to_firewall(bf);
         if (is_err_result(firewall_validate(fw)) == 1) {
             # "firewall validation failed: {e}" — warn only, non-fatal (Rust).
+            sakshi_warn("firewall validation failed:", strlen("firewall validation failed:"));
         } else {
             _network_manager_apply_nft_ruleset(firewall_render(fw));
         }
@@ -250,6 +256,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
 
     var cn = container_network_new(ip, 0, network_name, host_veth, container_veth);
     map_set(mgr.connections, container_id, cn);
+    sakshi_info("container connected to network", strlen("container connected to network"));
     return cn;
 }
 
@@ -291,6 +298,7 @@ fn network_manager_disconnect_container(m, container_id) {
 
     # Delete veth pair (best-effort; errors ignored — "if already gone, ignore").
     var _v = delete_veth(cn.host_veth);
+    sakshi_info("container disconnected from network", strlen("container disconnected from network"));
     return STIVA_ERR_OK;
 }
 
@@ -360,6 +368,7 @@ fn _network_manager_apply_nft_ruleset(ruleset) {
     vec_push(args, "-f");
     vec_push(args, path);
     var _rc = exec_vec(args);           # best-effort; ignore exit code
+    sakshi_debug("applied nftables ruleset", strlen("applied nftables ruleset"));
     return 0;
 }
 

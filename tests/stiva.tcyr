@@ -1888,7 +1888,6 @@ fn test_runtime_criu_available_returns_bool() {
     return 0;
 }
 
-
 # ── container.cyr (rust-old/src/container.rs) ──
 # Mirrors rust-old container.rs #[cfg(test)] (portable subset).
 fn test_container_state_serde() {

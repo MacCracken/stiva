@@ -572,6 +572,7 @@ fn stiva_audit_log_new(path) {
     _audit_ensure_parent(path);
     var log = alloc(8);
     AuditLog_set_path(log, path);
+    sakshi_debug("audit log opened", strlen("audit log opened"));
     return log;
 }
 
@@ -3928,7 +3929,10 @@ fn network_manager_create_network(m, name, subnet) {
     var br = create_bridge(name, ip_pool_gateway(pool), ip_pool_prefix_len(pool));
     var bridge_created = 0;
     if (br == STIVA_ERR_OK) {
+        sakshi_info("bridge network created", strlen("bridge network created"));
         bridge_created = 1;
+    } else {
+        sakshi_warn("bridge creation deferred (requires root):", strlen("bridge creation deferred (requires root):"));
     }
 
     map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
@@ -3976,6 +3980,7 @@ fn network_manager_delete_network(m, name) {
 
     map_delete(mgr.networks, name);
     var _r = delete_bridge(name);      # best-effort (Rust: `let _ = ...`)
+    sakshi_info("network deleted", strlen("network deleted"));
     return STIVA_ERR_OK;
 }
 
@@ -4012,6 +4017,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
     var container_veth = container_veth_name();      # always "eth0"
     if (host_veth == 0) {
         # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
+        sakshi_warn("veth creation deferred (requires root):", strlen("veth creation deferred (requires root):"));
         host_veth = host_veth_name(container_id);
     }
 
@@ -4047,6 +4053,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
         var fw = bf_to_firewall(bf);
         if (is_err_result(firewall_validate(fw)) == 1) {
             # "firewall validation failed: {e}" — warn only, non-fatal (Rust).
+            sakshi_warn("firewall validation failed:", strlen("firewall validation failed:"));
         } else {
             _network_manager_apply_nft_ruleset(firewall_render(fw));
         }
@@ -4063,6 +4070,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
 
     var cn = container_network_new(ip, 0, network_name, host_veth, container_veth);
     map_set(mgr.connections, container_id, cn);
+    sakshi_info("container connected to network", strlen("container connected to network"));
     return cn;
 }
 
@@ -4104,6 +4112,7 @@ fn network_manager_disconnect_container(m, container_id) {
 
     # Delete veth pair (best-effort; errors ignored — "if already gone, ignore").
     var _v = delete_veth(cn.host_veth);
+    sakshi_info("container disconnected from network", strlen("container disconnected from network"));
     return STIVA_ERR_OK;
 }
 
@@ -4173,6 +4182,7 @@ fn _network_manager_apply_nft_ruleset(ruleset) {
     vec_push(args, "-f");
     vec_push(args, path);
     var _rc = exec_vec(args);           # best-effort; ignore exit code
+    sakshi_debug("applied nftables ruleset", strlen("applied nftables ruleset"));
     return 0;
 }
 
@@ -4567,6 +4577,7 @@ fn image_store_has_blob(store, digest) {
 # maps to STIVA_ERR_DIGEST_MISMATCH). Dedup: if the path already exists,
 # returns the path without rewriting.
 fn image_store_store_blob(store, digest, data, len) {
+    sakshi_debug("storing blob", strlen("storing blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
 
     # Dedup: skip if already present.
@@ -4588,6 +4599,7 @@ fn image_store_store_blob(store, digest, data, len) {
 # absent (rust-old: Err(ImageNotFound); caller maps -1 →
 # STIVA_ERR_IMAGE_NOT_FOUND) / on any read failure.
 fn image_store_read_blob(store, digest, buf, maxlen) {
+    sakshi_debug("reading blob", strlen("reading blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
     if (file_exists(path) == 0) { return 0 - 1; }
     return file_read_all(path, buf, maxlen);
@@ -5262,6 +5274,7 @@ fn select_platform(index, target) {
         if (e2.platform != 0) {
             var p2: Platform = e2.platform;
             if (streq(p2.os, tp.os) == 1 && streq(p2.architecture, tp.architecture) == 1) {
+                sakshi_warn("no exact variant match, using ", strlen("no exact variant match, using "));
                 return _platform_manifest_clone(entry2);
             }
         }
@@ -5677,6 +5690,7 @@ fn setup_overlay(layers, container_root) {
     var rc = sys_mount("overlay", merged, "overlay", 0, opts);
     if (rc < 0) { return 0; }
 
+    sakshi_info("overlay mounted", strlen("overlay mounted"));
     return overlay_paths_new(merged, upper, work, _stor_dup(container_root));
 }
 
@@ -5689,7 +5703,9 @@ fn teardown_overlay(paths) {
     var pp: OverlayPaths = paths;
 
     if (file_exists(pp.merged) == 1) {
-        sys_umount2(pp.merged, 2);
+        if (sys_umount2(pp.merged, 2) < 0) {
+            sakshi_warn("overlay umount failed", strlen("overlay umount failed"));
+        }
     }
 
     # Clean up writable layers (remove_dir_all analogue).
@@ -6022,6 +6038,7 @@ fn prepare_layers(store, layers) {
         # Dedup: already-unpacked layers are skipped.
         if (file_exists(layer_dir) == 1) {
             if (file_exists(marker) == 1) {
+                sakshi_info("layer already unpacked, skipping", strlen("layer already unpacked, skipping"));
                 vec_push(layer_dirs, layer_dir);
                 i = i + 1;
                 continue;
@@ -6037,6 +6054,7 @@ fn prepare_layers(store, layers) {
             return 0;                               # rust-old: LayerUnpack("blob not found …")
         }
 
+        sakshi_info("unpacking layer", strlen("unpacking layer"));
         var rc = unpack_layer(blob_path, layer_dir);
         if (rc != 0) { return 0; }
 
@@ -6372,6 +6390,7 @@ fn record_build_cache(store, cache_key, layer_digest) {
 fn store_layer(store, data, len) {
     var digest = sha256_digest(data, len);
     if (image_store_store_blob(store, digest, data, len) == 0) { return 0; }
+    sakshi_debug("layer stored", strlen("layer stored"));
     return digest;
 }
 
@@ -6486,6 +6505,7 @@ fn _bld_step_from_pairs(pairs) {
 # section or an unknown step type; otherwise the heap BuildSpec pointer.
 #[must_use]
 fn parse_build_spec(toml_str) {
+    sakshi_info("parsing build specification", strlen("parsing build specification"));
     var sections = bayan_toml_parse(str_from(toml_str));
 
     # ── [image] → ImageDef (required) ─────────────────
@@ -6528,6 +6548,7 @@ fn parse_build_spec(toml_str) {
 
     # ── stages: flat bayan model cannot re-nest per-stage steps; the
     # consuming tar.gz stage builder is deferred → empty vec (serde default).
+    sakshi_debug("build spec parsed", strlen("build spec parsed"));
     return build_spec_new(image, steps, config, vec_new());
 }
 
@@ -7106,6 +7127,61 @@ fn standard_mounts() {
     return mounts;
 }
 
+# ── runtime-local string helpers ──────────────────────
+# Heap constructors (alloc + return; never a stack struct). Runtime-local so
+# `cyrius check src/runtime.cyr` resolves them standalone (the per-module `_cat2`
+# duplication is the established port idiom).
+
+# Non-negative i64 → fresh heap cstr (mirror _container_int_to_cstr).
+#[must_use]
+fn _rt_int_to_cstr(n) {
+    if (n == 0) {
+        var z = alloc(2);
+        store8(z, 48);
+        store8(z + 1, 0);
+        return z;
+    }
+    var digits = 0;
+    var t = n;
+    while (t > 0) { digits = digits + 1; t = t / 10; }
+    var out = alloc(digits + 1);
+    store8(out + digits, 0);
+    var i = digits - 1;
+    var v = n;
+    while (i >= 0) {
+        store8(out + i, 48 + v % 10);
+        v = v / 10;
+        i = i - 1;
+    }
+    return out;
+}
+
+# Concatenate two NUL-terminated cstrings into a fresh heap cstr.
+#[must_use]
+fn _rt_cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Concatenate three NUL-terminated cstrings into a fresh heap cstr.
+#[must_use]
+fn _rt_cat3(a, b, c) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var lc = strlen(c);
+    var out = alloc(la + lb + lc + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    memcpy(out + la + lb, c, lc);
+    store8(out + la + lb + lc, 0);
+    return out;
+}
+
 # Convert volume specs into SpecMount entries (rust-old: volume_mounts).
 # `volumes` is a vec of "source:target[:ro]" cstrs; `rootless` is 1/0.
 # Each mount gets options starting with "rbind", plus "ro" when the volume is
@@ -7121,6 +7197,8 @@ fn volume_mounts(volumes, rootless) {
         var spec = vec_get(volumes, i);
         var vol = parse_volume(spec);   # storage.cyr: 0 on invalid spec
         if (vol == 0) {
+            # rust-old: Err(StivaError::Storage(format!("invalid volume spec: {spec}"))).
+            stiva_err_print(STIVA_ERR_STORAGE, _rt_cat2("invalid volume spec: ", spec));
             return 0;
         }
         # storage.cyr VolumeMount layout is { source; target; read_only; } at
@@ -7230,6 +7308,439 @@ fn criu_available() {
     return 0;
 }
 
+# ── Spec generation (rust-old: generate_spec) ─────────────────────
+# Build a RuntimeSpec from a Container + rootfs path. PURE + synchronous — no
+# kavach, no async. Reads container.cyr's Container/ContainerConfig via raw
+# load64 offsets (container.cyr is included AFTER runtime.cyr, so a cross-module
+# struct annotation isn't in scope — same load64 idiom volume_mounts uses for
+# VolumeMount). Returns a RuntimeSpec* on success, or 0 on an invalid volume.
+#
+#   Container layout:       config @ offset 64.
+#   ContainerConfig layout: command@8 env@16 volumes@24 memory_limit@48
+#     cpu_shares@56 max_pids@64 user@72 workdir@80 rootless@104 secrets@112
+#     scan_policy@120 timeout_ms@128 backend@136 min_isolation_score@144
+#     agent_id@152 domainname@160 seccomp_profile@176.
+fn generate_spec(container, rootfs) {
+    var config = load64(container + 64);
+
+    var c_command = load64(config + 8);
+    var c_env = load64(config + 16);
+    var c_volumes = load64(config + 24);
+    var c_memory = load64(config + 48);
+    var c_cpu = load64(config + 56);
+    var c_maxpids = load64(config + 64);
+    var c_user = load64(config + 72);
+    var c_workdir = load64(config + 80);
+    var c_rootless = load64(config + 104);
+    var c_secrets = load64(config + 112);
+    var c_scan = load64(config + 120);
+    var c_timeout = load64(config + 128);
+    var c_backend = load64(config + 136);
+    var c_minscore = load64(config + 144);
+    var c_agent = load64(config + 152);
+    var c_domain = load64(config + 160);
+    var c_seccomp = load64(config + 176);
+
+    # env: each (k,v) → "k=v". The env map is built with map_new (cstr keys) —
+    # iterate via map_keys + map_get (mixing map_new_str keys would OOB-segfault).
+    var envv = vec_new();
+    if (c_env != 0) {
+        var keys = map_keys(c_env);
+        var kn = vec_len(keys);
+        var ki = 0;
+        while (ki < kn) {
+            var k = vec_get(keys, ki);
+            var v = map_get(c_env, k);
+            vec_push(envv, _rt_cat3(k, "=", v));
+            ki = ki + 1;
+        }
+    }
+
+    # command: empty → ["/bin/sh"], else reuse config.command.
+    var cmdv = c_command;
+    if (c_command == 0) {
+        cmdv = vec_new();
+        vec_push(cmdv, "/bin/sh");
+    } elif (vec_len(c_command) == 0) {
+        cmdv = vec_new();
+        vec_push(cmdv, "/bin/sh");
+    }
+
+    # workdir: config.workdir or "/".
+    var wd = c_workdir;
+    if (c_workdir == 0) { wd = "/"; }
+
+    # limits: value if > 0 else 0 (unset).
+    var mem = 0;
+    if (c_memory > 0) { mem = c_memory; }
+    var cpu = 0;
+    if (c_cpu > 0) { cpu = c_cpu; }
+    var pids = 0;
+    if (c_maxpids > 0) { pids = c_maxpids; }
+
+    # mounts: standard_mounts() ++ volume_mounts(volumes, rootless)?
+    var mnts = standard_mounts();
+    if (c_volumes != 0) {
+        var vm = volume_mounts(c_volumes, c_rootless);
+        if (vm == 0) {
+            # volume_mounts already printed "invalid volume spec: <spec>".
+            return 0;
+        }
+        var vn = vec_len(vm);
+        var vi = 0;
+        while (vi < vn) {
+            vec_push(mnts, vec_get(vm, vi));
+            vi = vi + 1;
+        }
+    }
+
+    # namespaces: [Pid, Net, Mount, Uts, Ipc] (+ User if rootless).
+    var nsv = vec_new();
+    vec_push(nsv, RUNTIME_NS_PID);
+    vec_push(nsv, RUNTIME_NS_NET);
+    vec_push(nsv, RUNTIME_NS_MOUNT);
+    vec_push(nsv, RUNTIME_NS_UTS);
+    vec_push(nsv, RUNTIME_NS_IPC);
+    if (c_rootless == 1) {
+        vec_push(nsv, RUNTIME_NS_USER);
+    }
+
+    var s = runtime_spec_new();
+    var ss: RuntimeSpec = s;
+    ss.rootfs = rootfs;
+    ss.command = cmdv;
+    ss.env = envv;
+    ss.namespaces = nsv;
+    ss.memory_limit_bytes = mem;
+    ss.cpu_shares = cpu;
+    ss.max_pids = pids;
+    ss.user = c_user;
+    ss.workdir = wd;
+    ss.read_only_rootfs = 0;
+    ss.mounts = mnts;
+    ss.rootless = c_rootless;
+    ss.secrets = c_secrets;
+    ss.scan_policy = c_scan;
+    ss.timeout_ms = c_timeout;
+    ss.backend = c_backend;
+    ss.min_isolation_score = c_minscore;
+    ss.io_max_bytes_per_sec = 0;
+    ss.seccomp_profile = c_seccomp;
+    ss.agent_id = c_agent;
+    ss.domainname = c_domain;
+    return s;
+}
+
+# ── Signals (rust-old: send_signal) ───────────────────────────────
+# Send `signal` to `pid`. Returns STIVA_ERR_OK (0) on success, or an
+# STIVA_ERR_RUNTIME sentinel on failure (the detail is printed to stderr).
+# Validation order mirrors the oracle: signal first, then pid.
+#   - invalid signal: mirror rustix Signal::from_named_raw (None for a value
+#     outside the named-signal range) — accept 1..=64 (standard + realtime).
+#   - invalid pid: mirror rustix Pid::from_raw (None for pid <= 0).
+# Divergence: rustix's `{e}` errno text isn't available from the raw syscall, so
+# the send-failure message drops the ": <e>" suffix.
+fn send_signal(pid, signal) {
+    var lm = _rt_cat3("sending signal to container: signal=", _rt_int_to_cstr(signal),
+    _rt_cat2(" pid=", _rt_int_to_cstr(pid)));
+    sakshi_info(lm, strlen(lm));
+    if (signal < 1 || signal > 64) {
+        stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("invalid signal ", _rt_int_to_cstr(signal)));
+        return STIVA_ERR_RUNTIME;
+    }
+    if (pid <= 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("invalid PID ", _rt_int_to_cstr(pid)));
+        return STIVA_ERR_RUNTIME;
+    }
+    var rc = sys_kill(pid, signal);
+    if (rc < 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME,
+        _rt_cat3("failed to send signal ", _rt_int_to_cstr(signal),
+        _rt_cat2(" to PID ", _rt_int_to_cstr(pid))));
+        return STIVA_ERR_RUNTIME;
+    }
+    return STIVA_ERR_OK;
+}
+
+# ── cgroup v2 limits (rust-old: resolve_cgroup_base / apply_cgroup_limits) ──
+
+# Parse the cgroup v2 base path from /proc/<pid>/cgroup content. Finds the line
+# whose LINE-START is "0::" (the unified-hierarchy entry), strips that prefix,
+# trims surrounding whitespace, and returns "/sys/fs/cgroup<path>". Returns 0 if
+# no such line exists. Pure — line-start anchored (not strstr-anywhere) so a
+# pathological "1:x:/a/0::b" line cannot false-match.
+#[must_use]
+fn _rt_cgroup_base_from_content(content) {
+    var len = strlen(content);
+    var start = 0;
+    var i = 0;
+    while (i <= len) {
+        var at_end = 0;
+        if (i == len) { at_end = 1; } elif (load8(content + i) == 10) { at_end = 1; }   # '\n'
+        if (at_end == 1) {
+            var line_len = i - start;
+            # prefix "0::" ('0'=48, ':'=58) at the line start.
+            if (line_len >= 3 && load8(content + start) == 48 && load8(content + start + 1) == 58 && load8(content + start + 2) == 58) {
+                var pstart = start + 3;
+                var pend = i;
+                # trim() both ends (space/tab/CR/LF).
+                while (pstart < pend && (load8(content + pstart) == 32 || load8(content + pstart) == 9)) { pstart = pstart + 1; }
+                while (pend > pstart) {
+                    var ch = load8(content + pend - 1);
+                    if (ch == 32 || ch == 9 || ch == 13 || ch == 10) { pend = pend - 1; } else { break; }
+                }
+                var plen = pend - pstart;
+                var prefix = "/sys/fs/cgroup";
+                var pl0 = strlen(prefix);
+                var out = alloc(pl0 + plen + 1);
+                memcpy(out, prefix, pl0);
+                memcpy(out + pl0, content + pstart, plen);
+                store8(out + pl0 + plen, 0);
+                return out;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Resolve a container's cgroup v2 base dir from its PID. Reads /proc/<pid>/cgroup
+# and returns "/sys/fs/cgroup<path>", or 0 on read failure / no v2 entry (the
+# detail is printed to stderr). Divergence: the read-failure ": <e>" errno text
+# is unavailable from file_read_all, so it's dropped.
+fn resolve_cgroup_base(pid) {
+    var path = _rt_cat3("/proc/", _rt_int_to_cstr(pid), "/cgroup");
+    var buf = alloc(65536);
+    var n = file_read_all(path, buf, 65535);
+    if (n < 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("failed to read cgroup for PID ", _rt_int_to_cstr(pid)));
+        return 0;
+    }
+    store8(buf + n, 0);
+    var base = _rt_cgroup_base_from_content(buf);
+    if (base == 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("no cgroup v2 entry for PID ", _rt_int_to_cstr(pid)));
+        return 0;
+    }
+    return base;
+}
+
+# cpu.max quota for a cpu_shares value: 1024 shares == 1 core, period = 100ms
+# (100000us). quota = shares * period / 1024 (rust-old apply_cgroup_limits).
+#[must_use]
+fn _rt_cpu_quota(shares) {
+    return shares * 100000 / 1024;
+}
+
+# Apply CPU/memory/PID/IO limits to a running container's cgroup v2 files.
+# BEST-EFFORT: never returns an error — a write failure is skipped (the oracle
+# only warns) and resolve failure returns early. Returns 0 always.
+fn apply_cgroup_limits(pid, spec) {
+    var lm = _rt_cat2("applying cgroup v2 resource limits, pid=", _rt_int_to_cstr(pid));
+    sakshi_info(lm, strlen(lm));
+    var base = resolve_cgroup_base(pid);
+    if (base == 0) {
+        sakshi_warn("could not resolve cgroup base, skipping limits",
+        strlen("could not resolve cgroup base, skipping limits"));
+        return 0;
+    }
+    var sp: RuntimeSpec = spec;
+
+    if (sp.memory_limit_bytes > 0) {
+        var mp = _rt_cat2(base, "/memory.max");
+        var mv = _rt_int_to_cstr(sp.memory_limit_bytes);
+        file_write_all(mp, mv, strlen(mv));
+    }
+    if (sp.max_pids > 0) {
+        var pp = _rt_cat2(base, "/pids.max");
+        var pv = _rt_int_to_cstr(sp.max_pids);
+        file_write_all(pp, pv, strlen(pv));
+    }
+    if (sp.cpu_shares > 0) {
+        var cp = _rt_cat2(base, "/cpu.max");
+        # "<quota> <period>" — period 100000us.
+        var cv = _rt_cat3(_rt_int_to_cstr(_rt_cpu_quota(sp.cpu_shares)), " ", _rt_int_to_cstr(100000));
+        file_write_all(cp, cv, strlen(cv));
+    }
+    if (sp.io_max_bytes_per_sec > 0) {
+        var iov = _rt_int_to_cstr(sp.io_max_bytes_per_sec);
+        var ip = _rt_cat2(base, "/io.max");
+        # "252:0 rbps=<io> wbps=<io>" — device-mapper major 252 (overlay).
+        var ival = _rt_cat2("252:0 rbps=", iov);
+        ival = _rt_cat2(ival, " wbps=");
+        ival = _rt_cat2(ival, iov);
+        file_write_all(ip, ival, strlen(ival));
+    }
+    return 0;
+}
+
+# ── Sandbox build (rust-old: build_sandbox) ───────────────────────
+# Assemble a kavach SandboxPolicy + SandboxConfig from a RuntimeSpec, create the
+# sandbox, and transition it to RUNNING. Returns the sandbox ptr, or 0 on
+# failure (detail printed to stderr). The kavach Cyrius port is SYNCHRONOUS
+# (sandbox_create/transition are blocking) — no async needed.
+#
+# The command is NOT returned (avoids a dangling pair struct); exec_container
+# rejoins spec.command itself.
+#
+# Divergences (documented): the kavach dist takes integer policy units — memory
+# in MB (bytes/1048576, truncating) and CPU in tenths-of-a-core ((shares*10)/1024)
+# rather than the oracle's f64 fractional cores. SandboxConfig has no secrets /
+# externalization setter in the dist, so scan_policy + secret injection are
+# TODO(v3.1). sandbox_create/exec return 0 (no error code) so their failure
+# messages carry no "<e>"; sandbox_transition returns a code → kavach_err_name.
+fn build_sandbox(spec) {
+    var sp: RuntimeSpec = spec;
+    var policy = policy_basic();
+
+    if (sp.memory_limit_bytes > 0) {
+        SandboxPolicy_set_memory_limit_mb(policy, sp.memory_limit_bytes / 1048576);
+    }
+    if (sp.max_pids > 0) {
+        SandboxPolicy_set_max_pids(policy, sp.max_pids);
+    }
+    if (sp.cpu_shares > 0) {
+        SandboxPolicy_set_cpu_limit_tenths(policy, sp.cpu_shares * 10 / 1024);
+    }
+    SandboxPolicy_set_network_enabled(policy, 0);
+    SandboxPolicy_set_read_only_rootfs(policy, sp.read_only_rootfs);
+    if (sp.seccomp_profile != 0) {
+        SandboxPolicy_set_seccomp_enabled(policy, 1);
+        SandboxPolicy_set_seccomp_profile(policy, sp.seccomp_profile);
+    }
+
+    # Backend cascade (order load-bearing): explicit name > min-strength resolve >
+    # OCI-if-available > Process.
+    var b = Backend.PROCESS;
+    if (sp.backend != 0) {
+        b = backend_parse(sp.backend);
+        if (b == 0 - 1) {
+            stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("unknown backend: ", sp.backend));
+            return 0;
+        }
+    } elif (sp.min_isolation_score != 0 - 1) {
+        # resolve_min_strength_backend returns -1 (NOT 0) when nothing meets the
+        # score; 0 is a valid PROCESS backend.
+        b = resolve_min_strength_backend(policy, sp.min_isolation_score);
+        if (b == 0 - 1) {
+            stiva_err_print(STIVA_ERR_RUNTIME,
+            _rt_cat2("no backend meets minimum isolation score ", _rt_int_to_cstr(sp.min_isolation_score)));
+            return 0;
+        }
+    } elif (backend_is_available(Backend.OCI) == 1) {
+        b = Backend.OCI;
+    } else {
+        b = Backend.PROCESS;
+    }
+    var lm = _rt_cat2("selected sandbox backend: ", backend_name(b));
+    sakshi_debug(lm, strlen(lm));
+
+    var cfg = config_new();
+    config_backend(cfg, b);
+    config_policy(cfg, policy);
+    config_timeout_ms(cfg, sp.timeout_ms);
+    if (sp.agent_id != 0) { config_agent_id(cfg, sp.agent_id); }
+    if (sp.domainname != 0) { config_domainname(cfg, sp.domainname); }
+    # TODO(v3.1): scan_policy + secret injection — no SandboxConfig setter in dist.
+
+    var sb = sandbox_create(cfg);
+    if (sb == 0) {
+        sakshi_error("failed to create sandbox", strlen("failed to create sandbox"));
+        stiva_err_print(STIVA_ERR_SANDBOX, "failed to create sandbox");
+        return 0;
+    }
+    var rc = sandbox_transition(sb, SandboxState.RUNNING);
+    if (rc != KAVACH_ERR_OK) {
+        stiva_err_print(STIVA_ERR_SANDBOX, _rt_cat2("failed to transition sandbox: ", kavach_err_name(rc)));
+        return 0;
+    }
+    return sb;
+}
+
+# Join a vec of cstrs with `sep` into a fresh heap cstr (rust-old: command.join(" ")).
+#[must_use]
+fn _rt_join(v, sep) {
+    var n = vec_len(v);
+    if (n == 0) {
+        var e = alloc(1);
+        store8(e, 0);
+        return e;
+    }
+    var seplen = strlen(sep);
+    var total = 0;
+    var i = 0;
+    while (i < n) { total = total + strlen(vec_get(v, i)); i = i + 1; }
+    total = total + seplen * (n - 1);
+    var out = alloc(total + 1);
+    var pos = 0;
+    i = 0;
+    while (i < n) {
+        if (i > 0) { memcpy(out + pos, sep, seplen); pos = pos + seplen; }
+        var s = vec_get(v, i);
+        var sl = strlen(s);
+        memcpy(out + pos, s, sl);
+        pos = pos + sl;
+        i = i + 1;
+    }
+    store8(out + pos, 0);
+    return out;
+}
+
+# ── One-shot exec (rust-old: exec_container) ──────────────────────
+# Build a sandbox, run the joined command in it (blocking), tear it down, and
+# map the kavach ExecResult → a stiva ContainerExecResult. Returns the result
+# ptr, or 0 on failure (build_sandbox / sandbox_exec printed the detail).
+#
+# sandbox_exec returns 0 on any of {not-RUNNING, backend failure, gate BLOCK,
+# gate QUARANTINE}; the oracle only distinguishes ok/err, so a generic
+# STIVA_ERR_SANDBOX is faithful. The kavach ExecResult is copied field-by-field
+# through accessors (NOT aliased across the module boundary).
+fn exec_container(spec) {
+    var sp: RuntimeSpec = spec;
+    var command = _rt_join(sp.command, " ");
+    var lm = _rt_cat2("executing one-shot container via kavach: ", command);
+    sakshi_info(lm, strlen(lm));
+
+    var sb = build_sandbox(spec);
+    if (sb == 0) { return 0; }   # error already printed by build_sandbox
+
+    var r = sandbox_exec(sb, command);
+    if (r == 0) {
+        sakshi_error("sandbox execution failed", strlen("sandbox execution failed"));
+        stiva_err_print(STIVA_ERR_SANDBOX, "sandbox execution failed");
+        return 0;
+    }
+    sandbox_destroy(sb);   # best-effort, ignore return (oracle: `let _ = ...`)
+
+    var lc = _rt_cat2("container execution complete, exit_code=", _rt_int_to_cstr(ExecResult_exit_code(r)));
+    sakshi_info(lc, strlen(lc));
+    return container_exec_result_new(
+    ExecResult_exit_code(r),
+    ExecResult_stdout(r),
+    ExecResult_stderr(r),
+    ExecResult_duration_ms(r),
+    ExecResult_timed_out(r));
+}
+
+# ── Security scoring (rust-old: security_score / security_score_for) ──
+# kavach score_backend returns the isolation strength as an i64 (0..100); the
+# Rust StrengthScore wrapper collapses to that integer in the dist. No async.
+fn security_score() {
+    var backend = Backend.PROCESS;
+    if (backend_is_available(Backend.OCI) == 1) { backend = Backend.OCI; }
+    var lm = _rt_cat2("computing security strength score: ", backend_name(backend));
+    sakshi_info(lm, strlen(lm));
+    var policy = policy_basic();
+    return score_backend(backend, policy);
+}
+
+# Score an explicit (backend, policy) pair — no logging (parity: the oracle's
+# security_score_for has none).
+fn security_score_for(backend, policy) {
+    return score_backend(backend, policy);
+}
+
 # ── DEFERRED (land with the async runtime + codecs + kavach exec) ─────────
 # rust-old/src/runtime.rs additionally defines the execution/orchestration
 # surface below. Each needs infrastructure the ported base does not yet expose
@@ -7237,34 +7748,12 @@ fn criu_available() {
 # codecs, cgroups-v2 fs writes, and the deeper kavach sandbox exec/spawn +
 # ExternalizationGate handles — so they are ported alongside those landings.
 #
-# generate_spec(container: &Container, rootfs: &Path) -> RuntimeSpec
-#     Pure, but reads container.rs's ContainerConfig (env HashMap iteration,
-#     Option<String> fields, command/volumes/limits). Lands with container.cyr
-#     once its ContainerConfig field accessors are finalized. Behavior:
-#       - env: each (k,v) → "k=v" cstr.
-#       - command: empty → ["/bin/sh"], else config.command.
-#       - workdir: config.workdir or "/".
-#       - memory_limit_bytes/cpu_shares/max_pids: value if > 0 else unset.
-#       - mounts: standard_mounts() ++ volume_mounts(config.volumes, config.rootless)?
-#       - namespaces: [Pid, Net, Mount, Uts, Ipc] (+ User if rootless).
-#       - read_only_rootfs = false; io_max_bytes_per_sec = unset.
-#       - secrets/scan_policy/timeout_ms/backend/min_isolation_score/
-#         seccomp_profile/agent_id/domainname copied from config.
-#
-# build_sandbox(spec) -> (kavach::Sandbox, command)   [async]
-#     kavach policy_basic() + memory/pids/cpu limits, seccomp profile, backend
-#     select (explicit backend_parse > min-strength resolve > Oci-if-available
-#     else Process), config_* builder, secret injection, sandbox_create +
-#     transition(Running). Needs kavach async sandbox_create + Backend resolve.
-# exec_container(spec) -> ContainerExecResult              [async, kavach exec]
 # spawn_container(spec) -> DaemonHandle                    [async, kavach spawn]
 # struct DaemonHandle { process: SpawnedProcess, _sandbox: Sandbox }
 #     .pid() / .wait() / .kill(grace_ms) / .try_wait()     [async, kavach]
 # exec_in_container(pid, command, env, workdir) -> ContainerExecResult
 #     [async, nsenter subprocess + pre_exec fd-close CVE-2024-21626 mitigation]
-# scan_output(result, policy) -> ContainerExecResult   [kavach ExternalizationGate]
-# security_score() -> StrengthScore                    [kavach score_backend]
-# security_score_for(backend, policy) -> StrengthScore [kavach score_backend]
+# scan_output(result, policy) -> ContainerExecResult   [kavach ExternalizationGate handle unported]
 # container_top(pid) -> Vec<ProcessInfo>               [async /proc dir walk]
 # is_descendant_of(child, ancestor) -> bool            [reads /proc/<pid>/stat]
 # read_process_info(pid) -> ProcessInfo                [async /proc reads]
@@ -7272,11 +7761,7 @@ fn criu_available() {
 # import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
 #     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
 # copy_into_container / copy_from_container / copy_dir_recursive  [fs recursion]
-# send_signal(pid, signal)                             [rustix kill_process]
 # pause_container / unpause_container                  [async cgroup.freeze write]
-# resolve_cgroup_base(pid) -> String                   [async /proc/<pid>/cgroup]
-# write_cgroup_file(pid, filename, value)              [async cgroup fs write]
-# apply_cgroup_limits(pid, spec)                       [async memory/pids/cpu/io.max]
 # container_stats(pid) -> ContainerStats               [async cgroup fs reads]
 # read_cgroup_u64 / read_cpu_usage                     [async cgroup fs reads]
 # checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
@@ -9418,128 +9903,128 @@ fn tool_list() {
     # stiva_pull — read-only
     var pull_props = vec_new();
     vec_push(pull_props, schema_prop_new("image",
-        "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
+    "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
     var pull_req = vec_new();
     vec_push(pull_req, "image");
     var pull = tool_def_new("stiva_pull",
-        "Pull an OCI container image from a registry",
-        schema_new("object", pull_props, pull_req));
+    "Pull an OCI container image from a registry",
+    schema_new("object", pull_props, pull_req));
     tool_def_with_annotations(pull, ann_read_only());
     vec_push(tools, pull);
 
     # stiva_run — destructive
     var run_props = vec_new();
     vec_push(run_props, schema_prop_new("image",
-        "{\"type\": \"string\", \"description\": \"Image reference to run\"}"));
+    "{\"type\": \"string\", \"description\": \"Image reference to run\"}"));
     vec_push(run_props, schema_prop_new("name",
-        "{\"type\": \"string\", \"description\": \"Container name (optional)\"}"));
+    "{\"type\": \"string\", \"description\": \"Container name (optional)\"}"));
     vec_push(run_props, schema_prop_new("command",
-        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command to execute (overrides entrypoint)\"}"));  #skip-lint
+    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command to execute (overrides entrypoint)\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("env",
-        "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}, \"description\": \"Environment variables\"}"));  #skip-lint
+    "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}, \"description\": \"Environment variables\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("ports",
-        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Port mappings (e.g., '8080:80')\"}"));  #skip-lint
+    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Port mappings (e.g., '8080:80')\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("volumes",
-        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Volume mounts (e.g., '/host:/container:ro')\"}"));  #skip-lint
+    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Volume mounts (e.g., '/host:/container:ro')\"}"));  #skip-lint
     var run_req = vec_new();
     vec_push(run_req, "image");
     var run = tool_def_new("stiva_run",
-        "Run a container from an image",
-        schema_new("object", run_props, run_req));
+    "Run a container from an image",
+    schema_new("object", run_props, run_req));
     tool_def_with_annotations(run, ann_destructive());
     vec_push(tools, run);
 
     # stiva_ps — read-only, no params
     var ps = tool_def_new("stiva_ps",
-        "List all containers",
-        schema_new("object", vec_new(), vec_new()));
+    "List all containers",
+    schema_new("object", vec_new(), vec_new()));
     tool_def_with_annotations(ps, ann_read_only());
     vec_push(tools, ps);
 
     # stiva_stop — destructive
     var stop_props = vec_new();
     vec_push(stop_props, schema_prop_new("id",
-        "{\"type\": \"string\", \"description\": \"Container ID to stop\"}"));
+    "{\"type\": \"string\", \"description\": \"Container ID to stop\"}"));
     var stop_req = vec_new();
     vec_push(stop_req, "id");
     var stop = tool_def_new("stiva_stop",
-        "Stop a running container",
-        schema_new("object", stop_props, stop_req));
+    "Stop a running container",
+    schema_new("object", stop_props, stop_req));
     tool_def_with_annotations(stop, ann_destructive());
     vec_push(tools, stop);
 
     # stiva_ansamblu — destructive
     var ans_props = vec_new();
     vec_push(ans_props, schema_prop_new("action",
-        "{\"type\": \"string\", \"enum\": [\"up\", \"down\"], \"description\": \"Ansamblu action to perform\"}"));
+    "{\"type\": \"string\", \"enum\": [\"up\", \"down\"], \"description\": \"Ansamblu action to perform\"}"));
     vec_push(ans_props, schema_prop_new("file",
-        "{\"type\": \"string\", \"description\": \"TOML ansamblu file content\"}"));
+    "{\"type\": \"string\", \"description\": \"TOML ansamblu file content\"}"));
     vec_push(ans_props, schema_prop_new("session_id",
-        "{\"type\": \"string\", \"description\": \"Session ID (required for 'down')\"}"));
+    "{\"type\": \"string\", \"description\": \"Session ID (required for 'down')\"}"));
     var ans_req = vec_new();
     vec_push(ans_req, "action");
     var ans = tool_def_new("stiva_ansamblu",
-        "Manage multi-service deployments via ansamblu files",
-        schema_new("object", ans_props, ans_req));
+    "Manage multi-service deployments via ansamblu files",
+    schema_new("object", ans_props, ans_req));
     tool_def_with_annotations(ans, ann_destructive());
     vec_push(tools, ans);
 
     # stiva_exec — destructive
     var exec_props = vec_new();
     vec_push(exec_props, schema_prop_new("id",
-        "{\"type\": \"string\", \"description\": \"Container ID\"}"));
+    "{\"type\": \"string\", \"description\": \"Container ID\"}"));
     vec_push(exec_props, schema_prop_new("command",
-        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command and arguments to execute\"}"));  #skip-lint
+    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command and arguments to execute\"}"));  #skip-lint
     var exec_req = vec_new();
     vec_push(exec_req, "id");
     vec_push(exec_req, "command");
     var exec = tool_def_new("stiva_exec",
-        "Execute a command inside a running container",
-        schema_new("object", exec_props, exec_req));
+    "Execute a command inside a running container",
+    schema_new("object", exec_props, exec_req));
     tool_def_with_annotations(exec, ann_destructive());
     vec_push(tools, exec);
 
     # stiva_build — destructive
     var build_props = vec_new();
     vec_push(build_props, schema_prop_new("spec",
-        "{\"type\": \"string\", \"description\": \"TOML build spec content\"}"));
+    "{\"type\": \"string\", \"description\": \"TOML build spec content\"}"));
     vec_push(build_props, schema_prop_new("context_dir",
-        "{\"type\": \"string\", \"description\": \"Build context directory path\"}"));
+    "{\"type\": \"string\", \"description\": \"Build context directory path\"}"));
     var build_req = vec_new();
     vec_push(build_req, "spec");
     vec_push(build_req, "context_dir");
     var build = tool_def_new("stiva_build",
-        "Build an image from a Stivafile specification",
-        schema_new("object", build_props, build_req));
+    "Build an image from a Stivafile specification",
+    schema_new("object", build_props, build_req));
     tool_def_with_annotations(build, ann_destructive());
     vec_push(tools, build);
 
     # stiva_push — destructive
     var push_props = vec_new();
     vec_push(push_props, schema_prop_new("image",
-        "{\"type\": \"string\", \"description\": \"Image ID or reference to push\"}"));
+    "{\"type\": \"string\", \"description\": \"Image ID or reference to push\"}"));
     vec_push(push_props, schema_prop_new("target",
-        "{\"type\": \"string\", \"description\": \"Target registry reference (optional)\"}"));
+    "{\"type\": \"string\", \"description\": \"Target registry reference (optional)\"}"));
     var push_req = vec_new();
     vec_push(push_req, "image");
     var push = tool_def_new("stiva_push",
-        "Push a local image to a registry",
-        schema_new("object", push_props, push_req));
+    "Push a local image to a registry",
+    schema_new("object", push_props, push_req));
     tool_def_with_annotations(push, ann_destructive());
     vec_push(tools, push);
 
     # stiva_inspect — read-only
     var insp_props = vec_new();
     vec_push(insp_props, schema_prop_new("id",
-        "{\"type\": \"string\", \"description\": \"Container or image ID\"}"));
+    "{\"type\": \"string\", \"description\": \"Container or image ID\"}"));
     vec_push(insp_props, schema_prop_new("type",
-        "{\"type\": \"string\", \"enum\": [\"container\", \"image\"], \"description\": \"What to inspect\"}"));
+    "{\"type\": \"string\", \"enum\": [\"container\", \"image\"], \"description\": \"What to inspect\"}"));
     var insp_req = vec_new();
     vec_push(insp_req, "id");
     vec_push(insp_req, "type");
     var insp = tool_def_new("stiva_inspect",
-        "Inspect a container or image",
-        schema_new("object", insp_props, insp_req));
+    "Inspect a container or image",
+    schema_new("object", insp_props, insp_req));
     tool_def_with_annotations(insp, ann_read_only());
     vec_push(tools, insp);
 
@@ -9624,11 +10109,11 @@ fn stiva_config_new(root_path, image_path, default_network, max_containers, audi
 fn stiva_config_default() {
     var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
     return stiva_config_new(
-        "/var/lib/agnos/containers",
-        "/var/lib/agnos/images",
-        net,
-        64,
-        0
+    "/var/lib/agnos/containers",
+    "/var/lib/agnos/images",
+    net,
+    64,
+    0
     );
 }
 

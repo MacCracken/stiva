@@ -97,19 +97,44 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > - **YAML** — `bayan` has JSON/TOML/base64 but no YAML → `compose_yaml_to_toml`
 >   blocked.
 >
-> **The big v3.1 arc — the async orchestration surface** (kavach exec/spawn,
-> cgroups v2, CRIU, the registry HTTP client, concurrent layer downloads, the
-> ~40-method async `Stiva` facade in `stiva_core.cyr`). HTTP/TLS (`sandhi`/
-> `tls_native`) and the async runtime (`lib/async.cyr`) EXIST, but `lib/async.cyr`
-> is a cooperative-future model weaker than tokio (no mid-body suspend, limited
-> spawn/timers) — mapping tokio-shaped orchestration onto it is substantial and
-> is tracked in **cyrius issue `2026-07-07-async-runtime-tokio-parity-gaps.md`**.
-> cgroups v2 / CRIU are plain syscall/subprocess work (no Cyrius dependency).
+ **SANDBOX RUN PATH — NOW WIRED (synchronous, 3.0.0).** The audit that claimed
+> the run path was "async-blocked" was WRONG: the kavach Cyrius bundle is 100%
+> blocking (0 `async fn` in 9061 lines). So the core execution surface is now
+> implemented against it, no async runtime needed:
+> - `generate_spec` (Container → RuntimeSpec, pure),
+> - `build_sandbox` (policy_basic + mem/cpu/pid limits + backend cascade +
+>   config + `sandbox_create` + transition-to-RUNNING),
+> - `exec_container` (`sandbox_exec` → `ExecResult` → `ContainerExecResult`),
+> - `send_signal` (`sys_kill`), `resolve_cgroup_base` + `apply_cgroup_limits`
+>   (cgroup v2 fs writes), `security_score`/`security_score_for` (`score_backend`).
 >
-> So v3.1 is chiefly: wire bayan/sandhi/sankoch, port the tokio async onto
-> `lib/async.cyr`, and add zstd + tar. `rust-old/` stays the oracle until then.
-> (NB: the per-module `# ── DEFERRED ──` blocks were written by the port agents
-> and carry the same "needs async/codec" overstatement — read them against this
+> **sakshi structured logging FOLDED IN (3.0.0).** The 210 dropped Rust `tracing::*`
+> calls are being restored: the run path emits `sakshi_info`/`_debug`/`_warn`/
+> `_error` (init `sakshi_set_level(SK_INFO)` at the CLI entry), and a byte-exact,
+> identifier-neutral sweep added the oracle's log points to the implemented
+> image/storage/build/audit/network/registry surface. Verified emitting via ring
+> assertions in `tests/runpath.tcyr`.
+>
+> **Tests split** — the monolithic `tests/stiva.tcyr` hit the cycc identifier
+> dedup cap (16384); run-path tests live in `tests/runpath.tcyr`, both run via
+> `cyrius tests tests/`. Cap filed as cyrius issue
+> `2026-07-07-lexid-dedup-cap-too-low-for-large-consumers.md`.
+>
+> **Still deferred to v3.1 — the genuinely async / non-trivial surface:**
+> detached `run -d` (needs a policy-threading `spawn` in kavach — `persistent_spawn`
+> can't apply the seccomp/cgroup/secret pipeline, so a half-isolated daemon path
+> is intentionally NOT shipped), streaming `logs -f`, concurrent layer downloads,
+> the registry HTTP client, CRIU checkpoint/restore (criu subprocess), nsenter
+> `exec`, and the ~40-method async `Stiva` facade in `stiva_core.cyr`. HTTP/TLS
+> (`sandhi`/`tls_native`) + `lib/async.cyr` EXIST but the cooperative-future model
+> is weaker than tokio — tracked in cyrius issue
+> `2026-07-07-async-runtime-tokio-parity-gaps.md`. Plus the codec gaps: **zstd**
+> and a **tar writer** (`sankoch`), **YAML** (`bayan`).
+>
+> So v3.1 is chiefly: the tokio→`lib/async.cyr` async port (detached/logs/registry
+> HTTP/facade) + zstd/tar-writer/YAML. `rust-old/` stays the oracle until then.
+> (NB: the per-module `# ── DEFERRED ──` blocks still carry the old "needs async/
+> codec" overstatement for the un-ported surface — read them against this
 > accounting.)
 
 ---

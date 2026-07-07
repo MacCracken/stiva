@@ -330,6 +330,7 @@ fn select_platform(index, target) {
         if (e2.platform != 0) {
             var p2: Platform = e2.platform;
             if (streq(p2.os, tp.os) == 1 && streq(p2.architecture, tp.architecture) == 1) {
+                sakshi_warn("no exact variant match, using ", strlen("no exact variant match, using "));
                 return _platform_manifest_clone(entry2);
             }
         }

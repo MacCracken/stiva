@@ -377,6 +377,7 @@ fn image_store_has_blob(store, digest) {
 # maps to STIVA_ERR_DIGEST_MISMATCH). Dedup: if the path already exists,
 # returns the path without rewriting.
 fn image_store_store_blob(store, digest, data, len) {
+    sakshi_debug("storing blob", strlen("storing blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
 
     # Dedup: skip if already present.
@@ -398,6 +399,7 @@ fn image_store_store_blob(store, digest, data, len) {
 # absent (rust-old: Err(ImageNotFound); caller maps -1 →
 # STIVA_ERR_IMAGE_NOT_FOUND) / on any read failure.
 fn image_store_read_blob(store, digest, buf, maxlen) {
+    sakshi_debug("reading blob", strlen("reading blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
     if (file_exists(path) == 0) { return 0 - 1; }
     return file_read_all(path, buf, maxlen);

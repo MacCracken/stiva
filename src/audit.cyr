@@ -278,6 +278,7 @@ fn stiva_audit_log_new(path) {
     _audit_ensure_parent(path);
     var log = alloc(8);
     AuditLog_set_path(log, path);
+    sakshi_debug("audit log opened", strlen("audit log opened"));
     return log;
 }
 

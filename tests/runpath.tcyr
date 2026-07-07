@@ -1,0 +1,295 @@
+# stiva run-path test suite — Cyrius port
+# Split out of tests/stiva.tcyr: the monolith hit the cycc identifier
+# dedup cap (16384). Run both via `cyrius tests tests/`.
+# Mirrors rust-old runtime.rs run-path (generate_spec/send_signal/cgroups/build_sandbox).
+
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+include "src/mcp.cyr"
+include "src/stiva_core.cyr"
+
+# ── generate_spec (rust-old runtime.rs:172) ──
+fn _rt_make_container(cfg) {
+    return container_new("cid", 0, "img", "ref", CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
+}
+
+fn test_generate_spec_defaults() {
+    test_group("generate_spec_defaults");
+    var cfg = container_config_default();
+    var ctr = _rt_make_container(cfg);
+    var sp: RuntimeSpec = generate_spec(ctr, "/var/lib/stiva/rootfs");
+    assert(sp != 0, "spec built");
+    assert_eq(streq(sp.rootfs, "/var/lib/stiva/rootfs"), 1, "rootfs passthrough");
+    # empty command → ["/bin/sh"]
+    assert_eq(vec_len(sp.command), 1, "command len 1");
+    assert_eq(streq(vec_get(sp.command, 0), "/bin/sh"), 1, "command /bin/sh");
+    # empty workdir → "/"
+    assert_eq(streq(sp.workdir, "/"), 1, "workdir /");
+    # 5 base namespaces, PID first, no USER when not rootless
+    assert_eq(vec_len(sp.namespaces), 5, "5 namespaces");
+    assert_eq(vec_get(sp.namespaces, 0), RUNTIME_NS_PID, "ns[0] Pid");
+    # standard mounts only (no volumes)
+    assert_eq(vec_len(sp.mounts), 5, "5 standard mounts");
+    # sentinels/pass-through
+    assert_eq(sp.min_isolation_score, 0 - 1, "min_isolation_score None");
+    assert_eq(sp.read_only_rootfs, 0, "read_only_rootfs false");
+    assert_eq(sp.io_max_bytes_per_sec, 0, "io unset");
+    return 0;
+}
+
+fn test_generate_spec_rootless() {
+    test_group("generate_spec_rootless");
+    var cfg: ContainerConfig = container_config_default();
+    cfg.rootless = 1;
+    var sp: RuntimeSpec = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(vec_len(sp.namespaces), 6, "6 namespaces (User appended)");
+    assert_eq(vec_get(sp.namespaces, 5), RUNTIME_NS_USER, "ns[5] User");
+    assert_eq(sp.rootless, 1, "rootless passthrough");
+    return 0;
+}
+
+fn test_generate_spec_env_kv() {
+    test_group("generate_spec_env_kv");
+    var cfg: ContainerConfig = container_config_default();
+    # env map MUST be map_new (cstr keys) — generate_spec iterates map_keys/map_get.
+    var m = map_new();
+    map_set(m, "PATH", "/usr/bin");
+    cfg.env = m;
+    var sp: RuntimeSpec = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(vec_len(sp.env), 1, "one env entry");
+    assert_eq(streq(vec_get(sp.env, 0), "PATH=/usr/bin"), 1, "env k=v folded");
+    return 0;
+}
+
+fn test_generate_spec_bad_volume() {
+    test_group("generate_spec_bad_volume");
+    var cfg: ContainerConfig = container_config_default();
+    var vols = vec_new();
+    vec_push(vols, "nocolon");   # invalid → volume_mounts returns 0
+    cfg.volumes = vols;
+    assert_eq(generate_spec(_rt_make_container(cfg), "/rootfs"), 0, "invalid volume -> 0");
+    return 0;
+}
+
+# ── send_signal (rust-old runtime.rs:996) ──
+fn test_send_signal_bad_signal() {
+    test_group("send_signal_bad_signal");
+    # signal out of the named range → STIVA_ERR_RUNTIME sentinel (non-OK).
+    assert_eq(send_signal(1234, 999), STIVA_ERR_RUNTIME, "signal 999 -> runtime err");
+    assert_eq(send_signal(1234, 0), STIVA_ERR_RUNTIME, "signal 0 -> runtime err");
+    return 0;
+}
+
+fn test_send_signal_bad_pid() {
+    test_group("send_signal_bad_pid");
+    assert_eq(send_signal(0, 15), STIVA_ERR_RUNTIME, "pid 0 -> runtime err");
+    return 0;
+}
+
+fn test_send_signal_self_signal0_range() {
+    test_group("send_signal_self_signal0_range");
+    # Deliver SIGCONT (18) to our own process — harmless, must succeed.
+    assert_eq(send_signal(getpid(), 18), STIVA_ERR_OK, "SIGCONT self -> OK");
+    return 0;
+}
+
+# ── cgroup base parsing (rust-old runtime.rs:1038) ──
+fn test_resolve_cgroup_base_parse() {
+    test_group("resolve_cgroup_base_parse");
+    var base = _rt_cgroup_base_from_content("0::/foo/bar\n");
+    assert_eq(streq(base, "/sys/fs/cgroup/foo/bar"), 1, "0:: line -> base path");
+    # trailing whitespace trimmed
+    var base2 = _rt_cgroup_base_from_content("12:pids:/legacy\n0::/svc  \n");
+    assert_eq(streq(base2, "/sys/fs/cgroup/svc"), 1, "picks 0:: line, trims");
+    # no 0:: unified line -> 0
+    assert_eq(_rt_cgroup_base_from_content("1:name=systemd:/x\n"), 0, "no v2 entry -> 0");
+    return 0;
+}
+
+fn test_cpu_quota_formula() {
+    test_group("cpu_quota_formula");
+    # shares * 100000 / 1024
+    assert_eq(_rt_cpu_quota(1024), 100000, "1024 shares -> 1 core quota");
+    assert_eq(_rt_cpu_quota(512), 50000, "512 shares -> half core");
+    return 0;
+}
+
+fn test_apply_cgroup_limits_besteffort() {
+    test_group("apply_cgroup_limits_besteffort");
+    # No real writable cgroup in the harness — must NOT crash and must return 0
+    # (best-effort: write failures are swallowed).
+    var cfg: ContainerConfig = container_config_default();
+    cfg.memory_limit = 134217728;
+    cfg.cpu_shares = 512;
+    cfg.max_pids = 100;
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(apply_cgroup_limits(getpid(), sp), 0, "best-effort returns 0");
+    return 0;
+}
+
+# ── build_sandbox (rust-old runtime.rs:276) — kavach, synchronous ──
+fn test_build_sandbox_noop() {
+    test_group("build_sandbox_noop");
+    kavach_init();   # register backends (idempotent alloc_init)
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    var sb = build_sandbox(sp);
+    assert(sb != 0, "sandbox created");
+    assert_eq(Sandbox_state(sb), SandboxState.RUNNING, "state RUNNING");
+    return 0;
+}
+
+fn test_build_sandbox_bad_backend() {
+    test_group("build_sandbox_bad_backend");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "bogus";
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(build_sandbox(sp), 0, "unknown backend -> 0");
+    return 0;
+}
+
+fn test_build_sandbox_fallback() {
+    test_group("build_sandbox_fallback");
+    kavach_init();
+    # backend None, min_isolation_score None → OCI-if-available else PROCESS.
+    var cfg: ContainerConfig = container_config_default();
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    var sb = build_sandbox(sp);
+    assert(sb != 0, "fallback sandbox created");
+    var cfgp = load64(sb + 8);   # Sandbox.config @ offset 8
+    var bk = SandboxConfig_backend(cfgp);
+    # host-dependent: OCI(4) iff runc/crun on PATH, else PROCESS(0).
+    var ok = 0;
+    if (bk == Backend.OCI || bk == Backend.PROCESS) { ok = 1; }
+    assert_eq(ok, 1, "fallback backend is OCI or PROCESS");
+    return 0;
+}
+
+fn test_build_sandbox_min_score_none() {
+    test_group("build_sandbox_min_score_none");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.min_isolation_score = 101;   # unreachable (scores clamp to 100)
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(build_sandbox(sp), 0, "no backend meets score 101 -> 0");
+    return 0;
+}
+
+# ── exec_container (rust-old runtime.rs:365) — full generate→build→exec→map ──
+fn test_exec_container_noop() {
+    test_group("exec_container_noop");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var cmd = vec_new();
+    vec_push(cmd, "echo");
+    vec_push(cmd, "hi");           # benign — the ext gate runs even on NOOP
+    cfg.command = cmd;
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    var res: ContainerExecResult = exec_container(sp);
+    assert(res != 0, "exec result built");
+    assert_eq(res.exit_code, 0, "noop exit_code 0");
+    assert_eq(res.timed_out, 0, "not timed out");
+    return 0;
+}
+
+fn test_exec_container_bad_backend() {
+    test_group("exec_container_bad_backend");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "bogus";
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(exec_container(sp), 0, "build failure propagates -> 0");
+    return 0;
+}
+
+# ── security_score (rust-old runtime.rs:615) — score_backend passthrough ──
+fn test_security_score() {
+    test_group("security_score");
+    kavach_init();
+    var s = security_score();
+    var ok = 0;
+    if (s >= 0 && s <= 100) { ok = 1; }
+    assert_eq(ok, 1, "auto-backend score in 0..100");
+    return 0;
+}
+
+fn test_security_score_for() {
+    test_group("security_score_for");
+    kavach_init();
+    var s = security_score_for(Backend.PROCESS, policy_basic());
+    var ok = 0;
+    if (s >= 0 && s <= 100) { ok = 1; }
+    assert_eq(ok, 1, "explicit score in 0..100");
+    return 0;
+}
+
+# ── sakshi logging actually emits (not just compiles) ──
+fn test_runpath_logging_emits() {
+    test_group("runpath_logging_emits");
+    kavach_init();
+    sakshi_output_buffer();      # route emits to the in-memory ring
+    sakshi_set_level(SK_INFO);
+    sakshi_ring_clear();
+    var before = sakshi_ring_event_count();
+    send_signal(0, 15);          # emits an info line at entry (then errors on bad pid)
+    assert(sakshi_ring_event_count() > before, "send_signal emitted a log line");
+    # level filter: at SK_WARN an info emit is suppressed.
+    sakshi_set_level(SK_WARN);
+    sakshi_ring_clear();
+    var b2 = sakshi_ring_event_count();
+    security_score();            # info-level → suppressed at WARN
+    assert_eq(sakshi_ring_event_count(), b2, "info suppressed at WARN");
+    sakshi_set_level(SK_INFO);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_generate_spec_defaults();
+    test_generate_spec_rootless();
+    test_generate_spec_env_kv();
+    test_generate_spec_bad_volume();
+    test_send_signal_bad_signal();
+    test_send_signal_bad_pid();
+    test_send_signal_self_signal0_range();
+    test_resolve_cgroup_base_parse();
+    test_cpu_quota_formula();
+    test_apply_cgroup_limits_besteffort();
+    test_build_sandbox_noop();
+    test_build_sandbox_bad_backend();
+    test_build_sandbox_fallback();
+    test_build_sandbox_min_score_none();
+    test_exec_container_noop();
+    test_exec_container_bad_backend();
+    test_security_score();
+    test_security_score_for();
+    test_runpath_logging_emits();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

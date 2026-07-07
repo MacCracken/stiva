@@ -11,14 +11,31 @@ frozen at `rust-old/` as the parity oracle. See `docs/development/roadmap.md`
 (v3.0.0) for the module-by-module ledger.
 
 **Scope**: the port covers every module's types, pure logic, and syscall-driven
-surface, with **779 tests green** and a clean `dist/stiva.cyr` bundle. The async
-container-execution surface (kavach sandbox exec, cgroups, CRIU, the registry
-HTTP client, the async `Stiva` facade) is **DEFERRED to v3.1** — as porting work
-not yet done, not (mostly) Cyrius gaps: HTTP/TLS (`sandhi`/`tls_native`) and the
-async runtime (`lib/async.cyr`) EXIST and are declared in `[deps].stdlib`; the
-deferral is the effort of wiring them + mapping tokio-shaped async onto Cyrius's
-weaker cooperative futures (tracked in cyrius issue
+surface, **plus the synchronous sandbox run path**, with **820 tests green**
+(`tests/stiva.tcyr` 779 + `tests/runpath.tcyr` 41) and a clean `dist/stiva.cyr`
+bundle. Only the genuinely **async** surface (detached `run -d`, streaming
+`logs -f`, concurrent layer downloads, the registry HTTP client, CRIU, nsenter
+`exec`, the ~40-method async `Stiva` facade) is **DEFERRED to v3.1**: HTTP/TLS
+(`sandhi`/`tls_native`) and the async runtime (`lib/async.cyr`) EXIST and are
+declared in `[deps].stdlib`; the deferral is mapping tokio-shaped async onto
+Cyrius's weaker cooperative futures (tracked in cyrius issue
 `2026-07-07-async-runtime-tokio-parity-gaps.md`).
+
+**Sandbox run path WIRED (synchronous).** An adversarial audit proved the run
+path was never async-blocked — the kavach Cyrius bundle is 100% blocking (0
+`async fn`). So `generate_spec`, `build_sandbox` (policy + backend cascade +
+`sandbox_create` + transition-to-RUNNING), `exec_container` (`sandbox_exec` →
+`ExecResult`), `send_signal`, `apply_cgroup_limits` (cgroup v2 writes), and
+`security_score` are now implemented against it. stiva **launches containers in
+the kavach sandbox** as of 3.0.0.
+
+**sakshi structured logging folded in.** The dropped Rust `tracing::*` surface is
+restored: `sakshi_set_level(SK_INFO)` at the CLI entry, run-path + implemented
+image/storage/build/audit/network/registry operations emit byte-exact log lines
+(verified emitting via ring assertions). Tests split (`stiva.tcyr` +
+`runpath.tcyr`, run via `cyrius tests tests/`) to stay under the cycc identifier
+cap — filed as cyrius issue
+`2026-07-07-lexid-dedup-cap-too-low-for-large-consumers.md`. Toolchain pin → 6.4.17.
 
 **Gaps closed before the tag** — the achievable deferrals I'd wrongly blamed on
 "no codec" (the stdlib has the codecs): **`build.parse_build_spec`** (Stivafile
@@ -28,7 +45,6 @@ list/remove via `bayan` JSON), and **`storage.unpack_layer`/`prepare_layers`**
 remain (narrow): **zstd** (`sankoch` has gzip/xz/lz4/bzip2, not zstd), a **tar
 writer** (build's layer builder), and a **YAML** parser (compose only). See the
 roadmap's deferred-surface accounting.
-Toolchain pinned **6.4.16**.
 
 ### Summary
 - **All 16 modules ported**: error, oci, intents, audit, convert, network
@@ -41,7 +57,10 @@ Toolchain pinned **6.4.16**.
 - **CLI via cmdit** (`src/main.cyr`) — 33 subcommands as cmdit verbs (getopt-long
   + generated help), not hand-rolled. `stiva convert --format dockerfile` works
   end-to-end; the async verbs print a clear "deferred to v3.1" message.
-- **779 Cyrius tests**, `cyrius bench`/`fmt`/`lint` clean; `dist/stiva.cyr` built.
+- **820 Cyrius tests** (`stiva.tcyr` 779 + `runpath.tcyr` 41), `cyrius bench`/
+  `fmt`/`lint` clean; `dist/stiva.cyr` built.
+- **Synchronous sandbox run path wired** + **sakshi structured logging folded in**
+  (see the scope note above).
 - **Closed three achievable deferrals** with the existing stdlib (refuting the
   earlier "no codec" deferral): build Stivafile TOML parse (`bayan`), image
   images.json JSON index (`bayan`), storage gzip-tar layer unpack (`sankoch` +
