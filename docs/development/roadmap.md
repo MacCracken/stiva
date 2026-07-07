@@ -42,7 +42,24 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [~] `registry` — **ported** (src/registry.cyr): OCI ref/digest/manifest struct parsing (17 tests). Entire async HTTP client + auth + credential store + mirror config DEFERRED (need net/sandhi/TLS/JSON). **NOT WIRED — see cycc blocker below.**
 - [ ] dep-free next after unblock: `storage` (needs image), `build` (needs image+registry); `agent`/`fleet` need `container`
 
-> **⚠️ cycc BLOCKER — image/registry ported but unwired.** Wiring image+registry (10→12 domain modules, + sigil's sha256) tips the compilation unit past a cycc limit: a struct-typed local (`var ii: OciIndex = idx; ii.field = …`) mis-resolves to a SIMD vector → `error: SIMD vector has no named fields` (parse_decl.cyr guard `lt <= -2048`), even though the local's struct sid is small. Ruled out: struct/enum count (109, cap 256/1024), per-fn local slots (16384, reset per fn), stale lib bundles, toolchain drift (repro on 6.4.10 **and** 6.4.11). **Repro:** `error+image+registry` alone builds; adding the other 10 modules fails at the first `: Struct` field write in the last-included module. Root cause looks like an accumulation-triggered type-descriptor mis-encoding in cycc. **The 10-module aggregate is green (227 tests).** image/registry stay on disk (lint-clean); re-enable the commented lines in `cyrius.cyml`/`src/lib.cyr`/`src/main.cyr` + the `[deps.sigil]` block once cycc is fixed. Needs a cycc-owner decision.
+> **⚠️ cycc BLOCKER — image/registry ported but unwired. ROOT-CAUSED.**
+> Wiring image+registry grows the compilation unit so that one of their structs
+> lands on **struct-id 20 or 21**, whose type encoding `SLTYPE = -struct_id`
+> (-20 / -21) is **byte-identical to the legacy `f64v2` (-20) / `f64v4` (-21)
+> SIMD sentinels**. `parse_decl.cyr`'s field-access guard then mis-flags a
+> `var x: ThatStruct; x.field` as a SIMD vector → `error: SIMD vector has no
+> named fields`. struct-ids count ALL unit structs (explicit + enum/tagged +
+> Result/Option + generics + stdlib/dep bundles), so the collision lands on
+> whichever struct is 20th/21st overall — hence "adding a module breaks an
+> unrelated module's field access." Deterministic minimal repro (no stdlib):
+> **`docs/development/cycc-bug-struct-sid-20-21.cyr`** — 20 structs + access the
+> 20th → error; access the 19th → OK. Repro on cycc **6.4.10 and 6.4.11**.
+> Ruled out: total struct count (cap 1024, errors cleanly), per-fn local slots
+> (16384), stale bundles, version. **Fix is in cycc** (disambiguate struct sids
+> from the f64v2/f64v4 sentinels) — NOT in stiva; the port never edits the
+> language. **The 10-module aggregate is green (227 tests).** image/registry
+> stay on disk (lint-clean); re-enable the commented lines in `cyrius.cyml` /
+> `src/lib.cyr` / `src/main.cyr` + the `[deps.sigil]` block once cycc is fixed.
 
 **Accepted divergences** (found by the verify stage; track to ADRs at parity-validation):
 - `audit` — `AuditLog::new` is *lazy* (file created on first append) vs Rust *eager* (create+append at construction): error surfaces at first `log`, not `new`. Also `metadata` on read is left null (round-trip inspects op/ids/result only, matching the Rust tests).

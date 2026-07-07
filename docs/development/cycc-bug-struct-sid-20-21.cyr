@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MINIMAL REPRO — cycc bug: struct-id 20/21 collides with f64v2/f64v4 SIMD
+# sentinels, so a struct-typed local mis-resolves as a SIMD vector.
+#
+#   $ cyrius build docs/development/cycc-bug-struct-sid-20-21.cyr /tmp/out
+#   error:<source>:25: SIMD vector has no named fields   (the `x.a = 42;` line)
+#
+# Reproduced on cycc 6.4.10 AND 6.4.11.  Self-contained: no includes, no stdlib.
+#
+# ── ROOT CAUSE ───────────────────────────────────────────────────────────────
+# A struct-typed local's type is stored as SLTYPE = (0 - struct_id) — a NEGATIVE
+# sentinel (util.cyr GLTYPE/SLTYPE). The legacy SIMD vector types reuse two of
+# those exact negative values as flat sentinels:
+#       f64v2 -> -20        f64v4 -> -21
+# (newer vectors live in the reserved band <= -2048; see common/util.cyr:607+).
+# The field-access guard in frontend/parse_decl.cyr (PARSE_FIELD_LOAD ~line 219
+# and PARSE_FIELD_STORE ~line 434) rejects `.field` on a SIMD local:
+#       if (lt == 0 - 20 || lt == 0 - 21 || lt <= 0 - 2048) {
+#           ERR_MSG(S, "SIMD vector has no named fields", 31);
+#       }
+# The 20th struct defined in a unit gets struct_id 20 -> SLTYPE -20, which is
+# byte-identical to the f64v2 sentinel. The 21st (-21) collides with f64v4.
+# So ANY `var x: <the-20th-or-21st-struct>; x.field` is mis-compiled as a SIMD
+# vector access and hard-errors — even though it is an ordinary struct.
+#
+# ── BOUNDARY (deterministic) ─────────────────────────────────────────────────
+#   19 structs, access the 19th  -> OK (struct_id 19, no collision), runs.
+#   20 structs, access the 20th  -> ERROR (struct_id 20 == -f64v2).
+#   21 structs, access the 21st  -> ERROR (struct_id 21 == -f64v4).
+# struct_ids are assigned sequentially as structs are DEFINED, and they count
+# ALL structs in the compilation unit: explicit `struct`s, enum/tagged-union-
+# generated structs, Result/Option/Either, generic monomorphizations, and every
+# struct in the auto-prepended stdlib + git-dep bundles. So in a real project
+# the collision lands on WHICHEVER struct happens to be the 20th/21st overall —
+# which is why it surfaces as a spooky "adding an unrelated module breaks a
+# different module's field access" (this is exactly how it hit the stiva port:
+# the 10-module aggregate was fine; adding image+registry shifted one of their
+# structs onto id 20/21).
+#
+# ── WHY IT ISN'T CAUGHT MORE OFTEN ───────────────────────────────────────────
+# The collision only fires when the id-20/21 struct is accessed via the
+# `var x: StructName = ...; x.field` typed-local pattern on a REACHABLE path
+# (DCE'd functions are never checked). Code that reaches struct fields via
+# store64/load64 offsets or accessor fns, or whose id-20/21 struct is never
+# field-accessed, silently dodges it.
+#
+# ── SUGGESTED FIX DIRECTION (cycc — NOT changed here) ────────────────────────
+# Disambiguate struct sids from the legacy flat SIMD sentinels. E.g. give
+# f64v2/f64v4 descriptor-band sentinels like the other vectors (<= -2048), or
+# offset struct SLTYPE so struct_id 20/21 never encode to -20/-21, or store a
+# separate is_simd flag instead of overloading the sign of the type word.
+# This file is the reproducer only — the fix belongs in the cyrius compiler.
+# ─────────────────────────────────────────────────────────────────────────────
+
+struct S1  { a; }
+struct S2  { a; }
+struct S3  { a; }
+struct S4  { a; }
+struct S5  { a; }
+struct S6  { a; }
+struct S7  { a; }
+struct S8  { a; }
+struct S9  { a; }
+struct S10 { a; }
+struct S11 { a; }
+struct S12 { a; }
+struct S13 { a; }
+struct S14 { a; }
+struct S15 { a; }
+struct S16 { a; }
+struct S17 { a; }
+struct S18 { a; }
+struct S19 { a; }
+struct S20 { a; }        # <- the 20th struct: struct_id 20
+
+fn main() {
+    var buf[8];
+    var x: S20 = &buf;   # struct_id 20 -> SLTYPE -20 == f64v2 sentinel
+    x.a = 42;            # ERROR here: "SIMD vector has no named fields"
+    return x.a;          # (expected: compiles; program returns 42)
+}
+
+var r = main();
+syscall(60, r);
