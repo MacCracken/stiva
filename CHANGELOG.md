@@ -29,6 +29,14 @@ path was never async-blocked — the kavach Cyrius bundle is 100% blocking (0
 `security_score` are now implemented against it. stiva **launches containers in
 the kavach sandbox** as of 3.0.0.
 
+**CLI wired to the run path.** `stiva run <image> [cmd…]` now works end-to-end —
+image lookup (images.json index) → `prepare_layers` → `setup_overlay` (with the
+`container_root/rootfs` fallback) → `generate_spec` → `exec_container`, printing
+stdout/stderr and returning the container exit code (mirrors rust-old
+`container.rs` create()+start()). `stiva images` (list the index) and
+`stiva info` (version + kavach security score + backend availability) are also
+live. Detached `run -d`, `exec` (nsenter), and the rest remain deferred to v3.1.
+
 **sakshi structured logging folded in.** The dropped Rust `tracing::*` surface is
 restored: `sakshi_set_level(SK_INFO)` at the CLI entry, run-path + implemented
 image/storage/build/audit/network/registry operations emit byte-exact log lines

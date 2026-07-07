@@ -158,13 +158,156 @@ fn _cli_deferred(verb_name) {
     return CMDIT_EXIT_RUN;
 }
 
+# Resolve the container-data root: --root flag, else $STIVA_ROOT, else default.
+fn _cli_root(h, f_root) {
+    var r = cmdit_get_str(h, f_root);
+    if (r != 0) { return r; }
+    var e = getenv("STIVA_ROOT");
+    if (e != 0) { return e; }
+    return "/var/lib/stiva";
+}
+
+# Find an image in the index by exact reference OR id (rust-old: ImageStore
+# lookup resolves ref then id). Returns the Image* or 0.
+fn _cli_find_image(images, ref) {
+    if (images == 0) { return 0; }
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        var iim: Image = im;
+        # reference is an ImageRef* — compare its full "registry/repo:tag" form.
+        if (streq(image_ref_full_ref(iim.reference), ref) == 1) { return im; }
+        if (streq(iim.id, ref) == 1) { return im; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# `run <image> [command...]` — resolve the image, prepare its rootfs, and run
+# the command in a kavach sandbox (one-shot). Mirrors rust-old container.rs
+# create()+start(): image lookup → prepare_layers → setup_overlay (with the
+# container_root/rootfs fallback when the overlay mount is unavailable) →
+# generate_spec → exec_container. Detached (-d) is deferred to v3.1.
+fn _cli_run(h, root) {
+    var vh = cmdit_new("stiva run");
+    var f_name = cmdit_str(vh, 0, "name", 0, "Container name");
+    var f_backend = cmdit_str(vh, 0, "backend", 0, "Sandbox backend: process|oci|noop|gvisor|...");
+    var f_workdir = cmdit_str(vh, 119, "workdir", 0, "Working directory inside the container");
+    var f_detach = cmdit_bool(vh, 100, "detach", "Run detached (deferred to v3.1)");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva run: missing <image>\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    if (cmdit_get_bool(vh, f_detach) == 1) {
+        _cli_puts("stiva run --detach: detached containers are deferred to v3.1\n");
+        _cli_puts("  (kavach's spawn primitive can't yet thread the seccomp/cgroup/secret\n");
+        _cli_puts("   policy — a half-isolated daemon won't ship; run foreground for now)\n");
+        return CMDIT_EXIT_RUN;
+    }
+    var image_ref = cmdit_positional(vh, 0);
+
+    var store = image_store_new(root);
+    if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    var img = _cli_find_image(image_store_load_index(store), image_ref);
+    if (img == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, image_ref);
+        return CMDIT_EXIT_RUN;
+    }
+    var ii: Image = img;
+
+    var layer_dirs = prepare_layers(store, ii.layers);
+    if (layer_dirs == 0) {
+        stiva_err_print(STIVA_ERR_LAYER_UNPACK, image_ref);
+        return CMDIT_EXIT_RUN;
+    }
+
+    var nm = cmdit_get_str(vh, f_name);
+    var cid = nm;
+    if (cid == 0) { cid = _rt_cat2("run-", _rt_int_to_cstr(getpid())); }
+    sys_mkdir(_rt_cat2(root, "/containers"), 493);
+    var croot = _rt_cat3(root, "/containers/", cid);
+    sys_mkdir(croot, 493);
+
+    # setup_overlay needs mount privileges; on failure fall back to
+    # container_root/rootfs (rust-old create() overlay match arm).
+    var overlay = setup_overlay(layer_dirs, croot);
+    var rootfs = 0;
+    if (overlay != 0) {
+        rootfs = load64(overlay + 0);   # OverlayPaths.merged
+    } else {
+        rootfs = _rt_cat2(croot, "/rootfs");
+        sys_mkdir(rootfs, 493);
+    }
+
+    var cfg = container_config_default();
+    var cc: ContainerConfig = cfg;
+    var cmdv = vec_new();
+    var pc = cmdit_positional_count(vh);
+    var pi = 1;
+    while (pi < pc) { vec_push(cmdv, cmdit_positional(vh, pi)); pi = pi + 1; }
+    if (vec_len(cmdv) > 0) { cc.command = cmdv; }
+    var bk = cmdit_get_str(vh, f_backend);
+    if (bk != 0) { cc.backend = bk; }
+    var wd = cmdit_get_str(vh, f_workdir);
+    if (wd != 0) { cc.workdir = wd; }
+    if (nm != 0) { cc.name = nm; }
+
+    var ctr = container_new(cid, nm, ii.id, image_ref_full_ref(ii.reference), CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
+    var spec = generate_spec(ctr, rootfs);
+    if (spec == 0) { return CMDIT_EXIT_RUN; }        # detail printed by generate_spec
+    var res = exec_container(spec);
+    if (res == 0) { return CMDIT_EXIT_RUN; }          # detail printed by exec_container
+
+    var rr: ContainerExecResult = res;
+    if (rr.stdout != 0 && strlen(rr.stdout) > 0) { _cli_puts(rr.stdout); }
+    if (rr.stderr != 0 && strlen(rr.stderr) > 0) { sys_write(2, rr.stderr, strlen(rr.stderr)); }
+    return rr.exit_code;
+}
+
+# `images` — list locally stored images (rust-old: Commands::Images → the
+# images.json index).
+fn _cli_images(root) {
+    var store = image_store_new(root);
+    if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    _cli_puts("REPOSITORY\tIMAGE ID\tSIZE\n");
+    var images = image_store_load_index(store);
+    if (images == 0) { return CMDIT_EXIT_OK; }
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var iim: Image = vec_get(images, i);
+        _cli_puts(image_ref_full_ref(iim.reference)); _cli_puts("\t");
+        _cli_puts(iim.id); _cli_puts("\t");
+        _cli_puts(_rt_int_to_cstr(iim.size_bytes)); _cli_puts("\n");
+        i = i + 1;
+    }
+    return CMDIT_EXIT_OK;
+}
+
+# `info` — runtime information (rust-old: Commands::Info). Version + the kavach
+# security strength score + backend availability.
+fn _cli_info() {
+    _cli_puts("stiva "); _cli_puts(_stiva_version_str()); _cli_puts("\n");
+    _cli_puts("Security score: "); _cli_puts(_rt_int_to_cstr(security_score())); _cli_puts("/100\n");
+    _cli_puts("Backends:\n");
+    _cli_puts("  process: "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.PROCESS))); _cli_puts("\n");
+    _cli_puts("  oci:     "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.OCI))); _cli_puts("\n");
+    _cli_puts("  noop:    "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.NOOP))); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
 fn main() {
     alloc_init();
     kavach_init();               # register sandbox backends (idempotent; needed by the run path)
     sakshi_set_level(SK_INFO);   # structured audit trail to stderr (SK_INFO default)
     var h = cmdit_new("stiva");
     # Global flags — bind before OR after the verb (rust-old: root_path/image_path).
-    cmdit_str(h, 0, "root", 0, "Root directory for container data");
+    var f_root = cmdit_str(h, 0, "root", 0, "Root directory for container data");
     cmdit_str(h, 0, "image-path", 0, "Image storage directory");
     _cli_register_verbs(h);
 
@@ -176,6 +319,9 @@ fn main() {
 
     var v = cmdit_verb_matched(h);
     if (v == V_CONVERT) { return _cli_convert(h); }
+    if (v == V_RUN) { return _cli_run(h, _cli_root(h, f_root)); }
+    if (v == V_IMAGES) { return _cli_images(_cli_root(h, f_root)); }
+    if (v == V_INFO) { return _cli_info(); }
     # Every other verb is the deferred async surface.
     return _cli_deferred(_cli_verb_name(v));
 }

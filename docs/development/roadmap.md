@@ -115,6 +115,12 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > image/storage/build/audit/network/registry surface. Verified emitting via ring
 > assertions in `tests/runpath.tcyr`.
 >
+> **CLI WIRED to the run path (3.0.0).** `stiva run <image> [cmd…]` runs a
+> container end-to-end (index lookup → `prepare_layers` → `setup_overlay` w/
+> rootfs fallback → `generate_spec` → `exec_container`, prints output + returns
+> exit code); `stiva images` and `stiva info` are live too. Verified against the
+> built binary. The other verbs still route to `_cli_deferred` (async surface).
+>
 > **Tests split** — the monolithic `tests/stiva.tcyr` hit the cycc identifier
 > dedup cap (16384); run-path tests live in `tests/runpath.tcyr`, both run via
 > `cyrius tests tests/`. Cap filed as cyrius issue
