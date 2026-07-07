@@ -1,0 +1,350 @@
+# stiva — container storage: overlay filesystem, volumes, tmpfs, layer unpack.
+# Ported from rust-old/src/storage.rs.
+#
+# What ports cleanly here (self-contained or syscall/ported-dep only):
+#   struct VolumeMount { source, target, read_only } + parse_volume
+#   struct OverlayPaths { merged, upper, work, container_root }
+#     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
+#   mount_volumes                          (parse_volume + bind mount syscall)
+#
+# What is DEFERRED (see the block at the bottom):
+#   unpack_layer / unpack_tar_gz / unpack_tar_zstd / prepare_layers — these
+#   drive flate2 (gzip) + zstd + tar stream decoders to unpack layer blobs.
+#   There is no Cyrius stdlib gzip/zstd/tar codec yet, so — exactly like
+#   image.cyr's serde deferral — they land with a compression/tar codec.
+#   prepare_layers additionally calls unpack_layer, so it defers with them
+#   (though its ImageStore/Layer deps — image.cyr — are already ported).
+#
+# Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
+# becomes an integer sentinel here. parse_volume returns 0 (null) on an
+# invalid spec (rust-old: Err(StivaError::Storage(...)); caller reports via
+# stiva_err_print(STIVA_ERR_STORAGE, detail)). setup_overlay returns 0 on
+# no-layers / mount failure (caller: STIVA_ERR_OVERLAY). mount_volumes
+# returns -1 on failure (caller: STIVA_ERR_STORAGE).
+
+# ── small cstr helpers (parity-exact byte handling) ──────────────
+
+# Copy bytes [start, end) of `src` into a fresh NUL-terminated cstr.
+# Returns the heap pointer (empty cstr if end <= start).
+#[must_use]
+fn _stor_slice(src, start, end) {
+    var n = end - start;
+    if (n < 0) { n = 0; }
+    var out = alloc(n + 1);
+    memcpy(out, src + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Fresh copy of a NUL-terminated cstr.
+#[must_use]
+fn _stor_dup(s) {
+    return _stor_slice(s, 0, strlen(s));
+}
+
+# Concatenate two cstrs into a fresh heap cstr.
+#[must_use]
+fn _stor_cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Count occurrences of `byte` in `s` (so split-part count = count+1).
+#[must_use]
+fn _stor_count(s, byte) {
+    var len = strlen(s);
+    var i = 0;
+    var c = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+# Index of the nth (0-based) `byte` in `s`, or -1 if fewer than n+1 present.
+#[must_use]
+fn _stor_nth_index(s, byte, n) {
+    var len = strlen(s);
+    var i = 0;
+    var seen = 0;
+    while (i < len) {
+        if (load8(s + i) == byte) {
+            if (seen == n) { return i; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ── VolumeMount ──────────────────────────
+# A volume mount definition. `read_only` is 1/0 (rust-old: struct VolumeMount).
+struct VolumeMount {
+    source;
+    target;
+    read_only;
+}
+
+fn volume_mount_new(source, target, read_only) {
+    var v = alloc(24);
+    var vv: VolumeMount = v;
+    vv.source = source;
+    vv.target = target;
+    vv.read_only = read_only;
+    return v;
+}
+
+# Parse a volume string `"source:target[:ro]"` (rust-old: parse_volume).
+#
+# 2 parts → { source, target, read_only: false }.
+# 3 parts → read_only = (parts[2] == "ro").
+# Any other count → 0 (rust-old: Err(StivaError::Storage("invalid volume
+# spec: {spec}")); caller reports via stiva_err_print(STIVA_ERR_STORAGE)).
+#[must_use]
+fn parse_volume(spec) {
+    var colons = _stor_count(spec, 58);   # ':' = 58
+    var nparts = colons + 1;
+
+    if (nparts == 2) {
+        var c0 = _stor_nth_index(spec, 58, 0);
+        var source = _stor_slice(spec, 0, c0);
+        var target = _stor_slice(spec, c0 + 1, strlen(spec));
+        return volume_mount_new(source, target, 0);
+    }
+    if (nparts == 3) {
+        var a0 = _stor_nth_index(spec, 58, 0);
+        var a1 = _stor_nth_index(spec, 58, 1);
+        var src = _stor_slice(spec, 0, a0);
+        var tgt = _stor_slice(spec, a0 + 1, a1);
+        var mode = _stor_slice(spec, a1 + 1, strlen(spec));
+        var ro = 0;
+        if (streq(mode, "ro") == 1) { ro = 1; }
+        return volume_mount_new(src, tgt, ro);
+    }
+    return 0;
+}
+
+# ── OverlayPaths ──────────────────────────
+# Overlay directory layout for a container (rust-old: struct OverlayPaths).
+struct OverlayPaths {
+    merged;
+    upper;
+    work;
+    container_root;
+}
+
+fn overlay_paths_new(merged, upper, work, container_root) {
+    var p = alloc(32);
+    var pp: OverlayPaths = p;
+    pp.merged = merged;
+    pp.upper = upper;
+    pp.work = work;
+    pp.container_root = container_root;
+    return p;
+}
+
+# Join a dir cstr and a child name with a '/' separator.
+#[must_use]
+fn _stor_join(dir, name) {
+    var slash = _stor_cat2(dir, "/");
+    return _stor_cat2(slash, name);
+}
+
+# Build the overlay lowerdir option string: layer dirs in REVERSE order
+# (top layer first for overlayfs), joined by ':'. `layers` is a vec of
+# cstr layer-dir pointers; `n` = its length.
+#[must_use]
+fn _stor_lowerdir(layers, n) {
+    var out = _stor_dup("");
+    var i = n - 1;
+    while (i >= 0) {
+        var dir = vec_get(layers, i);
+        out = _stor_cat2(out, dir);
+        if (i > 0) { out = _stor_cat2(out, ":"); }
+        i = i - 1;
+    }
+    return out;
+}
+
+# Prepare overlay directory structure and mount overlayfs
+# (rust-old: setup_overlay). `layers` is a vec of cstr layer-dir pointers
+# ordered bottom-to-top; `container_root` is a cstr.
+#
+# Returns a heap OverlayPaths* on success, or 0 on failure. Rust returns
+# Err(StivaError::Overlay(...)) on: empty layers, invalid overlay options
+# (NUL in string — not reachable here as we build a clean cstr), or a mount
+# failure. Caller reports 0 via stiva_err_print(STIVA_ERR_OVERLAY, detail).
+#
+# NOTE: the upper/work/merged dirs are created REGARDLESS of mount success,
+# matching the Rust ordering (create_dir_all before mount), so a caller
+# testing the dir-setup path observes the same side effects.
+fn setup_overlay(layers, container_root) {
+    if (vec_len(layers) == 0) { return 0; }
+
+    var upper = _stor_join(container_root, "upper");
+    var work = _stor_join(container_root, "work");
+    var merged = _stor_join(container_root, "merged");
+
+    # 0o755 = 493. create_dir_all analogues; EEXIST is idempotent/fine.
+    sys_mkdir(upper, 493);
+    sys_mkdir(work, 493);
+    sys_mkdir(merged, 493);
+
+    # Build "lowerdir={},upperdir={},workdir={}" mount data.
+    var lowerdir = _stor_lowerdir(layers, vec_len(layers));
+    var opts = _stor_dup("lowerdir=");
+    opts = _stor_cat2(opts, lowerdir);
+    opts = _stor_cat2(opts, ",upperdir=");
+    opts = _stor_cat2(opts, upper);
+    opts = _stor_cat2(opts, ",workdir=");
+    opts = _stor_cat2(opts, work);
+
+    # mount("overlay", merged, "overlay", 0, opts). sys_mount returns 0 on
+    # success, negative on failure. Rust maps a mount error to
+    # Err(StivaError::Overlay("mount overlay failed: ...")).
+    var rc = sys_mount("overlay", merged, "overlay", 0, opts);
+    if (rc < 0) { return 0; }
+
+    return overlay_paths_new(merged, upper, work, _stor_dup(container_root));
+}
+
+# Tear down overlay filesystem — unmount and clean up (rust-old:
+# teardown_overlay). Best-effort throughout: an unmount or rmdir failure is
+# ignored (Rust logs a warning / discards the Result). Always returns 0 (Ok).
+#
+# MNT_DETACH = 2 — lazy unmount if busy (rust-old: UnmountFlags::DETACH).
+fn teardown_overlay(paths) {
+    var pp: OverlayPaths = paths;
+
+    if (file_exists(pp.merged) == 1) {
+        sys_umount2(pp.merged, 2);
+    }
+
+    # Clean up writable layers (remove_dir_all analogue).
+    if (file_exists(pp.upper) == 1) {
+        _stor_remove_dir_all(pp.upper);
+    }
+    if (file_exists(pp.work) == 1) {
+        _stor_remove_dir_all(pp.work);
+    }
+
+    return 0;
+}
+
+# Recursively remove a directory tree (remove_dir_all analogue). Best-effort:
+# walks entries via getdents64, recurses into subdirs, unlinks files, then
+# rmdir's `path`. Returns 0 always (failures ignored, matching Rust's
+# `let _ = std::fs::remove_dir_all(...)`).
+#
+# `path` is a cstr. Uses a raw getdents64 walk (Linux dirent64: reclen @16,
+# d_type @18, d_name @19) — overlayfs is Linux-only, matching the rust-old
+# `#[cfg(target_os = "linux")]` gate on the whole teardown mount path.
+#
+# O_RDONLY = 0, O_DIRECTORY = 65536 (0o200000). DT_DIR = 4.
+fn _stor_remove_dir_all(path) {
+    var fd = sys_open(path, 65536, 0);   # O_DIRECTORY (dir-only open)
+    if (fd >= 0) {
+        var buf = alloc(4096);
+        var rgo = 1;
+        while (rgo == 1) {
+            var n = sys_getdents64(fd, buf, 4096);
+            if (n <= 0) { rgo = 0; }
+            else {
+                var pos = 0;
+                while (pos < n) {
+                    var reclen = load16(buf + pos + 16);
+                    var dtype = load8(buf + pos + 18);
+                    var name = buf + pos + 19;
+                    # Skip "." and "..".
+                    var skip = 0;
+                    if (load8(name) == 46) {
+                        if (load8(name + 1) == 0) { skip = 1; }
+                        if (load8(name + 1) == 46) {
+                            if (load8(name + 2) == 0) { skip = 1; }
+                        }
+                    }
+                    if (skip == 0) {
+                        var child = _stor_join(path, name);
+                        if (dtype == 4) {
+                            _stor_remove_dir_all(child);
+                        } else {
+                            sys_unlink(child);
+                        }
+                    }
+                    pos = pos + reclen;
+                }
+            }
+        }
+        sys_close(fd);
+    }
+    sys_rmdir(path);
+    return 0;
+}
+
+# ── mount_volumes ─────────────────────────
+# Mount bind volumes into the container rootfs (rust-old: mount_volumes,
+# Linux path). Each spec is `"source:target[:ro]"`; the target is relative
+# to `merged_rootfs`. `volume_specs` is a vec of cstr specs.
+#
+# Returns a vec of VolumeMount* on success, or 0 on failure. Rust returns
+# Err(StivaError::Storage(...)) on a bad spec (via parse_volume) or a bind
+# mount failure. Caller reports 0 via stiva_err_print(STIVA_ERR_STORAGE).
+#
+# MS_BIND = 4096; MS_RDONLY = 1 (rust-old: MountFlags::BIND / ::RDONLY).
+fn mount_volumes(volume_specs, merged_rootfs) {
+    var mounts = vec_new();
+    var n = vec_len(volume_specs);
+    var i = 0;
+    while (i < n) {
+        var spec = vec_get(volume_specs, i);
+        var vol = parse_volume(spec);
+        if (vol == 0) { return 0; }
+        var vv: VolumeMount = vol;
+
+        # target_in_rootfs = merged_rootfs + vol.target (strip a leading '/').
+        var tgt = vv.target;
+        if (load8(tgt) == 47) { tgt = tgt + 1; }   # '/' = 47
+        var target_in_rootfs = _stor_join(merged_rootfs, tgt);
+
+        # 0o755 = 493. create_dir_all for the mountpoint.
+        sys_mkdir(target_in_rootfs, 493);
+
+        var flags = 4096;                 # MS_BIND
+        if (vv.read_only == 1) { flags = flags + 1; }   # | MS_RDONLY
+
+        var rc = sys_mount(vv.source, target_in_rootfs, "", flags, 0);
+        if (rc < 0) { return 0; }
+
+        vec_push(mounts, vol);
+        i = i + 1;
+    }
+    return mounts;
+}
+
+# ── DEFERRED (land with a gzip/zstd/tar codec) ────────────────
+# rust-old/src/storage.rs also defines, coupled to flate2 (gzip) + zstd +
+# tar stream decoders (no Cyrius stdlib compression/archive codec yet):
+#
+#   fn unpack_layer(blob_path: &Path, dest: &Path) -> Result<(), StivaError>
+#     (opens the blob, tries gzip-tar, falls back to zstd-tar; on both
+#      failing → Err(StivaError::LayerUnpack(...)))
+#   fn unpack_tar_gz(file, dest) -> Result<(), Box<dyn Error>>
+#     (flate2::read::GzDecoder + tar::Archive, overwrite + preserve perms)
+#   fn unpack_tar_zstd(file, dest) -> Result<(), Box<dyn Error>>
+#     (zstd::stream::Decoder + tar::Archive, overwrite + preserve perms)
+#   fn prepare_layers(store: &ImageStore, layers: &[Layer])
+#       -> Result<Vec<PathBuf>, StivaError>
+#     (dedup by digest via a .unpacked marker; for each missing layer,
+#      create_dir_all(layers/<hex>), verify blob exists in blobs/sha256/<hex>
+#      else Err(LayerUnpack("blob not found ...")), unpack_layer, then write
+#      the .unpacked marker; returns the ordered layer dirs. ImageStore/Layer
+#      are already ported in image.cyr — this defers only for unpack_layer.)
+#
+# These are ported alongside a gzip/zstd/tar codec for parity. Tracked in
+# the roadmap.

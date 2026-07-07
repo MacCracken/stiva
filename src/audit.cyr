@@ -274,7 +274,7 @@ struct AuditLog {
 # The Rust also opened the file eagerly with create+append; here the file is
 # created lazily on the first `log` via file_append_locked (O_CREAT). Returns
 # the AuditLog handle, or 0 on allocation failure (documented sentinel).
-fn audit_log_new(path) {
+fn stiva_audit_log_new(path) {
     _audit_ensure_parent(path);
     var log = alloc(8);
     AuditLog_set_path(log, path);

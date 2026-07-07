@@ -1,0 +1,339 @@
+# stiva — TOML-based image build spec: types, defaults, build cache store.
+# Ported from rust-old/src/build.rs.
+#
+# What ports cleanly here (self-contained or depends only on already-ported
+# image.cyr):
+#   struct ImageDef    { base, name, tag }           + default_tag
+#   struct BuildStage  { name, base, steps }
+#   struct BuildConfig { entrypoint, expose, user, workdir }
+#   struct BuildStep   { tag, ... } + enum BuildStep discriminants
+#   struct BuildSpec   { image, steps, config, stages }
+#   store_layer            (sha256_digest + store_blob — both in image.cyr)
+#   check_build_cache / record_build_cache
+#       (the on-disk {root}/cache/{hex} key→digest map; plain file ops)
+#
+# What is DEFERRED (see the block at the bottom):
+#   * parse_build_spec — round-trips TOML through serde (toml::from_str).
+#     The ported base has no TOML object-model parser, so — exactly like
+#     image.cyr's images.json index and convert.cyr's compose deferral —
+#     it lands with a TOML codec.
+#   * build_cache_key — hashes serde_json::to_string(step); needs a JSON
+#     serializer for the tagged BuildStep enum. Lands with the JSON codec.
+#   * build_run_layer / build_copy_layer / append_dir_recursive / build_image
+#     — construct tar.gz layers (flate2 GzEncoder + tar::Builder) and
+#     build_image is async (drives ImageStore::pull over the network). The
+#     ported base has neither a tar builder / gzip encoder nor the async
+#     registry network layer, so these land with those.
+#
+# sha256_digest is NOT re-ported here — build.rs's private copy is
+# byte-identical to image.cyr's public sha256_digest; we reuse that one to
+# avoid a duplicate global (Cyrius hoists fns to globals, last-def-wins).
+#
+# Error mapping (mirrors error.cyr): Rust `Err(StivaError::Storage(String))`
+# becomes an integer sentinel here — store_layer returns 0 on a store
+# failure; the caller reports it via stiva_err_print(STIVA_ERR_STORAGE,
+# detail).
+
+# ── BuildStep discriminant (rust-old: enum BuildStep) ────────────
+# The Rust enum is `#[serde(tag = "type", rename_all = "lowercase")]` and
+# `#[non_exhaustive]`; each variant carries fields. Cyrius has no
+# data-carrying enums, so the discriminant is this enum and the payload
+# lives in the BuildStep struct's fields (unused fields are 0 per variant).
+# Members are prefixed BUILD_STEP_* for global enum-member uniqueness
+# (Cyrius hoists members to globals under last-def-wins — see error.cyr).
+enum BuildStep {
+    BUILD_STEP_RUN = 0;
+    BUILD_STEP_COPY = 1;
+    BUILD_STEP_ENV = 2;
+    BUILD_STEP_WORKDIR = 3;
+    BUILD_STEP_LABEL = 4;
+    BUILD_STEP_FROM_STAGE = 5;
+}
+
+# Serde `type` wire name for a BuildStep discriminant (the lowercase tag
+# values; from_stage keeps its explicit `#[serde(rename = "from_stage")]`).
+#[must_use]
+fn build_step_type_name(kind) {
+    if (kind == BUILD_STEP_RUN) { return "run"; }
+    if (kind == BUILD_STEP_COPY) { return "copy"; }
+    if (kind == BUILD_STEP_ENV) { return "env"; }
+    if (kind == BUILD_STEP_WORKDIR) { return "workdir"; }
+    if (kind == BUILD_STEP_LABEL) { return "label"; }
+    if (kind == BUILD_STEP_FROM_STAGE) { return "from_stage"; }
+    return "unknown";
+}
+
+# A single build step. `kind` selects which fields are meaningful:
+#   RUN        → command   (cstr; the space-joined argv, or a vec — see note)
+#   COPY       → source, destination
+#   ENV        → key, value
+#   WORKDIR    → source     (the path; reuses the `source` slot)
+#   LABEL      → key, value
+#   FROM_STAGE → stage, source, destination
+# Unused slots are 0. In the Rust oracle `command` is a `Vec<String>`; here
+# a BuildStep holds an i64 that a caller may treat as a vec of cstrs.
+struct BuildStep {
+    kind;
+    command;
+    source;
+    destination;
+    key;
+    value;
+    stage;
+}
+
+fn build_step_run(command) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_RUN;
+    ss.command = command;
+    ss.source = 0;
+    ss.destination = 0;
+    ss.key = 0;
+    ss.value = 0;
+    ss.stage = 0;
+    return s;
+}
+
+fn build_step_copy(source, destination) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_COPY;
+    ss.command = 0;
+    ss.source = source;
+    ss.destination = destination;
+    ss.key = 0;
+    ss.value = 0;
+    ss.stage = 0;
+    return s;
+}
+
+fn build_step_env(key, value) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_ENV;
+    ss.command = 0;
+    ss.source = 0;
+    ss.destination = 0;
+    ss.key = key;
+    ss.value = value;
+    ss.stage = 0;
+    return s;
+}
+
+fn build_step_workdir(path) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_WORKDIR;
+    ss.command = 0;
+    ss.source = path;
+    ss.destination = 0;
+    ss.key = 0;
+    ss.value = 0;
+    ss.stage = 0;
+    return s;
+}
+
+fn build_step_label(key, value) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_LABEL;
+    ss.command = 0;
+    ss.source = 0;
+    ss.destination = 0;
+    ss.key = key;
+    ss.value = value;
+    ss.stage = 0;
+    return s;
+}
+
+fn build_step_from_stage(stage, source, destination) {
+    var s = alloc(56);
+    var ss: BuildStep = s;
+    ss.kind = BUILD_STEP_FROM_STAGE;
+    ss.command = 0;
+    ss.source = source;
+    ss.destination = destination;
+    ss.key = 0;
+    ss.value = 0;
+    ss.stage = stage;
+    return s;
+}
+
+# ── ImageDef (rust-old: struct ImageDef) ──────────────────
+# Image identity within a build spec. `tag` defaults to "latest" (serde
+# `#[serde(default = "default_tag")]`).
+struct ImageDef {
+    base;
+    name;
+    tag;
+}
+
+fn image_def_new(base, name, tag) {
+    var d = alloc(24);
+    var dd: ImageDef = d;
+    dd.base = base;
+    dd.name = name;
+    dd.tag = tag;
+    return d;
+}
+
+# Default output tag (rust-old: fn default_tag). Serde default for
+# ImageDef::tag when the TOML omits it.
+#[must_use]
+fn default_tag() {
+    return "latest";
+}
+
+# ── BuildStage (rust-old: struct BuildStage) ────────────────
+# A named multi-stage build stage. `steps` is a vec of BuildStep*.
+struct BuildStage {
+    name;
+    base;
+    steps;
+}
+
+fn build_stage_new(name, base, steps) {
+    var s = alloc(24);
+    var ss: BuildStage = s;
+    ss.name = name;
+    ss.base = base;
+    ss.steps = steps;
+    return s;
+}
+
+# ── BuildConfig (rust-old: struct BuildConfig, derives Default) ──
+# Final image config applied after all steps. `entrypoint` and `expose`
+# are vecs (of cstr / u16 respectively); `user` and `workdir` are cstr or
+# 0 for None (Rust Option<String>).
+struct BuildConfig {
+    entrypoint;
+    expose;
+    user;
+    workdir;
+}
+
+# Default BuildConfig (rust-old: BuildConfig::default): empty entrypoint /
+# expose vecs, user/workdir = None (0).
+fn build_config_default() {
+    var c = alloc(32);
+    var cc: BuildConfig = c;
+    cc.entrypoint = vec_new();
+    cc.expose = vec_new();
+    cc.user = 0;
+    cc.workdir = 0;
+    return c;
+}
+
+fn build_config_new(entrypoint, expose, user, workdir) {
+    var c = alloc(32);
+    var cc: BuildConfig = c;
+    cc.entrypoint = entrypoint;
+    cc.expose = expose;
+    cc.user = user;
+    cc.workdir = workdir;
+    return c;
+}
+
+# ── BuildSpec (rust-old: struct BuildSpec) ─────────────────
+# A full TOML-based image build spec. `steps` / `stages` are vecs of
+# BuildStep* / BuildStage*; `image` is an ImageDef*, `config` a BuildConfig*.
+struct BuildSpec {
+    image;
+    steps;
+    config;
+    stages;
+}
+
+fn build_spec_new(image, steps, config, stages) {
+    var s = alloc(32);
+    var ss: BuildSpec = s;
+    ss.image = image;
+    ss.steps = steps;
+    ss.config = config;
+    ss.stages = stages;
+    return s;
+}
+
+# ── Build cache store ────────────────────────
+# The on-disk key→digest cache under {root}/cache. A cache key is a
+# `sha256:{hex}` string; the file name is the bare hex (Rust strips the
+# "sha256:" prefix with strip_prefix, which is exactly image.cyr's
+# digest_hex). These are plain file operations — no serde — so they port
+# cleanly on top of image.cyr's ImageStore.
+
+# Path "{root}/cache/{hex}" for a cache key (rust-old: the shared
+# `cache_dir.join(cache_key.strip_prefix("sha256:").unwrap_or(cache_key))`).
+#[must_use]
+fn _build_cache_path(store, cache_key) {
+    var root = image_store_root(store);
+    var hex = digest_hex(cache_key);          # strip "sha256:" if present
+    var dir = _img_cat2(root, "/cache/");
+    return _img_cat2(dir, hex);
+}
+
+# Check whether a cached layer digest exists for a cache key
+# (rust-old: check_build_cache). Reads the cache file's contents (the
+# stored layer digest) into `buf` (up to `maxlen`); returns the byte count,
+# or -1 when no cache entry exists (rust-old: None).
+fn check_build_cache(store, cache_key, buf, maxlen) {
+    var path = _build_cache_path(store, cache_key);
+    if (file_exists(path) == 0) { return 0 - 1; }
+    return file_read_all(path, buf, maxlen);
+}
+
+# Record a cache entry mapping a cache key → a layer digest
+# (rust-old: record_build_cache). Creates {root}/cache (idempotent) and
+# writes the digest to the key's file. Returns 0 on success, -1 on a
+# write failure (rust-old: Err(StivaError) via `?`; caller maps to
+# STIVA_ERR_IO).
+fn record_build_cache(store, cache_key, layer_digest) {
+    var root = image_store_root(store);
+    var cache_dir = _img_cat2(root, "/cache");
+    sys_mkdir(cache_dir, 493);                # 0o755 — create_dir_all analogue
+    var path = _build_cache_path(store, cache_key);
+    var n = strlen(layer_digest);
+    if (file_write_all(path, layer_digest, n) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Store a layer blob and return its digest (rust-old: store_layer).
+# Computes sha256 over the `len` bytes at `data`, stores it in the blob
+# store keyed by that digest, and returns the `sha256:{hex}` digest cstr.
+# Returns 0 on a store failure (rust-old: Err(StivaError) via `?`; caller
+# maps to STIVA_ERR_STORAGE).
+fn store_layer(store, data, len) {
+    var digest = sha256_digest(data, len);
+    if (image_store_store_blob(store, digest, data, len) == 0) { return 0; }
+    return digest;
+}
+
+# ── DEFERRED (land with a TOML codec + JSON codec + tar/gzip + async net) ──
+# rust-old/src/build.rs also defines, coupled to serde (toml/json), to a
+# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
+#
+#   TOML codec (serde toml::from_str of BuildSpec, a nested-struct + tagged
+#   BuildStep tree):
+#     fn parse_build_spec(toml_str: &str) -> Result<BuildSpec, StivaError>
+#
+#   JSON codec (serde_json::to_string of the tagged BuildStep enum):
+#     fn build_cache_key(base_digest, step_index, step: &BuildStep) -> String
+#
+#   tar.gz layer builders (flate2 GzEncoder + tar::Builder/Header; not in
+#   the ported base):
+#     fn build_run_layer(command: &[String], step_index) -> Result<Vec<u8>>
+#     fn build_copy_layer(context_dir, source, destination) -> Result<Vec<u8>>
+#     fn append_dir_recursive<W: Write>(archive, src_dir, dest_prefix)
+#         -> Result<(), StivaError>
+#   (these also serialize the OCI image config JSON: struct OciImageConfig,
+#    OciContainerConfig, OciRootFs — all serde-derived, defer with the JSON
+#    codec.)
+#
+#   async build driver (drives ImageStore::pull over the network — deferred
+#   in image.cyr with the registry network layer — plus the tar/json above):
+#     async fn build_image(spec, image_store, registry_client, context_dir)
+#         -> Result<Image, StivaError>
+#
+# These are ported alongside the TOML codec, the JSON codec, the tar/gzip
+# layer builder, and the async registry network layer for parity. Tracked
+# in the roadmap.

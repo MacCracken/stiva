@@ -40,7 +40,10 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] `network_rootless` — RootlessNetworkBackend/PortMapping/parse_port_mappings/is_unprivileged/which/available_backends/select_backend; async slirp4netns/pasta spawn DEFERRED (needs async process runtime); `+`-sign u16 parse fixed
 - [x] `image` — ImageRef parse + full_ref, Layer/Image structs, sha256_digest (sigil sha256), content-addressable ImageStore (new/store_blob/has_blob/read_blob); mkdir-failure + digest-mismatch fixes. JSON `images.json` index + async pull/push/verify DEFERRED (need a JSON codec + registry net layer).
 - [x] `registry` — OCI media types, ref/digest/manifest/descriptor/platform struct parsing, `parse_www_authenticate`, `normalize_arch`, `registry_host`. Entire async HTTP client + auth + credential store + mirror config DEFERRED (need net/sandhi/TLS/JSON).
-- [ ] dep-free next: `storage` (needs image), `build` (needs image+registry); `agent`/`fleet` need `container`
+- [x] `storage` — VolumeMount/parse_volume, OverlayPaths + setup/teardown_overlay (mkdir + overlay mount/umount2 + recursive rm via getdents64), mount_volumes (bind mounts). tar/gzip/zstd layer unpack DEFERRED (no Cyrius codec).
+- [x] `build` — ImageDef/BuildStep/BuildConfig types + step names, sha256 helper. TOML Stivafile parse + multi-stage tar.gz layer builder + build cache DEFERRED (need TOML/JSON + tar/gzip).
+- [x] **AGNOS deps wired** (probe-validated, cc 6.4.14): full `sigil` + `kavach 3.7.0`/`majra 2.5.0`/`nein 1.6.2`/`bote 3.0.0`(core)/`agnodrm 1.4.5` + transitive `libro`/`sakshi`, stdlib union. Our `audit_log_new`/`port_mapping_new` → `stiva_*` to avoid bundle collisions. ~37 benign cross-bundle "duplicate fn (last-def-wins)" warnings (shared agnos helpers — ecosystem norm).
+- [ ] dep-heavy (in progress): `encrypted`(agnodrm) · `network_nat`/`network_manager`(nein) · then `runtime`+`container`(kavach/majra, circular pair) · `health`/`ansamblu`(majra) · `mcp`(bote) · `lib` (crate root). `agent`/`fleet` need `container`.
 
 > **✅ cycc struct-id/SIMD-sentinel blocker — RESOLVED in cyrius 6.4.14.**
 > Wiring image+registry had grown the unit so a struct landed on **struct-id
@@ -65,12 +68,21 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - `audit` — `AuditLog::new` is *lazy* (file created on first append) vs Rust *eager* (create+append at construction): error surfaces at first `log`, not `new`. Also `metadata` on read is left null (round-trip inspects op/ids/result only, matching the Rust tests).
 - `convert` — ENTRYPOINT JSON-array parsing is a minimal quoted-token scan; interior `\"` escapes and malformed arrays diverge from serde_json (fine for well-formed Dockerfiles; needs a real JSON layer for full parity). ENTRYPOINT last-wins + shell-form were fixed to match.
 - **Idiom note**: this stdlib `strstr` returns a 0-based INDEX (`-1` absent), NOT a C pointer — the first audit port had a pointer-vs-index bug (`at + strlen(key)`) that only the integration build+test caught, not the agent's syntax-only `cyrius check`. Central build+test after each batch is mandatory.
-- [ ] dep-heavy (need AGNOS dep wiring): `runtime`+`main`→kavach · `container`→kavach/majra · `ansamblu`+`health`→majra · `network/{nat,manager}`→nein · `mcp`→bote · `encrypted`→agnodrm · `lib`→kavach/majra/nein
-- [ ] **Re-wire AGNOS deps** to the Cyrius `dist/*.cyr` bundles (kavach 3.7.0, majra 2.5.0, nein 1.6.2, bote 3.0.0, agnodrm 1.4.5). Recipe derived from `dist/*.deps` sidecars; wired per-consuming-module + transitive git deps (sigil/libro/sakshi) + stdlib union. Probe-build before the first consuming module.
-- [ ] **Port the `stiva` CLI** (34 subcommands) onto `src/main.cyr` (`args.cyr` dispatch)
-- [ ] **Parity validation** — every module cross-checked vs Rust (the workflow's verify stage); record accepted divergences as ADRs
-- [ ] **Test + benchmark parity** — port the suite (434 tests / 20 benches) and prove no regression
-- [ ] **Cleanup** — `distlib` → `dist/stiva.cyr`; remove `rust-old/` after full parity (kavach precedent); version → 3.0.0; zugot recipe
+- [x] **All 16 Rust modules ported** → 25 Cyrius domain modules (network split into 7; `lib.rs` → `stiva_core.cyr` + the aggregation header): `health`(majra), `ansamblu`(majra), `agent`, `fleet`, `mcp`(bote), plus the crate-root `stiva_core` (StivaConfig + the deferred Stiva facade). Runtime memory bugs the agents introduced (dangling struct-literal returns, map-key-type, single-field-struct semantics) fixed + baked into the port playbook.
+- [x] **Re-wire AGNOS deps** to the Cyrius `dist/*.cyr` bundles (kavach 3.7.0, majra 2.5.0, nein 1.6.2, bote 3.0.0/core, agnodrm 1.4.5) + transitive `sigil`/`libro`/`sakshi` + stdlib union. Probe-validated in isolation first. `audit_log_new`/`port_mapping_new` → `stiva_*` to avoid bundle collisions.
+- [x] **Port the `stiva` CLI** — `src/main.cyr` uses the **cmdit** library (verb dispatch, getopt-long), NOT hand-rolled argv: all 33 subcommands registered as verbs with generated `--help`/`--version`. `convert` has ported backing (Dockerfile→Stivafile via `dockerfile_to_toml`); the container-lifecycle verbs print a clear "deferred to v3.1" message (they drive the async facade).
+- [x] **Parity validation** — every module cross-checked vs the Rust oracle by the workflow's adversarial verify stage; accepted divergences recorded above.
+- [x] **Test parity** — 697 Cyrius tests (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`, all green; `cyrius bench`/`fmt`/`lint` clean.
+- [x] **distlib** → `dist/stiva.cyr` (8,863-line bundle); version → **3.0.0**.
+
+> **v3.0.0 = the PORT (structure + pure logic + syscall surface). DEFERRED to
+> v3.1** (needs Cyrius async runtime + tar/gzip/zstd + full HTTP/TLS/JSON codecs):
+> the async container-execution surface — kavach sandbox exec/spawn, cgroups v2
+> limits/stats, CRIU checkpoint/restore, tar/gzip/zstd layer pack/unpack, the
+> registry HTTP pull/push client, the images.json JSON index, compose-YAML
+> convert, and the async `Stiva` facade (~40 orchestration methods in
+> `stiva_core.cyr`). Each is documented in a `# ── DEFERRED ──` block in its
+> module. `rust-old/` stays as the parity oracle until that surface lands.
 
 ---
 

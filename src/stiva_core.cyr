@@ -1,0 +1,73 @@
+# stiva — crate-root surface (StivaConfig + the Stiva runtime facade)
+# Ported from rust-old/src/lib.rs.
+#
+# rust-old/src/lib.rs is the crate root: it re-exports the domain modules
+# (that aggregation lives in src/lib.cyr) AND defines `StivaConfig` (ported
+# below) + the top-level `Stiva` runtime facade. `Stiva` and its ~40
+# orchestration methods drive not-yet-ported async surfaces
+# (ContainerManager, RegistryClient, AuditLog::new, ImageStore async pull/
+# push) — captured in the DEFERRED block at the bottom, matching the
+# container/registry precedent.
+
+# ── StivaConfig (rust-old: struct StivaConfig) ────────────────
+# Configuration for the stiva runtime. Fields:
+#   root_path       — cstr, default "/var/lib/agnos/containers"
+#   image_path      — cstr, default "/var/lib/agnos/images"
+#   default_network — NetworkModeVal pointer (network_mod.cyr), default Bridge
+#   max_containers  — i64 (Rust usize), default 64
+#   audit_log       — cstr path or 0 for None (Rust Option<PathBuf>), default 0
+# 5 fields × 8 = 40 bytes.
+struct StivaConfig {
+    root_path;
+    image_path;
+    default_network;
+    max_containers;
+    audit_log;
+}
+
+# Heap constructor — explicit field values.
+#[must_use]
+fn stiva_config_new(root_path, image_path, default_network, max_containers, audit_log) {
+    var p = alloc(40);
+    var c: StivaConfig = p;
+    c.root_path = root_path;
+    c.image_path = image_path;
+    c.default_network = default_network;
+    c.max_containers = max_containers;
+    c.audit_log = audit_log;
+    return p;
+}
+
+# Default StivaConfig (rust-old: impl Default for StivaConfig).
+# root "/var/lib/agnos/containers", image "/var/lib/agnos/images",
+# NetworkMode::Bridge, max_containers 64, audit_log None (0).
+#[must_use]
+fn stiva_config_default() {
+    var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    return stiva_config_new(
+        "/var/lib/agnos/containers",
+        "/var/lib/agnos/images",
+        net,
+        64,
+        0
+    );
+}
+
+# ── DEFERRED (land with the async runtime / orchestration layer) ──
+# rust-old/src/lib.rs also defines the top-level runtime facade, which is
+# stateful orchestration over surfaces that are themselves DEFERRED in their
+# home modules (ContainerManager → container.cyr, RegistryClient →
+# registry.cyr, AuditLog::new → audit.cyr, ImageStore async pull/push/list/
+# remove/gc → image.cyr). It needs an async runtime, shared Arc/locks, and
+# majra pub/sub, none of which the ported base provides yet. Faithful port
+# lands alongside those async layers.
+#
+#   struct Stiva { image_store, registry_client, containers, audit, config }
+#   async fn Stiva::new(config) / with_registry(config, RegistryConfig)
+#   async fn pull/run/ps/stop/rm/restart/signal/pause/unpause/stats/build/push
+#   async fn images/inspect/prune/top/export/wait/exec/logs/log_tail
+#   fn rmi/tag/inspect_image/import/security_score/gc/audit/emit_audit/event_bus
+#   async fn cp_into/cp_from/checkpoint/restore/prepare_migration/apply_migration
+#   async fn rename/update/get_rootfs
+#   async fn ansamblu_up/ansamblu_down/ansamblu_scale/service_logs  [feature=ansamblu]
+#   async fn container_security_score

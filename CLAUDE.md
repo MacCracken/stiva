@@ -7,16 +7,21 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **MSRV**: 1.89
-- **Version**: SemVer, currently 2.0.0
+- **Version**: SemVer, currently 3.0.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ⚠️ Porting Status — v3.0.0: Rust → Cyrius (IN PROGRESS)
+## ⚠️ Porting Status — v3.0.0: Rust → Cyrius (STRUCTURE COMPLETE; async → v3.1)
 
-Stiva is being ported from Rust to the **Cyrius** language, following the AGNOS
-ecosystem port pattern (kavach, majra, nein, bote, agnodrm, vidya are done).
+Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
+pattern). **v3.0.0** = all 16 Rust modules → 25 Cyrius `src/*.cyr` domain modules
++ the CLI, **697 tests green**, `dist/stiva.cyr` built, pin 6.4.15. The **async
+container-execution surface** (kavach exec, cgroups, CRIU, tar/gzip/zstd, the
+registry HTTP client, JSON/YAML codecs, the async `Stiva` facade in
+`stiva_core.cyr`) is **DEFERRED to v3.1** in per-module `# ── DEFERRED ──` blocks
+— it needs Cyrius async runtime + codecs. `rust-old/` stays the oracle until then.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.

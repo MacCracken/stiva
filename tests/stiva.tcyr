@@ -12,8 +12,21 @@ include "src/network_bridge.cyr"
 include "src/network_dns.cyr"
 include "src/network_pool.cyr"
 include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+include "src/mcp.cyr"
+include "src/stiva_core.cyr"
 
 # ── error.cyr (rust-old/src/error.rs) ────────────────────────────
 fn test_error_names() {
@@ -172,7 +185,7 @@ fn test_audit_log_write_and_read() {
     test_group("audit_log_write_and_read");
     var path = "/tmp/stiva_audit_test_wr.log";
     xunlink(path);
-    var log = audit_log_new(path);
+    var log = stiva_audit_log_new(path);
     audit_log_log(log, audit_entry_container(AUDIT_OP_CREATE, "c1", AUDIT_RESULT_SUCCESS, 0));
     audit_log_log(log, audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0));
     audit_log_log(log, audit_entry_image(AUDIT_OP_PULL, "nginx", AUDIT_RESULT_SUCCESS, 0));
@@ -188,7 +201,7 @@ fn test_audit_log_read_limit() {
     test_group("audit_log_read_limit");
     var path = "/tmp/stiva_audit_test_lim.log";
     xunlink(path);
-    var log = audit_log_new(path);
+    var log = stiva_audit_log_new(path);
     var i = 0;
     while (i < 10) {
         audit_log_log(log, audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0));
@@ -204,7 +217,7 @@ fn test_audit_log_empty() {
     test_group("audit_log_empty");
     var path = "/tmp/stiva_audit_test_empty.log";
     xunlink(path);
-    var log = audit_log_new(path);
+    var log = stiva_audit_log_new(path);
     var entries = audit_log_read_entries(log, 10);
     assert_eq(vec_len(entries), 0, "eq");
     xunlink(path);
@@ -970,6 +983,1449 @@ fn test_registry_credential() {
     return 0;
 }
 
+
+# ── storage.cyr (rust-old/src/storage.rs) ──
+fn test_parse_volume_rw() {
+    test_group("parse_volume_rw");
+    var vol = parse_volume("/data:/mnt/data");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(streq(vv.source, "/data"), 1, "source");
+    assert_eq(streq(vv.target, "/mnt/data"), 1, "target");
+    assert_eq(vv.read_only, 0, "rw");
+    return 0;
+}
+
+fn test_parse_volume_ro() {
+    test_group("parse_volume_ro");
+    var vol = parse_volume("/config:/etc/config:ro");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(vv.read_only, 1, "ro");
+    return 0;
+}
+
+fn test_parse_volume_invalid() {
+    test_group("parse_volume_invalid");
+    assert_eq(parse_volume("nocolon"), 0, "nocolon is null");
+    return 0;
+}
+
+fn test_parse_volume_too_many_parts() {
+    test_group("parse_volume_too_many_parts");
+    assert_eq(parse_volume("/a:/b:ro:extra"), 0, "4 parts is null");
+    return 0;
+}
+
+fn test_parse_volume_rw_explicit() {
+    test_group("parse_volume_rw_explicit");
+    var vol = parse_volume("/src:/dst:rw");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(vv.read_only, 0, "rw explicit is not ro");
+    return 0;
+}
+
+fn test_parse_named_volume() {
+    test_group("parse_named_volume");
+    var vol = parse_volume("pgdata:/var/lib/postgresql/data");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(streq(vv.source, "pgdata"), 1, "named source");
+    assert_eq(streq(vv.target, "/var/lib/postgresql/data"), 1, "named target");
+    assert_eq(vv.read_only, 0, "rw");
+    return 0;
+}
+
+fn test_parse_volume_empty_string() {
+    test_group("parse_volume_empty_string");
+    assert_eq(parse_volume(""), 0, "empty string is null");
+    return 0;
+}
+
+# Mirrors setup_overlay_no_layers: empty layer vec => 0 (Err(Overlay)).
+fn test_setup_overlay_no_layers() {
+    test_group("setup_overlay_no_layers");
+    var empty = vec_new();
+    assert_eq(setup_overlay(empty, "/tmp/stiva-storage-test"), 0, "no layers is null");
+    return 0;
+}
+
+# Mirrors overlay_paths_debug: fields round-trip through the struct.
+fn test_overlay_paths_fields() {
+    test_group("overlay_paths_fields");
+    var p = overlay_paths_new("/merged", "/upper", "/work", "/root");
+    var pp: OverlayPaths = p;
+    assert_eq(streq(pp.merged, "/merged"), 1, "merged");
+    assert_eq(streq(pp.upper, "/upper"), 1, "upper");
+    assert_eq(streq(pp.work, "/work"), 1, "work");
+    assert_eq(streq(pp.container_root, "/root"), 1, "container_root");
+    return 0;
+}
+
+# Mirrors mount_volumes_empty: empty specs vec => empty (non-null) result.
+fn test_mount_volumes_empty() {
+    test_group("mount_volumes_empty");
+    var specs = vec_new();
+    var mounts = mount_volumes(specs, "/tmp/stiva-storage-test");
+    assert(mounts != 0, "non-null");
+    assert_eq(vec_len(mounts), 0, "empty");
+    return 0;
+}
+
+# ── build.cyr (rust-old/src/build.rs) ──
+# ── build.cyr (rust-old/src/build.rs) ────────────────────────────
+# Mirrors the portable subset of build.rs's #[cfg(test)] module. The
+# parse_build_spec / serde-round-trip / tar.gz layer-builder tests are
+# DEFERRED with their functions (TOML/JSON codec + tar/gzip), so they are
+# not mirrored here.
+
+fn test_build_default_tag() {
+    test_group("build_default_tag");
+    # rust-old: image_def_default_tag — default_tag() == "latest"
+    assert_eq(streq(default_tag(), "latest"), 1, "default tag latest");
+    return 0;
+}
+
+fn test_build_config_default() {
+    test_group("build_config_default");
+    # rust-old: build_config_default — empty entrypoint/expose, None user/workdir
+    var c = build_config_default();
+    var cc: BuildConfig = c;
+    assert_eq(vec_len(cc.entrypoint), 0, "entrypoint empty");
+    assert_eq(vec_len(cc.expose), 0, "expose empty");
+    assert_eq(cc.user, 0, "user none");
+    assert_eq(cc.workdir, 0, "workdir none");
+    return 0;
+}
+
+fn test_build_step_type_names() {
+    test_group("build_step_type_names");
+    # serde `type` tag wire names (rename_all=lowercase; from_stage explicit)
+    assert_eq(streq(build_step_type_name(BUILD_STEP_RUN), "run"), 1, "run");
+    assert_eq(streq(build_step_type_name(BUILD_STEP_COPY), "copy"), 1, "copy");
+    assert_eq(streq(build_step_type_name(BUILD_STEP_ENV), "env"), 1, "env");
+    assert_eq(streq(build_step_type_name(BUILD_STEP_WORKDIR), "workdir"), 1, "workdir");
+    assert_eq(streq(build_step_type_name(BUILD_STEP_LABEL), "label"), 1, "label");
+    assert_eq(streq(build_step_type_name(BUILD_STEP_FROM_STAGE), "from_stage"), 1, "from_stage");
+    return 0;
+}
+
+fn test_build_step_variants() {
+    test_group("build_step_variants");
+    # Mirrors rust-old step_variants: the payload each variant carries.
+    var run = build_step_run(0);
+    var rr: BuildStep = run;
+    assert_eq(rr.kind, BUILD_STEP_RUN, "run kind");
+
+    var cp = build_step_copy("./app", "/app");
+    var cc: BuildStep = cp;
+    assert_eq(cc.kind, BUILD_STEP_COPY, "copy kind");
+    assert_eq(streq(cc.source, "./app"), 1, "copy source");
+    assert_eq(streq(cc.destination, "/app"), 1, "copy destination");
+
+    var ev = build_step_env("PORT", "8080");
+    var ee: BuildStep = ev;
+    assert_eq(ee.kind, BUILD_STEP_ENV, "env kind");
+    assert_eq(streq(ee.key, "PORT"), 1, "env key");
+    assert_eq(streq(ee.value, "8080"), 1, "env value");
+
+    var wd = build_step_workdir("/app");
+    var ww: BuildStep = wd;
+    assert_eq(ww.kind, BUILD_STEP_WORKDIR, "workdir kind");
+    assert_eq(streq(ww.source, "/app"), 1, "workdir path");
+
+    var lb = build_step_label("maintainer", "stiva");
+    var ll: BuildStep = lb;
+    assert_eq(ll.kind, BUILD_STEP_LABEL, "label kind");
+    assert_eq(streq(ll.key, "maintainer"), 1, "label key");
+    assert_eq(streq(ll.value, "stiva"), 1, "label value");
+
+    var fs = build_step_from_stage("builder", "/out", "/app");
+    var ff: BuildStep = fs;
+    assert_eq(ff.kind, BUILD_STEP_FROM_STAGE, "from_stage kind");
+    assert_eq(streq(ff.stage, "builder"), 1, "from_stage stage");
+    assert_eq(streq(ff.source, "/out"), 1, "from_stage source");
+    assert_eq(streq(ff.destination, "/app"), 1, "from_stage destination");
+    return 0;
+}
+
+fn test_build_sha256_digest() {
+    test_group("build_sha256_digest");
+    # rust-old sha256_digest_known_value / _deterministic (build.rs's private
+    # sha256_digest is byte-identical to image.cyr's public one, reused here).
+    var empty = sha256_digest("", 0);
+    assert_eq(streq(empty, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), 1, "sha256 of empty");
+    var a = sha256_digest("hello world", 11);
+    var b = sha256_digest("hello world", 11);
+    assert_eq(streq(a, b), 1, "sha256 deterministic");
+    return 0;
+}
+
+
+# ── network_nat.cyr (rust-old/src/network/nat.rs) ──
+fn test_nat_parse() {
+    test_group("nat_parse");
+
+    # parse_simple_port
+    var s1 = network_nat_parse_port_spec("8080:80");
+    assert(s1 != 0, "simple ok");
+    assert_eq(port_spec_host_port(s1), 8080, "host 8080");
+    assert_eq(port_spec_container_port(s1), 80, "cont 80");
+    assert_eq(port_spec_protocol(s1), NETWORK_NAT_PROTO_TCP, "tcp");
+    assert_eq(port_spec_has_host_addr(s1), 0, "no addr (host_addr none)");
+
+    # parse_port_with_tcp
+    var s2 = network_nat_parse_port_spec("8080:80/tcp");
+    assert(s2 != 0, "explicit tcp ok");
+    assert_eq(port_spec_protocol(s2), NETWORK_NAT_PROTO_TCP, "explicit tcp");
+
+    # parse_port_with_udp
+    var s3 = network_nat_parse_port_spec("53:53/udp");
+    assert(s3 != 0, "udp ok");
+    assert_eq(port_spec_protocol(s3), NETWORK_NAT_PROTO_UDP, "udp");
+    assert_eq(port_spec_host_port(s3), 53, "udp host 53");
+    assert_eq(port_spec_container_port(s3), 53, "udp cont 53");
+
+    # parse_port_with_bind_addr — 0.0.0.0 = 0
+    var s4 = network_nat_parse_port_spec("0.0.0.0:8080:80");
+    assert(s4 != 0, "bind addr ok");
+    assert_eq(port_spec_has_host_addr(s4), 1, "has addr");
+    assert_eq(port_spec_host_addr(s4), 0, "addr 0.0.0.0");
+    assert_eq(port_spec_host_port(s4), 8080, "bindaddr host 8080");
+    assert_eq(port_spec_container_port(s4), 80, "bindaddr cont 80");
+
+    # parse_port_with_localhost — 127.0.0.1 = 2130706433
+    var s5 = network_nat_parse_port_spec("127.0.0.1:3000:3000/tcp");
+    assert(s5 != 0, "localhost ok");
+    assert_eq(port_spec_has_host_addr(s5), 1, "localhost has addr");
+    assert_eq(port_spec_host_addr(s5), 2130706433, "127.0.0.1 value");
+    assert_eq(port_spec_protocol(s5), NETWORK_NAT_PROTO_TCP, "localhost tcp");
+
+    # invalid cases → 0 (Rust: is_err())
+    assert_eq(network_nat_parse_port_spec(""), 0, "empty");
+    assert_eq(network_nat_parse_port_spec("8080"), 0, "no colon");
+    assert_eq(network_nat_parse_port_spec("8080:80/sctp"), 0, "bad proto");
+    assert_eq(network_nat_parse_port_spec("99999:80"), 0, "port too big (u16 overflow)");
+    assert_eq(network_nat_parse_port_spec("8080:abc"), 0, "non-numeric port");
+    assert_eq(network_nat_parse_port_spec("not-an-ip:8080:80"), 0, "bad bind addr");
+
+    # trim
+    var s6 = network_nat_parse_port_spec("  8080:80  ");
+    assert(s6 != 0, "trimmed ok");
+    assert_eq(port_spec_host_port(s6), 8080, "trimmed host 8080");
+
+    # port_protocol_default
+    assert_eq(network_nat_proto_default(), NETWORK_NAT_PROTO_TCP, "default tcp");
+
+    # ipv4 format roundtrip (used by network_nat_to_nein_port_mapping addr string)
+    assert_eq(streq(_network_nat_fmt_ipv4(2130706433), "127.0.0.1"), 1, "fmt 127.0.0.1");
+    return 0;
+}
+
+
+# ── network_manager.cyr (rust-old/src/network/manager.rs) ──
+fn test_network_manager_creates_default_network() {
+    test_group("network_manager_creates_default_network");
+    var mgr = network_manager_new();
+    assert(mgr != 0, "new manager");
+    assert_eq(network_manager_has_network(mgr, network_manager_default_bridge()), 1, "default bridge present");
+    return 0;
+}
+
+fn test_network_manager_create_custom_network() {
+    test_group("network_manager_create_custom_network");
+    var mgr = network_manager_new();
+    var rc = network_manager_create_network(mgr, "mynet", "10.0.0.0/24");
+    assert_eq(rc, STIVA_ERR_OK, "create mynet ok");
+    assert_eq(network_manager_has_network(mgr, "mynet"), 1, "mynet present");
+    return 0;
+}
+
+fn test_network_manager_create_duplicate_network_fails() {
+    test_group("network_manager_create_duplicate_network_fails");
+    var mgr = network_manager_new();
+    var rc = network_manager_create_network(mgr, network_manager_default_bridge(), "10.0.0.0/24");
+    assert_eq(rc, STIVA_ERR_NETWORK, "duplicate default bridge errors");
+    return 0;
+}
+
+fn test_network_manager_delete_network() {
+    test_group("network_manager_delete_network");
+    var mgr = network_manager_new();
+    var rc1 = network_manager_create_network(mgr, "temp", "10.1.0.0/24");
+    assert_eq(rc1, STIVA_ERR_OK, "create temp ok");
+    var rc2 = network_manager_delete_network(mgr, "temp");
+    assert_eq(rc2, STIVA_ERR_OK, "delete temp ok");
+    assert_eq(network_manager_has_network(mgr, "temp"), 0, "temp gone");
+    return 0;
+}
+
+fn test_network_manager_delete_nonexistent_network_fails() {
+    test_group("network_manager_delete_nonexistent_network_fails");
+    var mgr = network_manager_new();
+    var rc = network_manager_delete_network(mgr, "nope");
+    assert_eq(rc, STIVA_ERR_NETWORK, "delete unknown errors");
+    return 0;
+}
+
+fn test_network_manager_connect_container_allocates_ip() {
+    test_group("network_manager_connect_container_allocates_ip");
+    var mgr = network_manager_new();
+    var empty = vec_new();
+    var cn = network_manager_connect_container(mgr, "container-abc123", network_manager_default_bridge(), empty, 0);
+    assert(cn != 0, "connected");
+    var c: ContainerNetwork = cn;
+    assert_eq(streq(c.network_name, network_manager_default_bridge()), 1, "network name is default bridge");
+    # 172.17.0.2 as u32 host value = 0xAC110002 = 2886795266.
+    assert_eq(c.ip, 2886795266, "ip is 172.17.0.2");
+    return 0;
+}
+
+fn test_network_manager_connect_multiple_containers() {
+    test_group("network_manager_connect_multiple_containers");
+    var mgr = network_manager_new();
+    var e1 = vec_new();
+    var cn1 = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), e1, 0);
+    var e2 = vec_new();
+    var cn2 = network_manager_connect_container(mgr, "c2-abcdef123456", network_manager_default_bridge(), e2, 0);
+    assert(cn1 != 0, "cn1");
+    assert(cn2 != 0, "cn2");
+    var a: ContainerNetwork = cn1;
+    var b: ContainerNetwork = cn2;
+    assert_neq(a.ip, b.ip, "distinct ips");
+    return 0;
+}
+
+fn test_network_manager_disconnect_container_releases_ip() {
+    test_group("network_manager_disconnect_container_releases_ip");
+    var mgr = network_manager_new();
+    var e1 = vec_new();
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), e1, 0);
+    assert(cn != 0, "connected");
+    var before = ip_pool_allocated_count(network_manager_get_pool(mgr, network_manager_default_bridge()));
+    assert_eq(before, 1, "1 allocated before");
+    var rc = network_manager_disconnect_container(mgr, "c1-abcdef123456");
+    assert_eq(rc, STIVA_ERR_OK, "disconnect ok");
+    var after = ip_pool_allocated_count(network_manager_get_pool(mgr, network_manager_default_bridge()));
+    assert_eq(after, 0, "0 allocated after");
+    return 0;
+}
+
+fn test_network_manager_disconnect_nonexistent_fails() {
+    test_group("network_manager_disconnect_nonexistent_fails");
+    var mgr = network_manager_new();
+    var rc = network_manager_disconnect_container(mgr, "nope");
+    assert_eq(rc, STIVA_ERR_NETWORK, "disconnect unknown errors");
+    return 0;
+}
+
+fn test_network_manager_delete_network_with_connections_fails() {
+    test_group("network_manager_delete_network_with_connections_fails");
+    var mgr = network_manager_new();
+    var rc1 = network_manager_create_network(mgr, "busy", "10.2.0.0/24");
+    assert_eq(rc1, STIVA_ERR_OK, "create busy ok");
+    var e1 = vec_new();
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", "busy", e1, 0);
+    assert(cn != 0, "connected to busy");
+    var rc2 = network_manager_delete_network(mgr, "busy");
+    assert_eq(rc2, STIVA_ERR_NETWORK, "delete busy with connections errors");
+    return 0;
+}
+
+fn test_network_manager_connect_with_port_specs() {
+    test_group("network_manager_connect_with_port_specs");
+    var mgr = network_manager_new();
+    var ports = vec_new();
+    vec_push(ports, "8080:80");
+    vec_push(ports, "443:443/tcp");
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), ports, 0);
+    assert(cn != 0, "connected with ports");
+    var c: ContainerNetwork = cn;
+    assert_eq(c.ip, 2886795266, "ip is 172.17.0.2");
+    return 0;
+}
+
+fn test_network_manager_connect_with_invalid_port_fails() {
+    test_group("network_manager_connect_with_invalid_port_fails");
+    var mgr = network_manager_new();
+    var ports = vec_new();
+    vec_push(ports, "not-a-port");
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), ports, 0);
+    assert_eq(cn, 0, "invalid port spec errors");
+    return 0;
+}
+
+fn test_network_manager_connect_to_nonexistent_network_fails() {
+    test_group("network_manager_connect_to_nonexistent_network_fails");
+    var mgr = network_manager_new();
+    var e1 = vec_new();
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", "nope", e1, 0);
+    assert_eq(cn, 0, "connect to unknown network errors");
+    return 0;
+}
+
+fn test_network_manager_connect_with_dns_injection() {
+    test_group("network_manager_connect_with_dns_injection");
+    var root = "/tmp/stiva-nm-dns-test";
+    sys_mkdir(root, 0x1FF);
+    var mgr = network_manager_new();
+    var e1 = vec_new();
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), e1, root);
+    assert(cn != 0, "connected with rootfs");
+    assert_eq(file_exists("/tmp/stiva-nm-dns-test/etc/resolv.conf"), 1, "resolv.conf injected");
+    assert_eq(file_exists("/tmp/stiva-nm-dns-test/etc/hosts"), 1, "hosts injected");
+    assert_eq(file_exists("/tmp/stiva-nm-dns-test/etc/hostname"), 1, "hostname injected");
+    return 0;
+}
+
+fn test_network_manager_resolve_network_name_bridge() {
+    test_group("network_manager_resolve_network_name_bridge");
+    var mgr = network_manager_new();
+    var mode = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    var name = network_manager_resolve_network_name(mgr, mode);
+    assert(name != 0, "some name");
+    assert_eq(streq(name, network_manager_default_bridge()), 1, "resolves to default bridge");
+    return 0;
+}
+
+fn test_network_manager_resolve_network_name_custom() {
+    test_group("network_manager_resolve_network_name_custom");
+    var mgr = network_manager_new();
+    var mode = network_mode_new(NETWORK_MODE_CUSTOM, "mynet");
+    var name = network_manager_resolve_network_name(mgr, mode);
+    assert(name != 0, "some name");
+    assert_eq(streq(name, "mynet"), 1, "resolves to mynet");
+    return 0;
+}
+
+fn test_network_manager_resolve_network_name_host() {
+    test_group("network_manager_resolve_network_name_host");
+    var mgr = network_manager_new();
+    var mode = network_mode_new(NETWORK_MODE_HOST, 0);
+    var name = network_manager_resolve_network_name(mgr, mode);
+    assert_eq(name, 0, "host resolves to none");
+    return 0;
+}
+
+fn test_network_manager_resolve_network_name_none() {
+    test_group("network_manager_resolve_network_name_none");
+    var mgr = network_manager_new();
+    var mode = network_mode_new(NETWORK_MODE_NONE, 0);
+    var name = network_manager_resolve_network_name(mgr, mode);
+    assert_eq(name, 0, "none resolves to none");
+    return 0;
+}
+
+fn test_network_manager_get_connection_info() {
+    test_group("network_manager_get_connection_info");
+    var mgr = network_manager_new();
+    var e1 = vec_new();
+    var cn = network_manager_connect_container(mgr, "c1-abcdef123456", network_manager_default_bridge(), e1, 0);
+    assert(cn != 0, "connected");
+    var got = network_manager_get_connection(mgr, "c1-abcdef123456");
+    assert(got != 0, "got connection");
+    var c: ContainerNetwork = got;
+    assert_eq(streq(c.network_name, network_manager_default_bridge()), 1, "network name matches");
+    return 0;
+}
+
+fn test_network_manager_get_connection_nonexistent() {
+    test_group("network_manager_get_connection_nonexistent");
+    var mgr = network_manager_new();
+    var got = network_manager_get_connection(mgr, "nope");
+    assert_eq(got, 0, "unknown connection is none");
+    return 0;
+}
+
+
+# ── encrypted.cyr (rust-old/src/encrypted.rs) ──
+fn test_encrypted_media_type_detection() {
+    test_group("encrypted_media_type_detection");
+    assert_eq(is_encrypted_media_type("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"), 1, "encrypted detected");
+    assert_eq(is_encrypted_media_type("application/vnd.oci.image.layer.v1.tar+gzip"), 0, "plain not encrypted");
+    return 0;
+}
+
+fn test_strip_encrypted_suffix_works() {
+    test_group("strip_encrypted_suffix_works");
+    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"), "application/vnd.oci.image.layer.v1.tar+gzip", "stripped");
+    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip"), "application/vnd.oci.image.layer.v1.tar+gzip", "unchanged");
+    return 0;
+}
+
+fn test_load_key_from_file() {
+    test_group("load_key_from_file");
+    # Mirrors rust-old load_key_from_file: write 32 x 0x42 bytes, load, compare.
+    var path = "/tmp/stiva_enc_test.key";
+    var kd = alloc(32);
+    memset(kd, 0x42, 32);
+    file_write_all(path, kd, 32);
+    var src = key_source_new_file(path);
+    var len = alloc(8);
+    var loaded = load_key(src, len);
+    assert(loaded != 0, "key loaded");
+    assert_eq(load64(len), 32, "32 bytes");
+    assert_eq(load8(loaded), 0x42, "first byte 0x42");
+    return 0;
+}
+
+fn test_load_key_missing_file() {
+    test_group("load_key_missing_file");
+    # rust-old load_key_missing_file: load_key(File("/nonexistent/key")).is_err()
+    var src = key_source_new_file("/nonexistent/key");
+    var len = alloc(8);
+    assert_eq(load_key(src, len), 0, "missing file -> null");
+    return 0;
+}
+
+fn test_load_key_missing_env() {
+    test_group("load_key_missing_env");
+    # rust-old load_key_missing_env: EnvVar("STIVA_NONEXISTENT_KEY_VAR").is_err()
+    var src = key_source_new_env("STIVA_NONEXISTENT_KEY_VAR");
+    var len = alloc(8);
+    assert_eq(load_key(src, len), 0, "missing env -> null");
+    return 0;
+}
+
+fn test_luks_config_fields() {
+    test_group("luks_config_fields");
+    # rust-old luks_config_serde: mapper_name == "stiva-data", size_mb == 512.
+    var c = luks_volume_config_new("/var/lib/agnos/volumes/data.img", "stiva-data", "/data", 512);
+    var cc: LuksVolumeConfig = c;
+    assert_streq(cc.mapper_name, "stiva-data", "mapper name");
+    assert_eq(cc.size_mb, 512, "size 512");
+    return 0;
+}
+
+fn test_verity_config_fields() {
+    test_group("verity_config_fields");
+    # rust-old verity_config_serde: root_hash == "abc123".
+    var c = verity_volume_config_new("/var/lib/agnos/rootfs.img", "/var/lib/agnos/rootfs.hash", "abc123", "stiva-rootfs");
+    var cc: VerityVolumeConfig = c;
+    assert_streq(cc.root_hash, "abc123", "root hash");
+    return 0;
+}
+
+fn test_open_volume_fields() {
+    test_group("open_volume_fields");
+    # rust-old open_volume_debug: debug string contains "stiva-data".
+    var v = open_volume_new("/dev/mapper/stiva-data", "stiva-data");
+    var vv: OpenVolume = v;
+    assert_streq(vv.mapper_name, "stiva-data", "mapper name");
+    return 0;
+}
+
+fn test_availability_no_feature() {
+    test_group("availability_no_feature");
+    # rust-old cryptsetup_available_check / veritysetup_available_check: no-feature build -> false.
+    assert_eq(cryptsetup_available(), 0, "cryptsetup unavailable");
+    assert_eq(veritysetup_available(), 0, "veritysetup unavailable");
+    return 0;
+}
+
+fn test_disabled_entry_points() {
+    test_group("disabled_entry_points");
+    # rust-old luks/verity *_nonexistent tests: without the feature these are Err.
+    # Port: null OpenVolume / null path (0) for open/format, -1 for close.
+    var c = luks_volume_config_new("/nonexistent/volume.img", "test-vol", "/data", 64);
+    assert_eq(stiva_luks_open(c, "password123"), 0, "luks_open disabled");
+    assert_eq(stiva_luks_close("nonexistent-mapper"), 0 - 1, "luks_close disabled");
+    assert_eq(stiva_luks_format(c, "password123"), 0, "luks_format disabled");
+    var vc = verity_volume_config_new("/nonexistent/data.img", "/nonexistent/hash.img", "abc", "test-verity");
+    assert_eq(stiva_verity_open(vc), 0, "verity_open disabled");
+    assert_eq(stiva_verity_close("nonexistent-mapper"), 0 - 1, "verity_close disabled");
+    assert_eq(stiva_verity_format("/nonexistent/data", "/nonexistent/hash"), 0, "verity_format disabled");
+    return 0;
+}
+
+
+# ── runtime.cyr (rust-old/src/runtime.rs) ──
+# ── runtime module tests (mirror rust-old/src/runtime.rs #[cfg(test)]) ──
+# Only the self-contained, ported surface is exercised. The kavach/tokio/
+# criu/tar tests in the oracle target DEFERRED functions and land with them.
+
+# True (1) iff vec `v` of cstrs contains a cstr equal to `needle`.
+fn _rt_opts_contains(v, needle) {
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(v, i), needle) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_runtime_namespace_names() {
+    test_group("runtime_namespace_names");
+    assert_eq(streq(namespace_name(RUNTIME_NS_PID), "Pid"), 1, "Pid");
+    assert_eq(streq(namespace_name(RUNTIME_NS_NET), "Net"), 1, "Net");
+    assert_eq(streq(namespace_name(RUNTIME_NS_MOUNT), "Mount"), 1, "Mount");
+    assert_eq(streq(namespace_name(RUNTIME_NS_UTS), "Uts"), 1, "Uts");
+    assert_eq(streq(namespace_name(RUNTIME_NS_IPC), "Ipc"), 1, "Ipc");
+    assert_eq(streq(namespace_name(RUNTIME_NS_USER), "User"), 1, "User");
+    assert_eq(streq(namespace_name(RUNTIME_NS_CGROUP), "Cgroup"), 1, "Cgroup");
+    return 0;
+}
+
+fn test_runtime_standard_mounts_complete() {
+    test_group("runtime_standard_mounts_complete");
+    var mounts = standard_mounts();
+    assert_eq(vec_len(mounts), 5, "5 standard mounts");
+
+    # destination is field offset 8 in SpecMount { source; destination; ... }.
+    var m0 = vec_get(mounts, 0);
+    var m1 = vec_get(mounts, 1);
+    var m2 = vec_get(mounts, 2);
+    var m3 = vec_get(mounts, 3);
+    var m4 = vec_get(mounts, 4);
+    assert_eq(streq(load64(m0 + 8), "/proc"), 1, "dest /proc");
+    assert_eq(streq(load64(m1 + 8), "/sys"), 1, "dest /sys");
+    assert_eq(streq(load64(m2 + 8), "/dev"), 1, "dest /dev");
+    assert_eq(streq(load64(m3 + 8), "/dev/pts"), 1, "dest /dev/pts");
+    assert_eq(streq(load64(m4 + 8), "/dev/shm"), 1, "dest /dev/shm");
+
+    # mount_type at offset 16.
+    assert_eq(streq(load64(m0 + 16), "proc"), 1, "type proc");
+    assert_eq(streq(load64(m1 + 16), "sysfs"), 1, "type sysfs");
+    return 0;
+}
+
+fn test_runtime_volume_mounts_conversion() {
+    test_group("runtime_volume_mounts_conversion");
+    var specs = vec_new();
+    vec_push(specs, "/a:/b");
+    vec_push(specs, "/c:/d:ro");
+
+    var mounts = volume_mounts(specs, 0);
+    assert_eq(vec_len(mounts), 2, "2 bind mounts");
+
+    var m0 = vec_get(mounts, 0);   # SpecMount { source; destination; mount_type; options }
+    var m1 = vec_get(mounts, 1);
+    assert_eq(streq(load64(m0 + 16), "bind"), 1, "mount_type bind");
+    # options at offset 24.
+    assert_eq(_rt_opts_contains(load64(m0 + 24), "rbind"), 1, "m0 has rbind");
+    assert_eq(_rt_opts_contains(load64(m0 + 24), "ro"), 0, "m0 has no ro");
+    assert_eq(_rt_opts_contains(load64(m1 + 24), "ro"), 1, "m1 has ro (readonly)");
+
+    # Rootless adds the idmap option.
+    var specs2 = vec_new();
+    vec_push(specs2, "/a:/b");
+    var rl = volume_mounts(specs2, 1);
+    var rm0 = vec_get(rl, 0);
+    assert_eq(_rt_opts_contains(load64(rm0 + 24), "X-mount.idmap="), 1, "rootless idmap");
+    return 0;
+}
+
+fn test_runtime_volume_mounts_invalid() {
+    test_group("runtime_volume_mounts_invalid");
+    var specs = vec_new();
+    vec_push(specs, "nocolon");
+    # parse_volume returns 0 for a spec with no ':' → volume_mounts returns 0.
+    assert_eq(volume_mounts(specs, 0), 0, "invalid spec -> null");
+    return 0;
+}
+
+fn test_runtime_parse_ppid_from_stat() {
+    test_group("runtime_parse_ppid_from_stat");
+    assert_eq(parse_ppid_from_stat("1234 (bash) S 1 1234 1234 0 -1 4194560"), 1, "basic ppid 1");
+    assert_eq(parse_ppid_from_stat("1234 (my (app)) S 42 1234 1234 0"), 42, "comm with parens -> 42");
+    assert_eq(parse_ppid_from_stat(""), 0, "empty -> 0");
+    return 0;
+}
+
+fn test_runtime_criu_available_returns_bool() {
+    test_group("runtime_criu_available_returns_bool");
+    # Must not crash — returns 0 or 1 based on PATH.
+    var a = criu_available();
+    var ok = 0;
+    if (a == 0 || a == 1) { ok = 1; }
+    assert_eq(ok, 1, "criu_available is 0/1");
+    return 0;
+}
+
+
+# ── container.cyr (rust-old/src/container.rs) ──
+# Mirrors rust-old container.rs #[cfg(test)] (portable subset).
+fn test_container_state_serde() {
+    test_group("container_state_serde");
+    # Round-trip name <-> ordinal for every variant (rust-old container_state_serde).
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_CREATED)), CONTAINER_STATE_CREATED, "Created rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_RUNNING)), CONTAINER_STATE_RUNNING, "Running rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_PAUSED)), CONTAINER_STATE_PAUSED, "Paused rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_STOPPED)), CONTAINER_STATE_STOPPED, "Stopped rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_REMOVING)), CONTAINER_STATE_REMOVING, "Removing rt");
+    assert_eq(streq(container_state_name(CONTAINER_STATE_RUNNING), "Running"), 1, "Running token");
+    assert_eq(container_state_from_name("Bogus"), 0 - 1, "unknown token -> -1");
+    return 0;
+}
+
+fn test_container_config_defaults() {
+    test_group("container_config_defaults");
+    var cfg: ContainerConfig = container_config_default();
+    assert_eq(cfg.name, 0, "name None");
+    assert_eq(cfg.command, 0, "command empty");
+    assert_eq(cfg.env, 0, "env empty");
+    assert_eq(cfg.volumes, 0, "volumes empty");
+    assert_eq(cfg.ports, 0, "ports empty");
+    assert_eq(cfg.network, 0, "network None");
+    assert_eq(cfg.memory_limit, 0, "memory_limit 0");
+    assert_eq(cfg.cpu_shares, 0, "cpu_shares 0");
+    assert_eq(cfg.user, 0, "user None");
+    assert_eq(cfg.workdir, 0, "workdir None");
+    assert_eq(cfg.detach, 0, "detach false");
+    assert_eq(cfg.stop_grace_ms, 10000, "stop_grace_ms 10000");
+    assert_eq(cfg.rootless, 0, "rootless false");
+    assert_eq(cfg.secrets, 0, "secrets empty");
+    assert_eq(cfg.scan_policy, 0, "scan_policy None");
+    assert_eq(cfg.min_isolation_score, 0 - 1, "min_isolation_score None");
+    return 0;
+}
+
+fn test_default_stop_grace_ms() {
+    test_group("default_stop_grace_ms");
+    assert_eq(default_stop_grace_ms(), 10000, "10_000");
+    return 0;
+}
+
+fn test_container_serde_round_trip() {
+    test_group("container_serde_round_trip");
+    # Build a Container like rust-old container_serde_round_trip and read fields back.
+    var cfg: ContainerConfig = container_config_default();
+    cfg.memory_limit = 256 * 1024 * 1024;
+    cfg.user = "nobody";
+    var c: Container = container_new("abc-123", "web", "sha256:img",
+        "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
+        1000, 2000, cfg, 0);
+    assert_eq(streq(c.id, "abc-123"), 1, "id");
+    assert_eq(c.state, CONTAINER_STATE_STOPPED, "state Stopped");
+    assert_eq(c.exit_code, 0, "exit_code 0");
+    var ccfg: ContainerConfig = c.config;
+    assert_eq(ccfg.memory_limit, 256 * 1024 * 1024, "config memory_limit");
+    assert_eq(streq(ccfg.user, "nobody"), 1, "config user");
+    return 0;
+}
+
+fn test_migration_bundle_serde() {
+    test_group("migration_bundle_serde");
+    var cfg = container_config_default();
+    var b: MigrationBundle = migration_bundle_new("abc-123",
+        "docker.io/library/nginx:latest", cfg, "/tmp/checkpoint", "node-1", 42);
+    assert_eq(streq(b.source_container_id, "abc-123"), 1, "source id");
+    assert_eq(streq(b.image_ref, "docker.io/library/nginx:latest"), 1, "image_ref");
+    assert_eq(streq(b.source_node, "node-1"), 1, "source_node");
+    assert_eq(streq(b.checkpoint_dir, "/tmp/checkpoint"), 1, "checkpoint_dir");
+    return 0;
+}
+
+fn test_container_require_pid() {
+    test_group("container_require_pid");
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    # Running + valid pid -> pid.
+    assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 4321, allowed, 1), 4321, "running+pid");
+    # Wrong state -> -1 (InvalidState).
+    assert_eq(container_require_pid(CONTAINER_STATE_CREATED, 4321, allowed, 1), 0 - 1, "wrong state");
+    # Right state but no pid -> -1.
+    assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 0 - 1, allowed, 1), 0 - 1, "no pid");
+    # Multi-state allowed set.
+    var allowed2 = vec_new();
+    vec_push(allowed2, CONTAINER_STATE_RUNNING);
+    vec_push(allowed2, CONTAINER_STATE_PAUSED);
+    assert_eq(container_require_pid(CONTAINER_STATE_PAUSED, 7, allowed2, 2), 7, "paused allowed");
+    return 0;
+}
+
+fn test_container_fixup_after_restart() {
+    test_group("container_fixup_after_restart");
+    var cfg = container_config_default();
+    # Running -> Stopped, pid cleared, changed=1.
+    var r: Container = container_new("i", 0, "im", "ref", CONTAINER_STATE_RUNNING, 99, 0, 0 - 1, cfg, 0 - 1);
+    assert_eq(container_fixup_after_restart(r), 1, "running changed");
+    assert_eq(r.state, CONTAINER_STATE_STOPPED, "now stopped");
+    assert_eq(r.pid, 0 - 1, "pid cleared");
+    # Paused -> Stopped too.
+    var p: Container = container_new("i", 0, "im", "ref", CONTAINER_STATE_PAUSED, 5, 0, 0 - 1, cfg, 0 - 1);
+    assert_eq(container_fixup_after_restart(p), 1, "paused changed");
+    assert_eq(p.state, CONTAINER_STATE_STOPPED, "paused now stopped");
+    # Stopped stays put, changed=0.
+    var s: Container = container_new("i", 0, "im", "ref", CONTAINER_STATE_STOPPED, 0 - 1, 0, 0 - 1, cfg, 0);
+    assert_eq(container_fixup_after_restart(s), 0, "stopped unchanged");
+    assert_eq(s.state, CONTAINER_STATE_STOPPED, "still stopped");
+    return 0;
+}
+
+fn test_container_should_rotate() {
+    test_group("container_should_rotate");
+    # Disabled when either bound is 0.
+    assert_eq(container_should_rotate(0, 3, 100, 100), 0, "max_bytes 0");
+    assert_eq(container_should_rotate(100, 0, 100, 100), 0, "max_files 0");
+    # Under limit -> no rotate.
+    assert_eq(container_should_rotate(1000, 3, 500, 200), 0, "under limit");
+    # Over limit -> rotate.
+    assert_eq(container_should_rotate(1000, 3, 900, 200), 1, "over limit");
+    return 0;
+}
+
+fn test_container_tail_start() {
+    test_group("container_tail_start");
+    # rust-old: saturating_sub(lines).
+    assert_eq(container_tail_start(5, 3), 2, "5-3=2");
+    assert_eq(container_tail_start(2, 10), 0, "saturating to 0");
+    assert_eq(container_tail_start(3, 3), 0, "exact");
+    return 0;
+}
+
+fn test_container_rotated_path() {
+    test_group("container_rotated_path");
+    assert_eq(streq(_container_rotated_path("/v/container.log", 1), "/v/container.log.1"), 1, ".1");
+    assert_eq(streq(_container_rotated_path("/v/container.log", 12), "/v/container.log.12"), 1, ".12");
+    return 0;
+}
+
+
+# ── health.cyr ──
+# ── health.cyr (rust-old/src/health.rs) ──────────────────────────
+# Mirrors the #[cfg(test)] module. Async fns are synchronous here; the
+# timing-based Rust tests (offline detection after sleeps) become
+# deterministic by using a 0ns offline_after so chb_update_statuses drives
+# every node OFFLINE on the next tick.
+
+# Helper: does `v` (vec of cstr) contain a cstr equal to `needle`?
+fn _test_vec_contains_cstr(v, needle) {
+    var i = 0;
+    var len = vec_len(v);
+    while (i < len) {
+        if (streq(vec_get(v, i), needle) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_health_status_from_majra() {
+    test_group("health_status_from_majra");
+    assert_eq(health_status_from_majra(HEALTH_MAJRA_ONLINE), HEALTH_STATUS_HEALTHY, "online->healthy");
+    assert_eq(health_status_from_majra(HEALTH_MAJRA_SUSPECT), HEALTH_STATUS_STARTING, "suspect->starting");
+    assert_eq(health_status_from_majra(HEALTH_MAJRA_OFFLINE), HEALTH_STATUS_UNHEALTHY, "offline->unhealthy");
+    assert_eq(health_status_from_majra(99), HEALTH_STATUS_UNKNOWN, "other->unknown");
+    return 0;
+}
+
+fn test_health_status_serde() {
+    test_group("health_status_serde");
+    # Serde names round-trip (rust: serialize/deserialize identity). No JSON
+    # codec in the base — check the wire names are stable & distinct.
+    assert_eq(streq(health_status_name(HEALTH_STATUS_HEALTHY), "Healthy"), 1, "healthy name");
+    assert_eq(streq(health_status_name(HEALTH_STATUS_UNHEALTHY), "Unhealthy"), 1, "unhealthy name");
+    assert_eq(streq(health_status_name(HEALTH_STATUS_STARTING), "Starting"), 1, "starting name");
+    assert_eq(streq(health_status_name(HEALTH_STATUS_UNKNOWN), "Unknown"), 1, "unknown name");
+    return 0;
+}
+
+fn test_health_register_and_heartbeat() {
+    test_group("health_register_and_heartbeat");
+    var m = health_monitor_new();
+    health_monitor_register(m, "c1", HEALTH_RESTART_NEVER, 0);
+    assert_eq(health_monitor_len(m), 1, "len is 1");
+    assert_eq(health_monitor_heartbeat(m, "c1"), 1, "heartbeat tracked");
+    assert_eq(health_monitor_get_status(m, "c1"), HEALTH_STATUS_HEALTHY, "status healthy");
+    return 0;
+}
+
+fn test_health_deregister() {
+    test_group("health_deregister");
+    var m = health_monitor_new();
+    health_monitor_register(m, "c1", HEALTH_RESTART_NEVER, 0);
+    health_monitor_deregister(m, "c1");
+    assert_eq(health_monitor_is_empty(m), 1, "empty after deregister");
+    return 0;
+}
+
+fn test_health_restart_count_increments() {
+    test_group("health_restart_count_increments");
+    # offline_after = 0 -> update drives the node OFFLINE immediately.
+    var cfg = heartbeat_config_new(0, 0, 0);
+    var m = health_monitor_with_config(cfg);
+    health_monitor_register(m, "c1", HEALTH_RESTART_ALWAYS, 0);
+    var needs = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(needs, "c1"), 1, "c1 needs restart");
+    assert_eq(health_monitor_restart_count(m, "c1"), 1, "restart count 1");
+    return 0;
+}
+
+fn test_health_never_policy_no_restart() {
+    test_group("health_never_policy_no_restart");
+    var cfg = heartbeat_config_new(0, 0, 0);
+    var m = health_monitor_with_config(cfg);
+    health_monitor_register(m, "c1", HEALTH_RESTART_NEVER, 0);
+    var needs = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(needs, "c1"), 0, "never -> no restart");
+    return 0;
+}
+
+fn test_health_on_failure_max_retries() {
+    test_group("health_on_failure_max_retries");
+    var cfg = heartbeat_config_new(0, 0, 0);
+    var m = health_monitor_with_config(cfg);
+    health_monitor_register(m, "c1", HEALTH_RESTART_ON_FAILURE, 2);
+    # First restart.
+    var r1 = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(r1, "c1"), 1, "restart 1");
+    # Second restart.
+    var r2 = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(r2, "c1"), 1, "restart 2");
+    # Third attempt -> no restart (max_retries = 2).
+    var r3 = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(r3, "c1"), 0, "no restart 3");
+    assert_eq(health_monitor_restart_count(m, "c1"), 2, "count capped at 2");
+    return 0;
+}
+
+fn test_health_unless_stopped_respects_user_stop() {
+    test_group("health_unless_stopped_respects_user_stop");
+    var cfg = heartbeat_config_new(0, 0, 0);
+    var m = health_monitor_with_config(cfg);
+    health_monitor_register(m, "c1", HEALTH_RESTART_UNLESS_STOPPED, 0);
+    health_monitor_mark_user_stopped(m, "c1");
+    var needs = health_monitor_check_and_restart(m);
+    assert_eq(_test_vec_contains_cstr(needs, "c1"), 0, "user-stopped -> no restart");
+    return 0;
+}
+
+fn test_health_unknown_status_for_unregistered() {
+    test_group("health_unknown_status_for_unregistered");
+    var m = health_monitor_new();
+    assert_eq(health_monitor_get_status(m, "nonexistent"), HEALTH_STATUS_UNKNOWN, "unknown for unregistered");
+    return 0;
+}
+
+fn test_health_heartbeat_unregistered_returns_false() {
+    test_group("health_heartbeat_unregistered_returns_false");
+    var m = health_monitor_new();
+    assert_eq(health_monitor_heartbeat(m, "nonexistent"), 0, "heartbeat false for unregistered");
+    return 0;
+}
+
+fn test_health_default_monitor() {
+    test_group("health_default_monitor");
+    var m = health_monitor_new();
+    assert_eq(health_monitor_is_empty(m), 1, "default is empty");
+    return 0;
+}
+
+
+# ── ansamblu.cyr ──
+fn test_ansamblu_replica_count() {
+    test_group("ansamblu_replica_count");
+    # replicas = None (-1) → 1
+    var s0 = service_def_new("x", 0, 0, 0, 0, 0);
+    assert_eq(replica_count(s0), 1, "replica_count_default");
+    # replicas = 0 → max(1) → 1
+    var s1: ServiceDef = service_def_new("x", 0, 0, 0, 0, 0);
+    s1.replicas = 0;
+    assert_eq(replica_count(s1), 1, "replica_count_zero_becomes_one");
+    # replicas = 3 → 3
+    var s3: ServiceDef = service_def_new("x", 0, 0, 0, 0, 0);
+    s3.replicas = 3;
+    assert_eq(replica_count(s3), 3, "replica_count_three");
+    return 0;
+}
+
+fn test_ansamblu_service_to_config() {
+    test_group("ansamblu_service_to_config");
+    # basic: single replica → name is the service name, env/ports carried
+    var env = map_new();
+    map_set(env, "PORT", "80");
+    var ports = vec_new();
+    vec_push(ports, "8080:80");
+    var svc = service_def_new("nginx", 0, env, ports, 0, 0);
+    var cfg = service_to_config("web", svc, 0);
+    assert_eq(streq(load64(cfg), "web"), 1, "s2c_basic_name");            # name @0
+    assert_eq(streq(map_get(load64(cfg + 16), "PORT"), "80"), 1, "s2c_env"); # env @16
+    assert_eq(streq(vec_get(load64(cfg + 32), 0), "8080:80"), 1, "s2c_ports"); # ports @32
+
+    # replicas > 1 → "{service}-{index}"
+    var w: ServiceDef = service_def_new("worker", 0, 0, 0, 0, 0);
+    w.replicas = 3;
+    var c0 = service_to_config("worker", w, 0);
+    var c1 = service_to_config("worker", w, 1);
+    var c2 = service_to_config("worker", w, 2);
+    assert_eq(streq(load64(c0), "worker-0"), 1, "s2c_r0");
+    assert_eq(streq(load64(c1), "worker-1"), 1, "s2c_r1");
+    assert_eq(streq(load64(c2), "worker-2"), 1, "s2c_r2");
+    return 0;
+}
+
+fn test_ansamblu_compute_scale() {
+    test_group("ansamblu_compute_scale");
+    var services = map_new();
+    var ids = vec_new();
+    vec_push(ids, "c0");
+    vec_push(ids, "c1");
+    map_set(services, "web", ids);
+    var sess = ansamblu_session_new("s", services, vec_new(), vec_new(), 0);
+
+    var out = alloc(16);
+    # scale up 2 → 4: to_add 2, to_remove empty
+    compute_scale(sess, "web", 4, out);
+    assert_eq(load64(out), 2, "scale_up_add");
+    assert_eq(vec_len(load64(out + 8)), 0, "scale_up_no_remove");
+    # scale down 2 → 1: to_add 0, to_remove = last id (newest-first) = "c1"
+    compute_scale(sess, "web", 1, out);
+    assert_eq(load64(out), 0, "scale_down_no_add");
+    assert_eq(vec_len(load64(out + 8)), 1, "scale_down_one");
+    assert_eq(streq(vec_get(load64(out + 8), 0), "c1"), 1, "scale_down_newest_first");
+    # scale equal 2 → 2: nothing
+    compute_scale(sess, "web", 2, out);
+    assert_eq(load64(out), 0, "scale_eq_no_add");
+    assert_eq(vec_len(load64(out + 8)), 0, "scale_eq_no_remove");
+    # absent service scaled to 3: add 3
+    compute_scale(sess, "ghost", 3, out);
+    assert_eq(load64(out), 3, "scale_absent_add");
+    return 0;
+}
+
+fn test_ansamblu_startup_order() {
+    test_group("ansamblu_startup_order");
+    # linear: frontend -> api -> db  (expect db before api before frontend)
+    var services = map_new();
+    var fe = service_def_new("nginx", 0, 0, 0, 0, 0);
+    var fe_deps = vec_new(); vec_push(fe_deps, "api");
+    var fes: ServiceDef = fe; fes.depends_on = fe_deps;
+    var api = service_def_new("app", 0, 0, 0, 0, 0);
+    var api_deps = vec_new(); vec_push(api_deps, "db");
+    var apis: ServiceDef = api; apis.depends_on = api_deps;
+    var db = service_def_new("postgres", 0, 0, 0, 0, 0);
+    map_set(services, "frontend", fe);
+    map_set(services, "api", api);
+    map_set(services, "db", db);
+    var spec = ansamblu_file_new(services, map_new(), map_new());
+
+    var order = resolve_startup_order(spec);
+    assert_neq(order, 0, "order_no_cycle");
+    assert_eq(vec_len(order), 3, "order_len");
+    # find positions
+    var db_pos = 0 - 1;
+    var api_pos = 0 - 1;
+    var fe_pos = 0 - 1;
+    var i = 0;
+    while (i < vec_len(order)) {
+        var nm = vec_get(order, i);
+        if (streq(nm, "db") == 1) { db_pos = i; }
+        if (streq(nm, "api") == 1) { api_pos = i; }
+        if (streq(nm, "frontend") == 1) { fe_pos = i; }
+        i = i + 1;
+    }
+    assert_eq(db_pos < api_pos, 1, "db_before_api");
+    assert_eq(api_pos < fe_pos, 1, "api_before_frontend");
+    return 0;
+}
+
+fn test_ansamblu_startup_order_cycle() {
+    test_group("ansamblu_startup_order_cycle");
+    # a -> b -> a is a cycle → resolve_startup_order returns 0
+    var services = map_new();
+    var a = service_def_new("a", 0, 0, 0, 0, 0);
+    var a_deps = vec_new(); vec_push(a_deps, "b");
+    var as1: ServiceDef = a; as1.depends_on = a_deps;
+    var b = service_def_new("b", 0, 0, 0, 0, 0);
+    var b_deps = vec_new(); vec_push(b_deps, "a");
+    var bs: ServiceDef = b; bs.depends_on = b_deps;
+    map_set(services, "a", a);
+    map_set(services, "b", b);
+    var spec = ansamblu_file_new(services, map_new(), map_new());
+    assert_eq(resolve_startup_order(spec), 0, "cycle_returns_zero");
+    return 0;
+}
+
+fn test_ansamblu_ready_services() {
+    test_group("ansamblu_ready_services");
+    # db (no deps), api (depends_on db)
+    var services = map_new();
+    var db = service_def_new("postgres", 0, 0, 0, 0, 0);
+    var api = service_def_new("app", 0, 0, 0, 0, 0);
+    var api_deps = vec_new(); vec_push(api_deps, "db");
+    var apis: ServiceDef = api; apis.depends_on = api_deps;
+    map_set(services, "db", db);
+    map_set(services, "api", api);
+    var spec = ansamblu_file_new(services, map_new(), map_new());
+
+    # initial: db ready, api not
+    var ready0 = ready_services(spec, 0);
+    var db_ready0 = 0;
+    var api_ready0 = 0;
+    var i = 0;
+    while (i < vec_len(ready0)) {
+        if (streq(vec_get(ready0, i), "db") == 1) { db_ready0 = 1; }
+        if (streq(vec_get(ready0, i), "api") == 1) { api_ready0 = 1; }
+        i = i + 1;
+    }
+    assert_eq(db_ready0, 1, "db_ready_initial");
+    assert_eq(api_ready0, 0, "api_not_ready_initial");
+
+    # after db completed: api ready, db no longer (it is completed)
+    var completed = map_new();
+    map_set(completed, "db", 1);
+    var ready1 = ready_services(spec, completed);
+    var api_ready1 = 0;
+    i = 0;
+    while (i < vec_len(ready1)) {
+        if (streq(vec_get(ready1, i), "api") == 1) { api_ready1 = 1; }
+        i = i + 1;
+    }
+    assert_eq(api_ready1, 1, "api_ready_after_db");
+    return 0;
+}
+
+fn test_ansamblu_plan_rolling_update() {
+    test_group("ansamblu_plan_rolling_update");
+    var services = map_new();
+    var ids = vec_new();
+    vec_push(ids, "old0");
+    map_set(services, "web", ids);
+    var sess = ansamblu_session_new("s", services, vec_new(), vec_new(), 0);
+
+    var newsvc: ServiceDef = service_def_new("nginx:2", 0, 0, 0, 0, 0);
+    newsvc.replicas = 2;
+    var plan: RollingUpdatePlan = plan_rolling_update(sess, "web", newsvc);
+    assert_eq(streq(plan.service_name, "web"), 1, "plan_name");
+    assert_eq(streq(plan.new_image, "nginx:2"), 1, "plan_image");
+    assert_eq(plan.new_replica_count, 2, "plan_count");
+    assert_eq(vec_len(plan.old_containers), 1, "plan_old_len");
+    assert_eq(streq(vec_get(plan.old_containers, 0), "old0"), 1, "plan_old_id");
+    # config defaults 1/1/10
+    var cfg: RollingUpdateConfig = plan.config;
+    assert_eq(cfg.max_surge, 1, "plan_cfg_surge");
+    assert_eq(cfg.max_unavailable, 1, "plan_cfg_unavail");
+    assert_eq(cfg.delay_secs, 10, "plan_cfg_delay");
+
+    # absent service → empty old_containers
+    var plan2: RollingUpdatePlan = plan_rolling_update(sess, "ghost", newsvc);
+    assert_eq(vec_len(plan2.old_containers), 0, "plan_absent_empty");
+    return 0;
+}
+
+fn test_ansamblu_defaults() {
+    test_group("ansamblu_defaults");
+    # HealthCheck serde defaults
+    var hc: HealthCheck = health_check_new(vec_new());
+    assert_eq(hc.interval_secs, 30, "hc_interval");
+    assert_eq(hc.timeout_secs, 5, "hc_timeout");
+    assert_eq(hc.retries, 3, "hc_retries");
+    # NetworkDef / VolumeDef defaults are None (0)
+    var nd: NetworkDef = network_def_default();
+    assert_eq(nd.driver, 0, "netdef_driver_none");
+    assert_eq(nd.subnet, 0, "netdef_subnet_none");
+    var vd_p = volume_def_default();
+    assert_eq(load64(vd_p), 0, "voldef_driver_none");
+    # RollingUpdateConfig default
+    var ruc: RollingUpdateConfig = rolling_update_config_default();
+    assert_eq(ruc.max_surge, 1, "ruc_surge");
+    assert_eq(ruc.max_unavailable, 1, "ruc_unavail");
+    assert_eq(ruc.delay_secs, 10, "ruc_delay");
+    return 0;
+}
+
+
+# ── agent.cyr ──
+# ── agent module tests (mirror rust-old/src/agent.rs #[cfg(test)]) ──
+# Builds a Container* raw record matching src/container.cyr's field layout
+# (8-byte fields: id@0 name@8 image_id@16 image_ref@24 state@32 pid@40
+#  created_at@48 started_at@56 config@64 exit_code@72) and a ContainerConfig*
+# whose ports field is at offset 32. The three HTTP mock tests
+# (register_with_mock / deregister_with_mock / report_status_with_mock /
+#  register_failure) are omitted: they require wiremock + async reqwest,
+# which the ported base lacks (deferred alongside the network functions).
+
+# Allocate a ContainerConfig* with only `ports` populated (offset 32).
+fn _agent_test_config(ports) {
+    var cfg = alloc(200);
+    memset(cfg, 0, 200);
+    store64(cfg + 32, ports);      # ports @ field index 4
+    return cfg;
+}
+
+# Allocate a Container* mirroring rust-old test_container(): id, optional
+# name (0 = None), image_id, image_ref, state, config.
+fn _agent_test_container(id, name, image_id, image_ref, state, config) {
+    var c = alloc(80);
+    memset(c, 0, 80);
+    store64(c + 0, id);
+    store64(c + 8, name);
+    store64(c + 16, image_id);
+    store64(c + 24, image_ref);
+    store64(c + 32, state);
+    store64(c + 64, config);
+    return c;
+}
+
+# True (1) iff cstr `needle` is an element of vec `v`.
+fn _agent_caps_contains(v, needle) {
+    var n = vec_len(v);
+    for (var i = 0; i < n; i = i + 1) {
+        if (streq(vec_get(v, i), needle) == 1) { return 1; }
+    }
+    return 0;
+}
+
+fn test_agent_build_registration_from_container() {
+    test_group("agent_build_registration_from_container");
+    var ports = vec_new();
+    vec_push(ports, "8080:80");
+    var cfg = _agent_test_config(ports);
+    var c = _agent_test_container("abc123def456", "web-server",
+        "sha256:img", "docker.io/library/nginx:latest",
+        CONTAINER_STATE_RUNNING, cfg);
+
+    var reg = build_registration(c);
+    var r: AgentRegistration = reg;
+    assert_eq(streq(r.id, "abc123def456"), 1, "id");
+    assert_eq(streq(r.name, "web-server"), 1, "name");
+    assert_eq(streq(r.agent_type, "container"), 1, "agent_type is container");
+    assert_eq(_agent_caps_contains(r.capabilities, "stiva"), 1,
+        "capabilities contains stiva");
+    return 0;
+}
+
+fn test_agent_build_registration_no_name() {
+    test_group("agent_build_registration_no_name");
+    var ports = vec_new();
+    var cfg = _agent_test_config(ports);
+    # name = 0 (None) → falls back to first 12 chars of id.
+    var c = _agent_test_container("abc123def456", 0,
+        "sha256:img", "docker.io/library/nginx:latest",
+        CONTAINER_STATE_RUNNING, cfg);
+
+    var reg = build_registration(c);
+    var r: AgentRegistration = reg;
+    assert_eq(streq(r.name, "abc123def456"), 1, "name falls back to first 12 of id");
+    return 0;
+}
+
+fn test_agent_first12_truncates() {
+    test_group("agent_first12_truncates");
+    # Long id → exactly 12 chars.
+    var got = _agent_first12("0123456789abcdefghij");
+    assert_eq(streq(got, "0123456789ab"), 1, "truncated to 12");
+    assert_eq(strlen(got), 12, "length 12");
+    # Short id (< 12) → whole string preserved.
+    var got2 = _agent_first12("short");
+    assert_eq(streq(got2, "short"), 1, "short id preserved");
+    return 0;
+}
+
+fn test_agent_registration_serde() {
+    test_group("agent_registration_serde");
+    # rust-old round-trips through JSON; Cyrius base has no serde, so verify
+    # the struct stores/returns its fields faithfully (parity on the payload).
+    var caps = vec_new();
+    vec_push(caps, "stiva");
+    var rp = alloc(40);
+    var reg: AgentRegistration = rp;
+    reg.id = "c1";
+    reg.name = "web";
+    reg.agent_type = "container";
+    reg.capabilities = caps;
+    reg.metadata = 0;
+    assert_eq(streq(reg.id, "c1"), 1, "id round-trips");
+    assert_eq(streq(reg.name, "web"), 1, "name round-trips");
+    return 0;
+}
+
+fn test_agent_status_serde() {
+    test_group("agent_status_serde");
+    var s = agent_status_new("c1", "running", 0);
+    var st: AgentStatus = s;
+    assert_eq(streq(st.id, "c1"), 1, "id");
+    assert_eq(streq(st.status, "running"), 1, "status round-trips");
+    assert_eq(st.metadata, 0, "metadata none");
+    return 0;
+}
+
+fn test_agent_default_registry_url() {
+    test_group("agent_default_registry_url");
+    assert_eq(streq(agent_default_registry_url(), "http://localhost:8090"), 1,
+        "default registry url");
+    return 0;
+}
+
+
+# ── fleet.cyr (rust-old/src/fleet.rs) ──
+fn test_fleet_strategy_names() {
+    test_group("fleet_strategy_names");
+    assert_eq(streq(fleet_strategy_name(FLEET_STRATEGY_SPREAD), "Spread"), 1, "spread");
+    assert_eq(streq(fleet_strategy_name(FLEET_STRATEGY_BINPACK), "BinPack"), 1, "binpack");
+    assert_eq(streq(fleet_strategy_name(FLEET_STRATEGY_PINNED), "Pinned"), 1, "pinned");
+    assert_eq(fleet_strategy_default(), FLEET_STRATEGY_SPREAD, "default spread");
+    return 0;
+}
+
+fn test_fleet_node_status_names() {
+    test_group("fleet_node_status_names");
+    assert_eq(streq(fleet_node_status_name(FLEET_NODE_READY), "Ready"), 1, "ready");
+    assert_eq(streq(fleet_node_status_name(FLEET_NODE_NOT_READY), "NotReady"), 1, "notready");
+    assert_eq(streq(fleet_node_status_name(FLEET_NODE_DRAINING), "Draining"), 1, "draining");
+    assert_eq(streq(fleet_node_status_name(FLEET_NODE_CORDONED), "Cordoned"), 1, "cordoned");
+    return 0;
+}
+
+fn test_fleet_constraints_default() {
+    test_group("fleet_constraints_default");
+    var c = deployment_constraints_default();
+    var cc: DeploymentConstraints = c;
+    assert_eq(cc.node_labels, 0, "no labels");
+    assert_eq(cc.min_memory_mb, 0 - 1, "no min mem");
+    assert_eq(cc.min_cpus, 0 - 1, "no min cpus");
+    assert_eq(cc.preferred_nodes, 0, "no preferred");
+    return 0;
+}
+
+fn test_fleet_free_slots() {
+    test_group("fleet_free_slots");
+    var cap = node_capacity_new(4096, 4, 10, 3);
+    var node = fleet_node_new("n1", "1.2.3.4", 0, cap, FLEET_NODE_READY, 0);
+    assert_eq(free_slots(node), 7, "10-3=7");
+    var cap2 = node_capacity_new(4096, 4, 5, 8);
+    var node2 = fleet_node_new("n2", "1.2.3.5", 0, cap2, FLEET_NODE_READY, 0);
+    assert_eq(free_slots(node2), 0, "over -> 0");
+    return 0;
+}
+
+
+# ── mcp.cyr (rust-old/src/mcp.rs) ──
+fn _mcp_names_contains(tools, target) {
+    var i = 0;
+    var n = vec_len(tools);
+    for (i = 0; i < n; i = i + 1) {
+        var t = vec_get(tools, i);
+        if (streq(tool_def_name(t), target) == 1) { return 1; }
+    }
+    return 0;
+}
+
+fn test_mcp_tool_list_has_nine_tools() {
+    test_group("mcp_tool_list_has_nine_tools");
+    var tools = tool_list();
+    assert_eq(vec_len(tools), 9);
+    assert_eq(_mcp_names_contains(tools, "stiva_pull"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_run"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_ps"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_stop"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_ansamblu"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_exec"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_build"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_push"), 1);
+    assert_eq(_mcp_names_contains(tools, "stiva_inspect"), 1);
+    return 0;
+}
+
+fn test_mcp_tool_schemas_are_valid() {
+    test_group("mcp_tool_schemas_are_valid");
+    var tools = tool_list();
+    var i = 0;
+    var n = vec_len(tools);
+    for (i = 0; i < n; i = i + 1) {
+        var t = vec_get(tools, i);
+        # input_schema.schema_type == "object"
+        assert_eq(streq(schema_type(tool_def_input_schema(t)), "object"), 1);
+        # description non-empty
+        assert(strlen(tool_def_description(t)) > 0);
+        # annotations present (non-null)
+        assert(tool_def_annotations(t) != 0);
+    }
+    return 0;
+}
+
+fn test_mcp_result_ok() {
+    test_group("mcp_result_ok");
+    var r = mcp_result_ok("{\"key\": \"value\"}");
+    assert_eq(mcp_result_success(r), 1);
+    assert_eq(vec_len(mcp_result_content(r)), 1);
+    var part = vec_get(mcp_result_content(r), 0);
+    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT);
+    return 0;
+}
+
+fn test_mcp_result_err() {
+    test_group("mcp_result_err");
+    var r = mcp_result_err("something failed");
+    assert_eq(mcp_result_success(r), 0);
+    assert_eq(vec_len(mcp_result_content(r)), 1);
+    var part = vec_get(mcp_result_content(r), 0);
+    assert_eq(streq(content_part_text_of(part), "something failed"), 1);
+    return 0;
+}
+
+fn test_mcp_result_resource() {
+    test_group("mcp_result_resource");
+    var r = mcp_result_resource("stiva://test/1", "{\"id\": \"1\"}");
+    assert_eq(mcp_result_success(r), 1);
+    assert_eq(vec_len(mcp_result_content(r)), 1);
+    var part = vec_get(mcp_result_content(r), 0);
+    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE);
+    assert_eq(streq(content_part_uri(part), "stiva://test/1"), 1);
+    assert_eq(streq(content_part_mime_type(part), "application/json"), 1);
+    return 0;
+}
+
+fn test_mcp_content_type_names() {
+    test_group("mcp_content_type_names");
+    # ContentPart #[serde(tag = "type")] wire values.
+    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_TEXT), "text"), 1);
+    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_RESOURCE), "resource"), 1);
+    return 0;
+}
+
+fn test_mcp_content_part_text() {
+    test_group("mcp_content_part_text");
+    var part = content_part_text("hello");
+    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT);
+    assert_eq(streq(content_part_text_of(part), "hello"), 1);
+    assert_eq(content_part_uri(part), 0);
+    return 0;
+}
+
+fn test_mcp_content_part_resource() {
+    test_group("mcp_content_part_resource");
+    var part = content_part_resource("stiva://containers/abc", "application/json", "{}");
+    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE);
+    assert_eq(streq(content_part_uri(part), "stiva://containers/abc"), 1);
+    assert_eq(streq(content_part_mime_type(part), "application/json"), 1);
+    assert_eq(streq(content_part_text_of(part), "{}"), 1);
+    return 0;
+}
+
+
+# ── lib.cyr (rust-old/src/lib.rs) ──
+fn test_lib_default_config() {
+    test_group("lib::default_config");
+    var c: StivaConfig = stiva_config_default();
+    assert_eq(streq(c.root_path, "/var/lib/agnos/containers"), 1, "default root_path");
+    assert_eq(streq(c.image_path, "/var/lib/agnos/images"), 1, "default image_path");
+    assert_eq(c.max_containers, 64, "default max_containers");
+    assert_eq(c.audit_log, 0, "default audit_log is None (0)");
+    var nm: NetworkModeVal = c.default_network;
+    assert_eq(nm.tag, NETWORK_MODE_BRIDGE, "default_network is Bridge");
+    return 0;
+}
+
+fn test_lib_config_custom_values() {
+    test_group("lib::config_custom_values");
+    var d: StivaConfig = stiva_config_new(
+        "/custom/containers",
+        "/custom/images",
+        network_mode_new(NETWORK_MODE_HOST, 0),
+        128,
+        0
+    );
+    assert_eq(streq(d.root_path, "/custom/containers"), 1, "custom root_path");
+    assert_eq(streq(d.image_path, "/custom/images"), 1, "custom image_path");
+    assert_eq(d.max_containers, 128, "custom max_containers");
+    var dn: NetworkModeVal = d.default_network;
+    assert_eq(dn.tag, NETWORK_MODE_HOST, "custom default_network is Host");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     # error + oci
@@ -1061,6 +2517,113 @@ fn main() {
     test_registry_platform_eq();
     test_registry_descriptor();
     test_registry_credential();
+    # storage + build
+    test_parse_volume_rw();
+    test_parse_volume_ro();
+    test_parse_volume_invalid();
+    test_parse_volume_too_many_parts();
+    test_parse_volume_rw_explicit();
+    test_parse_named_volume();
+    test_parse_volume_empty_string();
+    test_setup_overlay_no_layers();
+    test_overlay_paths_fields();
+    test_mount_volumes_empty();
+    test_build_default_tag();
+    test_build_config_default();
+    test_build_step_type_names();
+    test_build_step_variants();
+    test_build_sha256_digest();
+    # network_nat + network_manager + encrypted
+    test_nat_parse();
+    test_network_manager_creates_default_network();
+    test_network_manager_create_custom_network();
+    test_network_manager_create_duplicate_network_fails();
+    test_network_manager_delete_network();
+    test_network_manager_delete_nonexistent_network_fails();
+    test_network_manager_connect_container_allocates_ip();
+    test_network_manager_connect_multiple_containers();
+    test_network_manager_disconnect_container_releases_ip();
+    test_network_manager_disconnect_nonexistent_fails();
+    test_network_manager_delete_network_with_connections_fails();
+    test_network_manager_connect_with_port_specs();
+    test_network_manager_connect_with_invalid_port_fails();
+    test_network_manager_connect_to_nonexistent_network_fails();
+    test_network_manager_connect_with_dns_injection();
+    test_network_manager_resolve_network_name_bridge();
+    test_network_manager_resolve_network_name_custom();
+    test_network_manager_resolve_network_name_host();
+    test_network_manager_resolve_network_name_none();
+    test_network_manager_get_connection_info();
+    test_network_manager_get_connection_nonexistent();
+    test_encrypted_media_type_detection();
+    test_strip_encrypted_suffix_works();
+    test_load_key_from_file();
+    test_load_key_missing_file();
+    test_load_key_missing_env();
+    test_luks_config_fields();
+    test_verity_config_fields();
+    test_open_volume_fields();
+    test_availability_no_feature();
+    test_disabled_entry_points();
+    # runtime + container
+    test_runtime_namespace_names();
+    test_runtime_standard_mounts_complete();
+    test_runtime_volume_mounts_conversion();
+    test_runtime_volume_mounts_invalid();
+    test_runtime_parse_ppid_from_stat();
+    test_runtime_criu_available_returns_bool();
+    test_container_state_serde();
+    test_container_config_defaults();
+    test_default_stop_grace_ms();
+    test_container_serde_round_trip();
+    test_migration_bundle_serde();
+    test_container_require_pid();
+    test_container_fixup_after_restart();
+    test_container_should_rotate();
+    test_container_tail_start();
+    test_container_rotated_path();
+    # health + ansamblu + agent + fleet
+    test_health_status_from_majra();
+    test_health_status_serde();
+    test_health_register_and_heartbeat();
+    test_health_deregister();
+    test_health_restart_count_increments();
+    test_health_never_policy_no_restart();
+    test_health_on_failure_max_retries();
+    test_health_unless_stopped_respects_user_stop();
+    test_health_unknown_status_for_unregistered();
+    test_health_heartbeat_unregistered_returns_false();
+    test_health_default_monitor();
+    test_ansamblu_replica_count();
+    test_ansamblu_service_to_config();
+    test_ansamblu_compute_scale();
+    test_ansamblu_startup_order();
+    test_ansamblu_startup_order_cycle();
+    test_ansamblu_ready_services();
+    test_ansamblu_plan_rolling_update();
+    test_ansamblu_defaults();
+    test_agent_build_registration_from_container();
+    test_agent_build_registration_no_name();
+    test_agent_first12_truncates();
+    test_agent_registration_serde();
+    test_agent_status_serde();
+    test_agent_default_registry_url();
+    # fleet
+    test_fleet_strategy_names();
+    test_fleet_node_status_names();
+    test_fleet_constraints_default();
+    test_fleet_free_slots();
+    # mcp + stiva_core
+    test_mcp_tool_list_has_nine_tools();
+    test_mcp_tool_schemas_are_valid();
+    test_mcp_result_ok();
+    test_mcp_result_err();
+    test_mcp_result_resource();
+    test_mcp_content_type_names();
+    test_mcp_content_part_text();
+    test_mcp_content_part_resource();
+    test_lib_default_config();
+    test_lib_config_custom_values();
     return assert_summary();
 }
 

@@ -1,0 +1,538 @@
+# stiva — multi-container orchestration (ansamblu): types, DAG ordering,
+# rolling-update / scale planning, service→config conversion.
+# Ported from rust-old/src/ansamblu.rs.
+#
+# What ports cleanly here (self-contained, or depends only on already-ported
+# container.cyr / error.cyr and the sibling health.cyr):
+#   struct ServiceDef / NetworkDef / VolumeDef / HealthCheck / AnsambluFile
+#   struct AnsambluSession / RollingUpdateConfig / RollingUpdatePlan
+#   default_interval / default_timeout / default_retries
+#   default_max_surge / default_max_unavailable / default_update_delay
+#   rolling_update_config_default
+#   plan_rolling_update / compute_scale / service_container_ids
+#   service_to_config / replica_count
+#   build_dag / resolve_startup_order / ready_services
+#
+# In rust-old the DAG helpers delegate to `majra::queue::Dag` +
+# `DagScheduler::topological_sort` / `::new(..).ready(..)`. The vendored
+# majra bundle (lib/majra.cyr) exposes only the workflow-step DAG engine, not
+# that `queue::Dag { edges }` surface — so the two graph algorithms
+# (dependency-first topological sort with cycle detection, and the "ready"
+# frontier) are implemented locally here over the AnsambluFile's own
+# service→depends_on adjacency. Semantics match the Rust oracle.
+#
+# What is DEFERRED (see the block at the bottom):
+#   * parse_ansamblu — round-trips TOML through serde (toml::from_str). The
+#     ported base has no TOML object-model parser, so — exactly like
+#     build.cyr's parse_build_spec and convert.cyr's compose deferral — it
+#     lands with a TOML codec. The parsing #[cfg(test)] cases move with it.
+#   * the serde JSON round-trip tests (AnsambluFile / AnsambluSession /
+#     NetworkDef / VolumeDef / RestartPolicy) need a JSON serializer for these
+#     records; they land with the JSON codec.
+#
+# RestartPolicy is `pub use crate::health::RestartPolicy` in the oracle; it is
+# defined once in the sibling health.cyr (RESTART_POLICY_*), referenced here —
+# NOT redefined (Cyrius hoists enum members to globals, last-def-wins, so a
+# second definition would collide).
+#
+# Error mapping (mirrors error.cyr): Rust `Err(StivaError::Ansamblu(String))`
+# becomes an integer sentinel — resolve_startup_order returns 0 on a
+# dependency cycle; the caller reports it via
+# stiva_err_print(STIVA_ERR_ANSAMBLU, detail).
+
+# ── serde defaults (rust-old: default_* fns) ────────────────
+# HealthCheck field defaults.
+#[must_use]
+fn default_interval() {
+    return 30;
+}
+#[must_use]
+fn default_timeout() {
+    return 5;
+}
+#[must_use]
+fn default_retries() {
+    return 3;
+}
+
+# RollingUpdateConfig field defaults.
+#[must_use]
+fn default_max_surge() {
+    return 1;
+}
+#[must_use]
+fn default_max_unavailable() {
+    return 1;
+}
+#[must_use]
+fn default_update_delay() {
+    return 10;
+}
+
+# ── HealthCheck (rust-old: struct HealthCheck) ────────────────
+# `command` is a Vec<String> (vec handle, 0 = empty). interval_secs /
+# timeout_secs are u64; retries is u32. 4 fields × 8 = 32 bytes.
+struct HealthCheck {
+    command;
+    interval_secs;
+    timeout_secs;
+    retries;
+}
+
+# Allocate a HealthCheck with serde defaults for the numeric fields.
+#[must_use]
+fn health_check_new(command) {
+    var p = alloc(32);
+    var h: HealthCheck = p;
+    h.command = command;
+    h.interval_secs = default_interval();
+    h.timeout_secs = default_timeout();
+    h.retries = default_retries();
+    return p;
+}
+
+# ── ServiceDef (rust-old: struct ServiceDef) ────────────────
+# image: String (cstr). command/ports/volumes/depends_on: Vec<String>
+# (vec handle, 0 = empty). env: HashMap<String,String> (map handle, 0 =
+# empty). replicas: Option<u32> → count | -1 for None. restart:
+# Option<RestartPolicy> → RESTART_POLICY_* ordinal | -1 for None.
+# health_check: Option<HealthCheck> → HealthCheck* | 0 for None.
+# 9 fields × 8 = 72 bytes.
+struct ServiceDef {
+    image;
+    command;
+    env;
+    ports;
+    volumes;
+    depends_on;
+    replicas;
+    restart;
+    health_check;
+}
+
+# Construct a ServiceDef. Callers pass 0 for empty vecs/maps, -1 for a None
+# replicas/restart, and 0 for a None health_check.
+#[must_use]
+fn service_def_new(image, command, env, ports, volumes, depends_on) {
+    var p = alloc(72);
+    var s: ServiceDef = p;
+    s.image = image;
+    s.command = command;
+    s.env = env;
+    s.ports = ports;
+    s.volumes = volumes;
+    s.depends_on = depends_on;
+    s.replicas = 0 - 1;
+    s.restart = 0 - 1;
+    s.health_check = 0;
+    return p;
+}
+
+# ── NetworkDef (rust-old: struct NetworkDef, Default) ────────────
+# driver / subnet: Option<String> → cstr | 0 for None. 2 × 8 = 16 bytes.
+struct NetworkDef {
+    driver;
+    subnet;
+}
+
+# Default NetworkDef — both fields None (0).
+#[must_use]
+fn network_def_default() {
+    var p = alloc(16);
+    var n: NetworkDef = p;
+    n.driver = 0;
+    n.subnet = 0;
+    return p;
+}
+
+# ── VolumeDef (rust-old: struct VolumeDef, Default) ──────────────
+# driver: Option<String> → cstr | 0. 1 × 8 = 8 bytes.
+struct VolumeDef {
+    driver;
+}
+
+# Default VolumeDef — driver None (0).
+#[must_use]
+fn volume_def_default() {
+    # VolumeDef is single-field; Cyrius gives single-field structs VALUE
+    # semantics, so `v.driver = 0` would not write through the pointer.
+    # Store the field (driver = None) directly at offset 0.
+    var p = alloc(8);
+    store64(p, 0);
+    return p;
+}
+
+# ── AnsambluFile (rust-old: struct AnsambluFile) ───────────────
+# services: HashMap<String, ServiceDef*> (map handle). networks:
+# HashMap<String, NetworkDef*> (map handle, 0 = empty). volumes:
+# HashMap<String, VolumeDef*> (map handle, 0 = empty). 3 × 8 = 24 bytes.
+struct AnsambluFile {
+    services;
+    networks;
+    volumes;
+}
+
+# Construct an AnsambluFile from three (already-populated) map handles.
+#[must_use]
+fn ansamblu_file_new(services, networks, volumes) {
+    var p = alloc(24);
+    var a: AnsambluFile = p;
+    a.services = services;
+    a.networks = networks;
+    a.volumes = volumes;
+    return p;
+}
+
+# ── AnsambluSession (rust-old: struct AnsambluSession) ───────────
+# id: String (cstr). services: HashMap<String, Vec<String>> (map handle:
+# service name → vec of container-id cstrs). networks / startup_order:
+# Vec<String> (vec handle). created_at: DateTime<Utc> → epoch millis i64.
+# 5 fields × 8 = 40 bytes.
+struct AnsambluSession {
+    id;
+    services;
+    networks;
+    startup_order;
+    created_at;
+}
+
+#[must_use]
+fn ansamblu_session_new(id, services, networks, startup_order, created_at) {
+    var p = alloc(40);
+    var s: AnsambluSession = p;
+    s.id = id;
+    s.services = services;
+    s.networks = networks;
+    s.startup_order = startup_order;
+    s.created_at = created_at;
+    return p;
+}
+
+# ── RollingUpdateConfig (rust-old: struct RollingUpdateConfig) ────
+# max_surge / max_unavailable: u32. delay_secs: u64. 3 × 8 = 24 bytes.
+struct RollingUpdateConfig {
+    max_surge;
+    max_unavailable;
+    delay_secs;
+}
+
+# Default RollingUpdateConfig — rust-old impl Default: { 1, 1, 10 }.
+# (Matches the serde default_* fns.)
+#[must_use]
+fn rolling_update_config_default() {
+    var p = alloc(24);
+    var c: RollingUpdateConfig = p;
+    c.max_surge = default_max_surge();
+    c.max_unavailable = default_max_unavailable();
+    c.delay_secs = default_update_delay();
+    return p;
+}
+
+# ── RollingUpdatePlan (rust-old: struct RollingUpdatePlan) ───────
+# service_name: String. old_containers: Vec<String>. new_replica_count: u32.
+# new_image: String. config: RollingUpdateConfig*. 5 × 8 = 40 bytes.
+struct RollingUpdatePlan {
+    service_name;
+    old_containers;
+    new_replica_count;
+    new_image;
+    config;
+}
+
+# ── replica_count (rust-old: replica_count) ─────────────────
+# service.replicas.unwrap_or(1).max(1) — a None (-1) or a 0 both become 1.
+#[inline]
+#[must_use]
+fn replica_count(service) {
+    var s: ServiceDef = service;
+    var r = s.replicas;
+    if (r < 1) { return 1; }
+    return r;
+}
+
+# ── plan_rolling_update (rust-old: plan_rolling_update) ──────────
+# Build a RollingUpdatePlan from the session's current containers for
+# `service_name` and the new ServiceDef. old_containers defaults to an empty
+# vec when the service is absent. new_replica_count = replica_count(new).
+# In rust-old this is infallible-in-practice (returns Ok(...)); here it
+# returns the RollingUpdatePlan* directly.
+#[must_use]
+fn plan_rolling_update(session, service_name, new_service) {
+    var sess: AnsambluSession = session;
+    var old_containers = map_get(sess.services, service_name);
+    if (old_containers == 0) { old_containers = vec_new(); }
+
+    var new_svc: ServiceDef = new_service;
+    var p = alloc(40);
+    var plan: RollingUpdatePlan = p;
+    plan.service_name = service_name;
+    plan.old_containers = old_containers;
+    plan.new_replica_count = replica_count(new_service);
+    plan.new_image = new_svc.image;
+    plan.config = rolling_update_config_default();
+    return p;
+}
+
+# ── compute_scale (rust-old: compute_scale) ─────────────────
+# Returns (to_add, to_remove). Cyrius has no tuple return; the caller passes
+# `out` (an i64* to a 2-slot buffer): out[0] = to_add (u32),
+# out[1] = to_remove (vec handle of container-id cstrs, newest-first).
+#   desired > current → (desired-current, [])
+#   desired < current → (0, last `current-desired` ids reversed)
+#   desired == current → (0, [])
+# The "reversed, take remove_count" matches Rust `ids.iter().rev().take(n)`.
+fn compute_scale(session, service_name, desired, out) {
+    var sess: AnsambluSession = session;
+    var ids = map_get(sess.services, service_name);
+    var current = 0;
+    if (ids != 0) { current = vec_len(ids); }
+
+    if (desired > current) {
+        store64(out, desired - current);
+        store64(out + 8, vec_new());
+        return 0;
+    }
+    if (desired < current) {
+        var remove_count = current - desired;
+        var to_remove = vec_new();
+        # ids present (current > desired >= 0 implies current > 0).
+        var taken = 0;
+        var i = current - 1;
+        while (i >= 0 && taken < remove_count) {
+            vec_push(to_remove, vec_get(ids, i));
+            taken = taken + 1;
+            i = i - 1;
+        }
+        store64(out, 0);
+        store64(out + 8, to_remove);
+        return 0;
+    }
+    store64(out, 0);
+    store64(out + 8, vec_new());
+    return 0;
+}
+
+# ── service_container_ids (rust-old: service_container_ids) ──────
+# The session's container ids for a service, or an empty vec when absent.
+#[must_use]
+fn service_container_ids(session, service_name) {
+    var sess: AnsambluSession = session;
+    var ids = map_get(sess.services, service_name);
+    if (ids == 0) { return vec_new(); }
+    return ids;
+}
+
+# ── service_to_config (rust-old: service_to_config) ──────────────
+# Convert a ServiceDef into a container ContainerConfig for one replica.
+# Name is "{service}-{replica_index}" when replicas > 1, else just the
+# service name. Copies command / env / ports / volumes; everything else is
+# the ContainerConfig default.
+#[must_use]
+fn service_to_config(service_name, service, replica_index) {
+    var s: ServiceDef = service;
+
+    # service.replicas.unwrap_or(1) > 1  (None (-1) → 1, so > 1 is false)
+    var reps = s.replicas;
+    if (reps < 0) { reps = 1; }
+
+    var name = service_name;
+    if (reps > 1) {
+        # "{service_name}-{replica_index}"
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, service_name);
+        str_builder_putc(sb, 45);          # '-'
+        str_builder_add_int(sb, replica_index);
+        name = str_cstr(str_builder_build(sb));
+    }
+
+    # ContainerConfig is defined in the sibling container.cyr; write its
+    # fields by their documented byte offsets (name=0, command=8, env=16,
+    # volumes=24, ports=32) rather than a cross-file struct annotation, which
+    # a standalone parse of this module cannot resolve.
+    var cfg = container_config_default();
+    store64(cfg, name);           # name
+    store64(cfg + 8, s.command);  # command
+    store64(cfg + 16, s.env);     # env
+    store64(cfg + 24, s.volumes); # volumes
+    store64(cfg + 32, s.ports);   # ports
+    return cfg;
+}
+
+# ── DAG dependency resolution ─────────────────────
+# rust-old builds a majra `Dag { edges: name → depends_on }` and delegates
+# to DagScheduler. The vendored majra bundle lacks that surface, so the two
+# algorithms below operate directly on the AnsambluFile's service map.
+
+# The service names of an AnsambluFile, as a vec of cstr keys.
+#[must_use]
+fn _ansamblu_service_names(spec) {
+    var s: AnsambluFile = spec;
+    return map_keys(s.services);
+}
+
+# depends_on vec for a service name (empty vec if the service or its deps are
+# absent). Never returns 0.
+#[must_use]
+fn _ansamblu_deps_of(spec, name) {
+    var s: AnsambluFile = spec;
+    var svc = map_get(s.services, name);
+    if (svc == 0) { return vec_new(); }
+    var sd: ServiceDef = svc;
+    if (sd.depends_on == 0) { return vec_new(); }
+    return sd.depends_on;
+}
+
+# 1 iff `name` is present in vec `names` (cstr equality), else 0.
+#[must_use]
+fn _ansamblu_name_in(names, name) {
+    var n = vec_len(names);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(names, i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# build_dag — placeholder for the rust-old `majra::queue::Dag`. Since the
+# adjacency lives in the AnsambluFile itself and the bundle exposes no
+# compatible Dag type, this returns the spec handle unchanged; the sort /
+# ready helpers read the service map directly. Kept for name parity.
+#[must_use]
+fn build_dag(spec) {
+    return spec;
+}
+
+# resolve_startup_order — dependency-first topological order (Kahn's
+# algorithm). Returns a vec of service-name cstrs on success, or 0 on a
+# dependency cycle (rust-old: Err(StivaError::Ansamblu("dependency cycle
+# detected"))). Only edges to services that exist in the file are counted,
+# matching the Rust DAG which keys strictly off the declared services.
+#[must_use]
+fn resolve_startup_order(spec) {
+    var names = _ansamblu_service_names(spec);
+    var count = vec_len(names);
+    var order = vec_new();
+
+    # in_degree[i] = number of THIS service's depends_on entries that name a
+    # service also present in the file (unresolved edges are ignored, as in
+    # the majra DAG). placed[i] = 1 once emitted.
+    var in_degree = alloc(count * 8);
+    var placed = alloc(count * 8);
+    var i = 0;
+    while (i < count) {
+        var name = vec_get(names, i);
+        var deps = _ansamblu_deps_of(spec, name);
+        var dn = vec_len(deps);
+        var deg = 0;
+        var j = 0;
+        while (j < dn) {
+            var d = vec_get(deps, j);
+            if (_ansamblu_name_in(names, d) == 1) { deg = deg + 1; }
+            j = j + 1;
+        }
+        store64(in_degree + i * 8, deg);
+        store64(placed + i * 8, 0);
+        i = i + 1;
+    }
+
+    # Emit services with in-degree 0, then decrement dependents, repeat.
+    var emitted = 0;
+    while (emitted < count) {
+        var progressed = 0;
+        i = 0;
+        while (i < count) {
+            if (load64(placed + i * 8) == 0 && load64(in_degree + i * 8) == 0) {
+                var ni = vec_get(names, i);
+                vec_push(order, ni);
+                store64(placed + i * 8, 1);
+                emitted = emitted + 1;
+                progressed = 1;
+                # decrement in-degree of every not-yet-placed service that
+                # depends on ni.
+                var k = 0;
+                while (k < count) {
+                    if (load64(placed + k * 8) == 0) {
+                        var kdeps = _ansamblu_deps_of(spec, vec_get(names, k));
+                        var kd = vec_len(kdeps);
+                        var m = 0;
+                        while (m < kd) {
+                            if (streq(vec_get(kdeps, m), ni) == 1) {
+                                store64(in_degree + k * 8, load64(in_degree + k * 8) - 1);
+                            }
+                            m = m + 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (progressed == 0) {
+            # Remaining nodes form a cycle.
+            return 0;
+        }
+    }
+
+    return order;
+}
+
+# ready_services — services whose every declared (and present) dependency is
+# in `completed` and which are not themselves completed. `completed` is a set
+# represented as a map (name cstr → any non-null); a container-id vec-of-name
+# also works via _ansamblu_name_in. Here `completed` is a map handle (0 =
+# empty). Returns a vec of ready service-name cstrs. Mirrors
+# rust-old `DagScheduler::new(&dag).ready(completed)`.
+#[must_use]
+fn ready_services(spec, completed) {
+    var names = _ansamblu_service_names(spec);
+    var count = vec_len(names);
+    var ready = vec_new();
+
+    var i = 0;
+    while (i < count) {
+        var name = vec_get(names, i);
+        var done = 0;
+        if (completed != 0 && map_has(completed, name) == 1) { done = 1; }
+        if (done == 0) {
+            var deps = _ansamblu_deps_of(spec, name);
+            var dn = vec_len(deps);
+            var all_done = 1;
+            var j = 0;
+            while (j < dn) {
+                var d = vec_get(deps, j);
+                # Only depends_on entries that name an existing service gate
+                # readiness (matches the DAG keyed off declared services).
+                if (_ansamblu_name_in(names, d) == 1) {
+                    if (completed == 0 || map_has(completed, d) == 0) {
+                        all_done = 0;
+                    }
+                }
+                j = j + 1;
+            }
+            if (all_done == 1) { vec_push(ready, name); }
+        }
+        i = i + 1;
+    }
+
+    return ready;
+}
+
+# ── DEFERRED (land with a TOML + JSON codec) ────────────────
+# rust-old/src/ansamblu.rs also defines, coupled to serde codecs the ported
+# base does not yet have:
+#
+#   fn parse_ansamblu(toml_str: &str) -> Result<AnsambluFile, StivaError>
+#       toml::from_str → AnsambluFile; Err → StivaError::Ansamblu. Lands with
+#       the TOML object-model parser (same deferral as build.cyr's
+#       parse_build_spec and convert.cyr's compose parsing). The parsing
+#       #[cfg(test)] cases (parse_ansamblu_* / health_check_defaults) move
+#       with it.
+#
+#   serde JSON round-trip tests: ansamblu_file_serde_round_trip,
+#   ansamblu_session_serde, network_def_serde, volume_def_serde,
+#   restart_policy_serde — need a JSON serializer for these records; they land
+#   with the JSON codec.
+#
+# RestartPolicy itself (`pub use crate::health::RestartPolicy`) is defined in
+# the sibling src/health.cyr and referenced here, not re-ported.

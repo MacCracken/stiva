@@ -1,0 +1,422 @@
+# stiva — OCI runtime execution: spec types, mounts, /proc parsing, CRIU probe.
+# Ported from rust-old/src/runtime.rs.
+#
+# This module bridges container config to kavach for process isolation. The
+# HEAVY paths — kavach sandbox build/exec/spawn, tokio async I/O, nsenter/criu
+# subprocess execution, tar/gzip codecs, cgroups fs writes, and the
+# ExternalizationGate — are DEFERRED (see the block at the bottom): they need
+# the async runtime, tar/gzip/zstd codecs, and process-spawning surface the
+# ported base does not yet expose, matching the storage/registry precedent.
+#
+# What is ported here (self-contained + already-ported deps only):
+#   * The runtime spec value types: Namespace enum, SpecMount, RuntimeSpec,
+#     ContainerExecResult, ProcessInfo, ContainerStats (+ constructors).
+#   * standard_mounts()  — the fixed /proc,/sys,/dev,/dev/pts,/dev/shm list.
+#   * volume_mounts(vols, rootless) — SpecMount conversion via storage.parse_volume.
+#   * parse_ppid_from_stat(stat) — pure /proc/<pid>/stat PPID field parser.
+#   * criu_available() — PATH scan for the `criu` binary.
+#
+# Enum members are namespaced RUNTIME_NS_* for global uniqueness (see error.cyr).
+
+# ── Namespace ───────────────────────────
+# Linux namespaces for container isolation (rust-old: enum Namespace).
+enum Namespace {
+    RUNTIME_NS_PID = 0;
+    RUNTIME_NS_NET = 1;
+    RUNTIME_NS_MOUNT = 2;
+    RUNTIME_NS_UTS = 3;
+    RUNTIME_NS_IPC = 4;
+    RUNTIME_NS_USER = 5;
+    RUNTIME_NS_CGROUP = 6;
+}
+
+# serde wire name for a Namespace. Rust derives the default serde encoding for
+# the enum, which serializes each unit variant as its PascalCase name.
+#[must_use]
+fn namespace_name(ns) {
+    if (ns == RUNTIME_NS_PID) { return "Pid"; }
+    if (ns == RUNTIME_NS_NET) { return "Net"; }
+    if (ns == RUNTIME_NS_MOUNT) { return "Mount"; }
+    if (ns == RUNTIME_NS_UTS) { return "Uts"; }
+    if (ns == RUNTIME_NS_IPC) { return "Ipc"; }
+    if (ns == RUNTIME_NS_USER) { return "User"; }
+    if (ns == RUNTIME_NS_CGROUP) { return "Cgroup"; }
+    return "Unknown";
+}
+
+# ── SpecMount ───────────────────────────
+# A mount entry in the runtime spec (rust-old: struct SpecMount).
+#   source      : cstr host path, or 0 for virtual filesystems (Option<PathBuf>)
+#   destination : cstr container path
+#   mount_type  : cstr ("proc", "sysfs", "tmpfs", "bind", ...)
+#   options     : vec of option cstrs (vec.cyr handle)
+struct SpecMount {
+    source;
+    destination;
+    mount_type;
+    options;
+}
+
+fn spec_mount_new(source, destination, mount_type, options) {
+    var m = alloc(32);
+    var mm: SpecMount = m;
+    mm.source = source;
+    mm.destination = destination;
+    mm.mount_type = mount_type;
+    mm.options = options;
+    return m;
+}
+
+# ── RuntimeSpec ──────────────────────────
+# Full OCI runtime configuration generated from a container's config
+# (rust-old: struct RuntimeSpec, 22 fields).
+#
+# Optional Rust fields map as follows:
+#   Option<u64>/<u32> numeric limits → the value when set, else 0 = unset
+#     (mirrors ContainerConfig's own "0 = unlimited" convention).
+#   Option<String> (user/backend/seccomp_profile/agent_id/domainname) → cstr, 0 = None.
+#   Option<u8> min_isolation_score → value 0..100, or -1 = None.
+#   secrets/scan_policy → kavach handles (i64), 0 = none.
+#   namespaces/mounts/command/env → vec.cyr handles.
+#   bools (read_only_rootfs, rootless) → 1/0.
+struct RuntimeSpec {
+    rootfs;                  # cstr
+    command;                 # vec of cstr
+    env;                     # vec of "KEY=VALUE" cstr
+    namespaces;              # vec of Namespace ints
+    memory_limit_bytes;      # u64, 0 = unlimited
+    cpu_shares;              # u64, 0 = default
+    max_pids;                # u32, 0 = unlimited
+    user;                    # cstr or 0
+    workdir;                 # cstr
+    read_only_rootfs;        # 1/0
+    mounts;                  # vec of SpecMount*
+    rootless;                # 1/0
+    secrets;                 # vec of kavach SecretRef handles
+    scan_policy;             # kavach ExternalizationPolicy handle, 0 = none
+    timeout_ms;              # u64, 0 = no timeout
+    backend;                 # cstr backend name or 0
+    min_isolation_score;     # 0..100 or -1 = none
+    io_max_bytes_per_sec;    # u64, 0 = unlimited
+    seccomp_profile;         # cstr or 0
+    agent_id;                # cstr or 0
+    domainname;              # cstr or 0
+}
+
+fn runtime_spec_new() {
+    var s = alloc(168);   # 21 fields * 8
+    var ss: RuntimeSpec = s;
+    ss.rootfs = 0;
+    ss.command = 0;
+    ss.env = 0;
+    ss.namespaces = 0;
+    ss.memory_limit_bytes = 0;
+    ss.cpu_shares = 0;
+    ss.max_pids = 0;
+    ss.user = 0;
+    ss.workdir = 0;
+    ss.read_only_rootfs = 0;
+    ss.mounts = 0;
+    ss.rootless = 0;
+    ss.secrets = 0;
+    ss.scan_policy = 0;
+    ss.timeout_ms = 0;
+    ss.backend = 0;
+    ss.min_isolation_score = 0 - 1;
+    ss.io_max_bytes_per_sec = 0;
+    ss.seccomp_profile = 0;
+    ss.agent_id = 0;
+    ss.domainname = 0;
+    return s;
+}
+
+# ── ContainerExecResult ───────────────────────
+# Result of executing a container command (rust-old: struct ContainerExecResult).
+struct ContainerExecResult {
+    exit_code;     # i32
+    stdout;        # cstr
+    stderr;        # cstr
+    duration_ms;   # u64
+    timed_out;     # 1/0
+}
+
+fn container_exec_result_new(exit_code, stdout, stderr, duration_ms, timed_out) {
+    var r = alloc(40);
+    var rr: ContainerExecResult = r;
+    rr.exit_code = exit_code;
+    rr.stdout = stdout;
+    rr.stderr = stderr;
+    rr.duration_ms = duration_ms;
+    rr.timed_out = timed_out;
+    return r;
+}
+
+# ── ProcessInfo ──────────────────────────
+# A process entry from /proc inside a container's PID namespace
+# (rust-old: struct ProcessInfo). `state` is a single-char code (byte).
+struct ProcessInfo {
+    pid;
+    ppid;
+    comm;      # cstr
+    cmdline;   # cstr
+    state;     # byte (char)
+}
+
+fn process_info_new(pid, ppid, comm, cmdline, state) {
+    var p = alloc(40);
+    var pp: ProcessInfo = p;
+    pp.pid = pid;
+    pp.ppid = ppid;
+    pp.comm = comm;
+    pp.cmdline = cmdline;
+    pp.state = state;
+    return p;
+}
+
+# ── ContainerStats ─────────────────────────
+# Runtime statistics for a container (rust-old: struct ContainerStats).
+struct ContainerStats {
+    memory_bytes;
+    memory_limit_bytes;   # 0 = unlimited
+    cpu_usage_us;
+    pids_current;
+    pids_limit;           # 0 = unlimited
+}
+
+fn container_stats_new(memory_bytes, memory_limit_bytes, cpu_usage_us, pids_current, pids_limit) {
+    var c = alloc(40);
+    var cc: ContainerStats = c;
+    cc.memory_bytes = memory_bytes;
+    cc.memory_limit_bytes = memory_limit_bytes;
+    cc.cpu_usage_us = cpu_usage_us;
+    cc.pids_current = pids_current;
+    cc.pids_limit = pids_limit;
+    return c;
+}
+
+# ── Spec generation helpers ──────────────────────
+
+# Standard container mounts (/proc, /sys, /dev, /dev/pts, /dev/shm) — the
+# fixed base every container gets (rust-old: standard_mounts). Returns a vec
+# of 5 SpecMount*, each with its option list as a vec of cstrs.
+#[must_use]
+fn standard_mounts() {
+    var mounts = vec_new();
+
+    # /proc — proc, [nosuid, noexec, nodev]
+    var o_proc = vec_new();
+    vec_push(o_proc, "nosuid");
+    vec_push(o_proc, "noexec");
+    vec_push(o_proc, "nodev");
+    vec_push(mounts, spec_mount_new(0, "/proc", "proc", o_proc));
+
+    # /sys — sysfs, [nosuid, noexec, nodev, ro]
+    var o_sys = vec_new();
+    vec_push(o_sys, "nosuid");
+    vec_push(o_sys, "noexec");
+    vec_push(o_sys, "nodev");
+    vec_push(o_sys, "ro");
+    vec_push(mounts, spec_mount_new(0, "/sys", "sysfs", o_sys));
+
+    # /dev — tmpfs, [nosuid, mode=755]
+    var o_dev = vec_new();
+    vec_push(o_dev, "nosuid");
+    vec_push(o_dev, "mode=755");
+    vec_push(mounts, spec_mount_new(0, "/dev", "tmpfs", o_dev));
+
+    # /dev/pts — devpts, [nosuid, noexec, newinstance, mode=0620]
+    var o_pts = vec_new();
+    vec_push(o_pts, "nosuid");
+    vec_push(o_pts, "noexec");
+    vec_push(o_pts, "newinstance");
+    vec_push(o_pts, "mode=0620");
+    vec_push(mounts, spec_mount_new(0, "/dev/pts", "devpts", o_pts));
+
+    # /dev/shm — tmpfs, [nosuid, noexec, nodev, mode=1777]
+    var o_shm = vec_new();
+    vec_push(o_shm, "nosuid");
+    vec_push(o_shm, "noexec");
+    vec_push(o_shm, "nodev");
+    vec_push(o_shm, "mode=1777");
+    vec_push(mounts, spec_mount_new(0, "/dev/shm", "tmpfs", o_shm));
+
+    return mounts;
+}
+
+# Convert volume specs into SpecMount entries (rust-old: volume_mounts).
+# `volumes` is a vec of "source:target[:ro]" cstrs; `rootless` is 1/0.
+# Each mount gets options starting with "rbind", plus "ro" when the volume is
+# read-only, plus "X-mount.idmap=" when rootless (OCI runtime-spec v1.2.0
+# ID-mapped mounts). Returns a vec of SpecMount* on success, or 0 (null) if
+# any spec is invalid (rust-old: Err(StivaError::Storage(...)) — caller reports
+# via stiva_err_print(STIVA_ERR_STORAGE)).
+fn volume_mounts(volumes, rootless) {
+    var mounts = vec_new();
+    var n = vec_len(volumes);
+    var i = 0;
+    while (i < n) {
+        var spec = vec_get(volumes, i);
+        var vol = parse_volume(spec);   # storage.cyr: 0 on invalid spec
+        if (vol == 0) {
+            return 0;
+        }
+        # storage.cyr VolumeMount layout is { source; target; read_only; } at
+        # offsets 0/8/16. Accessed via load64 to avoid a cross-module struct
+        # annotation (the standalone parse has no VolumeMount in scope).
+        var vsource = load64(vol + 0);
+        var vtarget = load64(vol + 8);
+        var vread_only = load64(vol + 16);
+
+        var options = vec_new();
+        vec_push(options, "rbind");
+        if (vread_only == 1) {
+            vec_push(options, "ro");
+        }
+        if (rootless == 1) {
+            vec_push(options, "X-mount.idmap=");
+        }
+
+        vec_push(mounts, spec_mount_new(vsource, vtarget, "bind", options));
+        i = i + 1;
+    }
+    return mounts;
+}
+
+# ── /proc/<pid>/stat parsing ──────────────────────
+
+# Parse the PPID field from /proc/<pid>/stat content (rust-old:
+# parse_ppid_from_stat). Format: "pid (comm) state ppid ...". `comm` may itself
+# contain parens, so we find the LAST ')', skip ") " (2 bytes), skip the state
+# field (up to the next space), and parse the ppid that follows. Returns the
+# PPID, or 0 when the format is unrecognized (matches Rust's unwrap_or(0)).
+#[must_use]
+fn parse_ppid_from_stat(stat) {
+    var len = strlen(stat);
+
+    # rfind(')') — last ')'.
+    var close = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(stat + i) == 41) { close = i; }   # ')' = 41
+        i = i + 1;
+    }
+    if (close < 0) { return 0; }
+
+    # remainder = &stat[close + 2..]  (skip ") ").
+    var p = close + 2;
+    if (p >= len) { return 0; }
+
+    # split_whitespace(): the state field is the first token; skip it, then
+    # skip the whitespace between state and ppid, then parse ppid digits.
+    # Skip any leading spaces first (defensive; Rust's split_whitespace does).
+    while (p < len && load8(stat + p) == 32) { p = p + 1; }   # ' ' = 32
+    # Skip the state token (non-space run).
+    while (p < len && load8(stat + p) != 32) { p = p + 1; }
+    # Skip whitespace between state and ppid.
+    while (p < len && load8(stat + p) == 32) { p = p + 1; }
+    if (p >= len) { return 0; }
+
+    # Parse the ppid integer (digits until next space/end). atoi stops at the
+    # first non-digit, so we can hand it the tail directly.
+    return atoi(stat + p);
+}
+
+# ── CRIU availability ────────────────────────
+
+# True (1) iff the `criu` binary is found on PATH (rust-old: criu_available).
+# Scans $PATH (colon-separated) and checks each dir for a `criu` file. Returns
+# 0 when $PATH is unset or `criu` is absent. rust-old uses Path::is_file; here
+# we probe existence via file_exists (a directory would not be openable as a
+# read-only file on the platforms we target).
+#[must_use]
+fn criu_available() {
+    var path_var = getenv("PATH");
+    if (path_var == 0) { return 0; }
+
+    var len = strlen(path_var);
+    var start = 0;
+    var i = 0;
+    while (i <= len) {
+        var at_sep = 0;
+        if (i == len) {
+            at_sep = 1;
+        } elif (load8(path_var + i) == 58) {   # ':' = 58
+            at_sep = 1;
+        }
+
+        if (at_sep == 1) {
+            var seg_len = i - start;
+            if (seg_len > 0) {
+                # candidate = "<dir>/criu"
+                var cand = alloc(seg_len + 6);   # "/criu" (5) + NUL
+                memcpy(cand, path_var + start, seg_len);
+                store8(cand + seg_len, 47);          # '/'
+                store8(cand + seg_len + 1, 99);      # 'c'
+                store8(cand + seg_len + 2, 114);     # 'r'
+                store8(cand + seg_len + 3, 105);     # 'i'
+                store8(cand + seg_len + 4, 117);     # 'u'
+                store8(cand + seg_len + 5, 0);
+                if (file_exists(cand) == 1) {
+                    return 1;
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── DEFERRED (land with the async runtime + codecs + kavach exec) ─────────
+# rust-old/src/runtime.rs additionally defines the execution/orchestration
+# surface below. Each needs infrastructure the ported base does not yet expose
+# — the tokio async runtime, subprocess spawning (nsenter/criu), tar/gzip/zstd
+# codecs, cgroups-v2 fs writes, and the deeper kavach sandbox exec/spawn +
+# ExternalizationGate handles — so they are ported alongside those landings.
+#
+# generate_spec(container: &Container, rootfs: &Path) -> RuntimeSpec
+#     Pure, but reads container.rs's ContainerConfig (env HashMap iteration,
+#     Option<String> fields, command/volumes/limits). Lands with container.cyr
+#     once its ContainerConfig field accessors are finalized. Behavior:
+#       - env: each (k,v) → "k=v" cstr.
+#       - command: empty → ["/bin/sh"], else config.command.
+#       - workdir: config.workdir or "/".
+#       - memory_limit_bytes/cpu_shares/max_pids: value if > 0 else unset.
+#       - mounts: standard_mounts() ++ volume_mounts(config.volumes, config.rootless)?
+#       - namespaces: [Pid, Net, Mount, Uts, Ipc] (+ User if rootless).
+#       - read_only_rootfs = false; io_max_bytes_per_sec = unset.
+#       - secrets/scan_policy/timeout_ms/backend/min_isolation_score/
+#         seccomp_profile/agent_id/domainname copied from config.
+#
+# build_sandbox(spec) -> (kavach::Sandbox, command)   [async]
+#     kavach policy_basic() + memory/pids/cpu limits, seccomp profile, backend
+#     select (explicit backend_parse > min-strength resolve > Oci-if-available
+#     else Process), config_* builder, secret injection, sandbox_create +
+#     transition(Running). Needs kavach async sandbox_create + Backend resolve.
+# exec_container(spec) -> ContainerExecResult              [async, kavach exec]
+# spawn_container(spec) -> DaemonHandle                    [async, kavach spawn]
+# struct DaemonHandle { process: SpawnedProcess, _sandbox: Sandbox }
+#     .pid() / .wait() / .kill(grace_ms) / .try_wait()     [async, kavach]
+# exec_in_container(pid, command, env, workdir) -> ContainerExecResult
+#     [async, nsenter subprocess + pre_exec fd-close CVE-2024-21626 mitigation]
+# scan_output(result, policy) -> ContainerExecResult   [kavach ExternalizationGate]
+# security_score() -> StrengthScore                    [kavach score_backend]
+# security_score_for(backend, policy) -> StrengthScore [kavach score_backend]
+# container_top(pid) -> Vec<ProcessInfo>               [async /proc dir walk]
+# is_descendant_of(child, ancestor) -> bool            [reads /proc/<pid>/stat]
+# read_process_info(pid) -> ProcessInfo                [async /proc reads]
+# export_rootfs(rootfs, output)                        [async, tar builder]
+# import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
+#     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
+# copy_into_container / copy_from_container / copy_dir_recursive  [fs recursion]
+# send_signal(pid, signal)                             [rustix kill_process]
+# pause_container / unpause_container                  [async cgroup.freeze write]
+# resolve_cgroup_base(pid) -> String                   [async /proc/<pid>/cgroup]
+# write_cgroup_file(pid, filename, value)              [async cgroup fs write]
+# apply_cgroup_limits(pid, spec)                       [async memory/pids/cpu/io.max]
+# container_stats(pid) -> ContainerStats               [async cgroup fs reads]
+# read_cgroup_u64 / read_cpu_usage                     [async cgroup fs reads]
+# checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
+# pre_dump_container(pid, dump_dir, parent_dir)        [async criu pre-dump]
+# restore_lazy(dump_dir, rootfs, page_server_addr) -> pid  [async criu lazy restore]
+# restore_container(dump_dir, rootfs) -> pid           [async criu restore]

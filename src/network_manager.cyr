@@ -1,0 +1,374 @@
+# stiva — network manager: lifecycle for bridge networks, container connectivity
+# Ported from rust-old/src/network/manager.rs.
+#
+# The Rust NetworkManager owns:
+#   networks     : HashMap<String, ManagedNetwork>   (name -> { pool, bridge_created })
+#   connections  : HashMap<String, ContainerNetwork> (container_id -> connection)
+#   outbound_iface : String
+#
+# In Cyrius these are heap structs (pointer per field) with cstr-keyed maps
+# (hashmap.cyr KeyTypeCstr path — names/ids are NUL-terminated cstrings).
+# `alloc_init()` must have run once before any manager is created.
+#
+# IP representation: rust-old carried `ContainerNetwork.ip` as an Ipv4Addr.
+# network_pool.cyr allocates the u32 host value and network_mod.cyr's
+# ContainerNetwork stores it — so here `.ip` is the u32 host value
+# (ip_pool_allocate's return). We format it to a dotted-quad cstr on demand
+# (via _np_fmt_ipv4 from network_pool.cyr) for the NAT/DNS paths that need a
+# string, exactly where rust-old called `ip.to_string()` / `%ip`. Release
+# feeds the same u32 back to ip_pool_release. The test parity check
+# `cn.ip == "172.17.0.2".parse::<Ipv4Addr>()` becomes an integer compare on
+# that host value (172.17.0.2 = 0xAC110002 = 2886795266).
+#
+# Error mapping (mirrors error.cyr): every Rust `Err(StivaError::Network(...))`
+# becomes STIVA_ERR_NETWORK returned via an integer sentinel; the caller
+# reports detail via stiva_err_print(STIVA_ERR_NETWORK, detail). Fallible
+# constructors/queries that must yield a value return 0 (or a documented
+# negative) on failure.
+
+# ── constants (rust-old: pub const DEFAULT_*, const DEFAULT_OUTBOUND_IFACE) ──
+
+# Default bridge network name (rust-old: DEFAULT_BRIDGE).
+#[must_use]
+fn network_manager_default_bridge() {
+    return "stiva0";
+}
+
+# Default bridge subnet (rust-old: DEFAULT_SUBNET).
+#[must_use]
+fn network_manager_default_subnet() {
+    return "172.17.0.0/16";
+}
+
+# Default outbound interface for NAT (rust-old: DEFAULT_OUTBOUND_IFACE).
+#[must_use]
+fn _network_manager_default_outbound_iface() {
+    return "eth0";
+}
+
+# ── ManagedNetwork (rust-old: struct ManagedNetwork) ─────────────
+# pool          : ptr to an IpPool (network_pool.cyr)
+# bridge_created : 1 if the bridge interface was created, 0 if deferred (root)
+struct ManagedNetwork {
+    pool;
+    bridge_created;
+}
+
+fn _managed_network_new(pool, bridge_created) {
+    var m: ManagedNetwork = alloc(16);
+    m.pool = pool;
+    m.bridge_created = bridge_created;
+    return m;
+}
+
+# ── NetworkManager (rust-old: struct NetworkManager) ─────────────
+# networks       : cstr-keyed map name -> ManagedNetwork ptr
+# connections    : cstr-keyed map container_id -> ContainerNetwork ptr
+# outbound_iface : cstr
+struct NetworkManager {
+    networks;
+    connections;
+    outbound_iface;
+}
+
+# Create a new network manager with the default bridge network
+# (rust-old: NetworkManager::new). Returns the manager ptr on success, or 0
+# on failure (the default-bridge create_network failed). Callers report via
+# stiva_err_print(STIVA_ERR_NETWORK, detail).
+#[must_use]
+fn network_manager_new() {
+    return network_manager_with_outbound(_network_manager_default_outbound_iface());
+}
+
+# Create with a specific outbound interface (rust-old: with_outbound).
+# Returns the manager ptr, or 0 if the default-bridge create fails.
+#[must_use]
+fn network_manager_with_outbound(outbound_iface) {
+    var mgr: NetworkManager = alloc(24);
+    mgr.networks = map_new();
+    mgr.connections = map_new();
+    mgr.outbound_iface = outbound_iface;
+
+    # Create default bridge network (IP pool only; bridge iface requires root).
+    var rc = network_manager_create_network(mgr, network_manager_default_bridge(), network_manager_default_subnet());
+    if (rc != STIVA_ERR_OK) { return 0; }
+    return mgr;
+}
+
+# Create a named network with the given subnet (rust-old: create_network).
+# Returns STIVA_ERR_OK on success, or STIVA_ERR_NETWORK if the name already
+# exists or the subnet is invalid. The bridge interface is created best-effort
+# (deferred with a warning when not root) — the pool is always registered.
+fn network_manager_create_network(m, name, subnet) {
+    var mgr: NetworkManager = m;
+
+    if (map_has(mgr.networks, name) == 1) {
+        # "network '{name}' already exists"
+        return STIVA_ERR_NETWORK;
+    }
+
+    var pool = ip_pool_new(subnet);
+    if (pool == 0) { return STIVA_ERR_NETWORK; }
+
+    # Try to create the bridge interface (requires root). On failure the Rust
+    # logged a warn and continued with bridge_created = false.
+    var br = create_bridge(name, ip_pool_gateway(pool), ip_pool_prefix_len(pool));
+    var bridge_created = 0;
+    if (br == STIVA_ERR_OK) {
+        bridge_created = 1;
+    }
+
+    map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
+    return STIVA_ERR_OK;
+}
+
+# Count the connections whose network_name == `name` (rust-old: the
+# `connected` Vec filter/collect, used only for its length here).
+#[must_use]
+fn _network_manager_connected_count(m, name) {
+    var mgr: NetworkManager = m;
+    var ids = map_keys(mgr.connections);
+    var n = vec_len(ids);
+    var count = 0;
+    var i = 0;
+    while (i < n) {
+        var id = vec_get(ids, i);
+        var cn: ContainerNetwork = map_get(mgr.connections, id);
+        if (streq(cn.network_name, name) == 1) { count = count + 1; }
+        i = i + 1;
+    }
+    return count;
+}
+
+# Delete a named network (rust-old: delete_network). Returns STIVA_ERR_OK on
+# success, or STIVA_ERR_NETWORK if the network is unknown or still has
+# containers connected (in which case the network is left in place, matching
+# the Rust "put network back" behaviour). The bridge delete is best-effort.
+fn network_manager_delete_network(m, name) {
+    var mgr: NetworkManager = m;
+
+    if (map_has(mgr.networks, name) == 0) {
+        # "network '{name}' not found"
+        return STIVA_ERR_NETWORK;
+    }
+
+    # Check no containers are connected.
+    var connected = _network_manager_connected_count(m, name);
+    if (connected > 0) {
+        # Network stays registered (Rust removed then re-inserted on error);
+        # here we never removed it, so it is already "put back".
+        # "cannot delete network '{name}': {connected} containers connected"
+        return STIVA_ERR_NETWORK;
+    }
+
+    map_delete(mgr.networks, name);
+    var _r = delete_bridge(name);      # best-effort (Rust: `let _ = ...`)
+    return STIVA_ERR_OK;
+}
+
+# Connect a container to a network (rust-old: connect_container).
+# Allocates an IP, creates a veth pair, attaches to the bridge, applies NAT
+# rules for any port specs, and injects DNS into the rootfs when supplied.
+# Returns the ContainerNetwork ptr on success, or 0 on failure (unknown
+# network, IP exhausted, or an invalid port spec).
+#
+# Params:
+#   m            : NetworkManager ptr
+#   container_id : cstr
+#   network_name : cstr
+#   port_specs   : vec of cstr port-spec strings (may be empty)
+#   rootfs       : cstr rootfs path, or 0 for None
+#[must_use]
+fn network_manager_connect_container(m, container_id, network_name, port_specs, rootfs) {
+    var mgr: NetworkManager = m;
+
+    var mn = map_get(mgr.networks, network_name);
+    if (mn == 0) {
+        # "network '{network_name}' not found"
+        return 0;
+    }
+    var network: ManagedNetwork = mn;
+
+    # Allocate IP (u32 host value). -1 on exhaustion → propagate as failure.
+    var ip = ip_pool_allocate(network.pool);
+    if (ip < 0) { return 0; }
+
+    # Create veth pair. On failure (requires root) keep the IP allocated and
+    # fall back to a synthesized host name + "eth0" container end.
+    var host_veth = create_veth_pair(container_id);
+    var container_veth = container_veth_name();      # always "eth0"
+    if (host_veth == 0) {
+        # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
+        host_veth = host_veth_name(container_id);
+    }
+
+    # Attach host side to bridge (best-effort; Rust `let _ = ...`).
+    var _a = attach_to_bridge(host_veth, network_name);
+
+    # Parse port mappings and apply NAT rules via nein. An invalid port spec
+    # is a hard error (Rust `?`), releasing nothing (the IP stays allocated,
+    # matching the Rust which returns Err after the `pool.allocate()?`).
+    if (vec_len(port_specs) > 0) {
+        var subnet = ip_pool_subnet(network.pool);
+        var bridge_cfg = network_nat_bridge_config(network_name, subnet, mgr.outbound_iface);
+        var bf = bridge_firewall_new(bridge_cfg);
+
+        var np = vec_len(port_specs);
+        var i = 0;
+        while (i < np) {
+            var spec = vec_get(port_specs, i);
+            var port_spec = network_nat_parse_port_spec(spec);
+            if (port_spec == 0) {
+                # Invalid port spec (Rust: Err(StivaError::PortMapping(...))).
+                return 0;
+            }
+            var mapping = network_nat_to_nein_port_mapping(port_spec, ip);
+            var addres = bf_add_port_mapping(bf, mapping);
+            if (is_err_result(addres) == 1) {
+                # "port mapping error: {e}" (Rust mapped to StivaError::Network).
+                return 0;
+            }
+            i = i + 1;
+        }
+
+        var fw = bf_to_firewall(bf);
+        if (is_err_result(firewall_validate(fw)) == 1) {
+            # "firewall validation failed: {e}" — warn only, non-fatal (Rust).
+        } else {
+            _network_manager_apply_nft_ruleset(firewall_render(fw));
+        }
+    }
+
+    # Inject DNS into container rootfs if available (all best-effort).
+    if (rootfs != 0) {
+        var dns = network_dns_host_servers();
+        var _d1 = network_dns_inject_resolv_conf(rootfs, dns);
+        var hostname = host_veth_name_trunc(container_id);   # first up-to-12 chars
+        var _d2 = network_dns_inject_hosts(rootfs, ip, hostname);
+        var _d3 = network_dns_inject_hostname(rootfs, hostname);
+    }
+
+    var cn = container_network_new(ip, 0, network_name, host_veth, container_veth);
+    map_set(mgr.connections, container_id, cn);
+    return cn;
+}
+
+# First up-to-12 chars of `container_id` as a fresh cstr — the hostname the
+# Rust derived via `container_id[..12.min(len)]`. (bridge.cyr's host_veth_name
+# prepends "ve-"; this is the bare truncation the DNS path needs.)
+#[must_use]
+fn host_veth_name_trunc(container_id) {
+    var n = strlen(container_id);
+    var take = n;
+    if (take > 12) { take = 12; }
+    var out = alloc(take + 1);
+    memcpy(out, container_id, take);
+    store8(out + take, 0);
+    return out;
+}
+
+# Disconnect a container from its network (rust-old: disconnect_container).
+# Releases the IP back to its pool and deletes the veth pair (best-effort).
+# Returns STIVA_ERR_OK on success, or STIVA_ERR_NETWORK if the container is
+# not connected to any network.
+fn network_manager_disconnect_container(m, container_id) {
+    var mgr: NetworkManager = m;
+
+    var cnp = map_get(mgr.connections, container_id);
+    if (cnp == 0) {
+        # "container '{container_id}' not connected to any network"
+        return STIVA_ERR_NETWORK;
+    }
+    var cn: ContainerNetwork = cnp;
+    map_delete(mgr.connections, container_id);
+
+    # Release IP back to pool (if the network still exists).
+    var mn = map_get(mgr.networks, cn.network_name);
+    if (mn != 0) {
+        var network: ManagedNetwork = mn;
+        var _r = ip_pool_release(network.pool, cn.ip);
+    }
+
+    # Delete veth pair (best-effort; errors ignored — "if already gone, ignore").
+    var _v = delete_veth(cn.host_veth);
+    return STIVA_ERR_OK;
+}
+
+# Resolve which network name to use for a NetworkMode (rust-old:
+# resolve_network_name). Returns a name cstr, or 0 for None (Host / None /
+# Container(_) use no managed network). `mode` is a NetworkModeVal ptr
+# (network_mod.cyr).
+#[must_use]
+fn network_manager_resolve_network_name(m, mode) {
+    var mv: NetworkModeVal = mode;
+    if (mv.tag == NETWORK_MODE_BRIDGE) { return network_manager_default_bridge(); }
+    if (mv.tag == NETWORK_MODE_CUSTOM) { return mv.value; }
+    # Host | None | Container(_) → None.
+    return 0;
+}
+
+# Get the connection info for a container (rust-old: get_connection).
+# Returns the ContainerNetwork ptr, or 0 if not connected.
+#[must_use]
+fn network_manager_get_connection(m, container_id) {
+    var mgr: NetworkManager = m;
+    return map_get(mgr.connections, container_id);
+}
+
+# List all network names (rust-old: list_networks -> Vec<&str>). Returns a vec
+# of name cstrs (map iteration order is unspecified, as in Rust).
+#[must_use]
+fn network_manager_list_networks(m) {
+    var mgr: NetworkManager = m;
+    return map_keys(mgr.networks);
+}
+
+# True (1) iff a network with `name` is registered — helper for the
+# `list_networks().contains(...)` assertions the Rust tests use.
+#[must_use]
+fn network_manager_has_network(m, name) {
+    var mgr: NetworkManager = m;
+    return map_has(mgr.networks, name);
+}
+
+# Get the IP pool ptr for a network, for inspection (rust-old: get_pool).
+# Returns the IpPool ptr, or 0 if the network is unknown.
+#[must_use]
+fn network_manager_get_pool(m, network_name) {
+    var mgr: NetworkManager = m;
+    var mn = map_get(mgr.networks, network_name);
+    if (mn == 0) { return 0; }
+    var network: ManagedNetwork = mn;
+    return network.pool;
+}
+
+# ── nftables apply (rust-old: fn apply_nft_ruleset) ──────────────
+# Rust spawned `nft -f -`, piped the ruleset to its stdin, and waited —
+# synchronous, best-effort (all failures logged, never returned). Cyrius's
+# exec_vec has no stdin-piping surface, so we write the rendered ruleset to a
+# temp file and run `nft -f <file>` (semantically identical: nft reads the
+# ruleset from the given path instead of stdin). Every failure is swallowed,
+# matching the Rust warn-only contract. `ruleset` is a Str (firewall_render).
+fn _network_manager_apply_nft_ruleset(ruleset) {
+    var path = "/tmp/stiva-nft-ruleset.nft";
+    var w = file_write_all(path, str_data(ruleset), str_len(ruleset));
+    if (w < 0) { return 0; }            # can't stage ruleset — non-fatal
+
+    var nft = _network_manager_nft_bin();
+    var args = vec_new();
+    vec_push(args, nft);
+    vec_push(args, "-f");
+    vec_push(args, path);
+    var _rc = exec_vec(args);           # best-effort; ignore exit code
+    return 0;
+}
+
+# Resolve the `nft` binary path (execve needs an absolute path; exec_vec does
+# no $PATH lookup). nftables installs at /usr/sbin/nft on modern distros.
+#[must_use]
+fn _network_manager_nft_bin() {
+    if (file_exists("/usr/sbin/nft") == 1) { return "/usr/sbin/nft"; }
+    if (file_exists("/sbin/nft") == 1) { return "/sbin/nft"; }
+    if (file_exists("/usr/bin/nft") == 1) { return "/usr/bin/nft"; }
+    return "nft";
+}

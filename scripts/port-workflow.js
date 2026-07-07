@@ -17,8 +17,13 @@ const REPO = '/home/macro/Repos/stiva'
 // via the Workflow tool does NOT reliably reach the script under scriptPath
 // (observed undefined), so BATCH is the source of truth; args only overrides
 // when actually present.
-const BATCH = ['image', 'registry']
+const BATCH = ['mcp', 'lib']
 const MODULES = (Array.isArray(args) && args.length) ? args : BATCH
+// Modules already ported & wired (agents MAY reference their Cyrius API by
+// reading the named src/*.cyr — do NOT re-port or defer these).
+const PORTED = ['error', 'oci', 'intents', 'audit', 'convert', 'network_mod',
+  'network_bridge', 'network_dns', 'network_pool', 'network_rootless', 'network_nat',
+  'network_manager', 'image', 'registry', 'storage', 'build', 'encrypted', 'runtime', 'container', 'health', 'ansamblu', 'agent', 'fleet']
 function norm(mod) {
   const cyr = mod.split('/').join('_')       // network/bridge → network_bridge
   return { rs: `${REPO}/rust-old/src/${mod}.rs`, cyr: `${REPO}/src/${cyr}.cyr`, name: cyr, mod }
@@ -40,6 +45,9 @@ const PLAYBOOK = `You are porting one module of the "stiva" OCI container runtim
 - Strings are NUL-terminated cstrings. Helpers in string.cyr: strlen, streq(a,b)->1/0, memeq(a,b,n), memcpy, memset, atoi(cstr)->i64, println. Heap string type + ops in str.cyr: Str, str_from, str_len, str_eq, str_cat, str_sub, str_contains, str_starts_with, str_index_of, str_split; str_builder_new/_add_cstr/_add/_add_int/_putc/_build, str_data/str_cstr. Preserve EXACT display strings from Rust \`#[error("...")]\` / format! literals.
 - **strstr GOTCHA**: string.cyr's \`strstr(hay, needle)\` returns a 0-based INDEX (>= 0 found, **-1 absent**), NOT a C pointer. So "contains" is \`strstr(h,n) >= 0\` (index 0 IS a match), and the substring starts at \`hay + strstr(hay,key) + strlen(key)\` — never \`at + strlen(key)\` treating the return as a pointer. Verify with \`cyrius test\`, not just \`cyrius check\` (syntax-only check can't catch this).
 - Structs: \`struct S { a; b; }\`; init \`S { 1, 2 }\` or \`S { a: 1, b: 2 }\`; access \`s.a\`; \`s.a = v\`. Pointer-to-struct dot-access needs a \`: TypeName\` annotation on the local.
+- **CONSTRUCTOR gotcha (causes SEGFAULTS)**: a heap constructor MUST \`var p = alloc(N*8); var pp: S = p; pp.a = …; return p;\` (heap pointer). NEVER \`var x = S { … }; return x;\` — that struct literal is STACK-local and returning it yields a DANGLING pointer that segfaults when the caller reads it. Every stiva constructor uses the alloc form (see node_capacity_new, audit_entry_container).
+- **SINGLE-FIELD struct gotcha**: Cyrius gives a 1-field struct \`struct V { x; }\` VALUE semantics, so \`var v: V = p; v.x = 0\` does NOT write through the pointer and \`v.x\` reads \`p\` itself. For a 1-field heap struct, use raw \`store64(p, val)\` / \`load64(p)\` at offset 0 instead of \`.field\`.
+- **MAP KEY TYPE**: \`map_new()\` = cstr keys (NUL-terminated string literals like "web") — use this for env/label/service maps keyed by plain strings. \`map_new_str()\` = Str fat-pointer keys ONLY; passing a cstr literal to a map_new_str map mis-hashes it as a {ptr,len} struct → OOB read → SEGFAULT. Match the map's key type to how the module reads it (\`map_get(m, cstr)\` → map_new).
 - Collections: vec.cyr (vec_new, vec_push, vec_get, vec_len, vec_set, vec_pop); hashmap.cyr (hashmap_new, hashmap_put/get/has). alloc.cyr: call \`alloc_init()\` once before any heap use.
 - Control flow: if/elif/else, while, counted for (all 3 clauses required), switch (int-literal cases, no fallthrough), match (enum-exhaustive; use \`_ =>\` catch-all).
 - I/O: \`sys_write(fd, buf, len)\`; io.cyr file_open/file_read/file_write/file_read_all; fs.cyr for dir ops. Diagnostics to stderr use the module's err_print helper, never raw magic numbers.
@@ -47,6 +55,15 @@ const PLAYBOOK = `You are porting one module of the "stiva" OCI container runtim
 
 ## Cross-module coupling rule
 This module may reference types from other stiva modules not yet ported (e.g. container's Container/ContainerState/ContainerConfig, image's types). Port everything that is self-contained or depends only on already-ported modules (error.cyr is ported). For any function/type that needs a NOT-YET-PORTED module's types, DO NOT invent them — put them in a clearly commented \`# ── DEFERRED (land with src/<module>.cyr) ──\` block at the bottom listing the Rust signatures, exactly like src/oci.cyr does. Report those in the "deferred" field.
+
+## AGNOS dependency bundles (kavach / majra / nein / bote / agnodrm)
+If the Rust oracle uses an AGNOS crate (\`kavach::\`, \`majra::\`, \`nein::\`, \`bote::\`, \`agnosys::\`), the crate is ALREADY ported to Cyrius and vendored as a flat bundle in ${REPO}/lib/ — **read the bundle to find the Cyrius equivalent, don't invent or defer the whole thing**:
+- kavach → \`${REPO}/lib/kavach.cyr\` (sandbox_create/exec/spawn/destroy, backend_parse, SandboxPolicy/SandboxConfig fields, credential/secret, scoring). \`grep -E "^fn |^struct |^enum " lib/kavach.cyr\`.
+- majra → \`${REPO}/lib/majra.cyr\` (queue, heartbeat FSM, pub/sub).
+- nein → \`${REPO}/lib/nein.cyr\` (nftables rules, NAT, port mapping).
+- bote → \`${REPO}/lib/bote-core.cyr\` (JSON-RPC 2.0, tool registry, structured output).
+- agnodrm → \`${REPO}/lib/agnodrm.cyr\` (LUKS + dm-verity; the agnosys→agnodrm rename).
+Map each Rust AGNOS call to its Cyrius bundle fn (names are usually close: \`kavach::Sandbox::create\` → \`sandbox_create\`). These bundles are i64/handle-based (pointers + accessor fns), not Rust objects — adapt accordingly. ONLY defer an AGNOS-backed path when the Cyrius bundle genuinely lacks the surface (note which symbol is missing) OR when it needs infra the ported base lacks (async runtime, tar/gzip/zstd, full HTTP/TLS) — deferrals for missing codecs/async are legitimate and match the storage/registry precedent.
 
 ## Your deliverable for module "<MOD>"
 1. Read ${REPO}/rust-old/src/<MOD>.rs (the oracle) end to end.
@@ -96,9 +113,11 @@ const results = await pipeline(
     `Oracle (read this, the parity source): ${norm(mod).rs}\n` +
     `Write the port to EXACTLY this path:    ${norm(mod).cyr}\n` +
     `Use "${norm(mod).name}" as the module prefix base for enum members and _-prefixed private helpers.\n` +
+    `ALREADY-PORTED stiva modules you MAY reference directly (read the named ${REPO}/src/*.cyr for the Cyrius API — e.g. image_ref_parse/ImageRef in image.cyr; do NOT defer or re-port these): ${PORTED.join(', ')}.\n` +
     (MODULES.length > 1
-      ? `SIBLINGS ported ALONGSIDE you this same batch (their src/*.cyr are included together at build time, so you MAY reference their public types/fns directly instead of deferring — read their oracle .rs to learn the surface): ${MODULES.filter(m => m !== mod).map(m => `${norm(m).name} (rust-old/src/${m}.rs)`).join(', ')}. Only DEFER a cross-module ref if the OTHER module is NOT in this sibling list and is not yet ported.\n`
+      ? `SIBLINGS ported ALONGSIDE you this same batch (their src/*.cyr are included together at build time, so you MAY reference their public types/fns directly instead of deferring — read their oracle .rs to learn the surface): ${MODULES.filter(m => m !== mod).map(m => `${norm(m).name} (rust-old/src/${m}.rs)`).join(', ')}.\n`
       : ``) +
+    `Only DEFER a cross-module ref when the other stiva module is NEITHER already-ported NOR a sibling in this batch (put it in a documented DEFERRED block).\n` +
     `Port it now.`,
     { label: `port:${norm(mod).name}`, phase: 'Port', schema: PORT_SCHEMA, effort: 'high' }
   ),

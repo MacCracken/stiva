@@ -3,11 +3,38 @@
 All notable changes to stiva are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.0.0] — Cyrius Port (in progress)
+## [3.0.0] — Cyrius Port
 
-Porting stiva from Rust to the **Cyrius** language (AGNOS ecosystem port
-pattern). The Rust crate is frozen at `rust-old/` as the parity oracle. See
-`docs/development/roadmap.md` (v3.0.0) for the module-by-module ledger.
+Ported stiva from Rust to the **Cyrius** language (AGNOS ecosystem port pattern).
+All 16 Rust modules → 25 Cyrius domain modules + the CLI. The Rust crate is
+frozen at `rust-old/` as the parity oracle. See `docs/development/roadmap.md`
+(v3.0.0) for the module-by-module ledger.
+
+**Scope**: the port covers every module's types, pure logic, and syscall-driven
+surface, with **697 tests green** and a clean `dist/stiva.cyr` bundle. The async
+container-execution surface (kavach sandbox exec, cgroups, CRIU, tar/gzip/zstd,
+the registry HTTP client, JSON/YAML codecs, and the async `Stiva` facade) is
+documented as **DEFERRED to v3.1** in each module — it awaits Cyrius async
+runtime + codec support. Toolchain pinned **6.4.15**.
+
+### Summary
+- **All 16 modules ported**: error, oci, intents, audit, convert, network
+  (mod/bridge/dns/pool/rootless/nat/manager), image, registry, storage, build,
+  encrypted, runtime, container, health, ansamblu, agent, fleet, mcp, and the
+  crate root (`stiva_core`: StivaConfig + the deferred Stiva facade).
+- **AGNOS deps wired** as Cyrius `dist/*.cyr` bundles (kavach/majra/nein/bote/
+  agnodrm + sigil/libro/sakshi), probe-validated; ~37 benign cross-bundle
+  "duplicate fn (last-def-wins)" warnings (shared agnos helpers).
+- **CLI via cmdit** (`src/main.cyr`) — 33 subcommands as cmdit verbs (getopt-long
+  + generated help), not hand-rolled. `stiva convert --format dockerfile` works
+  end-to-end; the async verbs print a clear "deferred to v3.1" message.
+- **697 Cyrius tests**, `cyrius bench`/`fmt`/`lint` clean; `dist/stiva.cyr` built.
+- Surfaced + fixed a cycc compiler bug mid-port (struct-id 20/21 ↔ f64v2/f64v4
+  SIMD-sentinel collision), filed upstream with a minimal repro
+  (`docs/development/cycc-bug-struct-sid-20-21.cyr`) — **fixed in cyrius 6.4.14**.
+- Fixed agent-introduced runtime bugs (dangling struct-literal returns, map
+  key-type mismatch, single-field-struct value semantics), now in the port
+  playbook (`scripts/port-workflow.js`).
 
 ### Added
 - **Port scaffold** (`cyrius port`) — Rust → `rust-old/` (18,622 lines); Cyrius

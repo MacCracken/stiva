@@ -1,0 +1,392 @@
+# stiva — container lifecycle: state, config, records, log rotation.
+# Ported from rust-old/src/container.rs.
+#
+# This module carries the self-contained, synchronous surface of
+# container.rs: the ContainerState enum (+ serde names), the Container /
+# ContainerConfig / MigrationBundle records and their defaults/constructors,
+# the pure log-rotation and log-tail helpers, and the state-validation
+# (require_pid) and persisted-state-fixup logic.
+#
+# The async, stateful `ContainerManager` (tokio RwLock over a
+# HashMap<String, Container>, majra PubSub lifecycle events, NetworkManager
+# connect/disconnect, and all lifecycle methods that drive runtime's async
+# exec/spawn/kill/checkpoint) is DEFERRED — it needs an async runtime,
+# pub/sub, and shared-lock infra the ported base does not yet have. See the
+# DEFERRED block at the bottom (matches the storage/registry precedent).
+#
+# Enum members are namespaced `CONTAINER_STATE_*` so Cyrius's global
+# member-hoisting ("last def wins") cannot silently collide with a dep's
+# member of the same bare name (same convention as error.cyr).
+
+# ── ContainerState (rust-old: enum ContainerState) ──────────────
+
+# Container lifecycle state. `#[non_exhaustive]` in Rust; the variant set
+# and ordinals are the parity oracle.
+enum ContainerState {
+    CONTAINER_STATE_CREATED = 0;
+    CONTAINER_STATE_RUNNING = 1;
+    CONTAINER_STATE_PAUSED = 2;
+    CONTAINER_STATE_STOPPED = 3;
+    CONTAINER_STATE_REMOVING = 4;
+}
+
+# Serde wire name for a ContainerState. Serde derives PascalCase variant
+# names for this enum (no `rename`), so the JSON tokens are "Created",
+# "Running", "Paused", "Stopped", "Removing".
+#[must_use]
+fn container_state_name(state) {
+    if (state == CONTAINER_STATE_CREATED) { return "Created"; }
+    if (state == CONTAINER_STATE_RUNNING) { return "Running"; }
+    if (state == CONTAINER_STATE_PAUSED) { return "Paused"; }
+    if (state == CONTAINER_STATE_STOPPED) { return "Stopped"; }
+    if (state == CONTAINER_STATE_REMOVING) { return "Removing"; }
+    return "unknown";
+}
+
+# Parse a serde wire name back to a ContainerState ordinal, or -1 if the
+# token is not a known state (mirrors serde_json::from_str round-trip).
+#[must_use]
+fn container_state_from_name(name) {
+    if (streq(name, "Created") == 1) { return CONTAINER_STATE_CREATED; }
+    if (streq(name, "Running") == 1) { return CONTAINER_STATE_RUNNING; }
+    if (streq(name, "Paused") == 1) { return CONTAINER_STATE_PAUSED; }
+    if (streq(name, "Stopped") == 1) { return CONTAINER_STATE_STOPPED; }
+    if (streq(name, "Removing") == 1) { return CONTAINER_STATE_REMOVING; }
+    return 0 - 1;
+}
+
+# ── ContainerConfig (rust-old: struct ContainerConfig) ────────────
+
+# Default SIGTERM→SIGKILL grace period, in milliseconds (rust-old:
+# default_stop_grace_ms = 10_000). The serde default for stop_grace_ms.
+#[must_use]
+fn default_stop_grace_ms() {
+    return 10000;
+}
+
+# Container creation configuration.
+#
+# Optional Rust fields (`Option<String>`, `Option<u8>`) are represented as
+# a cstr pointer or 0 for None; `Vec<String>` / `HashMap` fields hold a vec
+# / hashmap handle (0 = empty until populated); the kavach `secrets` vec and
+# `scan_policy` Option hold kavach bundle handles (0 = none). `bool` fields
+# are 0/1. Field ordering matches the Rust struct for clarity.
+struct ContainerConfig {
+    name;                 # Option<String>  → cstr | 0
+    command;              # Vec<String>     → vec handle
+    env;                  # HashMap<String,String> → hashmap handle
+    volumes;              # Vec<String>
+    ports;                # Vec<String>
+    network;              # Option<String>  → cstr | 0
+    memory_limit;         # u64
+    cpu_shares;           # u64
+    max_pids;             # u32
+    user;                 # Option<String>  → cstr | 0
+    workdir;              # Option<String>  → cstr | 0
+    detach;               # bool 0/1
+    stop_grace_ms;        # u64
+    rootless;             # bool 0/1
+    secrets;              # Vec<kavach::SecretRef> → vec handle
+    scan_policy;          # Option<kavach::ExternalizationPolicy> → handle | 0
+    timeout_ms;           # u64
+    backend;              # Option<String>  → cstr | 0
+    min_isolation_score;  # Option<u8>      → int (0..100) | -1 for None
+    agent_id;             # Option<String>  → cstr | 0
+    domainname;           # Option<String>  → cstr | 0
+    annotations;          # HashMap<String,String> → hashmap handle
+    seccomp_profile;      # Option<String>  → cstr | 0
+    log_max_bytes;        # u64
+    log_max_files;        # u32
+}
+
+# Allocate a ContainerConfig with the Rust `Default` values: everything
+# empty/None/0/false except stop_grace_ms = default_stop_grace_ms(), and
+# min_isolation_score encoded as -1 (None). 25 fields × 8 bytes = 200.
+#[must_use]
+fn container_config_default() {
+    var p = alloc(200);
+    var c: ContainerConfig = p;
+    c.name = 0;
+    c.command = 0;
+    c.env = 0;
+    c.volumes = 0;
+    c.ports = 0;
+    c.network = 0;
+    c.memory_limit = 0;
+    c.cpu_shares = 0;
+    c.max_pids = 0;
+    c.user = 0;
+    c.workdir = 0;
+    c.detach = 0;
+    c.stop_grace_ms = default_stop_grace_ms();
+    c.rootless = 0;
+    c.secrets = 0;
+    c.scan_policy = 0;
+    c.timeout_ms = 0;
+    c.backend = 0;
+    c.min_isolation_score = 0 - 1;
+    c.agent_id = 0;
+    c.domainname = 0;
+    c.annotations = 0;
+    c.seccomp_profile = 0;
+    c.log_max_bytes = 0;
+    c.log_max_files = 0;
+    return p;
+}
+
+# ── Container (rust-old: struct Container) ─────────────────
+
+# A container instance. `state` is a CONTAINER_STATE_* ordinal; `pid` is a
+# PID or -1 for None; `created_at` / `started_at` are epoch-millis i64
+# (chrono::DateTime<Utc> in Rust; -1 for started_at = None); `config` is a
+# ContainerConfig*; `exit_code` is the process exit code or -1 for None.
+struct Container {
+    id;          # String
+    name;        # Option<String> → cstr | 0
+    image_id;    # String
+    image_ref;   # String (image_ref_full_ref of the source image)
+    state;       # ContainerState ordinal
+    pid;         # Option<u32> → pid | -1
+    created_at;  # DateTime<Utc> → epoch millis
+    started_at;  # Option<DateTime<Utc>> → epoch millis | -1
+    config;      # ContainerConfig*
+    exit_code;   # Option<i32> → exit code | -1
+}
+
+# Construct a Container record (rust-old: struct literal in `create`).
+#[must_use]
+fn container_new(id, name, image_id, image_ref, state, pid, created_at, started_at, config, exit_code) {
+    var p = alloc(80);
+    var c: Container = p;
+    c.id = id;
+    c.name = name;
+    c.image_id = image_id;
+    c.image_ref = image_ref;
+    c.state = state;
+    c.pid = pid;
+    c.created_at = created_at;
+    c.started_at = started_at;
+    c.config = config;
+    c.exit_code = exit_code;
+    return p;
+}
+
+# On daemon restart, a container that was persisted as Running or Paused is
+# now Stopped (its process is gone) with no PID. This is the per-record
+# fixup applied by rust-old `load_persisted_state`. Mutates `c` in place and
+# returns 1 if it changed the record, else 0.
+fn container_fixup_after_restart(c) {
+    var cc: Container = c;
+    if (cc.state == CONTAINER_STATE_RUNNING || cc.state == CONTAINER_STATE_PAUSED) {
+        cc.state = CONTAINER_STATE_STOPPED;
+        cc.pid = 0 - 1;
+        return 1;
+    }
+    return 0;
+}
+
+# ── MigrationBundle (rust-old: struct MigrationBundle) ────────────
+
+# Everything needed to transfer a container to another node.
+struct MigrationBundle {
+    source_container_id;  # String
+    image_ref;            # String
+    config;               # ContainerConfig*
+    checkpoint_dir;       # PathBuf → cstr path
+    source_node;          # String
+    prepared_at;          # DateTime<Utc> → epoch millis
+}
+
+#[must_use]
+fn migration_bundle_new(source_container_id, image_ref, config, checkpoint_dir, source_node, prepared_at) {
+    var p = alloc(48);
+    var b: MigrationBundle = p;
+    b.source_container_id = source_container_id;
+    b.image_ref = image_ref;
+    b.config = config;
+    b.checkpoint_dir = checkpoint_dir;
+    b.source_node = source_node;
+    b.prepared_at = prepared_at;
+    return p;
+}
+
+# ── State validation (rust-old: ContainerManager::require_pid) ────
+
+# True (1) iff `state` appears in the `allowed` vec of CONTAINER_STATE_*
+# ordinals (length `n`). Mirrors `allowed_states.contains(&state)`.
+#[must_use]
+fn _container_state_allowed(state, allowed, n) {
+    var i = 0;
+    for (i = 0; i < n; i = i + 1) {
+        if (vec_get(allowed, i) == state) { return 1; }
+    }
+    return 0;
+}
+
+# The pure decision of rust-old `require_pid`, minus the map lookup and lock.
+# Given a container's `state` and `pid` (pid = -1 for None), and the set of
+# `allowed` states (vec of length `n`), returns:
+#   pid  (>= 0)  → allowed and has a PID
+#   -1           → wrong state OR no PID; both are `StivaError::InvalidState`
+#                  in rust-old, so the caller reports via
+#                  stiva_err_print(STIVA_ERR_INVALID_STATE, detail).
+# The caller supplies the ContainerNotFound branch (missing from the map) and
+# builds the context string.
+#[must_use]
+fn container_require_pid(state, pid, allowed, n) {
+    if (_container_state_allowed(state, allowed, n) == 0) {
+        return 0 - 1;
+    }
+    if (pid < 0) {
+        return 0 - 1;
+    }
+    return pid;
+}
+
+# ── Log rotation (rust-old: rotate_logs) ──────────────────
+
+# Build "container.log.<n>" (the with_extension("log.{n}") path names).
+# `log_path` is the base ".../container.log" cstr; the rotated sibling
+# replaces the "log" extension. rust-old uses `Path::with_extension`, which
+# swaps the final extension: "…/container.log" → "…/container.log.N".
+#[must_use]
+fn _container_rotated_path(log_path, n) {
+    var dot = _container_cat2(log_path, ".");
+    var num = _container_int_to_cstr(n);
+    return _container_cat2(dot, num);
+}
+
+# Rotate log files: container.log → .1 → .2 → … → .N (oldest deleted).
+# Mirrors rust-old `rotate_logs`: remove the .max_files file, shift
+# .N-1→.N down to .1→.2, then move the live log to .1. All fs ops are
+# best-effort (errors ignored), matching the Rust `let _ =`.
+fn rotate_logs(log_path, max_files) {
+    # Delete the oldest rotated file.
+    var oldest = _container_rotated_path(log_path, max_files);
+    sys_unlink(oldest);
+
+    # Shift existing rotated files downward: N-1 → N, … , 1 → 2.
+    var i = max_files - 1;
+    while (i >= 1) {
+        var from = _container_rotated_path(log_path, i);
+        var to = _container_rotated_path(log_path, i + 1);
+        if (file_exists(from) == 1) {
+            sys_rename(from, to);
+        }
+        i = i - 1;
+    }
+
+    # Move the current log to .1.
+    var first = _container_rotated_path(log_path, 1);
+    sys_rename(log_path, first);
+    return 0;
+}
+
+# Decide whether a pending write should trigger rotation (rust-old
+# write_log guard): rotate iff log_max_bytes > 0 AND log_max_files > 0 AND
+# current_size + pending_len > log_max_bytes. Returns 1 to rotate, else 0.
+#[must_use]
+fn container_should_rotate(log_max_bytes, log_max_files, current_size, pending_len) {
+    if (log_max_bytes <= 0) { return 0; }
+    if (log_max_files <= 0) { return 0; }
+    if (current_size + pending_len > log_max_bytes) { return 1; }
+    return 0;
+}
+
+# ── log_tail line math (rust-old: ContainerManager::log_tail) ─────
+
+# The saturating start index for tailing `total` lines down to the last
+# `want` (rust-old: `all_lines.len().saturating_sub(lines)`). Never negative.
+#[must_use]
+fn container_tail_start(total, want) {
+    if (want >= total) { return 0; }
+    return total - want;
+}
+
+# ── small local string helpers (no external deps) ───────────────
+
+# Format a non-negative i64 as a fresh decimal NUL-terminated cstr. Used
+# to build rotated-log path suffixes (rust-old uses format!("log.{n}")).
+#[must_use]
+fn _container_int_to_cstr(n) {
+    if (n == 0) {
+        var z = alloc(2);
+        store8(z, 48);
+        store8(z + 1, 0);
+        return z;
+    }
+    # Count digits.
+    var digits = 0;
+    var t = n;
+    while (t > 0) { digits = digits + 1; t = t / 10; }
+    var out = alloc(digits + 1);
+    store8(out + digits, 0);
+    var i = digits - 1;
+    var v = n;
+    while (i >= 0) {
+        store8(out + i, 48 + v % 10);
+        v = v / 10;
+        i = i - 1;
+    }
+    return out;
+}
+
+# Concatenate two NUL-terminated cstrings into a fresh heap cstr.
+#[must_use]
+fn _container_cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# ── DEFERRED (needs async runtime + pub/sub + shared locks) ──────
+# rust-old/src/container.rs also defines the stateful manager, whose every
+# method is `async` and depends on tokio::sync::RwLock, majra PubSub, the
+# NetworkManager, and runtime's async exec/spawn/kill/checkpoint fns — infra
+# the ported base does not yet provide (same rationale as storage/registry
+# async deferrals). These land when the async/pubsub substrate is ported:
+#
+#   struct ContainerInternals { overlay, spec, exec_result, log_path, spawned }
+#   struct ContainerManager {
+#       root, containers: RwLock<HashMap<String,Container>>,
+#       internals: RwLock<HashMap<String,ContainerInternals>>,
+#       image_store: Arc<ImageStore>, publisher: PubSub,
+#       network_manager: RwLock<Option<NetworkManager>>,
+#   }
+#   fn ContainerManager::new(root, image_store) -> Result<Self, StivaError>
+#   fn require_pid(&self, id, allowed_states, op) -> Result<u32, StivaError>
+#         (pure decision ported above as container_require_pid; the map
+#          lookup + ContainerNotFound branch land here)
+#   fn load_persisted_state(root) -> HashMap<String,Container>
+#         (per-record fixup ported above as container_fixup_after_restart)
+#   async fn persist_state(&self)
+#   async fn create(&self, image: &Image, config) -> Result<Container>
+#   async fn start(&self, id) -> Result<()>
+#   async fn wait(&self, id) -> Result<ContainerExecResult>
+#   async fn try_wait(&self, id) -> Result<Option<i32>>
+#   async fn stop(&self, id) -> Result<()>
+#   async fn write_log(&self, id, exec_result)
+#         (rotation decision + rotate_logs ported above)
+#   async fn signal(&self, id, signal) -> Result<()>
+#   async fn pause / unpause / stats(&self, id)
+#   async fn exec(&self, id, command) -> Result<ContainerExecResult>
+#   async fn remove / restart(&self, id) -> Result<()>
+#   async fn get_rootfs(&self, id) -> Result<PathBuf>
+#   async fn list(&self) -> Result<Vec<Container>>
+#   async fn rename / update(&self, ...) -> Result<()>
+#   async fn checkpoint / restore(&self, id, ...) -> Result<...>
+#   async fn prepare_migration / apply_migration(&self, ...) -> Result<...>
+#   async fn logs / log_tail(&self, id, ...) -> Result<String>
+#         (tail line math ported above as container_tail_start)
+#   async fn connect_network / disconnect_network(&self, id, ...)
+#   fn publish_event(&self, event_json)
+#   fn event_bus(&self) -> &PubSub
+#
+# These reference runtime's RuntimeSpec / ContainerExecResult / DaemonHandle /
+# ContainerStats (sibling, ported), image's Image / ImageStore (ported),
+# storage's OverlayPaths (ported), the network manager (ported), majra PubSub,
+# and the tokio async runtime. Tracked in the roadmap.

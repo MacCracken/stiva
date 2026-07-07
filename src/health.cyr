@@ -1,0 +1,290 @@
+# stiva — container health monitoring (majra heartbeat FSM wrapper)
+# Ported from rust-old/src/health.rs.
+#
+# Wraps majra's ConcurrentHeartbeatTracker (Cyrius bundle: chb_* in
+# lib/majra.cyr) for container liveness, and layers restart-policy tracking
+# on top. The Rust `RwLock<HashMap<String, RestartState>>` collapses to a
+# plain map handle here (the chb_* tracker is already mutex-guarded); the
+# async fns become synchronous.
+#
+# Enum members are namespaced HEALTH_* / RESTART_* — Cyrius hoists enum
+# members to global constants under "last-def-wins", so bare names would
+# collide with other modules (see error.cyr / oci.cyr).
+#
+# DEFERRED at the bottom: run_probe / start_probe_loop — they require
+# runtime::exec_in_container (itself deferred, async/kavach-exec) plus tokio
+# timeout + task spawn, which the ported base lacks.
+
+# ── RestartPolicy (rust-old: enum RestartPolicy) ───────────────
+# Serde kebab-case wire names: never / always / on-failure / unless-stopped.
+# `OnFailure { max_retries }` carries a payload — the u32 is stored on the
+# RestartState alongside the policy kind (see RESTART_STATE).
+enum RestartPolicy {
+    HEALTH_RESTART_NEVER = 0;
+    HEALTH_RESTART_ALWAYS = 1;
+    HEALTH_RESTART_ON_FAILURE = 2;
+    HEALTH_RESTART_UNLESS_STOPPED = 3;
+}
+
+# Serde wire name for a restart-policy kind (kebab-case).
+#[must_use]
+fn restart_policy_name(kind) {
+    if (kind == HEALTH_RESTART_NEVER) { return "never"; }
+    if (kind == HEALTH_RESTART_ALWAYS) { return "always"; }
+    if (kind == HEALTH_RESTART_ON_FAILURE) { return "on-failure"; }
+    if (kind == HEALTH_RESTART_UNLESS_STOPPED) { return "unless-stopped"; }
+    return "never";
+}
+
+# ── HealthStatus (rust-old: enum HealthStatus) ────────────────
+enum HealthStatus {
+    HEALTH_STATUS_HEALTHY = 0;
+    HEALTH_STATUS_UNHEALTHY = 1;
+    HEALTH_STATUS_STARTING = 2;
+    HEALTH_STATUS_UNKNOWN = 3;
+}
+
+# Serde wire name for a HealthStatus. Rust derives serde with no rename, so
+# variants serialize by their PascalCase name.
+#[must_use]
+fn health_status_name(status) {
+    if (status == HEALTH_STATUS_HEALTHY) { return "Healthy"; }
+    if (status == HEALTH_STATUS_UNHEALTHY) { return "Unhealthy"; }
+    if (status == HEALTH_STATUS_STARTING) { return "Starting"; }
+    if (status == HEALTH_STATUS_UNKNOWN) { return "Unknown"; }
+    return "Unknown";
+}
+
+# majra NodeStatus raw values (lib/majra.cyr: STATUS_ONLINE=0, SUSPECT=1,
+# OFFLINE=2). Referenced by literal here — the chb_* tracker stores/returns
+# these as raw ints (node_state offset 0) — to keep this module parseable
+# standalone and avoid re-minting majra's enum names (last-def-wins).
+enum HealthMajraStatus {
+    HEALTH_MAJRA_ONLINE = 0;
+    HEALTH_MAJRA_SUSPECT = 1;
+    HEALTH_MAJRA_OFFLINE = 2;
+}
+
+# Map a majra NodeStatus to a HealthStatus
+# (rust-old: impl From<Status> for HealthStatus).
+#   Online  -> Healthy
+#   Suspect -> Starting
+#   Offline -> Unhealthy
+#   _       -> Unknown
+#[must_use]
+fn health_status_from_majra(s) {
+    if (s == HEALTH_MAJRA_ONLINE) { return HEALTH_STATUS_HEALTHY; }
+    if (s == HEALTH_MAJRA_SUSPECT) { return HEALTH_STATUS_STARTING; }
+    if (s == HEALTH_MAJRA_OFFLINE) { return HEALTH_STATUS_UNHEALTHY; }
+    return HEALTH_STATUS_UNKNOWN;
+}
+
+# ── RestartState (rust-old: struct RestartState) ───────────────
+# Per-container restart bookkeeping.
+#   policy_kind  — one of HEALTH_RESTART_*
+#   max_retries  — the OnFailure payload (0 for other policies)
+#   restart_count
+#   user_stopped — 1 iff the user explicitly stopped the container
+struct RestartState {
+    policy_kind;
+    max_retries;
+    restart_count;
+    user_stopped;
+}
+
+#[must_use]
+fn restart_state_new(policy_kind, max_retries) {
+    var r = alloc(32);
+    var rr: RestartState = r;
+    rr.policy_kind = policy_kind;
+    rr.max_retries = max_retries;
+    rr.restart_count = 0;
+    rr.user_stopped = 0;
+    return r;
+}
+
+# ── HealthMonitor (rust-old: struct HealthMonitor) ──────────────
+# tracker        — ConcurrentHeartbeatTracker handle (chb_*)
+# restart_states — map: container_id cstr -> RestartState ptr
+struct HealthMonitor {
+    tracker;
+    restart_states;
+}
+
+# Create a new health monitor with default heartbeat config
+# (suspect_after 30s, offline_after 90s, no eviction).
+# (rust-old: HealthMonitor::new / Default.)
+#[must_use]
+fn health_monitor_new() {
+    var cfg = heartbeat_config_new(30000000000, 90000000000, 0);
+    return health_monitor_with_config(cfg);
+}
+
+# Create with a custom heartbeat config handle (rust-old: with_config).
+#[must_use]
+fn health_monitor_with_config(config) {
+    var m = alloc(16);
+    var mm: HealthMonitor = m;
+    mm.tracker = chb_tracker_new(config);
+    mm.restart_states = map_new();
+    return m;
+}
+
+# Register a container for health tracking (rust-old: register, async).
+# `restart_policy_kind` is one of HEALTH_RESTART_*; `max_retries` is the
+# OnFailure payload (pass 0 for other policies).
+fn health_monitor_register(m, container_id, restart_policy_kind, max_retries) {
+    var mm: HealthMonitor = m;
+    # Register with the heartbeat tracker. The Rust builds a serde_json
+    # metadata blob {"type":"container","restart_policy":"..."}; we register
+    # with no metadata payload (0) — parity of behaviour, not of the opaque
+    # blob (the tracker never reads it).
+    chb_register(mm.tracker, container_id, 0);
+
+    var state = restart_state_new(restart_policy_kind, max_retries);
+    map_set(mm.restart_states, container_id, state);
+    return 0;
+}
+
+# Record a successful heartbeat. Returns 1 if the container is tracked,
+# 0 otherwise (rust-old: heartbeat -> bool).
+fn health_monitor_heartbeat(m, container_id) {
+    var mm: HealthMonitor = m;
+    return chb_heartbeat(mm.tracker, container_id);
+}
+
+# Deregister a container from health tracking (rust-old: deregister, async).
+fn health_monitor_deregister(m, container_id) {
+    var mm: HealthMonitor = m;
+    chb_deregister(mm.tracker, container_id);
+    map_delete(mm.restart_states, container_id);
+    return 0;
+}
+
+# Mark a container as explicitly stopped by the user (rust-old:
+# mark_user_stopped, async). No-op if the container is not tracked.
+fn health_monitor_mark_user_stopped(m, container_id) {
+    var mm: HealthMonitor = m;
+    var state = map_get(mm.restart_states, container_id);
+    if (state != 0) {
+        var s: RestartState = state;
+        s.user_stopped = 1;
+    }
+    return 0;
+}
+
+# Get health status for a container (rust-old: get_status). Unknown if the
+# container is not tracked.
+#[inline]
+#[must_use]
+fn health_monitor_get_status(m, container_id) {
+    var mm: HealthMonitor = m;
+    var ns = chb_get(mm.tracker, container_id);
+    if (ns == 0) { return HEALTH_STATUS_UNKNOWN; }
+    return health_status_from_majra(load64(ns));
+}
+
+# Update all container statuses and return a vec of container-id cstrs that
+# need restart (rust-old: check_and_restart, async).
+#
+# Transitions the FSM (Online->Suspect->Offline), then for every currently-
+# offline container consults its restart policy:
+#   Never          -> false
+#   Always         -> !user_stopped
+#   OnFailure(n)   -> !user_stopped && restart_count < n
+#   UnlessStopped  -> !user_stopped
+# Each restart increments restart_count.
+#[must_use]
+fn health_monitor_check_and_restart(m) {
+    var mm: HealthMonitor = m;
+
+    # Advance the FSM.
+    chb_update_statuses(mm.tracker);
+
+    var offline = chb_list_by_status(mm.tracker, HEALTH_MAJRA_OFFLINE);
+    var needs_restart = vec_new();
+
+    var i = 0;
+    var len = vec_len(offline);
+    while (i < len) {
+        var id = vec_get(offline, i);
+        var state = map_get(mm.restart_states, id);
+        if (state != 0) {
+            var s: RestartState = state;
+            var should_restart = _health_should_restart(s.policy_kind, s.max_retries, s.restart_count, s.user_stopped);
+            if (should_restart == 1) {
+                s.restart_count = s.restart_count + 1;
+                vec_push(needs_restart, id);
+            }
+        }
+        i = i + 1;
+    }
+
+    return needs_restart;
+}
+
+# Restart-eligibility predicate for an offline container. Returns 1/0.
+#[must_use]
+fn _health_should_restart(policy_kind, max_retries, restart_count, user_stopped) {
+    if (policy_kind == HEALTH_RESTART_NEVER) { return 0; }
+    if (policy_kind == HEALTH_RESTART_ALWAYS) {
+        if (user_stopped == 0) { return 1; }
+        return 0;
+    }
+    if (policy_kind == HEALTH_RESTART_ON_FAILURE) {
+        if (user_stopped == 0 && restart_count < max_retries) { return 1; }
+        return 0;
+    }
+    if (policy_kind == HEALTH_RESTART_UNLESS_STOPPED) {
+        if (user_stopped == 0) { return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+# Get the restart count for a container (rust-old: restart_count, async).
+# Returns 0 for untracked containers.
+#[must_use]
+fn health_monitor_restart_count(m, container_id) {
+    var mm: HealthMonitor = m;
+    var state = map_get(mm.restart_states, container_id);
+    if (state == 0) { return 0; }
+    var s: RestartState = state;
+    return s.restart_count;
+}
+
+# Number of tracked containers (rust-old: len).
+#[inline]
+#[must_use]
+fn health_monitor_len(m) {
+    var mm: HealthMonitor = m;
+    return chb_len(mm.tracker);
+}
+
+# Whether any containers are tracked (rust-old: is_empty).
+#[inline]
+#[must_use]
+fn health_monitor_is_empty(m) {
+    var mm: HealthMonitor = m;
+    return chb_is_empty(mm.tracker);
+}
+
+# ── DEFERRED (land with runtime async exec + tokio infra) ──────────
+# rust-old/src/health.rs also defines two probe-driver methods that depend
+# on runtime::exec_in_container (itself DEFERRED in src/runtime.cyr — async,
+# kavach exec) plus tokio timeout / task spawn / interval, none of which the
+# ported base provides yet:
+#
+#   async fn run_probe(&self, container_id: &str, pid: u32,
+#                      command: &[String], timeout_secs: u64) -> bool
+#       tokio::time::timeout(runtime::exec_in_container(pid, command, [], None));
+#       on Ok(exit_code == 0) -> heartbeat + true; else false.
+#
+#   fn start_probe_loop(container_id: String, pid: u32, command: Vec<String>,
+#                       interval_secs: u64, timeout_secs: u64)
+#                       -> tokio::task::JoinHandle<()>
+#       tokio::spawn loop: a fresh HealthMonitor registers the container
+#       (RestartPolicy::Never) and runs run_probe every interval_secs.
+#
+# These land once runtime's async exec surface and a Cyrius task/timer
+# runtime are available. Tracked in the roadmap.

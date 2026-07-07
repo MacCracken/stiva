@@ -83,7 +83,7 @@ fn PortMapping_protocol(p) { var pp: PortMapping = p; return pp.protocol; }
 
 # Allocate a PortMapping on the heap and return its pointer.
 #[must_use]
-fn port_mapping_new(host_port, container_port, protocol) {
+fn stiva_port_mapping_new(host_port, container_port, protocol) {
     var p = alloc(24);
     var pp: PortMapping = p;
     pp.host_port = host_port;
@@ -198,7 +198,7 @@ fn parse_port_mappings(specs) {
             container_port = p;
         }
 
-        vec_push(mappings, port_mapping_new(host_port, container_port, protocol));
+        vec_push(mappings, stiva_port_mapping_new(host_port, container_port, protocol));
         si = si + 1;
     }
     return mappings;

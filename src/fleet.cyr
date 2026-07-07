@@ -1,0 +1,595 @@
+# stiva — daimon edge fleet scheduling: container placement + migration.
+# Ported from rust-old/src/fleet.rs.
+#
+# Distributes containers across a fleet of nodes managed by daimon. Three
+# scheduling strategies (Spread / BinPack / Pinned), a migration-target
+# selector, fleet-health heartbeat sweep, and a rollback planner.
+#
+# i64-everywhere representation:
+#   * Every public struct (FleetDeployment, DeploymentConstraints, FleetNode,
+#     NodeCapacity, ScheduleResult) is a heap pointer to an 8-byte-per-field
+#     record; constructors alloc and return the pointer. `alloc_init()` must
+#     have run once before use.
+#   * String fields (`id`, `image`, `address`, `node_id`) are NUL-terminated
+#     cstr pointers. `Vec<String>` (preferred_nodes, reasons) is a vec handle.
+#     `HashMap<String,String>` (node_labels, node.labels) is a cstr-keyed
+#     hashmap handle (map_new / KeyTypeCstr). `HashMap<String,u32>`
+#     (assignments) is a cstr-keyed hashmap whose values are the counts.
+#   * `Option<u64>` / `Option<u32>` constraint fields use the sentinel -1 for
+#     None (min_memory_mb, min_cpus), since real capacities are non-negative.
+#   * `chrono::DateTime<Utc>` (created_at, last_seen) is an epoch-ns i64.
+#
+# Error mapping (mirrors error.cyr): every Rust `Err(StivaError::Fleet(...))`
+# maps to the integer sentinel `0 - 1` returned from a scheduling / selection
+# fn; the caller reports the context via stiva_err_print(STIVA_ERR_FLEET,
+# detail). `schedule` returns a ScheduleResult pointer on success, or 0 on
+# failure. `select_migration_target` returns the chosen node-id cstr on
+# success, or 0 on failure.
+
+# ── DeploymentStrategy (rust-old: enum DeploymentStrategy) ────────
+# Prefixed FLEET_STRATEGY_* for global enum-member uniqueness (see error.cyr).
+# The `Pinned { node_id }` payload is carried separately on the deployment
+# (see FleetDeployment.pinned_node), since Cyrius enum members are bare ints.
+enum DeploymentStrategy {
+    FLEET_STRATEGY_SPREAD = 0;
+    FLEET_STRATEGY_BINPACK = 1;
+    FLEET_STRATEGY_PINNED = 2;
+}
+
+# serde tag/name for a strategy — matches Rust's derived enum names.
+#[must_use]
+fn fleet_strategy_name(s) {
+    if (s == FLEET_STRATEGY_SPREAD) { return "Spread"; }
+    if (s == FLEET_STRATEGY_BINPACK) { return "BinPack"; }
+    if (s == FLEET_STRATEGY_PINNED) { return "Pinned"; }
+    return "unknown";
+}
+
+# The Rust `Default` for DeploymentStrategy is Spread.
+#[must_use]
+fn fleet_strategy_default() {
+    return FLEET_STRATEGY_SPREAD;
+}
+
+# ── NodeStatus (rust-old: enum NodeStatus) ─────────────────
+# Prefixed FLEET_NODE_* for global enum-member uniqueness.
+enum NodeStatus {
+    FLEET_NODE_READY = 0;
+    FLEET_NODE_NOT_READY = 1;
+    FLEET_NODE_DRAINING = 2;
+    FLEET_NODE_CORDONED = 3;
+}
+
+# serde name for a node status — matches Rust's derived enum names.
+#[must_use]
+fn fleet_node_status_name(s) {
+    if (s == FLEET_NODE_READY) { return "Ready"; }
+    if (s == FLEET_NODE_NOT_READY) { return "NotReady"; }
+    if (s == FLEET_NODE_DRAINING) { return "Draining"; }
+    if (s == FLEET_NODE_CORDONED) { return "Cordoned"; }
+    return "unknown";
+}
+
+# ── NodeCapacity (rust-old: struct NodeCapacity) ───────────────
+# 4 fields × 8 bytes = 32.
+struct NodeCapacity {
+    memory_mb;            # u64
+    cpus;                 # u32
+    max_containers;       # u32
+    running_containers;   # u32
+}
+
+#[must_use]
+fn node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
+    var p = alloc(32);
+    var c: NodeCapacity = p;
+    c.memory_mb = memory_mb;
+    c.cpus = cpus;
+    c.max_containers = max_containers;
+    c.running_containers = running_containers;
+    return p;
+}
+
+# ── FleetNode (rust-old: struct FleetNode) ─────────────────
+# id : cstr, address : cstr, labels : hashmap<str,str> handle (0 = empty),
+# capacity : NodeCapacity pointer, status : NodeStatus int,
+# last_seen : epoch-ns i64. 6 fields × 8 bytes = 48.
+struct FleetNode {
+    id;
+    address;
+    labels;
+    capacity;
+    status;
+    last_seen;
+}
+
+#[must_use]
+fn fleet_node_new(id, address, labels, capacity, status, last_seen) {
+    var p = alloc(48);
+    var n: FleetNode = p;
+    n.id = id;
+    n.address = address;
+    n.labels = labels;
+    n.capacity = capacity;
+    n.status = status;
+    n.last_seen = last_seen;
+    return p;
+}
+
+# ── DeploymentConstraints (rust-old: struct DeploymentConstraints) ──
+# node_labels : hashmap<str,str> handle (0 = empty),
+# min_memory_mb : u64 | -1 for None, min_cpus : u32 | -1 for None,
+# preferred_nodes : vec<cstr> handle (0 = empty). 4 fields × 8 bytes = 32.
+struct DeploymentConstraints {
+    node_labels;
+    min_memory_mb;
+    min_cpus;
+    preferred_nodes;
+}
+
+# Rust `Default` for DeploymentConstraints: empty labels, no min_memory/min_cpus
+# (encoded -1), empty preferred_nodes. Empty maps/vecs are the 0 sentinel.
+#[must_use]
+fn deployment_constraints_default() {
+    var p = alloc(32);
+    var c: DeploymentConstraints = p;
+    c.node_labels = 0;
+    c.min_memory_mb = 0 - 1;
+    c.min_cpus = 0 - 1;
+    c.preferred_nodes = 0;
+    return p;
+}
+
+# ── FleetDeployment (rust-old: struct FleetDeployment) ───────────
+# id : cstr, image : cstr, config : ContainerConfig pointer,
+# constraints : DeploymentConstraints pointer, replicas : u32,
+# strategy : DeploymentStrategy int, pinned_node : cstr | 0 (the Pinned
+# payload; non-null only when strategy == FLEET_STRATEGY_PINNED),
+# created_at : epoch-ns i64. 8 fields × 8 bytes = 64.
+struct FleetDeployment {
+    id;
+    image;
+    config;
+    constraints;
+    replicas;
+    strategy;
+    pinned_node;
+    created_at;
+}
+
+#[must_use]
+fn fleet_deployment_new(id, image, config, constraints, replicas, strategy, pinned_node, created_at) {
+    var p = alloc(64);
+    var d: FleetDeployment = p;
+    d.id = id;
+    d.image = image;
+    d.config = config;
+    d.constraints = constraints;
+    d.replicas = replicas;
+    d.strategy = strategy;
+    d.pinned_node = pinned_node;
+    d.created_at = created_at;
+    return p;
+}
+
+# ── ScheduleResult (rust-old: struct ScheduleResult) ─────────────
+# assignments : hashmap<str,u32> handle (node_id -> replica count),
+# reasons : vec<cstr> handle. 2 fields × 8 bytes = 16.
+struct ScheduleResult {
+    assignments;
+    reasons;
+}
+
+#[must_use]
+fn schedule_result_new(assignments, reasons) {
+    var p = alloc(16);
+    var r: ScheduleResult = p;
+    r.assignments = assignments;
+    r.reasons = reasons;
+    return p;
+}
+
+# ── constraint matching ───────────────────────
+
+# True (1) iff `node` satisfies every constraint in `constraints`
+# (rust-old: node_matches_constraints). All label keys must be present on
+# the node with an equal value; capacity must meet min_memory_mb / min_cpus
+# when those are set (non -1). An empty (0) label map matches anything.
+#[must_use]
+#[inline]
+fn node_matches_constraints(node, constraints) {
+    var n: FleetNode = node;
+    var c: DeploymentConstraints = constraints;
+
+    # Label constraints — every required key must match.
+    if (c.node_labels != 0) {
+        var keys = map_keys(c.node_labels);
+        var nk = vec_len(keys);
+        var i = 0;
+        while (i < nk) {
+            var key = vec_get(keys, i);
+            var want = map_get(c.node_labels, key);
+            # Node must have the key AND its value must equal `want`.
+            if (n.labels == 0) { return 0; }
+            if (map_has(n.labels, key) == 0) { return 0; }
+            var got = map_get(n.labels, key);
+            if (streq(got, want) == 0) { return 0; }
+            i = i + 1;
+        }
+    }
+
+    var cap: NodeCapacity = n.capacity;
+
+    # Memory constraint (Some(min) → node.memory_mb >= min).
+    if (c.min_memory_mb != 0 - 1) {
+        if (cap.memory_mb < c.min_memory_mb) { return 0; }
+    }
+
+    # CPU constraint.
+    if (c.min_cpus != 0 - 1) {
+        if (cap.cpus < c.min_cpus) { return 0; }
+    }
+
+    return 1;
+}
+
+# Remaining container slots on a node (rust-old: free_slots) —
+# max_containers saturating_sub running_containers (never negative).
+#[must_use]
+#[inline]
+fn free_slots(node) {
+    var n: FleetNode = node;
+    var cap: NodeCapacity = n.capacity;
+    if (cap.max_containers < cap.running_containers) { return 0; }
+    return cap.max_containers - cap.running_containers;
+}
+
+# ── candidate filtering ───────────────────────
+
+# Build a vec of node pointers that are Ready, match constraints, and have
+# free slots — the shared candidate set for schedule / select_migration_target.
+#[must_use]
+fn _fleet_candidates(nodes, count, constraints) {
+    var out = vec_new();
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        var n: FleetNode = node;
+        if (n.status == FLEET_NODE_READY) {
+            if (node_matches_constraints(node, constraints) == 1) {
+                if (free_slots(node) > 0) {
+                    vec_push(out, node);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# ── format helpers for the `reasons` strings ────────────────
+
+# Build "spread: assigned 1 replica to node {id}".
+#[must_use]
+fn _fleet_reason_spread(node_id) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "spread: assigned 1 replica to node ");
+    str_builder_add_cstr(sb, node_id);
+    return str_cstr(str_builder_build(sb));
+}
+
+# Build "binpack: assigned {n} replicas to node {id}".
+#[must_use]
+fn _fleet_reason_binpack(assign, node_id) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "binpack: assigned ");
+    str_builder_add_int(sb, assign);
+    str_builder_add_cstr(sb, " replicas to node ");
+    str_builder_add_cstr(sb, node_id);
+    return str_cstr(str_builder_build(sb));
+}
+
+# Build "pinned: assigned {n} replicas to node {id}".
+#[must_use]
+fn _fleet_reason_pinned(remaining, node_id) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "pinned: assigned ");
+    str_builder_add_int(sb, remaining);
+    str_builder_add_cstr(sb, " replicas to node ");
+    str_builder_add_cstr(sb, node_id);
+    return str_cstr(str_builder_build(sb));
+}
+
+# ── schedule ───────────────────────────
+
+# Sort a vec of FleetNode pointers ascending by running_containers
+# (Spread: most headroom first). In-place insertion sort — candidate lists
+# are small (fleet size). Matches Rust's `sort_by_key(running_containers)`.
+fn _fleet_sort_by_running_asc(cands) {
+    var n = vec_len(cands);
+    var i = 1;
+    while (i < n) {
+        var cur = vec_get(cands, i);
+        var curn: FleetNode = cur;
+        var curcap: NodeCapacity = curn.capacity;
+        var key = curcap.running_containers;
+        var j = i - 1;
+        var done = 0;
+        while (j >= 0 && done == 0) {
+            var pv = vec_get(cands, j);
+            var pvn: FleetNode = pv;
+            var pvcap: NodeCapacity = pvn.capacity;
+            if (pvcap.running_containers > key) {
+                vec_set(cands, j + 1, pv);
+                j = j - 1;
+            } else {
+                done = 1;
+            }
+        }
+        vec_set(cands, j + 1, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Sort a vec of FleetNode pointers descending by running_containers
+# (BinPack: most packed first). Matches Rust's `sort_by(b.cmp(a))`.
+fn _fleet_sort_by_running_desc(cands) {
+    var n = vec_len(cands);
+    var i = 1;
+    while (i < n) {
+        var cur = vec_get(cands, i);
+        var curn: FleetNode = cur;
+        var curcap: NodeCapacity = curn.capacity;
+        var key = curcap.running_containers;
+        var j = i - 1;
+        var done = 0;
+        while (j >= 0 && done == 0) {
+            var pv = vec_get(cands, j);
+            var pvn: FleetNode = pv;
+            var pvcap: NodeCapacity = pvn.capacity;
+            if (pvcap.running_containers < key) {
+                vec_set(cands, j + 1, pv);
+                j = j - 1;
+            } else {
+                done = 1;
+            }
+        }
+        vec_set(cands, j + 1, cur);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Schedule a deployment across fleet nodes (rust-old: schedule).
+#
+# `nodes` is a vec of FleetNode pointers; `count` is its length. Selects
+# nodes by constraints, capacity, and strategy. Returns a ScheduleResult
+# pointer on success. On failure returns 0 and reports via
+# stiva_err_print(STIVA_ERR_FLEET, detail); the specific Fleet(...) message
+# strings are preserved as the reported detail.
+#[must_use]
+fn schedule(deployment, nodes, count) {
+    var d: FleetDeployment = deployment;
+
+    var cands = _fleet_candidates(nodes, count, d.constraints);
+    if (vec_len(cands) == 0) {
+        stiva_err_print(STIVA_ERR_FLEET, "no ready nodes matching constraints");
+        return 0;
+    }
+
+    # cstr-keyed map (map_new → KeyTypeCstr / hash_str+streq). map_new_str is
+    # for Str fat-pointer keys and would mis-hash our NUL-terminated node ids.
+    var assignments = map_new();
+    var reasons = vec_new();
+    var remaining = d.replicas;
+
+    # Branch-local variables use per-strategy suffixes (_sp / _bp / _pn)
+    # because Cyrius `var`s are function-scoped, not block-scoped: a bare
+    # `node` / `n` / `slots` / `sb` reused across the if/elif/else arms would
+    # be a duplicate-variable error.
+    if (d.strategy == FLEET_STRATEGY_SPREAD) {
+        # Most headroom first, then round-robin.
+        _fleet_sort_by_running_asc(cands);
+        var ncand_sp = vec_len(cands);
+        var idx_sp = 0;
+        var limit_sp = ncand_sp * (d.replicas + 1);
+        while (remaining > 0) {
+            var node_sp = vec_get(cands, idx_sp % ncand_sp);
+            var n_sp: FleetNode = node_sp;
+            var current_sp = map_get_or(assignments, n_sp.id, 0);
+            var fs_sp = free_slots(node_sp);
+            var slots_sp = 0;
+            if (fs_sp > current_sp) { slots_sp = fs_sp - current_sp; }
+            if (slots_sp > 0) {
+                map_set(assignments, n_sp.id, current_sp + 1);
+                remaining = remaining - 1;
+                vec_push(reasons, _fleet_reason_spread(n_sp.id));
+            }
+            idx_sp = idx_sp + 1;
+            # Safety: prevent infinite loop if total capacity is insufficient.
+            if (idx_sp >= limit_sp) {
+                var sb_sp = str_builder_new();
+                str_builder_add_cstr(sb_sp, "insufficient capacity: need ");
+                str_builder_add_int(sb_sp, remaining);
+                str_builder_add_cstr(sb_sp, " more replicas but no slots available");
+                stiva_err_print(STIVA_ERR_FLEET, str_cstr(str_builder_build(sb_sp)));
+                return 0;
+            }
+        }
+    } elif (d.strategy == FLEET_STRATEGY_BINPACK) {
+        # Most-packed first, fill each greedily.
+        _fleet_sort_by_running_desc(cands);
+        var ncand_bp = vec_len(cands);
+        var i_bp = 0;
+        while (i_bp < ncand_bp) {
+            if (remaining == 0) { i_bp = ncand_bp; } else {
+                var node_bp = vec_get(cands, i_bp);
+                var n_bp: FleetNode = node_bp;
+                var slots_bp = free_slots(node_bp);
+                var assign_bp = remaining;
+                if (slots_bp < assign_bp) { assign_bp = slots_bp; }
+                if (assign_bp > 0) {
+                    map_set(assignments, n_bp.id, assign_bp);
+                    vec_push(reasons, _fleet_reason_binpack(assign_bp, n_bp.id));
+                    remaining = remaining - assign_bp;
+                }
+                i_bp = i_bp + 1;
+            }
+        }
+        if (remaining > 0) {
+            var sb_bp = str_builder_new();
+            str_builder_add_cstr(sb_bp, "insufficient capacity: need ");
+            str_builder_add_int(sb_bp, remaining);
+            str_builder_add_cstr(sb_bp, " more replicas");
+            stiva_err_print(STIVA_ERR_FLEET, str_cstr(str_builder_build(sb_bp)));
+            return 0;
+        }
+    } else {
+        # Pinned — find the pinned node among candidates.
+        var pinned_pn = d.pinned_node;
+        var ncand_pn = vec_len(cands);
+        var found_pn = 0;
+        var i_pn = 0;
+        while (i_pn < ncand_pn) {
+            var node_pn = vec_get(cands, i_pn);
+            var n_pn: FleetNode = node_pn;
+            if (streq(n_pn.id, pinned_pn) == 1) { found_pn = node_pn; i_pn = ncand_pn; } else { i_pn = i_pn + 1; }
+        }
+        if (found_pn == 0) {
+            var sb_pn = str_builder_new();
+            str_builder_add_cstr(sb_pn, "pinned node '");
+            str_builder_add_cstr(sb_pn, pinned_pn);
+            str_builder_add_cstr(sb_pn, "' not found or not ready");
+            stiva_err_print(STIVA_ERR_FLEET, str_cstr(str_builder_build(sb_pn)));
+            return 0;
+        }
+        var slots_pn = free_slots(found_pn);
+        if (slots_pn < remaining) {
+            var sb2_pn = str_builder_new();
+            str_builder_add_cstr(sb2_pn, "pinned node '");
+            str_builder_add_cstr(sb2_pn, pinned_pn);
+            str_builder_add_cstr(sb2_pn, "' has only ");
+            str_builder_add_int(sb2_pn, slots_pn);
+            str_builder_add_cstr(sb2_pn, " slots, need ");
+            str_builder_add_int(sb2_pn, remaining);
+            stiva_err_print(STIVA_ERR_FLEET, str_cstr(str_builder_build(sb2_pn)));
+            return 0;
+        }
+        map_set(assignments, pinned_pn, remaining);
+        vec_push(reasons, _fleet_reason_pinned(remaining, pinned_pn));
+    }
+
+    return schedule_result_new(assignments, reasons);
+}
+
+# ── migration target selection ─────────────────────
+
+# Select the best node for a single container migration (rust-old:
+# select_migration_target). Picks the Ready node with the most free capacity
+# that matches constraints. Returns the chosen node-id cstr on success, or 0
+# on failure (reported as STIVA_ERR_FLEET). `nodes` is a vec of FleetNode
+# pointers; `count` its length.
+#[must_use]
+fn select_migration_target(nodes, count, constraints) {
+    var best = 0;
+    var best_slots = 0 - 1;
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        var n: FleetNode = node;
+        if (n.status == FLEET_NODE_READY) {
+            if (node_matches_constraints(node, constraints) == 1) {
+                var fs = free_slots(node);
+                if (fs > 0) {
+                    # max_by_key: ties resolve to the last max in Rust's
+                    # iterator (later element wins on equal key). Use `>=`.
+                    if (fs >= best_slots) {
+                        best = node;
+                        best_slots = fs;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if (best == 0) {
+        stiva_err_print(STIVA_ERR_FLEET, "no suitable migration target node found");
+        return 0;
+    }
+    # Copy into a fresh local before the struct annotation: annotating the
+    # loop-mutated `best` directly mis-computes the field offset in codegen.
+    var bp = best + 0;
+    var b: FleetNode = bp;
+    return b.id;
+}
+
+# ── fleet health monitoring ──────────────────────
+
+# Check fleet node health based on heartbeat timestamps (rust-old:
+# check_fleet_health). Nodes that haven't been seen within `timeout_ns`
+# (a duration in nanoseconds; the Rust `chrono::Duration`) are marked
+# NotReady. Mutates the FleetNode records in place. Returns a vec of the
+# node-id cstrs whose status changed. `now_ns` is the current epoch-ns
+# (caller supplies it so the sweep is testable, matching chrono::Utc::now()).
+#[must_use]
+fn check_fleet_health(nodes, count, now_ns, timeout_ns) {
+    var cutoff = now_ns - timeout_ns;
+    var changed = vec_new();
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        var n: FleetNode = node;
+        if (n.status == FLEET_NODE_READY) {
+            if (n.last_seen < cutoff) {
+                n.status = FLEET_NODE_NOT_READY;
+                vec_push(changed, n.id);
+            }
+        }
+        i = i + 1;
+    }
+    return changed;
+}
+
+# Plan a rollback: reschedule containers from failed nodes to healthy ones
+# (rust-old: plan_rollback). Returns a vec of 2-element [source_id, target_id]
+# pair pointers (each pair a 16-byte heap record) for container migration.
+# For each NotReady node with running containers, finds a healthy target per
+# running container (skipping a target equal to the failed node itself).
+#[must_use]
+fn plan_rollback(nodes, count, constraints) {
+    var migrations = vec_new();
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        var fn0: FleetNode = node;
+        var cap: NodeCapacity = fn0.capacity;
+        if (fn0.status == FLEET_NODE_NOT_READY) {
+            if (cap.running_containers > 0) {
+                var k = 0;
+                while (k < cap.running_containers) {
+                    var target = select_migration_target(nodes, count, constraints);
+                    if (target != 0) {
+                        if (streq(target, fn0.id) == 0) {
+                            var pair = alloc(16);
+                            store64(pair, fn0.id);
+                            store64(pair + 8, target);
+                            vec_push(migrations, pair);
+                        }
+                    }
+                    k = k + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return migrations;
+}
+
+# ── DEFERRED (already-ported; no deferral needed) ───────────────
+# FleetDeployment.config is a container::ContainerConfig pointer. container
+# is already ported (src/container.cyr: struct ContainerConfig +
+# container_config_default). Callers build the config via
+# container_config_default() and pass the pointer to fleet_deployment_new —
+# no fleet-side type is deferred.

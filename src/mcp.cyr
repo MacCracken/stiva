@@ -1,0 +1,303 @@
+# stiva — MCP (Model Context Protocol) tools
+# Ported from rust-old/src/mcp.rs.
+#
+# Exposes container runtime operations as MCP tools that AI agents discover
+# and invoke via daimon. This module carries the self-contained surface:
+#   - McpResult / ContentPart data types + ok/resource/err constructors
+#   - tool_list() — the 9 static ToolDef definitions (built via lib/bote-core)
+#
+# The live async dispatch layer (handle_tool + the per-tool handle_* fns,
+# list_resources, read_resource) is coupled to the live async `Stiva`
+# instance (rust-old/src/lib.rs: stiva.pull/run/ps/stop/exec/push/inspect…),
+# an async runtime, and serde_json Value construction that the ported base
+# does not yet have. Those land with the Stiva runtime driver — see the
+# DEFERRED block at the bottom, matching the storage/registry async
+# precedent.
+#
+# Enum members are namespaced (MCP_CONTENT_*) — Cyrius hoists enum members
+# to global constants under "last definition wins", so bare names would
+# silently collide across modules (see error.cyr).
+#
+# Parity notes vs Rust:
+#   - McpResult::ok/resource take a `serde_json::Value`; here they take a
+#     pre-serialized JSON cstr (the audit.cyr precedent). The Rust
+#     serde_json::to_string_pretty is the caller's responsibility — the
+#     content `text` is stored verbatim.
+#   - ContentPart is `#[serde(tag = "type")]`: the wire "type" value is
+#     "text" for Text and "resource" for Resource (mcp_content_type_name).
+#   - Resource mime_type is always "application/json".
+
+# ── ContentPart ──────────────────────────
+# Typed content part in an MCP tool result (rust-old: enum ContentPart,
+# #[serde(tag = "type")], #[non_exhaustive]). Two shapes:
+#   MCP_CONTENT_TEXT     — { text }
+#   MCP_CONTENT_RESOURCE — { uri, mime_type, text }
+enum ContentPartKind {
+    MCP_CONTENT_TEXT = 0;
+    MCP_CONTENT_RESOURCE = 1;
+}
+
+# Serde `type` tag wire name for a ContentPart kind (the `#[serde(rename)]`
+# values on the variants).
+#[must_use]
+fn mcp_content_type_name(kind) {
+    if (kind == MCP_CONTENT_TEXT) { return "text"; }
+    if (kind == MCP_CONTENT_RESOURCE) { return "resource"; }
+    return "text";
+}
+
+# ContentPart layout (32 bytes):
+#   +0  kind      MCP_CONTENT_* tag
+#   +8  text      cstr (the text payload, present for both kinds)
+#   +16 uri       cstr or 0 (Resource only)
+#   +24 mime_type cstr or 0 (Resource only; "application/json")
+
+# Construct a Text content part (rust-old: ContentPart::Text { text }).
+fn content_part_text(text) {
+    var p = alloc(32);
+    store64(p, MCP_CONTENT_TEXT);
+    store64(p + 8, text);
+    store64(p + 16, 0);
+    store64(p + 24, 0);
+    return p;
+}
+
+# Construct a Resource content part
+# (rust-old: ContentPart::Resource { uri, mime_type, text }).
+fn content_part_resource(uri, mime_type, text) {
+    var p = alloc(32);
+    store64(p, MCP_CONTENT_RESOURCE);
+    store64(p + 8, text);
+    store64(p + 16, uri);
+    store64(p + 24, mime_type);
+    return p;
+}
+
+fn content_part_kind(p) { return load64(p); }
+fn content_part_text_of(p) { return load64(p + 8); }
+fn content_part_uri(p) { return load64(p + 16); }
+fn content_part_mime_type(p) { return load64(p + 24); }
+
+# ── McpResult ───────────────────────────
+# Result of an MCP tool invocation in structured MCP content format
+# (rust-old: struct McpResult { success, content }).
+#
+# Layout (16 bytes):
+#   +0  success   1 (ok) / 0 (err)
+#   +8  content   vec of ContentPart pointers
+struct McpResult {
+    success;
+    content;
+}
+
+fn mcp_result_success(r) { return load64(r); }
+fn mcp_result_content(r) { return load64(r + 8); }
+
+# Create a success result with text content
+# (rust-old: McpResult::ok). `data_json` is a pre-serialized JSON cstr
+# (the caller does serde_json::to_string_pretty).
+#[must_use]
+fn mcp_result_ok(data_json) {
+    var r = alloc(16);
+    store64(r, 1);
+    var content = vec_new();
+    vec_push(content, content_part_text(data_json));
+    store64(r + 8, content);
+    return r;
+}
+
+# Create a success result with a JSON resource (rust-old: McpResult::resource).
+# mime_type is always "application/json". `data_json` is a pre-serialized
+# JSON cstr.
+#[must_use]
+fn mcp_result_resource(uri, data_json) {
+    var r = alloc(16);
+    store64(r, 1);
+    var content = vec_new();
+    vec_push(content, content_part_resource(uri, "application/json", data_json));
+    store64(r + 8, content);
+    return r;
+}
+
+# Create an error result (rust-old: McpResult::err). `message` is stored as
+# the text content verbatim.
+#[must_use]
+fn mcp_result_err(message) {
+    var r = alloc(16);
+    store64(r, 0);
+    var content = vec_new();
+    vec_push(content, content_part_text(message));
+    store64(r + 8, content);
+    return r;
+}
+
+# ── tool_list ───────────────────────────
+# Return the list of MCP tools provided by stiva (rust-old: tool_list()).
+# Nine ToolDefs, each built via lib/bote-core (tool_def_new + schema_new +
+# schema_prop_new + annotations). Property values are raw JSON literals
+# preserved verbatim from the Rust serde_json::json!(...) schema fragments.
+#
+# Returns a vec of ToolDef pointers.
+#[must_use]
+fn tool_list() {
+    var tools = vec_new();
+
+    # stiva_pull — read-only
+    var pull_props = vec_new();
+    vec_push(pull_props, schema_prop_new("image",
+        "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
+    var pull_req = vec_new();
+    vec_push(pull_req, "image");
+    var pull = tool_def_new("stiva_pull",
+        "Pull an OCI container image from a registry",
+        schema_new("object", pull_props, pull_req));
+    tool_def_with_annotations(pull, ann_read_only());
+    vec_push(tools, pull);
+
+    # stiva_run — destructive
+    var run_props = vec_new();
+    vec_push(run_props, schema_prop_new("image",
+        "{\"type\": \"string\", \"description\": \"Image reference to run\"}"));
+    vec_push(run_props, schema_prop_new("name",
+        "{\"type\": \"string\", \"description\": \"Container name (optional)\"}"));
+    vec_push(run_props, schema_prop_new("command",
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command to execute (overrides entrypoint)\"}"));  #skip-lint
+    vec_push(run_props, schema_prop_new("env",
+        "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}, \"description\": \"Environment variables\"}"));  #skip-lint
+    vec_push(run_props, schema_prop_new("ports",
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Port mappings (e.g., '8080:80')\"}"));  #skip-lint
+    vec_push(run_props, schema_prop_new("volumes",
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Volume mounts (e.g., '/host:/container:ro')\"}"));  #skip-lint
+    var run_req = vec_new();
+    vec_push(run_req, "image");
+    var run = tool_def_new("stiva_run",
+        "Run a container from an image",
+        schema_new("object", run_props, run_req));
+    tool_def_with_annotations(run, ann_destructive());
+    vec_push(tools, run);
+
+    # stiva_ps — read-only, no params
+    var ps = tool_def_new("stiva_ps",
+        "List all containers",
+        schema_new("object", vec_new(), vec_new()));
+    tool_def_with_annotations(ps, ann_read_only());
+    vec_push(tools, ps);
+
+    # stiva_stop — destructive
+    var stop_props = vec_new();
+    vec_push(stop_props, schema_prop_new("id",
+        "{\"type\": \"string\", \"description\": \"Container ID to stop\"}"));
+    var stop_req = vec_new();
+    vec_push(stop_req, "id");
+    var stop = tool_def_new("stiva_stop",
+        "Stop a running container",
+        schema_new("object", stop_props, stop_req));
+    tool_def_with_annotations(stop, ann_destructive());
+    vec_push(tools, stop);
+
+    # stiva_ansamblu — destructive
+    var ans_props = vec_new();
+    vec_push(ans_props, schema_prop_new("action",
+        "{\"type\": \"string\", \"enum\": [\"up\", \"down\"], \"description\": \"Ansamblu action to perform\"}"));
+    vec_push(ans_props, schema_prop_new("file",
+        "{\"type\": \"string\", \"description\": \"TOML ansamblu file content\"}"));
+    vec_push(ans_props, schema_prop_new("session_id",
+        "{\"type\": \"string\", \"description\": \"Session ID (required for 'down')\"}"));
+    var ans_req = vec_new();
+    vec_push(ans_req, "action");
+    var ans = tool_def_new("stiva_ansamblu",
+        "Manage multi-service deployments via ansamblu files",
+        schema_new("object", ans_props, ans_req));
+    tool_def_with_annotations(ans, ann_destructive());
+    vec_push(tools, ans);
+
+    # stiva_exec — destructive
+    var exec_props = vec_new();
+    vec_push(exec_props, schema_prop_new("id",
+        "{\"type\": \"string\", \"description\": \"Container ID\"}"));
+    vec_push(exec_props, schema_prop_new("command",
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command and arguments to execute\"}"));  #skip-lint
+    var exec_req = vec_new();
+    vec_push(exec_req, "id");
+    vec_push(exec_req, "command");
+    var exec = tool_def_new("stiva_exec",
+        "Execute a command inside a running container",
+        schema_new("object", exec_props, exec_req));
+    tool_def_with_annotations(exec, ann_destructive());
+    vec_push(tools, exec);
+
+    # stiva_build — destructive
+    var build_props = vec_new();
+    vec_push(build_props, schema_prop_new("spec",
+        "{\"type\": \"string\", \"description\": \"TOML build spec content\"}"));
+    vec_push(build_props, schema_prop_new("context_dir",
+        "{\"type\": \"string\", \"description\": \"Build context directory path\"}"));
+    var build_req = vec_new();
+    vec_push(build_req, "spec");
+    vec_push(build_req, "context_dir");
+    var build = tool_def_new("stiva_build",
+        "Build an image from a Stivafile specification",
+        schema_new("object", build_props, build_req));
+    tool_def_with_annotations(build, ann_destructive());
+    vec_push(tools, build);
+
+    # stiva_push — destructive
+    var push_props = vec_new();
+    vec_push(push_props, schema_prop_new("image",
+        "{\"type\": \"string\", \"description\": \"Image ID or reference to push\"}"));
+    vec_push(push_props, schema_prop_new("target",
+        "{\"type\": \"string\", \"description\": \"Target registry reference (optional)\"}"));
+    var push_req = vec_new();
+    vec_push(push_req, "image");
+    var push = tool_def_new("stiva_push",
+        "Push a local image to a registry",
+        schema_new("object", push_props, push_req));
+    tool_def_with_annotations(push, ann_destructive());
+    vec_push(tools, push);
+
+    # stiva_inspect — read-only
+    var insp_props = vec_new();
+    vec_push(insp_props, schema_prop_new("id",
+        "{\"type\": \"string\", \"description\": \"Container or image ID\"}"));
+    vec_push(insp_props, schema_prop_new("type",
+        "{\"type\": \"string\", \"enum\": [\"container\", \"image\"], \"description\": \"What to inspect\"}"));
+    var insp_req = vec_new();
+    vec_push(insp_req, "id");
+    vec_push(insp_req, "type");
+    var insp = tool_def_new("stiva_inspect",
+        "Inspect a container or image",
+        schema_new("object", insp_props, insp_req));
+    tool_def_with_annotations(insp, ann_read_only());
+    vec_push(tools, insp);
+
+    return tools;
+}
+
+# ── DEFERRED (land with the Stiva async runtime driver) ───────────
+# rust-old/src/mcp.rs also defines the live tool-dispatch + resource layer,
+# coupled to the async `Stiva` instance (rust-old/src/lib.rs), an async
+# runtime, and serde_json::Value construction the ported base lacks:
+#
+#   async fn handle_tool(stiva: &Arc<Stiva>, name, params) -> McpResult
+#     — dispatch by tool name to the handle_* fns below; unknown → err.
+#   async fn handle_pull(stiva, params) -> McpResult      (stiva.pull)
+#   async fn handle_run(stiva, params) -> McpResult       (stiva.run; builds
+#       container::ContainerConfig with name/command/ports/volumes, detach=true)
+#   async fn handle_ps(stiva) -> McpResult                (stiva.ps)
+#   async fn handle_stop(stiva, params) -> McpResult      (stiva.stop)
+#   async fn handle_exec(stiva, params) -> McpResult      (stiva.exec)
+#   async fn handle_build(params) -> McpResult            (build::parse_build_spec)
+#   async fn handle_push(stiva, params) -> McpResult      (stiva.push)
+#   async fn handle_inspect(stiva, params) -> McpResult   (stiva.inspect /
+#       stiva.inspect_image; type ∈ {"container","image"})
+#   async fn handle_ansamblu(params) -> McpResult         (ansamblu::parse_ansamblu;
+#       action ∈ {"up","down"})
+#   async fn list_resources(stiva: &Arc<Stiva>) -> Vec<serde_json::Value>
+#       — container + image resources (stiva.ps + stiva.images)
+#   async fn read_resource(stiva: &Arc<Stiva>, uri) -> Result<Value, String>
+#       — strip_prefix "stiva://containers/" | "stiva://images/" then inspect.
+#
+# These reference the async Stiva runtime methods, serde_json Value
+# assembly, and the params Value accessor pattern (params.get(k).as_str());
+# they are ported alongside the Stiva runtime driver for parity. Tracked in
+# the roadmap.

@@ -1,0 +1,365 @@
+# stiva — NAT and port mapping via nein.
+# Ported from rust-old/src/network/nat.rs.
+#
+# The Rust module parses container port-mapping specs and bridges them into
+# nein's NAT / bridge primitives. In Cyrius the nein crate is vendored as the
+# flat bundle lib/nein.cyr; its handle-based fns stand in for the Rust types:
+#   nein::bridge::PortMapping  → pm_tcp / pm_udp / pm_host_port / ...
+#   nein::nat::NatRule         → nat_masquerade / nat_dnat (handle + nat_type/nat_vN)
+#   nein::nat::container_masquerade / port_forward → same-named bundle fns
+#   nein::bridge::BridgeConfig → bridge_config_new
+#
+# Error mapping (mirrors error.cyr): every Rust `Err(StivaError::PortMapping(..))`
+# maps to the integer sentinel `0` (invalid) returned from `network_nat_parse_port_spec`;
+# the caller reports it via stiva_err_print(STIVA_ERR_PORT_MAPPING, detail).
+# The context strings the Rust carried in the PortMapping payload are elided.
+#
+# `alloc_init()` must have been called once before any PortSpec is created.
+
+# ── Protocol for port mappings (rust-old: enum PortProtocol) ─────────
+# Prefixed NETWORK_NAT_PROTO_* for global enum-member uniqueness (see
+# error.cyr). Tcp is the #[default].
+enum PortProtocol {
+    NETWORK_NAT_PROTO_TCP = 0;
+    NETWORK_NAT_PROTO_UDP = 1;
+}
+
+# Default protocol (rust-old: #[default] Tcp).
+#[must_use]
+fn network_nat_proto_default() {
+    return NETWORK_NAT_PROTO_TCP;
+}
+
+# ── PortSpec (rust-old: struct PortSpec) ──────────────────
+# host_addr      : u32 host value of the IPv4 bind address (valid iff
+#                  has_host_addr == 1); mirrors Option<Ipv4Addr>.
+# has_host_addr  : 1 when a bind address was given, else 0 (None).
+# host_port      : port on the host (u16).
+# container_port : port inside the container (u16).
+# protocol       : PortProtocol.
+struct PortSpec {
+    host_addr;
+    has_host_addr;
+    host_port;
+    container_port;
+    protocol;
+}
+
+# Constructor is `network_nat_`-prefixed: nein's bundle defines an unrelated
+# `port_spec_new(protocol, port, transport)`; last-def-wins would silently
+# clobber one of the two. The read accessors below stay `port_spec_*` (no
+# nein collision) to mirror the Rust field names.
+#[must_use]
+fn network_nat_port_spec_new(host_addr, has_host_addr, host_port, container_port, protocol) {
+    var p = alloc(40);
+    var ps: PortSpec = p;
+    ps.host_addr = host_addr;
+    ps.has_host_addr = has_host_addr;
+    ps.host_port = host_port;
+    ps.container_port = container_port;
+    ps.protocol = protocol;
+    return p;
+}
+
+fn port_spec_host_addr(p) { var ps: PortSpec = p; return ps.host_addr; }
+fn port_spec_has_host_addr(p) { var ps: PortSpec = p; return ps.has_host_addr; }
+fn port_spec_host_port(p) { var ps: PortSpec = p; return ps.host_port; }
+fn port_spec_container_port(p) { var ps: PortSpec = p; return ps.container_port; }
+fn port_spec_protocol(p) { var ps: PortSpec = p; return ps.protocol; }
+
+# ── string helpers (self-contained; NUL-terminated cstrings) ─────────
+
+# True (1) iff `c` is ASCII whitespace that Rust's str::trim strips at the
+# ends of a port spec — space, tab, newline, carriage return.
+#[must_use]
+fn _network_nat_is_ws(c) {
+    if (c == 32 || c == 9 || c == 10 || c == 13) { return 1; }
+    return 0;
+}
+
+# Trim leading/trailing ASCII whitespace from `s`, writing a fresh cstr.
+# Mirrors Rust `spec.trim()`.
+#[must_use]
+fn _network_nat_trim(s) {
+    var len = strlen(s);
+    var start = 0;
+    while (start < len && _network_nat_is_ws(load8(s + start)) == 1) {
+        start = start + 1;
+    }
+    var end = len;
+    while (end > start && _network_nat_is_ws(load8(s + end - 1)) == 1) {
+        end = end - 1;
+    }
+    var n = end - start;
+    var out = alloc(n + 1);
+    memcpy(out, s + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Byte index of the LAST occurrence of `ch` in `s`, or -1 if absent.
+# Mirrors Rust `str::rsplit_once(ch)` split-point discovery.
+#[must_use]
+fn _network_nat_rindex(s, ch) {
+    var len = strlen(s);
+    var i = len - 1;
+    while (i >= 0) {
+        if (load8(s + i) == ch) { return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+# Count of `ch` occurrences in `s`.
+#[must_use]
+fn _network_nat_count(s, ch) {
+    var len = strlen(s);
+    var n = 0;
+    var i = 0;
+    while (i < len) {
+        if (load8(s + i) == ch) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Copy the [start,end) byte range of `s` into a fresh cstr.
+#[must_use]
+fn _network_nat_slice(s, start, end) {
+    var n = end - start;
+    var out = alloc(n + 1);
+    memcpy(out, s + start, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# Lowercase an ASCII cstr into a fresh buffer (for the protocol compare;
+# mirrors Rust `proto.to_lowercase()`).
+#[must_use]
+fn _network_nat_lower(s) {
+    var len = strlen(s);
+    var out = alloc(len + 1);
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c >= 65 && c <= 90) { c = c + 32; }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    store8(out + len, 0);
+    return out;
+}
+
+# ── numeric / address parse (mirrors Rust parse::<u16>() / Ipv4Addr) ──
+
+# Parse a decimal u16 port cstr. Returns the value (0..65535) via store at
+# `out` and 1 on success; 0 on invalid (empty, non-digit, or > 65535).
+# Mirrors Rust `s.parse::<u16>()` in parse_port.
+#[must_use]
+fn _network_nat_parse_port(s, out) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+    var val = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        if (val > 65535) { return 0; }
+        i = i + 1;
+    }
+    store64(out, val);
+    return 1;
+}
+
+# Parse a single decimal IPv4 octet [start,end) of `s`. Returns 1 on success
+# (value 0..255 stored at `out`), 0 on invalid. Rust Ipv4Addr::from_str
+# rejects a leading-zero octet ("010", "00") — only bare "0" is valid.
+#[must_use]
+fn _network_nat_parse_octet(s, start, end, out) {
+    if (end <= start) { return 0; }
+    if (end - start > 1 && load8(s + start) == 48) { return 0; }
+    var val = 0;
+    var i = start;
+    while (i < end) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0; }
+        val = val * 10 + (c - 48);
+        if (val > 255) { return 0; }
+        i = i + 1;
+    }
+    store64(out, val);
+    return 1;
+}
+
+# Parse a dotted-quad IPv4 cstr into its u32 host value. Returns 1 on
+# success (value stored at `out`), 0 on invalid. Mirrors Rust
+# `parts[0].parse::<Ipv4Addr>()`.
+#[must_use]
+fn _network_nat_parse_ipv4(s, out) {
+    var len = strlen(s);
+    if (len == 0) { return 0; }
+    var octets = 0;
+    var seg_start = 0;
+    var cell = alloc(8);
+    var value = 0;
+    var i = 0;
+    while (i <= len) {
+        var c = 0;
+        if (i < len) { c = load8(s + i); }
+        if (i == len || c == 46) {   # '.' or end
+            if (_network_nat_parse_octet(s, seg_start, i, cell) == 0) { return 0; }
+            var oct = load64(cell);
+            value = value * 256 + oct;
+            octets = octets + 1;
+            seg_start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (octets != 4) { return 0; }
+    store64(out, value);
+    return 1;
+}
+
+# Format a u32 host value into a fresh dotted-quad cstr (for network_nat_to_nein_port_mapping
+# addr string; mirrors Rust `container_ip.to_string()`).
+#[must_use]
+fn _network_nat_fmt_ipv4(v) {
+    var sb = str_builder_new();
+    var b0 = (v / 16777216) % 256;
+    var b1 = (v / 65536) % 256;
+    var b2 = (v / 256) % 256;
+    var b3 = v % 256;
+    str_builder_add_int(sb, b0);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b1);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b2);
+    str_builder_putc(sb, 46);
+    str_builder_add_int(sb, b3);
+    var s = str_builder_build(sb);
+    return str_cstr(s);
+}
+
+# ── network_nat_parse_port_spec (rust-old: network_nat_parse_port_spec) ───────
+# Parse a port specification string. Formats:
+#   "8080:80"                     — host 8080 → container 80 (TCP)
+#   "8080:80/tcp"                 — explicit TCP
+#   "8080:80/udp"                 — UDP
+#   "0.0.0.0:8080:80"             — explicit bind address
+#   "127.0.0.1:8080:80/tcp"       — bind address + protocol
+# Returns a PortSpec pointer on success, or 0 on any error (empty spec,
+# unknown protocol, wrong colon count, bad port/address). The caller reports
+# via stiva_err_print(STIVA_ERR_PORT_MAPPING, detail).
+#[must_use]
+fn network_nat_parse_port_spec(spec_in) {
+    var spec = _network_nat_trim(spec_in);
+    if (strlen(spec) == 0) {
+        # StivaError::PortMapping("empty port spec")
+        return 0;
+    }
+
+    # Split off protocol suffix on the LAST '/'.
+    var protocol = NETWORK_NAT_PROTO_TCP;
+    var port_part = spec;
+    var slash = _network_nat_rindex(spec, 47);   # '/'
+    if (slash >= 0) {
+        var proto_cstr = _network_nat_lower(spec + slash + 1);
+        if (streq(proto_cstr, "tcp") == 1) {
+            protocol = NETWORK_NAT_PROTO_TCP;
+        } elif (streq(proto_cstr, "udp") == 1) {
+            protocol = NETWORK_NAT_PROTO_UDP;
+        } else {
+            # StivaError::PortMapping("unknown protocol: {proto}")
+            return 0;
+        }
+        port_part = _network_nat_slice(spec, 0, slash);
+    }
+
+    # Number of ':'-separated parts.
+    var colons = _network_nat_count(port_part, 58);   # ':'
+    var parts = colons + 1;
+
+    var cell = alloc(8);
+
+    if (parts == 2) {
+        # host_port:container_port
+        var c0 = _network_nat_rindex(port_part, 58);
+        # colons == 1 here, so first ':' index == c0.
+        var host_str = _network_nat_slice(port_part, 0, c0);
+        var cont_str = port_part + c0 + 1;
+        if (_network_nat_parse_port(host_str, cell) == 0) { return 0; }
+        var host_port = load64(cell);
+        if (_network_nat_parse_port(cont_str, cell) == 0) { return 0; }
+        var container_port = load64(cell);
+        return network_nat_port_spec_new(0, 0, host_port, container_port, protocol);
+    }
+
+    if (parts == 3) {
+        # host_addr:host_port:container_port
+        var i1 = _network_nat_index(port_part, 58, 0);
+        var i2 = _network_nat_index(port_part, 58, i1 + 1);
+        var addr_str = _network_nat_slice(port_part, 0, i1);
+        var host_str2 = _network_nat_slice(port_part, i1 + 1, i2);
+        var cont_str2 = port_part + i2 + 1;
+        if (_network_nat_parse_ipv4(addr_str, cell) == 0) {
+            # StivaError::PortMapping("invalid bind address '{}': {e}")
+            return 0;
+        }
+        var host_addr = load64(cell);
+        if (_network_nat_parse_port(host_str2, cell) == 0) { return 0; }
+        var host_port2 = load64(cell);
+        if (_network_nat_parse_port(cont_str2, cell) == 0) { return 0; }
+        var container_port2 = load64(cell);
+        return network_nat_port_spec_new(host_addr, 1, host_port2, container_port2, protocol);
+    }
+
+    # StivaError::PortMapping("invalid port spec: {spec}")
+    return 0;
+}
+
+# Byte index of the first `ch` in `s` at or after `from`, or -1 if absent.
+#[must_use]
+fn _network_nat_index(s, ch, from) {
+    var len = strlen(s);
+    var i = from;
+    while (i < len) {
+        if (load8(s + i) == ch) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ── nein bridging (rust-old: network_nat_to_nein_port_mapping / masquerade_rule /
+#    port_forward_rule / network_nat_bridge_config) ────────────────
+
+# Convert a PortSpec to a nein PortMapping handle. `container_ip` is a u32
+# host value. Mirrors `network_nat_to_nein_port_mapping`.
+#[must_use]
+fn network_nat_to_nein_port_mapping(spec, container_ip) {
+    var addr = _network_nat_fmt_ipv4(container_ip);
+    var hp = port_spec_host_port(spec);
+    var cp = port_spec_container_port(spec);
+    if (port_spec_protocol(spec) == NETWORK_NAT_PROTO_TCP) {
+        return pm_tcp(hp, addr, cp);
+    }
+    return pm_udp(hp, addr, cp);
+}
+
+# Build a masquerade NAT rule for a bridge subnet (nein::nat::container_masquerade).
+#[must_use]
+fn masquerade_rule(subnet, outbound_iface) {
+    return container_masquerade(subnet, outbound_iface);
+}
+
+# Build a DNAT (port forward) rule (nein::nat::port_forward).
+#[must_use]
+fn port_forward_rule(host_port, container_addr, container_port) {
+    return port_forward(host_port, container_addr, container_port);
+}
+
+# Create a nein BridgeConfig handle (nein::bridge::BridgeConfig::new).
+#[must_use]
+fn network_nat_bridge_config(bridge_name, subnet, outbound_iface) {
+    return bridge_config_new(bridge_name, subnet, outbound_iface);
+}

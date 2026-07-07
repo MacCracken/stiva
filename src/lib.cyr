@@ -21,8 +21,8 @@
 #
 # The module ORDER below mirrors `[lib].modules` in cyrius.cyml, which is
 # what `cyrius distlib` reads to (re)build dist/stiva.cyr. Keep the two in
-# the same order. Modules are ported bottom-up from rust-old/ (the parity
-# oracle); this list grows as each lands.
+# the same order. `stiva_core.cyr` (the crate-root StivaConfig + Stiva facade,
+# ported from rust-old/src/lib.rs) is included last.
 
 include "src/error.cyr"
 include "src/oci.cyr"
@@ -34,5 +34,18 @@ include "src/network_bridge.cyr"
 include "src/network_dns.cyr"
 include "src/network_pool.cyr"
 include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+include "src/mcp.cyr"
+include "src/stiva_core.cyr"

@@ -1,0 +1,157 @@
+# stiva — daimon agent integration (register containers as agents)
+# Ported from rust-old/src/agent.rs.
+#
+# rust-old talks to daimon's agent registry over HTTP (reqwest, async),
+# avoiding a direct dependency on agent-runtime — same pattern sutra-daimon
+# uses. The self-contained, testable surface ports here:
+#   - DEFAULT_REGISTRY_URL constant
+#   - struct AgentRegistration + struct AgentStatus
+#   - build_registration(container) — pure, mirrors the Rust builder
+# The three network functions (register/deregister/report_status) require an
+# async reqwest client + HTTP/TLS which the ported base lacks; they live in
+# the DEFERRED block at the bottom (legitimate HTTP/async deferral, matching
+# the registry-module precedent).
+
+# Default daimon registry URL (rust-old: DEFAULT_REGISTRY_URL).
+#[must_use]
+fn agent_default_registry_url() {
+    return "http://localhost:8090";
+}
+
+# Agent registration payload (rust-old: struct AgentRegistration).
+# Fields are cstr / handle valued:
+#   id            — cstr (container id)
+#   name          — cstr (container name, or first-12 of id)
+#   agent_type    — cstr ("container")
+#   capabilities  — Vec handle of cstrs
+#   metadata      — handle to a metadata record (see AgentMetadata below);
+#                   rust-old carried a serde_json::Value, we carry the fields.
+struct AgentRegistration {
+    id;
+    name;
+    agent_type;
+    capabilities;
+    metadata;
+}
+
+# Metadata about the container placed in the registration payload
+# (rust-old: the serde_json::json!({...}) object in build_registration).
+struct AgentMetadata {
+    image_ref;   # cstr
+    image_id;    # cstr
+    state;       # cstr (rust-old: format!("{:?}", container.state))
+    ports;       # Vec handle of cstrs (container.config.ports) | 0
+}
+
+# Agent status report (rust-old: struct AgentStatus).
+#   id       — cstr
+#   status   — cstr
+#   metadata — handle to AgentMetadata | 0 (rust-old: Option<serde_json::Value>)
+struct AgentStatus {
+    id;
+    status;
+    metadata;
+}
+
+# Construct an AgentStatus record.
+#[must_use]
+fn agent_status_new(id, status, metadata) {
+    var p = alloc(24);
+    var s: AgentStatus = p;
+    s.id = id;
+    s.status = status;
+    s.metadata = metadata;
+    return p;
+}
+
+# Build an agent registration from a container (rust-old: build_registration).
+#
+# Mirrors the Rust builder exactly:
+#   id           = container.id
+#   name         = container.name, or first 12 chars of id when name is absent
+#   agent_type   = "container"
+#   capabilities = ["container-runtime", "stiva"]
+#   metadata     = { image_ref, image_id, state = "{:?}", ports }
+#
+# `container` is a Container* (see src/container.cyr). Returns an
+# AgentRegistration*.
+#[must_use]
+fn build_registration(container) {
+    # Container* field layout (src/container.cyr, 8-byte fields):
+    #   id@0 name@8 image_id@16 image_ref@24 state@32 pid@40
+    #   created_at@48 started_at@56 config@64 exit_code@72
+    # We read via load64 rather than a `: Container` annotation so this file
+    # parses standalone (Container is defined in the sibling module, not here).
+    var c_id = load64(container + 0);
+    var c_name = load64(container + 8);
+    var c_image_id = load64(container + 16);
+    var c_image_ref = load64(container + 24);
+    var c_state = load64(container + 32);
+    var c_config = load64(container + 64);
+
+    # name: container.name, falling back to &container.id[..12].
+    var name = c_name;
+    if (name == 0) {
+        name = _agent_first12(c_id);
+    }
+
+    # capabilities: ["container-runtime", "stiva"].
+    var caps = vec_new();
+    vec_push(caps, "container-runtime");
+    vec_push(caps, "stiva");
+
+    # metadata object. ContainerConfig.ports is field index 4 → offset 32.
+    var c_ports = load64(c_config + 32);
+    var mp = alloc(32);
+    var meta: AgentMetadata = mp;
+    meta.image_ref = c_image_ref;
+    meta.image_id = c_image_id;
+    meta.state = container_state_name(c_state);
+    meta.ports = c_ports;
+
+    var rp = alloc(40);
+    var reg: AgentRegistration = rp;
+    reg.id = c_id;
+    reg.name = name;
+    reg.agent_type = "container";
+    reg.capabilities = caps;
+    reg.metadata = mp;
+    return rp;
+}
+
+# First 12 bytes of NUL-terminated `id` as a fresh NUL-terminated cstr
+# (rust-old: container.id[..12].to_string()). If `id` is shorter than 12
+# bytes the whole string is copied. Returns a heap cstr.
+#[must_use]
+fn _agent_first12(id) {
+    var n = strlen(id);
+    if (n > 12) { n = 12; }
+    var buf = alloc(n + 1);
+    memcpy(buf, id, n);
+    store8(buf + n, 0);
+    return buf;
+}
+
+# ── DEFERRED (HTTP/async — no reqwest/TLS/async runtime in ported base) ──
+# rust-old/src/agent.rs also defines these network functions. Each builds a
+# URL under `{registry_url}` and issues a request against daimon's agent
+# registry using an async reqwest::Client, mapping transport failures to
+# StivaError::Network (STIVA_ERR_NETWORK). Port them once an HTTP client
+# lands (same status as registry.cyr's network paths):
+#
+#   async fn register_container(client, container, registry_url)
+#       POST {registry_url}/v1/agents/register  body = build_registration(...)
+#       non-2xx or transport error → Err(STIVA_ERR_NETWORK
+#         "daimon registration failed: {e}" /
+#         "daimon registration returned HTTP {status}")
+#
+#   async fn deregister_container(client, container_id, registry_url)
+#       DELETE {registry_url}/v1/agents/{container_id}
+#       non-2xx → warn (does NOT error); transport error → Err(NETWORK
+#         "daimon deregistration failed: {e}")
+#
+#   async fn report_status(client, container_id, status, registry_url)
+#       PUT {registry_url}/v1/agents/{container_id}/status
+#         body = AgentStatus { id: container_id, status, metadata: none }
+#       non-2xx → warn (does NOT error); transport error → Err(NETWORK
+#         "daimon status report failed: {e}")

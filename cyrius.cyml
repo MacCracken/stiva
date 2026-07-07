@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.4.14"
+cyrius = "6.4.15"
 
 [build]
 entry = "src/main.cyr"
@@ -37,70 +37,103 @@ modules = [
     "src/network_dns.cyr",
     "src/network_pool.cyr",
     "src/network_rootless.cyr",
+    "src/network_nat.cyr",
+    "src/network_manager.cyr",
     "src/image.cyr",
     "src/registry.cyr",
+    "src/storage.cyr",
+    "src/build.cyr",
+    "src/encrypted.cyr",
+    "src/runtime.cyr",
+    "src/container.cyr",
+    "src/health.cyr",
+    "src/ansamblu.cyr",
+    "src/agent.cyr",
+    "src/fleet.cyr",
+    "src/mcp.cyr",
+    "src/stiva_core.cyr",
 ]
 
 # ── Dependencies ─────────────────────────────────────────────────
-# Stdlib is OPT-IN: declare exactly what the project + every active [deps.*]
-# needs (each dep's `dist/<name>.deps` sidecar is the authoritative list).
-# This is the FOUNDATION set for the leaf modules (error, oci). It grows as
-# dep-consuming modules land — see the AGNOS deps note below.
+# Stdlib is OPT-IN. This UNION covers stiva's own modules + every AGNOS dep
+# bundle's `dist/*.deps` sidecar (kavach/majra/nein/bote/agnodrm) + their
+# transitive git deps (sigil/libro/sakshi). Validated by an isolated probe
+# build under cc 6.4.14. `sigil` (full) provides SHA-256/HMAC for image digests
+# AND the AGNOS bundles' crypto — the à-la-carte sha256 chain was retired here
+# (full sigil supersedes it; our audit_log_new/port_mapping_new were renamed
+# stiva_* to avoid its collisions).
 [deps]
 stdlib = [
-    "alloc",
-    "assert",
-    "atomic",
-    "bench",
-    "chrono",
-    "fmt",
-    "freelist",
-    "fs",
-    "hashmap",
-    "io",
-    "process",
-    "str",
-    "string",
-    "syscalls",
-    "thread_local",
-    "vec",
+    "alloc", "args", "assert", "async", "atomic", "bayan", "bench", "callback",
+    "chrono", "ct", "dynlib", "fdlopen", "fmt", "fnptr", "freelist", "fs",
+    "hashmap", "io", "keccak", "math", "mmap", "net", "process", "random",
+    "result", "sakshi", "sandhi", "sigil", "slice", "str", "string", "sync",
+    "syscalls", "tagged", "thread", "thread_local", "tls", "vec", "ws_server",
 ]
 
-# sigil provides SHA-256 for image content digests (image.cyr). Pull ONLY the
-# three hashing modules (sha_ni + sha256 + hex) — NOT the full `dist/sigil.cyr`
-# bundle (its mldsa/ecdsa SIMD-vector modules pull a large surface, and its
-# audit.cyr collides with our audit_log_new). These 3 are self-contained (no lib
-# includes, no SIMD-vector types): sha256_hex (hex.cyr) → sha256 (sha256.cyr) →
-# sha_ni.cyr (inline-asm SHA-NI, ifndef-guarded).
-[deps.sigil]
-git = "https://github.com/MacCracken/sigil.git"
-path = "../sigil"
-tag = "3.10.0"
-# sha256 + sha_ni use crypto_scratch's `cbank()` (thread-local scratch banks),
-# so crypto_scratch.cyr is pulled too. It needs thread_local + atomic (declared
-# in [deps].stdlib). This is the full à-la-carte SHA-256 chain — smaller and
-# collision-free vs the dist/sigil.cyr bundle (which redefines audit_log_new).
-modules = ["src/crypto_scratch.cyr", "src/sha_ni.cyr", "src/sha256.cyr", "src/sha512.cyr", "src/hex.cyr"]
-# NOTE: this is the honest minimal set for the current ported surface
-# (error, oci + the test/bench/fuzz harnesses). As each module lands, add
-# the stdlib modules it actually references and re-run `cyrius lib sync`
-# (which vendors the declared subset from the pin into ./lib/). Common
-# additions coming with the heavy modules: str, vec, fmt, io, fs, hashmap,
-# chrono, result, tagged, slice, net, process, random, bayan, fnptr.
+# ── AGNOS first-party deps (Cyrius dist bundles) ─────────────────
+# Declared before the deps that reference their symbols (single-pass forward-
+# ref resolution): sakshi ← libro ← majra ← bote; nein needs bote-core; kavach
+# + agnodrm sit on sigil (via [deps].stdlib). ~35 cross-bundle "duplicate fn
+# (last definition wins)" warnings are expected — shared agnos error helpers
+# each bundle vendors; benign, the ecosystem norm for multi-bundle consumers.
 
-# ── AGNOS first-party deps (already ported to Cyrius) ─────────────
-# Wired INCREMENTALLY as the first consuming module lands, so the foundation
-# doesn't force premature resolution of the full transitive tree. Each ships
-# a consumable dist/*.cyr bundle; their transitive git deps (sigil→keccak/ct,
-# bote→libro/majra, nein→bote-core, …) and the union of their stdlib leaves
-# must be declared here too (model on daimon + aethersafha cyrius.cyml).
-#
-#   kavach  3.7.0  → runtime (Sandbox, SandboxPolicy/Config, SecretRef,
-#                    StrengthScore, ExternalizationGate)
-#   majra   2.5.0  → fleet / health (queue, heartbeat FSM, pub/sub)
-#   nein    1.6.2  → network (nftables firewall, NAT, port mapping)
-#   bote    3.0.0  → mcp (JSON-RPC 2.0, tool registry, structured output)
-#   agnodrm 1.4.5  → encrypted (LUKS + dm-verity)
-#
-# The full validated [deps.*] blocks + stdlib union are added in the
-# AGNOS-dep-wiring step (probe-built before any consuming module ports).
+# Structured tracing (libro's transitive).
+[deps.sakshi]
+git = "https://github.com/MacCracken/sakshi.git"
+path = "../sakshi"
+tag = "2.4.4"
+modules = ["dist/sakshi.cyr"]
+
+# Audit-chain crypto tools (bote's + nein's transitive).
+[deps.libro]
+git = "https://github.com/MacCracken/libro.git"
+path = "../libro"
+tag = "2.7.10"
+modules = ["dist/libro.cyr"]
+
+# Job queue, heartbeat FSM, pub/sub — fleet / health / ansamblu / container.
+[deps.majra]
+git = "https://github.com/MacCracken/majra.git"
+path = "../majra"
+tag = "2.5.0"
+modules = ["dist/majra.cyr"]
+
+# MCP core (JSON-RPC 2.0, tool registry, structured output) — mcp. `bote-core`
+# is the subset nein also needs; the full MCP surface for mcp.cyr is pulled from
+# the same core (extend to dist/bote.cyr if mcp needs tools beyond core).
+[deps.bote]
+git = "https://github.com/MacCracken/bote.git"
+path = "../bote"
+tag = "3.0.0"
+modules = ["dist/bote-core.cyr"]
+
+# nftables firewall, NAT, port mapping — network/nat + network/manager.
+[deps.nein]
+git = "https://github.com/MacCracken/nein.git"
+path = "../nein"
+tag = "1.6.2"
+modules = ["dist/nein.cyr"]
+
+# Sandbox isolation — runtime + container (Sandbox, SandboxPolicy/Config,
+# SecretRef, StrengthScore, ExternalizationGate).
+[deps.kavach]
+git = "https://github.com/MacCracken/kavach.git"
+path = "../kavach"
+tag = "3.7.0"
+modules = ["dist/kavach.cyr"]
+
+# LUKS + dm-verity — encrypted.
+[deps.agnodrm]
+git = "https://github.com/MacCracken/agnodrm.git"
+path = "../agnodrm"
+tag = "1.4.5"
+modules = ["dist/agnodrm.cyr"]
+
+# CLI / argument parsing (getopt-long + verb dispatch) — src/main.cyr registers
+# stiva's 33 subcommands as cmdit verbs instead of hand-rolling argv parsing.
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+path = "../cmdit"
+tag = "1.1.0"
+modules = ["dist/cmdit.cyr"]

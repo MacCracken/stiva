@@ -16,24 +16,204 @@ include "src/network_bridge.cyr"
 include "src/network_dns.cyr"
 include "src/network_pool.cyr"
 include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+include "src/mcp.cyr"
+include "src/stiva_core.cyr"
 
-# ── CLI ──────────────────────────
-# Ported bottom-up as modules land. For now, a version banner + a smoke
-# path exercising the foundation modules. Full clap-style dispatch of the
-# 34 subcommands (rust-old/src/main.rs) is tracked in the roadmap.
+# ── CLI (cmdit verb dispatch) ──
+# stiva's 33 subcommands (rust-old/src/main.rs) via the cmdit library
+# (dist/cmdit.cyr) — registered as verbs, not hand-rolled argv parsing.
+# `convert` has ported backing (dockerfile_to_toml); the container-lifecycle
+# verbs drive the async Stiva facade (stiva_core.cyr), deferred to v3.1
+# pending the Cyrius async runtime + tar/gzip/HTTP codec layers.
 
-fn _print_banner() {
-    var banner = "stiva 2.0.0 — OCI container runtime (Cyrius port)\n";
-    sys_write(1, banner, strlen(banner));
+# Verb ids — cmdit_verb returns these in registration order.
+enum StivaVerb {
+    V_PULL = 0; V_BUILD = 1; V_PUSH = 2; V_RUN = 3; V_PS = 4;
+    V_STOP = 5; V_RM = 6; V_EXEC = 7; V_TOP = 8; V_INSPECT = 9;
+    V_IMAGES = 10; V_RMI = 11; V_TAG = 12; V_PAUSE = 13; V_UNPAUSE = 14;
+    V_STATS = 15; V_LOGS = 16; V_KILL = 17; V_EXPORT = 18; V_IMPORT = 19;
+    V_CP = 20; V_PRUNE = 21; V_WAIT = 22; V_CHECKPOINT = 23; V_RESTORE = 24;
+    V_RESTART = 25; V_INFO = 26; V_EVENTS = 27; V_DIFF = 28; V_COMPLETIONS = 29;
+    V_RENAME = 30; V_GC = 31; V_CONVERT = 32;
+}
+
+fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
+
+#[must_use]
+fn _stiva_version_str() {
+    return "3.0.0 — OCI container runtime (Cyrius port)";
+}
+
+# Register all 33 subcommands (order = the verb ids above).
+fn _cli_register_verbs(h) {
+    cmdit_verb(h, "pull", "Pull an image from a registry");
+    cmdit_verb(h, "build", "Build an image from a Stivafile");
+    cmdit_verb(h, "push", "Push a local image to a registry");
+    cmdit_verb(h, "run", "Run a container from an image");
+    cmdit_verb(h, "ps", "List containers");
+    cmdit_verb(h, "stop", "Stop a container");
+    cmdit_verb(h, "rm", "Remove a container");
+    cmdit_verb(h, "exec", "Execute a command in a running container");
+    cmdit_verb(h, "top", "List processes in a running container");
+    cmdit_verb(h, "inspect", "Inspect a container or image");
+    cmdit_verb(h, "images", "List local images");
+    cmdit_verb(h, "rmi", "Remove a local image");
+    cmdit_verb(h, "tag", "Tag a local image");
+    cmdit_verb(h, "pause", "Pause a running container");
+    cmdit_verb(h, "unpause", "Unpause a paused container");
+    cmdit_verb(h, "stats", "Show container stats");
+    cmdit_verb(h, "logs", "Show container logs");
+    cmdit_verb(h, "kill", "Send a signal to a container");
+    cmdit_verb(h, "export", "Export a container's filesystem as a tar archive");
+    cmdit_verb(h, "import", "Import a tar archive as an image");
+    cmdit_verb(h, "cp", "Copy files between host and container");
+    cmdit_verb(h, "prune", "Remove stopped containers and dangling images");
+    cmdit_verb(h, "wait", "Wait for a container to exit");
+    cmdit_verb(h, "checkpoint", "Checkpoint a running container (CRIU)");
+    cmdit_verb(h, "restore", "Restore a checkpointed container (CRIU)");
+    cmdit_verb(h, "restart", "Restart a container");
+    cmdit_verb(h, "info", "Show runtime information");
+    cmdit_verb(h, "events", "Stream lifecycle events");
+    cmdit_verb(h, "diff", "Show filesystem changes in a container");
+    cmdit_verb(h, "completions", "Generate shell completions");
+    cmdit_verb(h, "rename", "Rename a container");
+    cmdit_verb(h, "gc", "Garbage-collect unreferenced data");
+    cmdit_verb(h, "convert", "Convert a Dockerfile or compose file to a Stivafile");
     return 0;
+}
+
+# `convert <input> [-o output] [-f compose|dockerfile]` — the one command with
+# fully-ported backing (dockerfile_to_toml; compose_yaml_to_toml is deferred).
+fn _cli_convert(h) {
+    var vh = cmdit_new("stiva convert");
+    var f_out = cmdit_str(vh, 111, "output", 0, "Output TOML file path (default: stdout)");
+    var f_fmt = cmdit_str(vh, 102, "format", "compose", "Input format: compose|dockerfile");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva convert: missing <input> file\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var input = cmdit_positional(vh, 0);
+    var buf = alloc(1048576);
+    var n = file_read_all(input, buf, 1048575);
+    if (n < 0) { stiva_err_print(STIVA_ERR_IO, input); return CMDIT_EXIT_RUN; }
+    store8(buf + n, 0);
+
+    var fmt = cmdit_get_str(vh, f_fmt);
+    var toml = 0;
+    if (streq(fmt, "dockerfile") == 1) {
+        toml = dockerfile_to_toml(buf);
+        if (toml == 0) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE, "Dockerfile has no FROM instruction");
+            return CMDIT_EXIT_RUN;
+        }
+    } elif (streq(fmt, "compose") == 1) {
+        _cli_puts("stiva convert --format compose: not yet implemented in the Cyrius port\n");
+        _cli_puts("  (compose_yaml_to_toml needs a Cyrius YAML parser — deferred to v3.1;\n");
+        _cli_puts("   use --format dockerfile for now)\n");
+        return CMDIT_EXIT_RUN;
+    } else {
+        _cli_puts("stiva convert: unknown format (expected 'compose' or 'dockerfile')\n");
+        return CMDIT_EXIT_USAGE;
+    }
+
+    var out = cmdit_get_str(vh, f_out);
+    if (out != 0) {
+        if (file_write_all(out, toml, strlen(toml)) < 0) {
+            stiva_err_print(STIVA_ERR_IO, out);
+            return CMDIT_EXIT_RUN;
+        }
+        _cli_puts(out); _cli_puts("\n");
+    } else {
+        _cli_puts(toml);
+    }
+    return CMDIT_EXIT_OK;
+}
+
+# Container-lifecycle verbs drive the async Stiva facade (stiva_core.cyr),
+# deferred to v3.1. The module logic is ported; only the async execution
+# layer (kavach exec / cgroups / CRIU / tar / HTTP) awaits Cyrius async+codecs.
+fn _cli_deferred(verb_name) {
+    _cli_puts("stiva ");
+    _cli_puts(verb_name);
+    _cli_puts(": not yet implemented in the Cyrius port.\n");
+    _cli_puts("  This command drives the async container runtime (kavach exec / cgroups /\n");
+    _cli_puts("  CRIU / tar / HTTP), deferred to v3.1. Ported: try `stiva convert`.\n");
+    return CMDIT_EXIT_RUN;
 }
 
 fn main() {
     alloc_init();
-    _print_banner();
-    return 0;
+    var h = cmdit_new("stiva");
+    # Global flags — bind before OR after the verb (rust-old: root_path/image_path).
+    cmdit_str(h, 0, "root", 0, "Root directory for container data");
+    cmdit_str(h, 0, "image-path", 0, "Image storage directory");
+    _cli_register_verbs(h);
+
+    var r = cmdit_dispatch(h);
+    if (r == CMDIT_HELP) { cmdit_help(h); return CMDIT_EXIT_OK; }
+    if (r == CMDIT_VERSION) { return cmdit_version(h, _stiva_version_str()); }
+    if (r == CMDIT_RESULT_ERR) { cmdit_print_error(h); return CMDIT_EXIT_USAGE; }
+    if (cmdit_verb_matched(h) == 0 - 1) { cmdit_help(h); return CMDIT_EXIT_USAGE; }
+
+    var v = cmdit_verb_matched(h);
+    if (v == V_CONVERT) { return _cli_convert(h); }
+    # Every other verb is the deferred async surface.
+    return _cli_deferred(_cli_verb_name(v));
+}
+
+# Verb id → display name (for the deferred message; registration order).
+#[must_use]
+fn _cli_verb_name(v) {
+    if (v == V_PULL) { return "pull"; }
+    if (v == V_BUILD) { return "build"; }
+    if (v == V_PUSH) { return "push"; }
+    if (v == V_RUN) { return "run"; }
+    if (v == V_PS) { return "ps"; }
+    if (v == V_STOP) { return "stop"; }
+    if (v == V_RM) { return "rm"; }
+    if (v == V_EXEC) { return "exec"; }
+    if (v == V_TOP) { return "top"; }
+    if (v == V_INSPECT) { return "inspect"; }
+    if (v == V_IMAGES) { return "images"; }
+    if (v == V_RMI) { return "rmi"; }
+    if (v == V_TAG) { return "tag"; }
+    if (v == V_PAUSE) { return "pause"; }
+    if (v == V_UNPAUSE) { return "unpause"; }
+    if (v == V_STATS) { return "stats"; }
+    if (v == V_LOGS) { return "logs"; }
+    if (v == V_KILL) { return "kill"; }
+    if (v == V_EXPORT) { return "export"; }
+    if (v == V_IMPORT) { return "import"; }
+    if (v == V_CP) { return "cp"; }
+    if (v == V_PRUNE) { return "prune"; }
+    if (v == V_WAIT) { return "wait"; }
+    if (v == V_CHECKPOINT) { return "checkpoint"; }
+    if (v == V_RESTORE) { return "restore"; }
+    if (v == V_RESTART) { return "restart"; }
+    if (v == V_INFO) { return "info"; }
+    if (v == V_EVENTS) { return "events"; }
+    if (v == V_DIFF) { return "diff"; }
+    if (v == V_COMPLETIONS) { return "completions"; }
+    if (v == V_RENAME) { return "rename"; }
+    if (v == V_GC) { return "gc"; }
+    return "unknown";
 }
 
 var _rc = main();

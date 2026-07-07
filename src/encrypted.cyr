@@ -1,0 +1,298 @@
+# stiva — encrypted & verified container storage (LUKS + dm-verity + OCI layer crypto)
+# Ported from rust-old/src/encrypted.rs.
+#
+# The Rust module is entirely feature-gated on `encrypted`. WITHOUT that
+# feature (the default build), every volume/crypto entry point returns an
+# `Err(StivaError::Storage/Encryption(...))` and the availability probes
+# return false. The Cyrius build has no `encrypted` feature yet, so this
+# port faithfully mirrors the `#[cfg(not(feature = "encrypted"))]` arm:
+# the disabled entry points return their error sentinel and carry the exact
+# Rust message via stiva_err_print, matching the default build's behaviour.
+#
+# What ports fully (NOT feature-gated in Rust — active on every build):
+#   struct LuksVolumeConfig / VerityVolumeConfig / OpenVolume
+#   enum  KeySource (File | EnvVar) + key_source_new_file / _env
+#   is_encrypted_media_type / strip_encrypted_suffix   (pure cstr)
+#   load_key                                           (file read / env+hex)
+#   cryptsetup_available / veritysetup_available       (false, no feature)
+#
+# What is DEFERRED to the `encrypted` feature (agnodrm LUKS/verity bundle
+# calls + an AES-256-GCM codec) — see the block at the bottom:
+#   stiva_luks_open / stiva_luks_close / stiva_luks_format
+#   stiva_verity_open / stiva_verity_close / stiva_verity_format / make_verity_config
+#   decrypt_layer / encrypt_layer / rand_nonce
+# In the default build these return the disabled-path error, ported below.
+# (LUKS/verity entry points carry a `stiva_` prefix because the crypto
+# stdlib lib/sigil.cyr already mints global `luks_open/close/format`.)
+#
+# Error mapping (mirrors error.cyr): Rust `Err(StivaError::Storage(String))`
+# → sentinel + STIVA_ERR_STORAGE; `Err(StivaError::Encryption(String))` →
+# sentinel + STIVA_ERR_ENCRYPTION. The context string is carried by the
+# caller via stiva_err_print(code, detail).
+
+# ── LUKS volume configuration (rust-old: struct LuksVolumeConfig) ──
+# Fields hold NUL-terminated cstr pointers except size_mb (integer MB).
+struct LuksVolumeConfig {
+    image_path;
+    mapper_name;
+    mount_point;
+    size_mb;
+}
+
+#[must_use]
+fn luks_volume_config_new(image_path, mapper_name, mount_point, size_mb) {
+    var p = alloc(32);
+    var v: LuksVolumeConfig = p;
+    v.image_path = image_path;
+    v.mapper_name = mapper_name;
+    v.mount_point = mount_point;
+    v.size_mb = size_mb;
+    return p;
+}
+
+# ── dm-verity configuration (rust-old: struct VerityVolumeConfig) ──
+struct VerityVolumeConfig {
+    data_path;
+    hash_path;
+    root_hash;
+    mapper_name;
+}
+
+#[must_use]
+fn verity_volume_config_new(data_path, hash_path, root_hash, mapper_name) {
+    var p = alloc(32);
+    var v: VerityVolumeConfig = p;
+    v.data_path = data_path;
+    v.hash_path = hash_path;
+    v.root_hash = root_hash;
+    v.mapper_name = mapper_name;
+    return p;
+}
+
+# ── result of opening an encrypted/verified volume (rust-old: OpenVolume) ──
+struct OpenVolume {
+    dm_path;
+    mapper_name;
+}
+
+#[must_use]
+fn open_volume_new(dm_path, mapper_name) {
+    var p = alloc(16);
+    var v: OpenVolume = p;
+    v.dm_path = dm_path;
+    v.mapper_name = mapper_name;
+    return p;
+}
+
+# ── KeySource — key material source for OCI layer crypto ──
+# rust-old: enum KeySource { File(PathBuf), EnvVar(String) }.
+# Prefixed ENCRYPTED_KEYSRC_* for global enum-member uniqueness (see error.cyr).
+enum KeySource {
+    ENCRYPTED_KEYSRC_FILE = 0;
+    ENCRYPTED_KEYSRC_ENVVAR = 1;
+}
+
+# A KeySource value: a kind tag + a single cstr payload (the file path for
+# File, the env-var name for EnvVar).
+struct KeySourceVal {
+    kind;
+    value;
+}
+
+#[must_use]
+fn key_source_new_file(path) {
+    var p = alloc(16);
+    var v: KeySourceVal = p;
+    v.kind = ENCRYPTED_KEYSRC_FILE;
+    v.value = path;
+    return p;
+}
+
+#[must_use]
+fn key_source_new_env(var_name) {
+    var p = alloc(16);
+    var v: KeySourceVal = p;
+    v.kind = ENCRYPTED_KEYSRC_ENVVAR;
+    v.value = var_name;
+    return p;
+}
+
+# ── media-type helpers (rust-old: is_encrypted_media_type / strip) ──
+
+# True (1) iff `media_type` ends with "+encrypted".
+# rust-old: media_type.ends_with("+encrypted").
+#[must_use]
+#[inline]
+fn is_encrypted_media_type(media_type) {
+    var suffix = "+encrypted";
+    var slen = strlen(suffix);
+    var mlen = strlen(media_type);
+    if (mlen < slen) { return 0; }
+    return memeq(media_type + mlen - slen, suffix, slen);
+}
+
+# Strip the "+encrypted" suffix from a media type, returning a fresh cstr.
+# If the suffix is absent, returns a fresh copy of the whole input.
+# rust-old: media_type.strip_suffix("+encrypted").unwrap_or(media_type).
+#[must_use]
+#[inline]
+fn strip_encrypted_suffix(media_type) {
+    var mlen = strlen(media_type);
+    var keep = mlen;
+    if (is_encrypted_media_type(media_type) == 1) {
+        keep = mlen - strlen("+encrypted");
+    }
+    var out = alloc(keep + 1);
+    memcpy(out, media_type, keep);
+    store8(out + keep, 0);
+    return out;
+}
+
+# ── load_key (rust-old: load_key) ──
+# Load raw key bytes from a KeySource. NOT feature-gated in Rust — active
+# on every build.
+#   File(path)   -> read the file's raw bytes.
+#   EnvVar(name) -> read env var, trim, hex-decode.
+# Returns the heap buffer pointer on success and writes the byte length
+# through `out_len` (an i64 address). Returns 0 (null) on failure; the
+# caller reports via stiva_err_print(STIVA_ERR_ENCRYPTION, detail).
+#[must_use]
+fn load_key(source, out_len) {
+    store64(out_len, 0);
+    var src: KeySourceVal = source;
+    if (src.kind == ENCRYPTED_KEYSRC_FILE) {
+        # std::fs::read(path) — read the whole key file.
+        var buf = alloc(4096);
+        var n = file_read_all(src.value, buf, 4096);
+        if (n < 0) { return 0; }
+        store64(out_len, n);
+        return buf;
+    }
+    # EnvVar: std::env::var(var), trim, hex::decode.
+    var hex = getenv(src.value);
+    if (hex == 0) { return 0; }
+    # .trim() — strip leading/trailing ASCII whitespace.
+    var start = hex;
+    while (load8(start) != 0 && _enc_is_ws(load8(start)) == 1) { start = start + 1; }
+    var end = start + strlen(start);
+    while (end > start && _enc_is_ws(load8(end - 1)) == 1) { end = end - 1; }
+    var hlen = end - start;
+    # hex::decode — requires even length; hex_decode returns 0 on failure.
+    var bytes = hex_decode(start, hlen);
+    if (bytes == 0) { return 0; }
+    store64(out_len, hlen / 2);
+    return bytes;
+}
+
+# True (1) iff `c` is ASCII whitespace (space, tab, LF, CR, VT, FF) — the
+# set Rust's str::trim strips for the ASCII range used by hex keys.
+#[must_use]
+fn _enc_is_ws(c) {
+    if (c == 32) { return 1; }
+    if (c >= 9 && c <= 13) { return 1; }
+    return 0;
+}
+
+# ── availability probes ──
+# rust-old: with the `encrypted` feature these delegate to agnosys; without
+# it they return false. The Cyrius default build has no feature → false.
+#[must_use]
+fn cryptsetup_available() {
+    return 0;
+}
+
+#[must_use]
+fn veritysetup_available() {
+    return 0;
+}
+
+# ── disabled-feature entry points ──
+# These mirror rust-old's `#[cfg(not(feature = "encrypted"))]` arms exactly:
+# each returns the disabled error and carries the Rust message string. The
+# `encrypted`-feature implementations (agnodrm + AES-GCM) are DEFERRED below.
+
+# rust-old luks_open (no feature): Err(Storage("encrypted storage requires
+# the 'encrypted' feature")). Returns 0 (null OpenVolume); caller reports via
+# stiva_err_print(STIVA_ERR_STORAGE, "...requires the 'encrypted' feature").
+#[must_use]
+fn stiva_luks_open(config, passphrase) {
+    return 0;
+}
+
+# rust-old luks_close (no feature): Err(Storage("encrypted storage requires the 'encrypted' feature")).
+# Returns -1; caller: STIVA_ERR_STORAGE.
+#[must_use]
+fn stiva_luks_close(mapper_name) {
+    return 0 - 1;
+}
+
+# rust-old luks_format (no feature): Err(Storage("encrypted storage requires the 'encrypted' feature")).
+# Returns 0 (null path); caller: STIVA_ERR_STORAGE.
+#[must_use]
+fn stiva_luks_format(config, passphrase) {
+    return 0;
+}
+
+# rust-old verity_open (no feature): Err(Storage("verified storage requires the 'encrypted' feature")).
+# Returns 0 (null OpenVolume); caller: STIVA_ERR_STORAGE.
+#[must_use]
+fn stiva_verity_open(config) {
+    return 0;
+}
+
+# rust-old verity_close (no feature): Err(Storage("verified storage requires the 'encrypted' feature")).
+# Returns -1; caller: STIVA_ERR_STORAGE.
+#[must_use]
+fn stiva_verity_close(mapper_name) {
+    return 0 - 1;
+}
+
+# rust-old verity_format (no feature): Err(Storage("verified storage requires the 'encrypted' feature")).
+# Returns 0 (null hash); caller: STIVA_ERR_STORAGE.
+#[must_use]
+fn stiva_verity_format(data_path, hash_path) {
+    return 0;
+}
+
+# rust-old decrypt_layer (no feature): Err(Encryption("image encryption requires the 'encrypted' feature")).
+# Returns 0 (null); caller: STIVA_ERR_ENCRYPTION.
+#[must_use]
+fn decrypt_layer(data, data_len, key_source, out_len) {
+    store64(out_len, 0);
+    return 0;
+}
+
+# rust-old encrypt_layer (no feature): Err(Encryption("image encryption requires the 'encrypted' feature")).
+# Returns 0 (null); caller: STIVA_ERR_ENCRYPTION.
+#[must_use]
+fn encrypt_layer(data, data_len, key_source, out_len) {
+    store64(out_len, 0);
+    return 0;
+}
+
+# ── DEFERRED (land with the `encrypted` feature — agnodrm bundle + AES-GCM) ──
+# rust-old/src/encrypted.rs, under `#[cfg(feature = "encrypted")]`, also
+# implements the following against agnosys (now agnodrm) and aes_gcm/getrandom.
+# The default build never compiles these, and the Cyrius build has no
+# `encrypted` feature yet, so the active paths above are the parity target.
+# When the feature lands, wire these to lib/agnodrm.cyr + a Cyrius AES-256-GCM
+# codec:
+#   fn luks_open(config, passphrase) -> Result<OpenVolume>
+#       agnosys::luks::LuksConfig { name, backing_path, size_mb, mount_point }
+#       + LuksKey::from_passphrase + agnosys::luks::luks_open
+#   fn luks_close(mapper_name) -> Result<()>        agnosys::luks::luks_close
+#   fn luks_format(config, passphrase) -> Result<PathBuf>  agnosys::luks::luks_format
+#   fn verity_open(config) -> Result<OpenVolume>    agnosys::dmverity::verity_open
+#       (dm_path = "/dev/mapper/{mapper_name}")
+#   fn verity_close(mapper_name) -> Result<()>      agnosys::dmverity::verity_close
+#   fn verity_format(data_path, hash_path) -> Result<String>
+#       agnosys::dmverity::verity_format(.., Sha256, None)
+#   fn make_verity_config(config) -> agnosys::dmverity::VerityConfig
+#       (serde round-trip: data_block_size/hash_block_size = 4096, Sha256)
+#   fn decrypt_layer(data, key_source) -> Result<Vec<u8>>
+#       AES-256-GCM; nonce = data[..12], ciphertext = data[12..]; key must be 32 bytes
+#   fn encrypt_layer(data, key_source) -> Result<Vec<u8>>
+#       AES-256-GCM; result = nonce(12) || ciphertext || tag; key must be 32 bytes
+#   fn rand_nonce() -> [u8; 12]                     getrandom::fill (→ lib/random.cyr random_bytes)
+# agnodrm exposes LUKS/verity via cryptsetup/veritysetup shells; AES-256-GCM
+# has no Cyrius stdlib codec yet — mirrors storage.cyr's gzip/zstd deferral.
