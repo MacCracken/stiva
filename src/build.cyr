@@ -12,13 +12,15 @@
 #   check_build_cache / record_build_cache
 #       (the on-disk {root}/cache/{hex} key→digest map; plain file ops)
 #
+# What ports here now (v3.0.0 — bayan TOML object model):
+#   parse_build_spec — parses a Stivafile TOML string into the BuildSpec tree
+#     via bayan_toml_parse + bayan_toml_get / _get_array / _get_sections
+#     (rust-old used toml::from_str). See the fn's own comment for the [image]
+#     / [[steps]] / [config] mapping and the stages caveat.
+#
 # What is DEFERRED (see the block at the bottom):
-#   * parse_build_spec — round-trips TOML through serde (toml::from_str).
-#     The ported base has no TOML object-model parser, so — exactly like
-#     image.cyr's images.json index and convert.cyr's compose deferral —
-#     it lands with a TOML codec.
-#   * build_cache_key — hashes serde_json::to_string(step); needs a JSON
-#     serializer for the tagged BuildStep enum. Lands with the JSON codec.
+#   * build_cache_key — hashes serde_json::to_string(step). ACHIEVABLE via
+#     bayan's JSON serializer; just not wired yet (NOT a Cyrius gap).
 #   * build_run_layer / build_copy_layer / append_dir_recursive / build_image
 #     — construct tar.gz layers (flate2 GzEncoder + tar::Builder) and
 #     build_image is async (drives ImageStore::pull over the network). The
@@ -308,13 +310,165 @@ fn store_layer(store, data, len) {
     return digest;
 }
 
-# ── DEFERRED (land with a TOML codec + JSON codec + tar/gzip + async net) ──
-# rust-old/src/build.rs also defines, coupled to serde (toml/json), to a
-# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
+# ── Parsing (rust-old: parse_build_spec) ──────────────────
+# Parse a Stivafile TOML string into a BuildSpec. The Rust oracle used
+# `toml::from_str` (serde) over the nested BuildSpec/ImageDef/BuildStep/
+# BuildConfig tree; here we drive bayan's TOML object model (bayan_toml_parse
+# → sections; bayan_toml_get / _get_array / _get_sections) and rebuild the
+# same struct tree by hand.
 #
-#   TOML codec (serde toml::from_str of BuildSpec, a nested-struct + tagged
-#   BuildStep tree):
-#     fn parse_build_spec(toml_str: &str) -> Result<BuildSpec, StivaError>
+# bayan returns Str fat-pointers for every value; the ported BuildSpec structs
+# hold cstr slots (matching the build_step_* / image_def_new constructors and
+# the rest of the module), so each captured value is copied to a NUL-terminated
+# cstr via str_cstr before it lands in a struct field.
+#
+# Error mapping (mirrors error.cyr + the Rust oracle): the Rust returns
+# `Err(StivaError::InvalidState("invalid build spec: {e}"))` on any serde
+# failure. bayan is best-effort (it never structurally errors), so the one
+# fallible condition we can detect is the Rust `missing field `image`` — an
+# absent `[image]` table. On that we return the integer sentinel 0; the caller
+# reports it via stiva_err_print(STIVA_ERR_INVALID_STATE, "invalid build
+# spec: missing [image] section"). A successful parse returns the BuildSpec*.
+#
+# Multi-stage `[[stages]]` are NOT reconstructed here: bayan's section model is
+# flat (it cannot re-nest a stage's own `[[steps]]` under its stage table the
+# way serde does), and the tar.gz stage BUILDER that consumes them stays
+# deferred. `stages` therefore parses to an empty vec — matching the oracle's
+# `#[serde(default)]` when no stages are present, which is every case the
+# parse tests exercise.
+
+# Copy a bayan value Str to a fresh NUL-terminated cstr, or 0 when the Str is
+# absent (bayan_toml_get returns 0 for a missing key). Mirrors the Rust
+# Option<String> → 0-for-None convention used across the ported base.
+#[must_use]
+fn _bld_val_cstr(v) {
+    if (v == 0) { return 0; }
+    return str_cstr(v);
+}
+
+# Build a vec of cstr elements from a bayan array VALUE looked up by `key` in
+# `pairs` (rust-old: a serde `Vec<String>` field like a Run command or the
+# entrypoint). Returns an empty vec when the key is absent or is not an array,
+# so a missing `#[serde(default)]` vec field becomes `vec_new()`.
+fn _bld_str_vec(pairs, key) {
+    var out = vec_new();
+    var arr = bayan_toml_get_array(pairs, key);
+    if (arr == 0) { return out; }
+    var i = 0;
+    var n = vec_len(arr);
+    while (i < n) {
+        vec_push(out, str_cstr(vec_get(arr, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Build a vec of i64 port numbers from a bayan array VALUE (rust-old:
+# `Vec<u16>` expose). Each element is parsed with str_to_int. Empty vec when
+# the key is absent.
+fn _bld_int_vec(pairs, key) {
+    var out = vec_new();
+    var arr = bayan_toml_get_array(pairs, key);
+    if (arr == 0) { return out; }
+    var i = 0;
+    var n = vec_len(arr);
+    while (i < n) {
+        vec_push(out, str_to_int(vec_get(arr, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Reconstruct one BuildStep from a `[[steps]]` section's pairs vec, dispatching
+# on the serde `type` tag (rust-old: `#[serde(tag = "type")]`). Returns a
+# BuildStep* for a recognized tag, or 0 for an unknown/missing tag (rust-old:
+# serde rejects an unknown variant → parse error; the caller drops the spec).
+fn _bld_step_from_pairs(pairs) {
+    var ty = bayan_toml_get(pairs, "type");
+    if (ty == 0) { return 0; }
+    if (str_eq_cstr(ty, "run") == 1) {
+        return build_step_run(_bld_str_vec(pairs, "command"));
+    }
+    if (str_eq_cstr(ty, "copy") == 1) {
+        var src = _bld_val_cstr(bayan_toml_get(pairs, "source"));
+        var dst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        return build_step_copy(src, dst);
+    }
+    if (str_eq_cstr(ty, "env") == 1) {
+        var ek = _bld_val_cstr(bayan_toml_get(pairs, "key"));
+        var ev = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        return build_step_env(ek, ev);
+    }
+    if (str_eq_cstr(ty, "workdir") == 1) {
+        return build_step_workdir(_bld_val_cstr(bayan_toml_get(pairs, "path")));
+    }
+    if (str_eq_cstr(ty, "label") == 1) {
+        var lk = _bld_val_cstr(bayan_toml_get(pairs, "key"));
+        var lv = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        return build_step_label(lk, lv);
+    }
+    if (str_eq_cstr(ty, "from_stage") == 1) {
+        var fstage = _bld_val_cstr(bayan_toml_get(pairs, "stage"));
+        var fsrc = _bld_val_cstr(bayan_toml_get(pairs, "source"));
+        var fdst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        return build_step_from_stage(fstage, fsrc, fdst);
+    }
+    return 0;                              # unknown step type → parse failure
+}
+
+# Parse a Stivafile TOML string (cstr) into a BuildSpec* (rust-old:
+# parse_build_spec). Returns 0 (STIVA_ERR_INVALID_STATE) on a missing [image]
+# section or an unknown step type; otherwise the heap BuildSpec pointer.
+#[must_use]
+fn parse_build_spec(toml_str) {
+    var sections = bayan_toml_parse(str_from(toml_str));
+
+    # ── [image] → ImageDef (required) ─────────────────
+    var image_secs = bayan_toml_get_sections(sections, "image");
+    if (vec_len(image_secs) == 0) { return 0; }     # missing field `image`
+    var image_pairs = bayan_toml_section_pairs(vec_get(image_secs, 0));
+    var base = _bld_val_cstr(bayan_toml_get(image_pairs, "base"));
+    var name = _bld_val_cstr(bayan_toml_get(image_pairs, "name"));
+    if (base == 0) { return 0; }                    # missing field `base`
+    if (name == 0) { return 0; }                    # missing field `name`
+    var tag = _bld_val_cstr(bayan_toml_get(image_pairs, "tag"));
+    if (tag == 0) { tag = default_tag(); }          # serde default = "latest"
+    var image = image_def_new(base, name, tag);
+
+    # ── [[steps]] → Vec<BuildStep> (serde default = empty) ────
+    var steps = vec_new();
+    var step_secs = bayan_toml_get_sections(sections, "steps");
+    var si = 0;
+    var sn = vec_len(step_secs);
+    while (si < sn) {
+        var step = _bld_step_from_pairs(bayan_toml_section_pairs(vec_get(step_secs, si)));
+        if (step == 0) { return 0; }                # unknown/missing step type
+        vec_push(steps, step);
+        si = si + 1;
+    }
+
+    # ── [config] → BuildConfig (serde default) ────────
+    var config_secs = bayan_toml_get_sections(sections, "config");
+    var config = 0;
+    if (vec_len(config_secs) == 0) {
+        config = build_config_default();
+    } else {
+        var cp = bayan_toml_section_pairs(vec_get(config_secs, 0));
+        var entrypoint = _bld_str_vec(cp, "entrypoint");
+        var expose = _bld_int_vec(cp, "expose");
+        var user = _bld_val_cstr(bayan_toml_get(cp, "user"));
+        var workdir = _bld_val_cstr(bayan_toml_get(cp, "workdir"));
+        config = build_config_new(entrypoint, expose, user, workdir);
+    }
+
+    # ── stages: flat bayan model cannot re-nest per-stage steps; the
+    # consuming tar.gz stage builder is deferred → empty vec (serde default).
+    return build_spec_new(image, steps, config, vec_new());
+}
+
+# ── DEFERRED (land with a JSON codec + tar/gzip + async net) ──
+# rust-old/src/build.rs also defines, coupled to serde_json, to a
+# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
 #
 #   JSON codec (serde_json::to_string of the tagged BuildStep enum):
 #     fn build_cache_key(base_digest, step_index, step: &BuildStep) -> String

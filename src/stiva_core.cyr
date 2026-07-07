@@ -45,11 +45,11 @@ fn stiva_config_new(root_path, image_path, default_network, max_containers, audi
 fn stiva_config_default() {
     var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
     return stiva_config_new(
-        "/var/lib/agnos/containers",
-        "/var/lib/agnos/images",
-        net,
-        64,
-        0
+    "/var/lib/agnos/containers",
+    "/var/lib/agnos/images",
+    net,
+    64,
+    0
     );
 }
 

@@ -11,11 +11,24 @@ frozen at `rust-old/` as the parity oracle. See `docs/development/roadmap.md`
 (v3.0.0) for the module-by-module ledger.
 
 **Scope**: the port covers every module's types, pure logic, and syscall-driven
-surface, with **697 tests green** and a clean `dist/stiva.cyr` bundle. The async
-container-execution surface (kavach sandbox exec, cgroups, CRIU, tar/gzip/zstd,
-the registry HTTP client, JSON/YAML codecs, and the async `Stiva` facade) is
-documented as **DEFERRED to v3.1** in each module — it awaits Cyrius async
-runtime + codec support. Toolchain pinned **6.4.15**.
+surface, with **779 tests green** and a clean `dist/stiva.cyr` bundle. The async
+container-execution surface (kavach sandbox exec, cgroups, CRIU, the registry
+HTTP client, the async `Stiva` facade) is **DEFERRED to v3.1** — as porting work
+not yet done, not (mostly) Cyrius gaps: HTTP/TLS (`sandhi`/`tls_native`) and the
+async runtime (`lib/async.cyr`) EXIST and are declared in `[deps].stdlib`; the
+deferral is the effort of wiring them + mapping tokio-shaped async onto Cyrius's
+weaker cooperative futures (tracked in cyrius issue
+`2026-07-07-async-runtime-tokio-parity-gaps.md`).
+
+**Gaps closed before the tag** — the achievable deferrals I'd wrongly blamed on
+"no codec" (the stdlib has the codecs): **`build.parse_build_spec`** (Stivafile
+TOML → BuildSpec via `bayan`), the **`image` images.json index** (load/save/add/
+list/remove via `bayan` JSON), and **`storage.unpack_layer`/`prepare_layers`**
+(gzip via `sankoch` + a hand-rolled USTAR tar reader). Genuine stdlib gaps that
+remain (narrow): **zstd** (`sankoch` has gzip/xz/lz4/bzip2, not zstd), a **tar
+writer** (build's layer builder), and a **YAML** parser (compose only). See the
+roadmap's deferred-surface accounting.
+Toolchain pinned **6.4.16**.
 
 ### Summary
 - **All 16 modules ported**: error, oci, intents, audit, convert, network
@@ -28,7 +41,12 @@ runtime + codec support. Toolchain pinned **6.4.15**.
 - **CLI via cmdit** (`src/main.cyr`) — 33 subcommands as cmdit verbs (getopt-long
   + generated help), not hand-rolled. `stiva convert --format dockerfile` works
   end-to-end; the async verbs print a clear "deferred to v3.1" message.
-- **697 Cyrius tests**, `cyrius bench`/`fmt`/`lint` clean; `dist/stiva.cyr` built.
+- **779 Cyrius tests**, `cyrius bench`/`fmt`/`lint` clean; `dist/stiva.cyr` built.
+- **Closed three achievable deferrals** with the existing stdlib (refuting the
+  earlier "no codec" deferral): build Stivafile TOML parse (`bayan`), image
+  images.json JSON index (`bayan`), storage gzip-tar layer unpack (`sankoch` +
+  USTAR reader). Async-orchestration deferral tracked upstream via a filed cyrius
+  async-parity issue.
 - Surfaced + fixed a cycc compiler bug mid-port (struct-id 20/21 ↔ f64v2/f64v4
   SIMD-sentinel collision), filed upstream with a minimal repro
   (`docs/development/cycc-bug-struct-sid-20-21.cyr`) — **fixed in cyrius 6.4.14**.

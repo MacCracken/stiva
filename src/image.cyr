@@ -9,15 +9,18 @@
 #   ImageStore::new / root / store_blob / has_blob / read_blob
 #     (the content-addressable blob store — no JSON, just files)
 #
+# What ports here now (v3.0.0 — bayan JSON object model):
+#   The `images.json` index — load_index / save_index / add_to_index / list /
+#   remove — round-trips a JSON array of image records via bayan (rust-old used
+#   serde_json). Cyrius's JSON codec (`bayan`) covers it.
+#
 # What is DEFERRED (see the block at the bottom):
-#   * The `images.json` index — load_index / save_index / add_to_index /
-#     list / remove / gc / verify_integrity all round-trip a `Vec<Image>`
-#     (nested structs + chrono timestamps) through serde_json. The ported
-#     base has no JSON object-model serializer/parser, so — exactly like
-#     convert.cyr's compose deferral — these land with a JSON codec.
-#   * pull / push / verify_signature / fetch_foreign_layer are async and
-#     drive RegistryClient's network methods (reqwest/tokio), which are
-#     not part of the ported registry surface. They defer with those.
+#   * gc / verify_integrity — walk read_dir(blobs)/read_dir(layers) to drop
+#     unreferenced entries (blob dir-walk; achievable, just not ported yet).
+#   * pull / push / verify_signature / fetch_foreign_layer are async and drive
+#     RegistryClient's network methods. NOT a Cyrius gap — the net/sandhi/tls
+#     HTTP stack exists; the async registry client just isn't ported (see the
+#     cyrius async-runtime issue 2026-07-07 for the tokio-mapping work).
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here — parse() returns 0 (null) on an
@@ -400,23 +403,331 @@ fn image_store_read_blob(store, digest, buf, maxlen) {
     return file_read_all(path, buf, maxlen);
 }
 
-# ── DEFERRED (land with a JSON codec + registry network layer) ───
-# rust-old/src/image.rs also defines, coupled to serde_json (Vec<Image>
-# index round-trip) and to async RegistryClient network methods:
+# ── images.json index (serde_json Vec<Image> round-trip in Rust) ─
+# Ported onto the bayan JSON codec (lib/bayan.cyr, json_v_* value model).
+# The index is a JSON ARRAY of image objects, each shaped exactly like the
+# Rust serde output:
+#   { "id": str,
+#     "reference": { "registry": str, "repository": str,
+#                    "tag": str, "digest": str|null },
+#     "size_bytes": int,
+#     "layers": [ { "digest": str, "size_bytes": int,
+#                   "media_type": str }, ... ],
+#     "created_at": int }              # epoch-seconds i64 (chrono in Rust)
 #
-#   ImageStore index (serde_json Vec<Image>, chrono timestamps):
-#     fn index_path(&self) -> PathBuf
-#     fn load_index(&self) -> Result<Vec<Image>, StivaError>
-#     fn save_index(&self, images: &[Image]) -> Result<(), StivaError>
-#     fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError>
-#     fn add_to_index(&self, image: &Image) -> Result<(), StivaError>
-#     fn list(&self) -> Result<Vec<Image>, StivaError>
-#     fn remove(&self, id: &str) -> Result<(), StivaError>
+# Cyrius/bayan bridging notes:
+#   * bayan builds/parses a tagged value tree of Str fat-pointers; this
+#     module holds cstr pointers. We convert cstr→Str via str_from(...)
+#     when building, and Str→cstr via str_cstr(...) when parsing back
+#     (so downstream image.cyr code keeps its cstr contract).
+#   * json_v_obj_set keys are Str (the serializer reads them via
+#     str_data/str_len); json_v_obj_get keys are cstr (it strlen()s them).
+#   * A missing/absent index file is Rust `Ok(vec![])` → we return a fresh
+#     empty vec, never an error sentinel.
+
+# Index file path "{root}/images.json" (rust-old: index_path).
+#[must_use]
+fn _img_index_path(root) {
+    return _img_cat2(root, "/images.json");
+}
+
+# ImageRef* → JTAG_OBJ json value (rust-old: serde on ImageRef).
+# `digest` is a cstr or 0 (None) → JSON null.
+#[must_use]
+fn _img_ref_to_jv(ref) {
+    var rr: ImageRef = ref;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("registry"), json_v_str_new(str_from(rr.registry)));
+    json_v_obj_set(o, str_from("repository"), json_v_str_new(str_from(rr.repository)));
+    json_v_obj_set(o, str_from("tag"), json_v_str_new(str_from(rr.tag)));
+    if (rr.digest == 0) {
+        json_v_obj_set(o, str_from("digest"), json_v_null());
+    } else {
+        json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(rr.digest)));
+    }
+    return o;
+}
+
+# Layer* → JTAG_OBJ json value (rust-old: serde on Layer).
+#[must_use]
+fn _img_layer_to_jv(layer) {
+    var ll: Layer = layer;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(ll.digest)));
+    json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ll.size_bytes));
+    json_v_obj_set(o, str_from("media_type"), json_v_str_new(str_from(ll.media_type)));
+    return o;
+}
+
+# Image* → JTAG_OBJ json value (rust-old: serde on Image). `layers` is a
+# vec of Layer*; `created_at` is serialized as an epoch-seconds int.
+#[must_use]
+fn _img_to_jv(image) {
+    var ii: Image = image;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(ii.id)));
+    json_v_obj_set(o, str_from("reference"), _img_ref_to_jv(ii.reference));
+    json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ii.size_bytes));
+
+    var larr = json_v_arr_new();
+    var layers = ii.layers;
+    var n = vec_len(layers);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(larr, _img_layer_to_jv(vec_get(layers, i)));
+        i = i + 1;
+    }
+    json_v_obj_set(o, str_from("layers"), larr);
+    json_v_obj_set(o, str_from("created_at"), json_v_int_new(ii.created_at));
+    return o;
+}
+
+# Read a JTAG_STR field `key` from obj `v` as a fresh cstr, or 0 if the
+# field is absent / null / non-string (mirrors serde Option<String>=None).
+#[must_use]
+fn _img_jv_str_field(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return 0; }
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# JTAG_OBJ json value → ImageRef* (rust-old: deserialize ImageRef).
+# Returns 0 if any required field is missing.
+#[must_use]
+fn _img_jv_to_ref(v) {
+    if (v == 0) { return 0; }
+    var registry = _img_jv_str_field(v, "registry");
+    var repository = _img_jv_str_field(v, "repository");
+    var tag = _img_jv_str_field(v, "tag");
+    if (registry == 0) { return 0; }
+    if (repository == 0) { return 0; }
+    if (tag == 0) { return 0; }
+    var digest = _img_jv_str_field(v, "digest");   # 0 when null/absent (None)
+
+    var r = alloc(32);
+    var rr: ImageRef = r;
+    rr.registry = registry;
+    rr.repository = repository;
+    rr.tag = tag;
+    rr.digest = digest;
+    return r;
+}
+
+# JTAG_OBJ json value → Layer* (rust-old: deserialize Layer).
+# Returns 0 if any required field is missing.
+#[must_use]
+fn _img_jv_to_layer(v) {
+    if (v == 0) { return 0; }
+    var digest = _img_jv_str_field(v, "digest");
+    var media_type = _img_jv_str_field(v, "media_type");
+    if (digest == 0) { return 0; }
+    if (media_type == 0) { return 0; }
+    var size_bytes = json_v_int(json_v_obj_get(v, "size_bytes"));
+    return layer_new(digest, size_bytes, media_type);
+}
+
+# JTAG_OBJ json value → Image* (rust-old: deserialize Image).
+# Returns 0 if a required field is missing.
+#[must_use]
+fn _img_jv_to_image(v) {
+    if (v == 0) { return 0; }
+    var id = _img_jv_str_field(v, "id");
+    if (id == 0) { return 0; }
+    var reference = _img_jv_to_ref(json_v_obj_get(v, "reference"));
+    if (reference == 0) { return 0; }
+    var size_bytes = json_v_int(json_v_obj_get(v, "size_bytes"));
+    var created_at = json_v_int(json_v_obj_get(v, "created_at"));
+
+    var layers = vec_new();
+    var larr = json_v_obj_get(v, "layers");
+    if (larr != 0) {
+        var n = json_v_arr_len(larr);
+        var i = 0;
+        while (i < n) {
+            var l = _img_jv_to_layer(json_v_arr_get(larr, i));
+            if (l != 0) { vec_push(layers, l); }
+            i = i + 1;
+        }
+    }
+    return image_new(id, reference, size_bytes, layers, created_at);
+}
+
+# Load the image index (rust-old: load_index). Returns a vec of Image*.
+# A missing index file yields a fresh empty vec (Rust Ok(vec![])). A parse
+# failure also yields an empty vec (best-effort; Rust would surface a
+# serde error but the ported surface has no fallible-index caller).
+#[must_use]
+fn image_store_load_index(store) {
+    var path = _img_index_path(_img_store_root(store));
+    var out = vec_new();
+    if (file_exists(path) == 0) { return out; }
+
+    var cap = 16777216;   # 16 MiB index read cap (no stdlib file-size helper;
+    var buf = alloc(cap);  # 16 MiB holds ~80k image records — a practical bound)
+    var n = file_read_all(path, buf, cap);
+    if (n <= 0) { return out; }
+
+    # Parse via the explicit cstr+len entry point (buf holds `n` JSON bytes).
+    # We call bayan_json_v_parse_str directly rather than the 1-arg Str
+    # wrapper bayan_json_v_parse — the wrapper mis-lowers at this call site
+    # (the toolchain flags it 'expects 2 got 1'); the 2-arg form is correct.
+    var root = bayan_json_v_parse_str(buf, n);
+    if (root == 0) { return out; }
+    if (json_v_is_arr(root) == 0) { return out; }
+
+    var cnt = json_v_arr_len(root);
+    var i = 0;
+    while (i < cnt) {
+        var im = _img_jv_to_image(json_v_arr_get(root, i));
+        if (im != 0) { vec_push(out, im); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Save the image index (rust-old: save_index / save_index_pub). `images`
+# is a vec of Image*. Serializes to a JSON array, writes atomically via
+# a temp file + rename. Returns 1 on success, 0 on any write/rename
+# failure (rust-old: Err propagated via `?`).
+fn image_store_save_index(store, images) {
+    var root = _img_store_root(store);
+    var arr = json_v_arr_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(arr, _img_to_jv(vec_get(images, i)));
+        i = i + 1;
+    }
+    var s = json_v_build_pretty(arr, 2);
+    var data = str_data(s);
+    var len = str_len(s);
+
+    var path = _img_index_path(root);
+    var tmp = _img_cat2(path, ".tmp");
+    if (file_write_all(tmp, data, len) < 0) { return 0; }
+    if (sys_rename(tmp, path) < 0) { return 0; }
+    return 1;
+}
+
+# Add or replace an image in the local index (rust-old: add_to_index).
+# Replaces any existing entry with the same full_ref, then appends the new
+# image and saves. Returns 1 on success, 0 on save failure.
+fn image_store_add_to_index(store, image) {
+    var images = image_store_load_index(store);
+    var new_ref = image_ref_full_ref(_image_reference(image));
+
+    # Retain entries whose reference differs from the new image's.
+    var kept = vec_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var existing = vec_get(images, i);
+        var ex_ref = image_ref_full_ref(_image_reference(existing));
+        if (streq(ex_ref, new_ref) == 0) { vec_push(kept, existing); }
+        i = i + 1;
+    }
+    vec_push(kept, image);
+    return image_store_save_index(store, kept);
+}
+
+# List locally stored images (rust-old: list). Returns a vec of Image*.
+#[must_use]
+fn image_store_list(store) {
+    return image_store_load_index(store);
+}
+
+# Remove an image by id and delete now-unreferenced blobs
+# (rust-old: remove). Returns 1 on success. Returns -1 when no image with
+# `id` is present (rust-old: Err(ImageNotFound); caller maps -1 →
+# STIVA_ERR_IMAGE_NOT_FOUND). Returns 0 on a save failure.
+#
+# After dropping the target, every digest still referenced by a remaining
+# image (its config id + each layer digest) is collected; any blob file in
+# blobs/sha256 whose "sha256:{hex}" digest is not in that set is unlinked
+# (shared blobs survive). This mirrors the Rust read_dir/remove_file walk.
+fn image_store_remove(store, id) {
+    var root = _img_store_root(store);
+    var images = image_store_load_index(store);
+    var before = vec_len(images);
+
+    # Retain images whose id != id.
+    var kept = vec_new();
+    var i = 0;
+    while (i < before) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        if (streq(ii.id, id) == 0) { vec_push(kept, im); }
+        i = i + 1;
+    }
+    if (vec_len(kept) == before) { return 0 - 1; }
+
+    # Collect referenced digests from the survivors: config id + layers.
+    var referenced = vec_new();
+    var ki = 0;
+    while (ki < vec_len(kept)) {
+        var km = vec_get(kept, ki);
+        var kk: Image = km;
+        vec_push(referenced, kk.id);
+        var layers = kk.layers;
+        var lj = 0;
+        while (lj < vec_len(layers)) {
+            var lp = vec_get(layers, lj);
+            var ll: Layer = lp;
+            vec_push(referenced, ll.digest);
+            lj = lj + 1;
+        }
+        ki = ki + 1;
+    }
+
+    # Delete unreferenced blobs: for each hex in blobs/sha256, form
+    # "sha256:{hex}" and unlink when it's not in the referenced set.
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var name_s = vec_get(entries, ei);           # Str
+        var hex = str_cstr(name_s);
+        var digest = _img_cat2("sha256:", hex);
+        # Is `digest` referenced?
+        var found = 0;
+        var ri = 0;
+        while (ri < vec_len(referenced)) {
+            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
+            ri = ri + 1;
+        }
+        if (found == 0) {
+            var blob_slash = _img_cat2(blobs_dir, "/");
+            var blob_path = _img_cat2(blob_slash, hex);
+            xunlink(blob_path);
+        }
+        ei = ei + 1;
+    }
+
+    if (image_store_save_index(store, kept) == 0) { return 0; }
+    return 1;
+}
+
+# Read the `reference` field (ImageRef*) of an Image*. A 5-field struct is
+# safe to access through a pointer-annotated local, but this named helper
+# keeps the index code readable and localizes the field layout.
+#[must_use]
+fn _image_reference(image) {
+    var ii: Image = image;
+    return ii.reference;
+}
+
+# ── DEFERRED (blob dir-walk + async network layer) ──────────────
+# rust-old/src/image.rs also defines, still deferred here:
+#
+#   gc / verify_integrity (full blobs/ + layers/ dir-walk + re-hash):
 #     fn gc(&self) -> Result<(u32, u32), StivaError>
 #     fn verify_integrity(&self) -> Result<Vec<String>, StivaError>
-#   (verify_integrity re-reads every blob and re-hashes it; remove/gc walk
-#    read_dir(blobs)/read_dir(layers) and unlink/rmdir unreferenced entries.
-#    Both need the index deserialized to know what's referenced.)
+#   (gc walks read_dir(blobs)/read_dir(layers) and removes every entry not
+#    referenced by the index; verify_integrity re-reads every blob and
+#    re-hashes it to detect corruption. Ported alongside the layer-unpack
+#    surface for full parity.)
 #
 #   async network (RegistryClient reqwest/tokio; not in ported registry):
 #     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
@@ -424,5 +735,5 @@ fn image_store_read_blob(store, digest, buf, maxlen) {
 #     async fn verify_signature(&self, image, client) -> Result<bool>
 #     async fn fetch_foreign_layer(urls: &[String]) -> Result<Bytes>
 #
-# These are ported alongside the JSON codec and the registry network layer
-# for parity. Tracked in the roadmap.
+# These are ported alongside the registry network layer for parity.
+# Tracked in the roadmap.

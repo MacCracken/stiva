@@ -7,13 +7,13 @@
 #     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
 #   mount_volumes                          (parse_volume + bind mount syscall)
 #
-# What is DEFERRED (see the block at the bottom):
-#   unpack_layer / unpack_tar_gz / unpack_tar_zstd / prepare_layers — these
-#   drive flate2 (gzip) + zstd + tar stream decoders to unpack layer blobs.
-#   There is no Cyrius stdlib gzip/zstd/tar codec yet, so — exactly like
-#   image.cyr's serde deferral — they land with a compression/tar codec.
-#   prepare_layers additionally calls unpack_layer, so it defers with them
-#   (though its ImageStore/Layer deps — image.cyr — are already ported).
+# Layer unpacking (unpack_layer / prepare_layers) is now implemented on the
+# Cyrius stdlib `sankoch` gzip_decompress + a hand-rolled USTAR tar reader.
+#
+# What remains DEFERRED (see the block at the bottom):
+#   the zstd fallback (rust-old unpack_tar_zstd + unpack_layer's second
+#   attempt) — zstd is genuinely absent from sankoch (it ships gzip/xz/lz4/
+#   bzip2, not zstd), so that path lands with a zstd codec.
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here. parse_volume returns 0 (null) on an
@@ -327,24 +327,270 @@ fn mount_volumes(volume_specs, merged_rootfs) {
     return mounts;
 }
 
-# ── DEFERRED (land with a gzip/zstd/tar codec) ────────────────
-# rust-old/src/storage.rs also defines, coupled to flate2 (gzip) + zstd +
-# tar stream decoders (no Cyrius stdlib compression/archive codec yet):
+# ── Layer unpacking (gzip-tar) ─────────────────────
+# rust-old drives flate2 (gzip) + tar stream decoders; here we use the
+# Cyrius stdlib `sankoch` gzip_decompress and a hand-rolled USTAR reader.
+# The zstd fallback (rust-old unpack_tar_zstd) stays DEFERRED — zstd is
+# absent from sankoch (it ships gzip/xz/lz4/bzip2, not zstd).
+
+# Read an entire file into a fresh heap buffer. Returns the buffer pointer;
+# writes its length to the 8-byte cell at `out_len`. Returns 0 on open
+# failure (out_len set to a negative errno). Sizes the buffer via lseek to
+# SEEK_END so the whole blob is captured (file_read_all is maxlen-bounded).
+#[must_use]
+fn _stor_read_file(path, out_len) {
+    var fd = file_open(path, 0, 0);        # O_RDONLY
+    if (fd < 0) {
+        store64(out_len, fd);
+        return 0;
+    }
+    var size = xlseek(fd, 0, 2);           # SEEK_END → byte length
+    xlseek(fd, 0, 0);                       # SEEK_SET → rewind
+    if (size < 0) {
+        file_close(fd);
+        store64(out_len, 0 - 1);
+        return 0;
+    }
+    var buf = alloc(size + 1);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, size - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= size) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# Parse a NUL/space-terminated octal field of `len` bytes at `p` into an
+# i64. USTAR numeric fields (size, mode) are ASCII octal, right-space- or
+# NUL-padded. Leading spaces and trailing NUL/space are ignored.
+#[must_use]
+fn _stor_parse_octal(p, len) {
+    var val = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(p + i);
+        if (c >= 48 && c <= 55) {           # '0'..'7'
+            val = (val * 8) + (c - 48);
+        }
+        i = i + 1;
+    }
+    return val;
+}
+
+# Recursively create `path` and all missing parents (create_dir_all
+# analogue). Walks each '/'-separated prefix and sys_mkdir's it (0o755 =
+# 493); EEXIST is idempotent/fine. `path` is a NUL-terminated cstr.
+fn _stor_mkdir_p(path) {
+    var len = strlen(path);
+    var i = 1;                              # skip a leading '/'
+    while (i <= len) {
+        var at_sep = 0;
+        if (i == len) { at_sep = 1; }
+        else {
+            if (load8(path + i) == 47) { at_sep = 1; }    # '/'
+        }
+        if (at_sep == 1) {
+            var prefix = _stor_slice(path, 0, i);
+            sys_mkdir(prefix, 493);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Create every parent directory of a file `path` (the dir portion up to the
+# last '/'). No-op when `path` has no '/'.
+fn _stor_mkdir_parents(path) {
+    var len = strlen(path);
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(path + i) == 47) { slash = i; }
+        i = i + 1;
+    }
+    if (slash > 0) {
+        var dir = _stor_slice(path, 0, slash);
+        _stor_mkdir_p(dir);
+    }
+    return 0;
+}
+
+# Extract a decompressed USTAR archive `tar` of `tar_len` bytes into `dest`.
+# Minimal reader: 512-byte headers — name@0 (100b), mode@100, size@124
+# (12b octal), typeflag@156 ('0'/'\0' = file, '5' = dir). File data follows
+# in ceil(size/512) 512-byte blocks. Two consecutive all-zero blocks (or
+# running out of bytes) ends the archive.
 #
-#   fn unpack_layer(blob_path: &Path, dest: &Path) -> Result<(), StivaError>
-#     (opens the blob, tries gzip-tar, falls back to zstd-tar; on both
-#      failing → Err(StivaError::LayerUnpack(...)))
-#   fn unpack_tar_gz(file, dest) -> Result<(), Box<dyn Error>>
-#     (flate2::read::GzDecoder + tar::Archive, overwrite + preserve perms)
+# Directories are created (mkdir -p); files have their parents created then
+# are written via file_write_all. Entry names are joined under `dest`.
+# Returns 0 on success, -1 on a malformed header (short/torn block).
+fn _stor_extract_tar(tar, tar_len, dest) {
+    var pos = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        # Need a full 512-byte header block.
+        if (pos + 512 > tar_len) { rgo = 0; }
+        else {
+            var hdr = tar + pos;
+            # All-zero name byte @0 marks the end-of-archive block(s).
+            if (load8(hdr) == 0) {
+                rgo = 0;
+            } else {
+                # USTAR name field is exactly 100 bytes and is NOT NUL-terminated
+                # when the name fills all 100 — bound the copy to avoid over-read.
+                var nlen = 0;
+                while (nlen < 100 && load8(hdr + nlen) != 0) { nlen = nlen + 1; }
+                var name = _stor_slice(hdr, 0, nlen);
+                var size = _stor_parse_octal(hdr + 124, 12);
+                var typeflag = load8(hdr + 156);
+                pos = pos + 512;                        # advance past header
+
+                # Full path = dest + "/" + name.
+                var full = _stor_join(dest, name);
+
+                if (typeflag == 53) {                   # '5' → directory
+                    _stor_mkdir_p(full);
+                } else {
+                    if (typeflag == 48 || typeflag == 0) {   # '0' or '\0' → file
+                        _stor_mkdir_parents(full);
+                        if (pos + size > tar_len) {
+                            return 0 - 1;                # torn data region
+                        }
+                        file_write_all(full, tar + pos, size);
+                    }
+                    # else: link/char/block/fifo/longname — skipped (its data,
+                    # if any, is stepped over below), a minimal extractor.
+                }
+
+                # Step over the file data: ceil(size/512) blocks.
+                var blocks = (size + 511) / 512;
+                pos = pos + (blocks * 512);
+            }
+        }
+    }
+    return 0;
+}
+
+# Decompress a gzip'd tar `file` and extract it into `dest` (rust-old:
+# unpack_tar_gz — flate2 GzDecoder + tar::Archive). `blob` is the raw
+# gzip bytes, `blob_len` its length. Returns 0 on success, negative on
+# failure (gzip error → the sankoch ERR_* negative; tar error → -1).
+#
+# The decompressed size is unknown up front; we size the output buffer
+# generously (32x the compressed size, min 1 MiB) and retry doubling on
+# ERR_BUFFER_TOO_SMALL. gzip's trailer ISIZE could size it exactly, but a
+# growth loop is simpler and codec-agnostic.
+fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
+    var cap = blob_len * 32;
+    if (cap < 1048576) { cap = 1048576; }   # >= 1 MiB
+    var dlen = 0 - 1;
+    var tries = 0;
+    var out = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        out = alloc(cap);
+        dlen = gzip_decompress(blob, blob_len, out, cap);
+        if (dlen == (0 - 2)) {              # ERR_BUFFER_TOO_SMALL → grow + retry
+            cap = cap * 2;
+            tries = tries + 1;
+            if (tries > 24) { return 0 - 2; }   # runaway guard
+        } else {
+            rgo = 0;
+        }
+    }
+    if (dlen < 0) { return dlen; }          # gzip decode failed (not gzip, corrupt, …)
+    return _stor_extract_tar(out, dlen, dest);
+}
+
+# Unpack a single layer blob to a directory (rust-old: unpack_layer).
+# Supports gzip-tar; the zstd fallback is DEFERRED (see the block below).
+# `blob_path` and `dest` are cstrs.
+#
+# Returns 0 on success, -1 on failure (rust-old maps every failure — open,
+# decode, tar — to Err(StivaError::LayerUnpack)). The caller reports the -1
+# via stiva_err_print(STIVA_ERR_LAYER_UNPACK, detail); the sentinel stays a
+# plain integer here (matching parse_volume/mount_volumes in this module,
+# which never name a cross-module enum const in executable code).
+fn unpack_layer(blob_path, dest) {
+    var len_cell = alloc(8);
+    var blob = _stor_read_file(blob_path, len_cell);
+    if (blob == 0) { return 0 - 1; }        # cannot open blob
+    var blob_len = load64(len_cell);
+
+    var rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    if (rc == 0) { return 0; }
+    # rust-old falls back to zstd here; that path is deferred (no zstd codec),
+    # so a non-gzip blob is an unpack failure.
+    return 0 - 1;
+}
+
+# Unpack all image layers to the store's `layers/` directory (rust-old:
+# prepare_layers). `store` is an ImageStore* (image.cyr); `layers` is a vec
+# of Layer* ordered bottom-to-top. Returns an ordered vec of layer-dir cstrs
+# (bottom first). Layers already unpacked are skipped (dedup by a `.unpacked`
+# marker). Returns 0 on failure (a missing blob, or an unpack error) — caller
+# reports via stiva_err_print(STIVA_ERR_LAYER_UNPACK, detail).
+fn prepare_layers(store, layers) {
+    var layer_dirs = vec_new();
+    var root = image_store_root(store);
+    var layers_base = _stor_cat2(root, "/layers");
+    var n = vec_len(layers);
+    var i = 0;
+    while (i < n) {
+        var layer = vec_get(layers, i);
+        # Layer is defined in image.cyr (struct Layer { digest; size_bytes;
+        # media_type }); digest is field 0. Read it by raw offset so this
+        # module parses standalone (no cross-module struct type annotation).
+        var digest = load64(layer);
+        var hex = digest_hex(digest);              # strip "sha256:" prefix
+        var layer_dir = _stor_join(layers_base, hex);
+        var marker = _stor_join(layer_dir, ".unpacked");
+
+        # Dedup: already-unpacked layers are skipped.
+        if (file_exists(layer_dir) == 1) {
+            if (file_exists(marker) == 1) {
+                vec_push(layer_dirs, layer_dir);
+                i = i + 1;
+                continue;
+            }
+        }
+
+        _stor_mkdir_p(layer_dir);
+
+        # Blob must exist at blobs/sha256/<hex>.
+        var blob_base = _stor_cat2(root, "/blobs/sha256/");
+        var blob_path = _stor_cat2(blob_base, hex);
+        if (file_exists(blob_path) == 0) {
+            return 0;                               # rust-old: LayerUnpack("blob not found …")
+        }
+
+        var rc = unpack_layer(blob_path, layer_dir);
+        if (rc != 0) { return 0; }
+
+        # Mark as unpacked so we skip next time (write empty file).
+        file_write_all(marker, "", 0);
+
+        vec_push(layer_dirs, layer_dir);
+        i = i + 1;
+    }
+    return layer_dirs;
+}
+
+# ── DEFERRED (needs a zstd codec) ────────────────────
+# rust-old/src/storage.rs also defines unpack_tar_zstd:
+#
 #   fn unpack_tar_zstd(file, dest) -> Result<(), Box<dyn Error>>
 #     (zstd::stream::Decoder + tar::Archive, overwrite + preserve perms)
-#   fn prepare_layers(store: &ImageStore, layers: &[Layer])
-#       -> Result<Vec<PathBuf>, StivaError>
-#     (dedup by digest via a .unpacked marker; for each missing layer,
-#      create_dir_all(layers/<hex>), verify blob exists in blobs/sha256/<hex>
-#      else Err(LayerUnpack("blob not found ...")), unpack_layer, then write
-#      the .unpacked marker; returns the ordered layer dirs. ImageStore/Layer
-#      are already ported in image.cyr — this defers only for unpack_layer.)
 #
-# These are ported alongside a gzip/zstd/tar codec for parity. Tracked in
-# the roadmap.
+# and unpack_layer's zstd fallback (retry the blob through zstd-tar when the
+# gzip attempt fails). zstd is genuinely absent from the Cyrius stdlib —
+# sankoch ships gzip/xz/lz4/bzip2, not zstd — so the zstd path lands when a
+# zstd codec does. Tracked in the roadmap. (gzip unpack_layer / unpack_tar_gz
+# / prepare_layers are now implemented above.)

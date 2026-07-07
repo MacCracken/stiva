@@ -4199,15 +4199,18 @@ fn _network_manager_nft_bin() {
 #   ImageStore::new / root / store_blob / has_blob / read_blob
 #     (the content-addressable blob store — no JSON, just files)
 #
+# What ports here now (v3.0.0 — bayan JSON object model):
+#   The `images.json` index — load_index / save_index / add_to_index / list /
+#   remove — round-trips a JSON array of image records via bayan (rust-old used
+#   serde_json). Cyrius's JSON codec (`bayan`) covers it.
+#
 # What is DEFERRED (see the block at the bottom):
-#   * The `images.json` index — load_index / save_index / add_to_index /
-#     list / remove / gc / verify_integrity all round-trip a `Vec<Image>`
-#     (nested structs + chrono timestamps) through serde_json. The ported
-#     base has no JSON object-model serializer/parser, so — exactly like
-#     convert.cyr's compose deferral — these land with a JSON codec.
-#   * pull / push / verify_signature / fetch_foreign_layer are async and
-#     drive RegistryClient's network methods (reqwest/tokio), which are
-#     not part of the ported registry surface. They defer with those.
+#   * gc / verify_integrity — walk read_dir(blobs)/read_dir(layers) to drop
+#     unreferenced entries (blob dir-walk; achievable, just not ported yet).
+#   * pull / push / verify_signature / fetch_foreign_layer are async and drive
+#     RegistryClient's network methods. NOT a Cyrius gap — the net/sandhi/tls
+#     HTTP stack exists; the async registry client just isn't ported (see the
+#     cyrius async-runtime issue 2026-07-07 for the tokio-mapping work).
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here — parse() returns 0 (null) on an
@@ -4590,23 +4593,331 @@ fn image_store_read_blob(store, digest, buf, maxlen) {
     return file_read_all(path, buf, maxlen);
 }
 
-# ── DEFERRED (land with a JSON codec + registry network layer) ───
-# rust-old/src/image.rs also defines, coupled to serde_json (Vec<Image>
-# index round-trip) and to async RegistryClient network methods:
+# ── images.json index (serde_json Vec<Image> round-trip in Rust) ─
+# Ported onto the bayan JSON codec (lib/bayan.cyr, json_v_* value model).
+# The index is a JSON ARRAY of image objects, each shaped exactly like the
+# Rust serde output:
+#   { "id": str,
+#     "reference": { "registry": str, "repository": str,
+#                    "tag": str, "digest": str|null },
+#     "size_bytes": int,
+#     "layers": [ { "digest": str, "size_bytes": int,
+#                   "media_type": str }, ... ],
+#     "created_at": int }              # epoch-seconds i64 (chrono in Rust)
 #
-#   ImageStore index (serde_json Vec<Image>, chrono timestamps):
-#     fn index_path(&self) -> PathBuf
-#     fn load_index(&self) -> Result<Vec<Image>, StivaError>
-#     fn save_index(&self, images: &[Image]) -> Result<(), StivaError>
-#     fn save_index_pub(&self, images: &[Image]) -> Result<(), StivaError>
-#     fn add_to_index(&self, image: &Image) -> Result<(), StivaError>
-#     fn list(&self) -> Result<Vec<Image>, StivaError>
-#     fn remove(&self, id: &str) -> Result<(), StivaError>
+# Cyrius/bayan bridging notes:
+#   * bayan builds/parses a tagged value tree of Str fat-pointers; this
+#     module holds cstr pointers. We convert cstr→Str via str_from(...)
+#     when building, and Str→cstr via str_cstr(...) when parsing back
+#     (so downstream image.cyr code keeps its cstr contract).
+#   * json_v_obj_set keys are Str (the serializer reads them via
+#     str_data/str_len); json_v_obj_get keys are cstr (it strlen()s them).
+#   * A missing/absent index file is Rust `Ok(vec![])` → we return a fresh
+#     empty vec, never an error sentinel.
+
+# Index file path "{root}/images.json" (rust-old: index_path).
+#[must_use]
+fn _img_index_path(root) {
+    return _img_cat2(root, "/images.json");
+}
+
+# ImageRef* → JTAG_OBJ json value (rust-old: serde on ImageRef).
+# `digest` is a cstr or 0 (None) → JSON null.
+#[must_use]
+fn _img_ref_to_jv(ref) {
+    var rr: ImageRef = ref;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("registry"), json_v_str_new(str_from(rr.registry)));
+    json_v_obj_set(o, str_from("repository"), json_v_str_new(str_from(rr.repository)));
+    json_v_obj_set(o, str_from("tag"), json_v_str_new(str_from(rr.tag)));
+    if (rr.digest == 0) {
+        json_v_obj_set(o, str_from("digest"), json_v_null());
+    } else {
+        json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(rr.digest)));
+    }
+    return o;
+}
+
+# Layer* → JTAG_OBJ json value (rust-old: serde on Layer).
+#[must_use]
+fn _img_layer_to_jv(layer) {
+    var ll: Layer = layer;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(ll.digest)));
+    json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ll.size_bytes));
+    json_v_obj_set(o, str_from("media_type"), json_v_str_new(str_from(ll.media_type)));
+    return o;
+}
+
+# Image* → JTAG_OBJ json value (rust-old: serde on Image). `layers` is a
+# vec of Layer*; `created_at` is serialized as an epoch-seconds int.
+#[must_use]
+fn _img_to_jv(image) {
+    var ii: Image = image;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(ii.id)));
+    json_v_obj_set(o, str_from("reference"), _img_ref_to_jv(ii.reference));
+    json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ii.size_bytes));
+
+    var larr = json_v_arr_new();
+    var layers = ii.layers;
+    var n = vec_len(layers);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(larr, _img_layer_to_jv(vec_get(layers, i)));
+        i = i + 1;
+    }
+    json_v_obj_set(o, str_from("layers"), larr);
+    json_v_obj_set(o, str_from("created_at"), json_v_int_new(ii.created_at));
+    return o;
+}
+
+# Read a JTAG_STR field `key` from obj `v` as a fresh cstr, or 0 if the
+# field is absent / null / non-string (mirrors serde Option<String>=None).
+#[must_use]
+fn _img_jv_str_field(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return 0; }
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# JTAG_OBJ json value → ImageRef* (rust-old: deserialize ImageRef).
+# Returns 0 if any required field is missing.
+#[must_use]
+fn _img_jv_to_ref(v) {
+    if (v == 0) { return 0; }
+    var registry = _img_jv_str_field(v, "registry");
+    var repository = _img_jv_str_field(v, "repository");
+    var tag = _img_jv_str_field(v, "tag");
+    if (registry == 0) { return 0; }
+    if (repository == 0) { return 0; }
+    if (tag == 0) { return 0; }
+    var digest = _img_jv_str_field(v, "digest");   # 0 when null/absent (None)
+
+    var r = alloc(32);
+    var rr: ImageRef = r;
+    rr.registry = registry;
+    rr.repository = repository;
+    rr.tag = tag;
+    rr.digest = digest;
+    return r;
+}
+
+# JTAG_OBJ json value → Layer* (rust-old: deserialize Layer).
+# Returns 0 if any required field is missing.
+#[must_use]
+fn _img_jv_to_layer(v) {
+    if (v == 0) { return 0; }
+    var digest = _img_jv_str_field(v, "digest");
+    var media_type = _img_jv_str_field(v, "media_type");
+    if (digest == 0) { return 0; }
+    if (media_type == 0) { return 0; }
+    var size_bytes = json_v_int(json_v_obj_get(v, "size_bytes"));
+    return layer_new(digest, size_bytes, media_type);
+}
+
+# JTAG_OBJ json value → Image* (rust-old: deserialize Image).
+# Returns 0 if a required field is missing.
+#[must_use]
+fn _img_jv_to_image(v) {
+    if (v == 0) { return 0; }
+    var id = _img_jv_str_field(v, "id");
+    if (id == 0) { return 0; }
+    var reference = _img_jv_to_ref(json_v_obj_get(v, "reference"));
+    if (reference == 0) { return 0; }
+    var size_bytes = json_v_int(json_v_obj_get(v, "size_bytes"));
+    var created_at = json_v_int(json_v_obj_get(v, "created_at"));
+
+    var layers = vec_new();
+    var larr = json_v_obj_get(v, "layers");
+    if (larr != 0) {
+        var n = json_v_arr_len(larr);
+        var i = 0;
+        while (i < n) {
+            var l = _img_jv_to_layer(json_v_arr_get(larr, i));
+            if (l != 0) { vec_push(layers, l); }
+            i = i + 1;
+        }
+    }
+    return image_new(id, reference, size_bytes, layers, created_at);
+}
+
+# Load the image index (rust-old: load_index). Returns a vec of Image*.
+# A missing index file yields a fresh empty vec (Rust Ok(vec![])). A parse
+# failure also yields an empty vec (best-effort; Rust would surface a
+# serde error but the ported surface has no fallible-index caller).
+#[must_use]
+fn image_store_load_index(store) {
+    var path = _img_index_path(_img_store_root(store));
+    var out = vec_new();
+    if (file_exists(path) == 0) { return out; }
+
+    var cap = 16777216;   # 16 MiB index read cap (no stdlib file-size helper;
+    var buf = alloc(cap);  # 16 MiB holds ~80k image records — a practical bound)
+    var n = file_read_all(path, buf, cap);
+    if (n <= 0) { return out; }
+
+    # Parse via the explicit cstr+len entry point (buf holds `n` JSON bytes).
+    # We call bayan_json_v_parse_str directly rather than the 1-arg Str
+    # wrapper bayan_json_v_parse — the wrapper mis-lowers at this call site
+    # (the toolchain flags it 'expects 2 got 1'); the 2-arg form is correct.
+    var root = bayan_json_v_parse_str(buf, n);
+    if (root == 0) { return out; }
+    if (json_v_is_arr(root) == 0) { return out; }
+
+    var cnt = json_v_arr_len(root);
+    var i = 0;
+    while (i < cnt) {
+        var im = _img_jv_to_image(json_v_arr_get(root, i));
+        if (im != 0) { vec_push(out, im); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Save the image index (rust-old: save_index / save_index_pub). `images`
+# is a vec of Image*. Serializes to a JSON array, writes atomically via
+# a temp file + rename. Returns 1 on success, 0 on any write/rename
+# failure (rust-old: Err propagated via `?`).
+fn image_store_save_index(store, images) {
+    var root = _img_store_root(store);
+    var arr = json_v_arr_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(arr, _img_to_jv(vec_get(images, i)));
+        i = i + 1;
+    }
+    var s = json_v_build_pretty(arr, 2);
+    var data = str_data(s);
+    var len = str_len(s);
+
+    var path = _img_index_path(root);
+    var tmp = _img_cat2(path, ".tmp");
+    if (file_write_all(tmp, data, len) < 0) { return 0; }
+    if (sys_rename(tmp, path) < 0) { return 0; }
+    return 1;
+}
+
+# Add or replace an image in the local index (rust-old: add_to_index).
+# Replaces any existing entry with the same full_ref, then appends the new
+# image and saves. Returns 1 on success, 0 on save failure.
+fn image_store_add_to_index(store, image) {
+    var images = image_store_load_index(store);
+    var new_ref = image_ref_full_ref(_image_reference(image));
+
+    # Retain entries whose reference differs from the new image's.
+    var kept = vec_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var existing = vec_get(images, i);
+        var ex_ref = image_ref_full_ref(_image_reference(existing));
+        if (streq(ex_ref, new_ref) == 0) { vec_push(kept, existing); }
+        i = i + 1;
+    }
+    vec_push(kept, image);
+    return image_store_save_index(store, kept);
+}
+
+# List locally stored images (rust-old: list). Returns a vec of Image*.
+#[must_use]
+fn image_store_list(store) {
+    return image_store_load_index(store);
+}
+
+# Remove an image by id and delete now-unreferenced blobs
+# (rust-old: remove). Returns 1 on success. Returns -1 when no image with
+# `id` is present (rust-old: Err(ImageNotFound); caller maps -1 →
+# STIVA_ERR_IMAGE_NOT_FOUND). Returns 0 on a save failure.
+#
+# After dropping the target, every digest still referenced by a remaining
+# image (its config id + each layer digest) is collected; any blob file in
+# blobs/sha256 whose "sha256:{hex}" digest is not in that set is unlinked
+# (shared blobs survive). This mirrors the Rust read_dir/remove_file walk.
+fn image_store_remove(store, id) {
+    var root = _img_store_root(store);
+    var images = image_store_load_index(store);
+    var before = vec_len(images);
+
+    # Retain images whose id != id.
+    var kept = vec_new();
+    var i = 0;
+    while (i < before) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        if (streq(ii.id, id) == 0) { vec_push(kept, im); }
+        i = i + 1;
+    }
+    if (vec_len(kept) == before) { return 0 - 1; }
+
+    # Collect referenced digests from the survivors: config id + layers.
+    var referenced = vec_new();
+    var ki = 0;
+    while (ki < vec_len(kept)) {
+        var km = vec_get(kept, ki);
+        var kk: Image = km;
+        vec_push(referenced, kk.id);
+        var layers = kk.layers;
+        var lj = 0;
+        while (lj < vec_len(layers)) {
+            var lp = vec_get(layers, lj);
+            var ll: Layer = lp;
+            vec_push(referenced, ll.digest);
+            lj = lj + 1;
+        }
+        ki = ki + 1;
+    }
+
+    # Delete unreferenced blobs: for each hex in blobs/sha256, form
+    # "sha256:{hex}" and unlink when it's not in the referenced set.
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var name_s = vec_get(entries, ei);           # Str
+        var hex = str_cstr(name_s);
+        var digest = _img_cat2("sha256:", hex);
+        # Is `digest` referenced?
+        var found = 0;
+        var ri = 0;
+        while (ri < vec_len(referenced)) {
+            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
+            ri = ri + 1;
+        }
+        if (found == 0) {
+            var blob_slash = _img_cat2(blobs_dir, "/");
+            var blob_path = _img_cat2(blob_slash, hex);
+            xunlink(blob_path);
+        }
+        ei = ei + 1;
+    }
+
+    if (image_store_save_index(store, kept) == 0) { return 0; }
+    return 1;
+}
+
+# Read the `reference` field (ImageRef*) of an Image*. A 5-field struct is
+# safe to access through a pointer-annotated local, but this named helper
+# keeps the index code readable and localizes the field layout.
+#[must_use]
+fn _image_reference(image) {
+    var ii: Image = image;
+    return ii.reference;
+}
+
+# ── DEFERRED (blob dir-walk + async network layer) ──────────────
+# rust-old/src/image.rs also defines, still deferred here:
+#
+#   gc / verify_integrity (full blobs/ + layers/ dir-walk + re-hash):
 #     fn gc(&self) -> Result<(u32, u32), StivaError>
 #     fn verify_integrity(&self) -> Result<Vec<String>, StivaError>
-#   (verify_integrity re-reads every blob and re-hashes it; remove/gc walk
-#    read_dir(blobs)/read_dir(layers) and unlink/rmdir unreferenced entries.
-#    Both need the index deserialized to know what's referenced.)
+#   (gc walks read_dir(blobs)/read_dir(layers) and removes every entry not
+#    referenced by the index; verify_integrity re-reads every blob and
+#    re-hashes it to detect corruption. Ported alongside the layer-unpack
+#    surface for full parity.)
 #
 #   async network (RegistryClient reqwest/tokio; not in ported registry):
 #     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
@@ -4614,8 +4925,8 @@ fn image_store_read_blob(store, digest, buf, maxlen) {
 #     async fn verify_signature(&self, image, client) -> Result<bool>
 #     async fn fetch_foreign_layer(urls: &[String]) -> Result<Bytes>
 #
-# These are ported alongside the JSON codec and the registry network layer
-# for parity. Tracked in the roadmap.
+# These are ported alongside the registry network layer for parity.
+# Tracked in the roadmap.
 
 # --- registry.cyr ---
 
@@ -5162,13 +5473,13 @@ fn _reg_trim_quotes(s) {
 #     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
 #   mount_volumes                          (parse_volume + bind mount syscall)
 #
-# What is DEFERRED (see the block at the bottom):
-#   unpack_layer / unpack_tar_gz / unpack_tar_zstd / prepare_layers — these
-#   drive flate2 (gzip) + zstd + tar stream decoders to unpack layer blobs.
-#   There is no Cyrius stdlib gzip/zstd/tar codec yet, so — exactly like
-#   image.cyr's serde deferral — they land with a compression/tar codec.
-#   prepare_layers additionally calls unpack_layer, so it defers with them
-#   (though its ImageStore/Layer deps — image.cyr — are already ported).
+# Layer unpacking (unpack_layer / prepare_layers) is now implemented on the
+# Cyrius stdlib `sankoch` gzip_decompress + a hand-rolled USTAR tar reader.
+#
+# What remains DEFERRED (see the block at the bottom):
+#   the zstd fallback (rust-old unpack_tar_zstd + unpack_layer's second
+#   attempt) — zstd is genuinely absent from sankoch (it ships gzip/xz/lz4/
+#   bzip2, not zstd), so that path lands with a zstd codec.
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here. parse_volume returns 0 (null) on an
@@ -5482,27 +5793,273 @@ fn mount_volumes(volume_specs, merged_rootfs) {
     return mounts;
 }
 
-# ── DEFERRED (land with a gzip/zstd/tar codec) ────────────────
-# rust-old/src/storage.rs also defines, coupled to flate2 (gzip) + zstd +
-# tar stream decoders (no Cyrius stdlib compression/archive codec yet):
+# ── Layer unpacking (gzip-tar) ─────────────────────
+# rust-old drives flate2 (gzip) + tar stream decoders; here we use the
+# Cyrius stdlib `sankoch` gzip_decompress and a hand-rolled USTAR reader.
+# The zstd fallback (rust-old unpack_tar_zstd) stays DEFERRED — zstd is
+# absent from sankoch (it ships gzip/xz/lz4/bzip2, not zstd).
+
+# Read an entire file into a fresh heap buffer. Returns the buffer pointer;
+# writes its length to the 8-byte cell at `out_len`. Returns 0 on open
+# failure (out_len set to a negative errno). Sizes the buffer via lseek to
+# SEEK_END so the whole blob is captured (file_read_all is maxlen-bounded).
+#[must_use]
+fn _stor_read_file(path, out_len) {
+    var fd = file_open(path, 0, 0);        # O_RDONLY
+    if (fd < 0) {
+        store64(out_len, fd);
+        return 0;
+    }
+    var size = xlseek(fd, 0, 2);           # SEEK_END → byte length
+    xlseek(fd, 0, 0);                       # SEEK_SET → rewind
+    if (size < 0) {
+        file_close(fd);
+        store64(out_len, 0 - 1);
+        return 0;
+    }
+    var buf = alloc(size + 1);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, size - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= size) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# Parse a NUL/space-terminated octal field of `len` bytes at `p` into an
+# i64. USTAR numeric fields (size, mode) are ASCII octal, right-space- or
+# NUL-padded. Leading spaces and trailing NUL/space are ignored.
+#[must_use]
+fn _stor_parse_octal(p, len) {
+    var val = 0;
+    var i = 0;
+    while (i < len) {
+        var c = load8(p + i);
+        if (c >= 48 && c <= 55) {           # '0'..'7'
+            val = (val * 8) + (c - 48);
+        }
+        i = i + 1;
+    }
+    return val;
+}
+
+# Recursively create `path` and all missing parents (create_dir_all
+# analogue). Walks each '/'-separated prefix and sys_mkdir's it (0o755 =
+# 493); EEXIST is idempotent/fine. `path` is a NUL-terminated cstr.
+fn _stor_mkdir_p(path) {
+    var len = strlen(path);
+    var i = 1;                              # skip a leading '/'
+    while (i <= len) {
+        var at_sep = 0;
+        if (i == len) { at_sep = 1; }
+        else {
+            if (load8(path + i) == 47) { at_sep = 1; }    # '/'
+        }
+        if (at_sep == 1) {
+            var prefix = _stor_slice(path, 0, i);
+            sys_mkdir(prefix, 493);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Create every parent directory of a file `path` (the dir portion up to the
+# last '/'). No-op when `path` has no '/'.
+fn _stor_mkdir_parents(path) {
+    var len = strlen(path);
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(path + i) == 47) { slash = i; }
+        i = i + 1;
+    }
+    if (slash > 0) {
+        var dir = _stor_slice(path, 0, slash);
+        _stor_mkdir_p(dir);
+    }
+    return 0;
+}
+
+# Extract a decompressed USTAR archive `tar` of `tar_len` bytes into `dest`.
+# Minimal reader: 512-byte headers — name@0 (100b), mode@100, size@124
+# (12b octal), typeflag@156 ('0'/'\0' = file, '5' = dir). File data follows
+# in ceil(size/512) 512-byte blocks. Two consecutive all-zero blocks (or
+# running out of bytes) ends the archive.
 #
-#   fn unpack_layer(blob_path: &Path, dest: &Path) -> Result<(), StivaError>
-#     (opens the blob, tries gzip-tar, falls back to zstd-tar; on both
-#      failing → Err(StivaError::LayerUnpack(...)))
-#   fn unpack_tar_gz(file, dest) -> Result<(), Box<dyn Error>>
-#     (flate2::read::GzDecoder + tar::Archive, overwrite + preserve perms)
+# Directories are created (mkdir -p); files have their parents created then
+# are written via file_write_all. Entry names are joined under `dest`.
+# Returns 0 on success, -1 on a malformed header (short/torn block).
+fn _stor_extract_tar(tar, tar_len, dest) {
+    var pos = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        # Need a full 512-byte header block.
+        if (pos + 512 > tar_len) { rgo = 0; }
+        else {
+            var hdr = tar + pos;
+            # All-zero name byte @0 marks the end-of-archive block(s).
+            if (load8(hdr) == 0) {
+                rgo = 0;
+            } else {
+                # USTAR name field is exactly 100 bytes and is NOT NUL-terminated
+                # when the name fills all 100 — bound the copy to avoid over-read.
+                var nlen = 0;
+                while (nlen < 100 && load8(hdr + nlen) != 0) { nlen = nlen + 1; }
+                var name = _stor_slice(hdr, 0, nlen);
+                var size = _stor_parse_octal(hdr + 124, 12);
+                var typeflag = load8(hdr + 156);
+                pos = pos + 512;                        # advance past header
+
+                # Full path = dest + "/" + name.
+                var full = _stor_join(dest, name);
+
+                if (typeflag == 53) {                   # '5' → directory
+                    _stor_mkdir_p(full);
+                } else {
+                    if (typeflag == 48 || typeflag == 0) {   # '0' or '\0' → file
+                        _stor_mkdir_parents(full);
+                        if (pos + size > tar_len) {
+                            return 0 - 1;                # torn data region
+                        }
+                        file_write_all(full, tar + pos, size);
+                    }
+                    # else: link/char/block/fifo/longname — skipped (its data,
+                    # if any, is stepped over below), a minimal extractor.
+                }
+
+                # Step over the file data: ceil(size/512) blocks.
+                var blocks = (size + 511) / 512;
+                pos = pos + (blocks * 512);
+            }
+        }
+    }
+    return 0;
+}
+
+# Decompress a gzip'd tar `file` and extract it into `dest` (rust-old:
+# unpack_tar_gz — flate2 GzDecoder + tar::Archive). `blob` is the raw
+# gzip bytes, `blob_len` its length. Returns 0 on success, negative on
+# failure (gzip error → the sankoch ERR_* negative; tar error → -1).
+#
+# The decompressed size is unknown up front; we size the output buffer
+# generously (32x the compressed size, min 1 MiB) and retry doubling on
+# ERR_BUFFER_TOO_SMALL. gzip's trailer ISIZE could size it exactly, but a
+# growth loop is simpler and codec-agnostic.
+fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
+    var cap = blob_len * 32;
+    if (cap < 1048576) { cap = 1048576; }   # >= 1 MiB
+    var dlen = 0 - 1;
+    var tries = 0;
+    var out = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        out = alloc(cap);
+        dlen = gzip_decompress(blob, blob_len, out, cap);
+        if (dlen == (0 - 2)) {              # ERR_BUFFER_TOO_SMALL → grow + retry
+            cap = cap * 2;
+            tries = tries + 1;
+            if (tries > 24) { return 0 - 2; }   # runaway guard
+        } else {
+            rgo = 0;
+        }
+    }
+    if (dlen < 0) { return dlen; }          # gzip decode failed (not gzip, corrupt, …)
+    return _stor_extract_tar(out, dlen, dest);
+}
+
+# Unpack a single layer blob to a directory (rust-old: unpack_layer).
+# Supports gzip-tar; the zstd fallback is DEFERRED (see the block below).
+# `blob_path` and `dest` are cstrs.
+#
+# Returns 0 on success, -1 on failure (rust-old maps every failure — open,
+# decode, tar — to Err(StivaError::LayerUnpack)). The caller reports the -1
+# via stiva_err_print(STIVA_ERR_LAYER_UNPACK, detail); the sentinel stays a
+# plain integer here (matching parse_volume/mount_volumes in this module,
+# which never name a cross-module enum const in executable code).
+fn unpack_layer(blob_path, dest) {
+    var len_cell = alloc(8);
+    var blob = _stor_read_file(blob_path, len_cell);
+    if (blob == 0) { return 0 - 1; }        # cannot open blob
+    var blob_len = load64(len_cell);
+
+    var rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    if (rc == 0) { return 0; }
+    # rust-old falls back to zstd here; that path is deferred (no zstd codec),
+    # so a non-gzip blob is an unpack failure.
+    return 0 - 1;
+}
+
+# Unpack all image layers to the store's `layers/` directory (rust-old:
+# prepare_layers). `store` is an ImageStore* (image.cyr); `layers` is a vec
+# of Layer* ordered bottom-to-top. Returns an ordered vec of layer-dir cstrs
+# (bottom first). Layers already unpacked are skipped (dedup by a `.unpacked`
+# marker). Returns 0 on failure (a missing blob, or an unpack error) — caller
+# reports via stiva_err_print(STIVA_ERR_LAYER_UNPACK, detail).
+fn prepare_layers(store, layers) {
+    var layer_dirs = vec_new();
+    var root = image_store_root(store);
+    var layers_base = _stor_cat2(root, "/layers");
+    var n = vec_len(layers);
+    var i = 0;
+    while (i < n) {
+        var layer = vec_get(layers, i);
+        # Layer is defined in image.cyr (struct Layer { digest; size_bytes;
+        # media_type }); digest is field 0. Read it by raw offset so this
+        # module parses standalone (no cross-module struct type annotation).
+        var digest = load64(layer);
+        var hex = digest_hex(digest);              # strip "sha256:" prefix
+        var layer_dir = _stor_join(layers_base, hex);
+        var marker = _stor_join(layer_dir, ".unpacked");
+
+        # Dedup: already-unpacked layers are skipped.
+        if (file_exists(layer_dir) == 1) {
+            if (file_exists(marker) == 1) {
+                vec_push(layer_dirs, layer_dir);
+                i = i + 1;
+                continue;
+            }
+        }
+
+        _stor_mkdir_p(layer_dir);
+
+        # Blob must exist at blobs/sha256/<hex>.
+        var blob_base = _stor_cat2(root, "/blobs/sha256/");
+        var blob_path = _stor_cat2(blob_base, hex);
+        if (file_exists(blob_path) == 0) {
+            return 0;                               # rust-old: LayerUnpack("blob not found …")
+        }
+
+        var rc = unpack_layer(blob_path, layer_dir);
+        if (rc != 0) { return 0; }
+
+        # Mark as unpacked so we skip next time (write empty file).
+        file_write_all(marker, "", 0);
+
+        vec_push(layer_dirs, layer_dir);
+        i = i + 1;
+    }
+    return layer_dirs;
+}
+
+# ── DEFERRED (needs a zstd codec) ────────────────────
+# rust-old/src/storage.rs also defines unpack_tar_zstd:
+#
 #   fn unpack_tar_zstd(file, dest) -> Result<(), Box<dyn Error>>
 #     (zstd::stream::Decoder + tar::Archive, overwrite + preserve perms)
-#   fn prepare_layers(store: &ImageStore, layers: &[Layer])
-#       -> Result<Vec<PathBuf>, StivaError>
-#     (dedup by digest via a .unpacked marker; for each missing layer,
-#      create_dir_all(layers/<hex>), verify blob exists in blobs/sha256/<hex>
-#      else Err(LayerUnpack("blob not found ...")), unpack_layer, then write
-#      the .unpacked marker; returns the ordered layer dirs. ImageStore/Layer
-#      are already ported in image.cyr — this defers only for unpack_layer.)
 #
-# These are ported alongside a gzip/zstd/tar codec for parity. Tracked in
-# the roadmap.
+# and unpack_layer's zstd fallback (retry the blob through zstd-tar when the
+# gzip attempt fails). zstd is genuinely absent from the Cyrius stdlib —
+# sankoch ships gzip/xz/lz4/bzip2, not zstd — so the zstd path lands when a
+# zstd codec does. Tracked in the roadmap. (gzip unpack_layer / unpack_tar_gz
+# / prepare_layers are now implemented above.)
 
 # --- build.cyr ---
 
@@ -5520,13 +6077,15 @@ fn mount_volumes(volume_specs, merged_rootfs) {
 #   check_build_cache / record_build_cache
 #       (the on-disk {root}/cache/{hex} key→digest map; plain file ops)
 #
+# What ports here now (v3.0.0 — bayan TOML object model):
+#   parse_build_spec — parses a Stivafile TOML string into the BuildSpec tree
+#     via bayan_toml_parse + bayan_toml_get / _get_array / _get_sections
+#     (rust-old used toml::from_str). See the fn's own comment for the [image]
+#     / [[steps]] / [config] mapping and the stages caveat.
+#
 # What is DEFERRED (see the block at the bottom):
-#   * parse_build_spec — round-trips TOML through serde (toml::from_str).
-#     The ported base has no TOML object-model parser, so — exactly like
-#     image.cyr's images.json index and convert.cyr's compose deferral —
-#     it lands with a TOML codec.
-#   * build_cache_key — hashes serde_json::to_string(step); needs a JSON
-#     serializer for the tagged BuildStep enum. Lands with the JSON codec.
+#   * build_cache_key — hashes serde_json::to_string(step). ACHIEVABLE via
+#     bayan's JSON serializer; just not wired yet (NOT a Cyrius gap).
 #   * build_run_layer / build_copy_layer / append_dir_recursive / build_image
 #     — construct tar.gz layers (flate2 GzEncoder + tar::Builder) and
 #     build_image is async (drives ImageStore::pull over the network). The
@@ -5816,13 +6375,165 @@ fn store_layer(store, data, len) {
     return digest;
 }
 
-# ── DEFERRED (land with a TOML codec + JSON codec + tar/gzip + async net) ──
-# rust-old/src/build.rs also defines, coupled to serde (toml/json), to a
-# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
+# ── Parsing (rust-old: parse_build_spec) ──────────────────
+# Parse a Stivafile TOML string into a BuildSpec. The Rust oracle used
+# `toml::from_str` (serde) over the nested BuildSpec/ImageDef/BuildStep/
+# BuildConfig tree; here we drive bayan's TOML object model (bayan_toml_parse
+# → sections; bayan_toml_get / _get_array / _get_sections) and rebuild the
+# same struct tree by hand.
 #
-#   TOML codec (serde toml::from_str of BuildSpec, a nested-struct + tagged
-#   BuildStep tree):
-#     fn parse_build_spec(toml_str: &str) -> Result<BuildSpec, StivaError>
+# bayan returns Str fat-pointers for every value; the ported BuildSpec structs
+# hold cstr slots (matching the build_step_* / image_def_new constructors and
+# the rest of the module), so each captured value is copied to a NUL-terminated
+# cstr via str_cstr before it lands in a struct field.
+#
+# Error mapping (mirrors error.cyr + the Rust oracle): the Rust returns
+# `Err(StivaError::InvalidState("invalid build spec: {e}"))` on any serde
+# failure. bayan is best-effort (it never structurally errors), so the one
+# fallible condition we can detect is the Rust `missing field `image`` — an
+# absent `[image]` table. On that we return the integer sentinel 0; the caller
+# reports it via stiva_err_print(STIVA_ERR_INVALID_STATE, "invalid build
+# spec: missing [image] section"). A successful parse returns the BuildSpec*.
+#
+# Multi-stage `[[stages]]` are NOT reconstructed here: bayan's section model is
+# flat (it cannot re-nest a stage's own `[[steps]]` under its stage table the
+# way serde does), and the tar.gz stage BUILDER that consumes them stays
+# deferred. `stages` therefore parses to an empty vec — matching the oracle's
+# `#[serde(default)]` when no stages are present, which is every case the
+# parse tests exercise.
+
+# Copy a bayan value Str to a fresh NUL-terminated cstr, or 0 when the Str is
+# absent (bayan_toml_get returns 0 for a missing key). Mirrors the Rust
+# Option<String> → 0-for-None convention used across the ported base.
+#[must_use]
+fn _bld_val_cstr(v) {
+    if (v == 0) { return 0; }
+    return str_cstr(v);
+}
+
+# Build a vec of cstr elements from a bayan array VALUE looked up by `key` in
+# `pairs` (rust-old: a serde `Vec<String>` field like a Run command or the
+# entrypoint). Returns an empty vec when the key is absent or is not an array,
+# so a missing `#[serde(default)]` vec field becomes `vec_new()`.
+fn _bld_str_vec(pairs, key) {
+    var out = vec_new();
+    var arr = bayan_toml_get_array(pairs, key);
+    if (arr == 0) { return out; }
+    var i = 0;
+    var n = vec_len(arr);
+    while (i < n) {
+        vec_push(out, str_cstr(vec_get(arr, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Build a vec of i64 port numbers from a bayan array VALUE (rust-old:
+# `Vec<u16>` expose). Each element is parsed with str_to_int. Empty vec when
+# the key is absent.
+fn _bld_int_vec(pairs, key) {
+    var out = vec_new();
+    var arr = bayan_toml_get_array(pairs, key);
+    if (arr == 0) { return out; }
+    var i = 0;
+    var n = vec_len(arr);
+    while (i < n) {
+        vec_push(out, str_to_int(vec_get(arr, i)));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Reconstruct one BuildStep from a `[[steps]]` section's pairs vec, dispatching
+# on the serde `type` tag (rust-old: `#[serde(tag = "type")]`). Returns a
+# BuildStep* for a recognized tag, or 0 for an unknown/missing tag (rust-old:
+# serde rejects an unknown variant → parse error; the caller drops the spec).
+fn _bld_step_from_pairs(pairs) {
+    var ty = bayan_toml_get(pairs, "type");
+    if (ty == 0) { return 0; }
+    if (str_eq_cstr(ty, "run") == 1) {
+        return build_step_run(_bld_str_vec(pairs, "command"));
+    }
+    if (str_eq_cstr(ty, "copy") == 1) {
+        var src = _bld_val_cstr(bayan_toml_get(pairs, "source"));
+        var dst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        return build_step_copy(src, dst);
+    }
+    if (str_eq_cstr(ty, "env") == 1) {
+        var ek = _bld_val_cstr(bayan_toml_get(pairs, "key"));
+        var ev = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        return build_step_env(ek, ev);
+    }
+    if (str_eq_cstr(ty, "workdir") == 1) {
+        return build_step_workdir(_bld_val_cstr(bayan_toml_get(pairs, "path")));
+    }
+    if (str_eq_cstr(ty, "label") == 1) {
+        var lk = _bld_val_cstr(bayan_toml_get(pairs, "key"));
+        var lv = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        return build_step_label(lk, lv);
+    }
+    if (str_eq_cstr(ty, "from_stage") == 1) {
+        var fstage = _bld_val_cstr(bayan_toml_get(pairs, "stage"));
+        var fsrc = _bld_val_cstr(bayan_toml_get(pairs, "source"));
+        var fdst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        return build_step_from_stage(fstage, fsrc, fdst);
+    }
+    return 0;                              # unknown step type → parse failure
+}
+
+# Parse a Stivafile TOML string (cstr) into a BuildSpec* (rust-old:
+# parse_build_spec). Returns 0 (STIVA_ERR_INVALID_STATE) on a missing [image]
+# section or an unknown step type; otherwise the heap BuildSpec pointer.
+#[must_use]
+fn parse_build_spec(toml_str) {
+    var sections = bayan_toml_parse(str_from(toml_str));
+
+    # ── [image] → ImageDef (required) ─────────────────
+    var image_secs = bayan_toml_get_sections(sections, "image");
+    if (vec_len(image_secs) == 0) { return 0; }     # missing field `image`
+    var image_pairs = bayan_toml_section_pairs(vec_get(image_secs, 0));
+    var base = _bld_val_cstr(bayan_toml_get(image_pairs, "base"));
+    var name = _bld_val_cstr(bayan_toml_get(image_pairs, "name"));
+    if (base == 0) { return 0; }                    # missing field `base`
+    if (name == 0) { return 0; }                    # missing field `name`
+    var tag = _bld_val_cstr(bayan_toml_get(image_pairs, "tag"));
+    if (tag == 0) { tag = default_tag(); }          # serde default = "latest"
+    var image = image_def_new(base, name, tag);
+
+    # ── [[steps]] → Vec<BuildStep> (serde default = empty) ────
+    var steps = vec_new();
+    var step_secs = bayan_toml_get_sections(sections, "steps");
+    var si = 0;
+    var sn = vec_len(step_secs);
+    while (si < sn) {
+        var step = _bld_step_from_pairs(bayan_toml_section_pairs(vec_get(step_secs, si)));
+        if (step == 0) { return 0; }                # unknown/missing step type
+        vec_push(steps, step);
+        si = si + 1;
+    }
+
+    # ── [config] → BuildConfig (serde default) ────────
+    var config_secs = bayan_toml_get_sections(sections, "config");
+    var config = 0;
+    if (vec_len(config_secs) == 0) {
+        config = build_config_default();
+    } else {
+        var cp = bayan_toml_section_pairs(vec_get(config_secs, 0));
+        var entrypoint = _bld_str_vec(cp, "entrypoint");
+        var expose = _bld_int_vec(cp, "expose");
+        var user = _bld_val_cstr(bayan_toml_get(cp, "user"));
+        var workdir = _bld_val_cstr(bayan_toml_get(cp, "workdir"));
+        config = build_config_new(entrypoint, expose, user, workdir);
+    }
+
+    # ── stages: flat bayan model cannot re-nest per-stage steps; the
+    # consuming tar.gz stage builder is deferred → empty vec (serde default).
+    return build_spec_new(image, steps, config, vec_new());
+}
+
+# ── DEFERRED (land with a JSON codec + tar/gzip + async net) ──
+# rust-old/src/build.rs also defines, coupled to serde_json, to a
+# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
 #
 #   JSON codec (serde_json::to_string of the tagged BuildStep enum):
 #     fn build_cache_key(base_digest, step_index, step: &BuildStep) -> String
@@ -6145,7 +6856,8 @@ fn encrypt_layer(data, data_len, key_source, out_len) {
 #       AES-256-GCM; result = nonce(12) || ciphertext || tag; key must be 32 bytes
 #   fn rand_nonce() -> [u8; 12]                     getrandom::fill (→ lib/random.cyr random_bytes)
 # agnodrm exposes LUKS/verity via cryptsetup/veritysetup shells; AES-256-GCM
-# has no Cyrius stdlib codec yet — mirrors storage.cyr's gzip/zstd deferral.
+# is achievable via sigil's aes_gcm (this module is the no-`encrypted`-feature
+# arm anyway); the crypto bodies just aren't wired — NOT a Cyrius gap.
 
 # --- runtime.cyr ---
 
@@ -7286,13 +7998,11 @@ fn health_monitor_is_empty(m) {
 # service→depends_on adjacency. Semantics match the Rust oracle.
 #
 # What is DEFERRED (see the block at the bottom):
-#   * parse_ansamblu — round-trips TOML through serde (toml::from_str). The
-#     ported base has no TOML object-model parser, so — exactly like
-#     build.cyr's parse_build_spec and convert.cyr's compose deferral — it
-#     lands with a TOML codec. The parsing #[cfg(test)] cases move with it.
-#   * the serde JSON round-trip tests (AnsambluFile / AnsambluSession /
-#     NetworkDef / VolumeDef / RestartPolicy) need a JSON serializer for these
-#     records; they land with the JSON codec.
+#   * parse_ansamblu — TOML → AnsambluFile. ACHIEVABLE via bayan's TOML object
+#     model (`toml_parse`/`toml_get`), exactly like build.cyr's now-ported
+#     parse_build_spec — it just isn't wired yet (NOT a Cyrius gap).
+#   * the serde JSON round-trip tests likewise use bayan's JSON codec — not
+#     yet ported. (Only compose-YAML is a real stdlib gap: no YAML parser.)
 #
 # RestartPolicy is `pub use crate::health::RestartPolicy` in the oracle; it is
 # defined once in the sibling health.cyr (RESTART_POLICY_*), referenced here —

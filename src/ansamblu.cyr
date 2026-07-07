@@ -22,13 +22,11 @@
 # service→depends_on adjacency. Semantics match the Rust oracle.
 #
 # What is DEFERRED (see the block at the bottom):
-#   * parse_ansamblu — round-trips TOML through serde (toml::from_str). The
-#     ported base has no TOML object-model parser, so — exactly like
-#     build.cyr's parse_build_spec and convert.cyr's compose deferral — it
-#     lands with a TOML codec. The parsing #[cfg(test)] cases move with it.
-#   * the serde JSON round-trip tests (AnsambluFile / AnsambluSession /
-#     NetworkDef / VolumeDef / RestartPolicy) need a JSON serializer for these
-#     records; they land with the JSON codec.
+#   * parse_ansamblu — TOML → AnsambluFile. ACHIEVABLE via bayan's TOML object
+#     model (`toml_parse`/`toml_get`), exactly like build.cyr's now-ported
+#     parse_build_spec — it just isn't wired yet (NOT a Cyrius gap).
+#   * the serde JSON round-trip tests likewise use bayan's JSON codec — not
+#     yet ported. (Only compose-YAML is a real stdlib gap: no YAML parser.)
 #
 # RestartPolicy is `pub use crate::health::RestartPolicy` in the oracle; it is
 # defined once in the sibling health.cyr (RESTART_POLICY_*), referenced here —

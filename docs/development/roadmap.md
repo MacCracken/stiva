@@ -75,14 +75,42 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] **Test parity** — 697 Cyrius tests (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`, all green; `cyrius bench`/`fmt`/`lint` clean.
 - [x] **distlib** → `dist/stiva.cyr` (8,863-line bundle); version → **3.0.0**.
 
-> **v3.0.0 = the PORT (structure + pure logic + syscall surface). DEFERRED to
-> v3.1** (needs Cyrius async runtime + tar/gzip/zstd + full HTTP/TLS/JSON codecs):
-> the async container-execution surface — kavach sandbox exec/spawn, cgroups v2
-> limits/stats, CRIU checkpoint/restore, tar/gzip/zstd layer pack/unpack, the
-> registry HTTP pull/push client, the images.json JSON index, compose-YAML
-> convert, and the async `Stiva` facade (~40 orchestration methods in
-> `stiva_core.cyr`). Each is documented in a `# ── DEFERRED ──` block in its
-> module. `rust-old/` stays as the parity oracle until that surface lands.
+> **v3.0.0 = the PORT (structure + pure logic + syscall surface). The rest is
+> DEFERRED to v3.1 — as PORTING WORK, not (mostly) Cyrius gaps.**
+>
+> **CLOSED before the 3.0.0 tag** (the achievable ones, using the existing stdlib
+> I'd wrongly blamed as "no codec"):
+> - `build.parse_build_spec` — Stivafile TOML → BuildSpec via **`bayan`** TOML.
+> - `image` **images.json index** — load/save/add/list/remove via **`bayan`** JSON.
+> - `storage.unpack_layer`/`prepare_layers` — **gzip** via **`sankoch`** + a
+>   hand-rolled USTAR **tar reader**.
+>
+> **Still deferred, but achievable now (bayan/sankoch — just not ported):**
+> `ansamblu.parse_ansamblu` (bayan TOML), `oci.parse_bundle` (bayan JSON),
+> `build_cache_key` (bayan JSON), audit metadata round-trip, `build` tar.gz layer
+> **writer**. Labeled accurately in each module ("achievable via bayan, not a
+> Cyrius gap").
+>
+> **Genuine stdlib gaps (real v3.1 stdlib work):**
+> - **zstd** — `sankoch` has gzip/xz/lz4/bzip2 but not zstd → zstd-compressed
+>   OCI layers (`unpack_tar_zstd`) blocked; gzip layers work.
+> - **YAML** — `bayan` has JSON/TOML/base64 but no YAML → `compose_yaml_to_toml`
+>   blocked.
+>
+> **The big v3.1 arc — the async orchestration surface** (kavach exec/spawn,
+> cgroups v2, CRIU, the registry HTTP client, concurrent layer downloads, the
+> ~40-method async `Stiva` facade in `stiva_core.cyr`). HTTP/TLS (`sandhi`/
+> `tls_native`) and the async runtime (`lib/async.cyr`) EXIST, but `lib/async.cyr`
+> is a cooperative-future model weaker than tokio (no mid-body suspend, limited
+> spawn/timers) — mapping tokio-shaped orchestration onto it is substantial and
+> is tracked in **cyrius issue `2026-07-07-async-runtime-tokio-parity-gaps.md`**.
+> cgroups v2 / CRIU are plain syscall/subprocess work (no Cyrius dependency).
+>
+> So v3.1 is chiefly: wire bayan/sandhi/sankoch, port the tokio async onto
+> `lib/async.cyr`, and add zstd + tar. `rust-old/` stays the oracle until then.
+> (NB: the per-module `# ── DEFERRED ──` blocks were written by the port agents
+> and carry the same "needs async/codec" overstatement — read them against this
+> accounting.)
 
 ---
 

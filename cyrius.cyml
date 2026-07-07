@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.4.15"
+cyrius = "6.4.16"
 
 [build]
 entry = "src/main.cyr"
@@ -67,8 +67,9 @@ stdlib = [
     "alloc", "args", "assert", "async", "atomic", "bayan", "bench", "callback",
     "chrono", "ct", "dynlib", "fdlopen", "fmt", "fnptr", "freelist", "fs",
     "hashmap", "io", "keccak", "math", "mmap", "net", "process", "random",
-    "result", "sakshi", "sandhi", "sigil", "slice", "str", "string", "sync",
-    "syscalls", "tagged", "thread", "thread_local", "tls", "vec", "ws_server",
+    "result", "sakshi", "sandhi", "sankoch", "sigil", "slice", "str", "string",
+    "sync", "syscalls", "tagged", "thread", "thread_local", "tls", "vec",
+    "ws_server",
 ]
 
 # ── AGNOS first-party deps (Cyrius dist bundles) ─────────────────

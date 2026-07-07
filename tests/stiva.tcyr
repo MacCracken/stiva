@@ -1073,12 +1073,166 @@ fn test_mount_volumes_empty() {
     return 0;
 }
 
+# -- Layer unpacking (gzip-tar) tests --
+
+# Write an octal size field of `len` bytes at `p` (NUL-padded), for a USTAR
+# header. Matches _stor_parse_octal's leniency (leading/trailing NULs ok).
+fn _t_write_octal(p, len, val) {
+    var i = len - 1;
+    var v = val;
+    while (i >= 0) {
+        store8(p + i, 48 + (v & 7));   # '0' + low octal digit
+        v = v / 8;
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Build a single-file USTAR archive (name + data) into `out`, returning the
+# total byte length. Layout: 512 header (name@0, size octal @124, typeflag
+# '0' @156) + ceil(size/512) data blocks + two 512-byte zero blocks (EOF).
+fn _t_build_tar(out, name, data, dlen) {
+    var i = 0;
+    while (i < 5120) { store8(out + i, 0); i = i + 1; }   # zero the whole scratch
+
+    # name @0
+    var nl = strlen(name);
+    memcpy(out, name, nl);
+    # size @124 (12-byte octal field; write low 11 digits + trailing NUL)
+    _t_write_octal(out + 124, 11, dlen);
+    store8(out + 124 + 11, 0);
+    # typeflag @156 = '0' (regular file)
+    store8(out + 156, 48);
+
+    # data blocks
+    memcpy(out + 512, data, dlen);
+    var blocks = (dlen + 511) / 512;
+    var total = 512 + (blocks * 512);
+    # two zero blocks already zero (scratch pre-zeroed) — advance past them.
+    return total + 1024;
+}
+
+# _stor_parse_octal decodes ASCII octal, ignoring non-octal padding.
+fn test_stor_parse_octal() {
+    test_group("stor_parse_octal");
+    var buf = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(buf + i, 0); i = i + 1; }
+    # "644" -> 0o644 = 420
+    store8(buf, 54); store8(buf + 1, 52); store8(buf + 2, 52);
+    assert_eq(_stor_parse_octal(buf, 12), 420, "0o644 = 420");
+    return 0;
+}
+
+# End-to-end: gzip a hand-built USTAR archive, unpack_layer it, read back.
+fn test_unpack_layer_gz_roundtrip() {
+    test_group("unpack_layer_gz_roundtrip");
+    var dir = "/tmp/stiva-unpack-test";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/layer.tar.gz");
+    var dest = _stor_cat2(dir, "/unpacked");
+    sys_mkdir(dest, 493);
+
+    # Build the tar, gzip it, write the blob.
+    var tar = alloc(5120);
+    var data = "hello from layer";
+    var tlen = _t_build_tar(tar, "etc/hello.txt", data, strlen(data));
+    var gz = alloc(8192);
+    var glen = gzip_compress(tar, tlen, gz, 8192);
+    assert(glen > 0, "gzip compressed");
+    file_write_all(blob, gz, glen);
+
+    var rc = unpack_layer(blob, dest);
+    assert_eq(rc, 0, "unpack ok");
+
+    # Read back etc/hello.txt.
+    var out = _stor_cat2(dest, "/etc/hello.txt");
+    var rbuf = alloc(64);
+    var n = file_read_all(out, rbuf, 64);
+    store8(rbuf + n, 0);
+    assert_eq(streq(rbuf, "hello from layer"), 1, "content round-trips");
+    return 0;
+}
+
+# unpack_layer on a nonexistent blob returns the -1 failure sentinel.
+fn test_unpack_layer_missing_blob() {
+    test_group("unpack_layer_missing_blob");
+    assert_eq(unpack_layer("/nonexistent/stiva/blob", "/tmp"), 0 - 1, "missing blob = -1");
+    return 0;
+}
+
+# unpack_layer on non-gzip bytes fails (-1) — the zstd fallback is deferred.
+fn test_unpack_layer_not_gzip() {
+    test_group("unpack_layer_not_gzip");
+    var dir = "/tmp/stiva-unpack-badgz";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/bad.tar.gz");
+    file_write_all(blob, "this is not gzip", 16);
+    assert_eq(unpack_layer(blob, dir), 0 - 1, "non-gzip = -1");
+    return 0;
+}
+
+# prepare_layers on a store with no matching blob returns 0 (LayerUnpack).
+fn test_prepare_layers_missing_blob() {
+    test_group("prepare_layers_missing_blob");
+    var root = "/tmp/stiva-prep-missing";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var layers = vec_new();
+    vec_push(layers, layer_new("sha256:doesnotexist", 0, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    assert_eq(prepare_layers(store, layers), 0, "missing blob => 0");
+    return 0;
+}
+
+# prepare_layers unpacks a real gzip'd layer, then dedups on a second call.
+fn test_prepare_layers_dedup() {
+    test_group("prepare_layers_dedup");
+    var root = "/tmp/stiva-prep-dedup";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+
+    # Build a gzip'd tar blob and store it by its true digest.
+    var tar = alloc(5120);
+    var data = "layer content";
+    var tlen = _t_build_tar(tar, "file.txt", data, strlen(data));
+    var gz = alloc(8192);
+    var glen = gzip_compress(tar, tlen, gz, 8192);
+    assert(glen > 0, "gzip ok");
+    var digest = sha256_digest(gz, glen);
+    var stored = image_store_store_blob(store, digest, gz, glen);
+    assert(stored != 0, "blob stored");
+
+    var layers = vec_new();
+    vec_push(layers, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+
+    # First prepare: unpacks.
+    var dirs = prepare_layers(store, layers);
+    assert(dirs != 0, "prepare ok");
+    assert_eq(vec_len(dirs), 1, "one dir");
+    var d0 = vec_get(dirs, 0);
+    var f0 = _stor_cat2(d0, "/file.txt");
+    assert_eq(file_exists(f0), 1, "file.txt extracted");
+    var m0 = _stor_cat2(d0, "/.unpacked");
+    assert_eq(file_exists(m0), 1, ".unpacked marker written");
+
+    # Second prepare: dedup (marker present → skip), same dir returned.
+    var layers2 = vec_new();
+    vec_push(layers2, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    var dirs2 = prepare_layers(store, layers2);
+    assert(dirs2 != 0, "prepare2 ok");
+    assert_eq(vec_len(dirs2), 1, "one dir (dedup)");
+    assert_eq(streq(vec_get(dirs2, 0), d0), 1, "same layer dir");
+    return 0;
+}
+
 # ── build.cyr (rust-old/src/build.rs) ──
 # ── build.cyr (rust-old/src/build.rs) ────────────────────────────
 # Mirrors the portable subset of build.rs's #[cfg(test)] module. The
-# parse_build_spec / serde-round-trip / tar.gz layer-builder tests are
-# DEFERRED with their functions (TOML/JSON codec + tar/gzip), so they are
-# not mirrored here.
+# serde-round-trip / tar.gz layer-builder tests remain DEFERRED with their
+# functions (JSON codec + tar/gzip). parse_build_spec now lands (bayan TOML
+# object model) and is mirrored below (rust-old parse_full_spec /
+# parse_minimal_spec / parse_no_steps / parse_missing_image_section /
+# parse_unknown_step_type / step_variants).
 
 fn test_build_default_tag() {
     test_group("build_default_tag");
@@ -1159,6 +1313,96 @@ fn test_build_sha256_digest() {
     var a = sha256_digest("hello world", 11);
     var b = sha256_digest("hello world", 11);
     assert_eq(streq(a, b), 1, "sha256 deterministic");
+    return 0;
+}
+
+# rust-old: parse_full_spec — full Stivafile with every step type + config.
+fn test_build_parse_full_spec() {
+    test_group("build_parse_full_spec");
+    var src = "[image]\nbase = \"alpine:3.19\"\nname = \"myapp\"\ntag = \"v1.0\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"apk\", \"add\", \"--no-cache\", \"curl\"]\n\n[[steps]]\ntype = \"copy\"\nsource = \"./app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/app\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"/app/build.sh\"]\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\nworkdir = \"/app\"\n";
+    var spec = parse_build_spec(src);
+    assert_neq(spec, 0, "non-null spec");
+    var ss: BuildSpec = spec;
+    var img: ImageDef = ss.image;
+    assert_eq(streq(img.base, "alpine:3.19"), 1, "base");
+    assert_eq(streq(img.name, "myapp"), 1, "name");
+    assert_eq(streq(img.tag, "v1.0"), 1, "tag");
+    assert_eq(vec_len(ss.steps), 6, "6 steps");
+
+    # Step payloads mirror rust-old step_variants.
+    var s0: BuildStep = vec_get(ss.steps, 0);
+    assert_eq(s0.kind, BUILD_STEP_RUN, "step0 run");
+    assert_eq(vec_len(s0.command), 4, "run has 4 args");
+    assert_eq(streq(vec_get(s0.command, 0), "apk"), 1, "run arg0 apk");
+    var s1: BuildStep = vec_get(ss.steps, 1);
+    assert_eq(s1.kind, BUILD_STEP_COPY, "step1 copy");
+    assert_eq(streq(s1.source, "./app"), 1, "copy source");
+    assert_eq(streq(s1.destination, "/app"), 1, "copy destination");
+    var s2: BuildStep = vec_get(ss.steps, 2);
+    assert_eq(s2.kind, BUILD_STEP_ENV, "step2 env");
+    assert_eq(streq(s2.key, "PORT"), 1, "env key");
+    assert_eq(streq(s2.value, "8080"), 1, "env value");
+    var s3: BuildStep = vec_get(ss.steps, 3);
+    assert_eq(s3.kind, BUILD_STEP_WORKDIR, "step3 workdir");
+    assert_eq(streq(s3.source, "/app"), 1, "workdir path");
+    var s4: BuildStep = vec_get(ss.steps, 4);
+    assert_eq(s4.kind, BUILD_STEP_LABEL, "step4 label");
+    assert_eq(streq(s4.key, "maintainer"), 1, "label key");
+    var s5: BuildStep = vec_get(ss.steps, 5);
+    assert_eq(s5.kind, BUILD_STEP_RUN, "step5 run");
+    assert_eq(vec_len(s5.command), 1, "run has 1 arg");
+
+    var cfg: BuildConfig = ss.config;
+    assert_eq(vec_len(cfg.entrypoint), 1, "entrypoint len");
+    assert_eq(streq(vec_get(cfg.entrypoint, 0), "/app/start.sh"), 1, "entrypoint[0]");
+    assert_eq(vec_len(cfg.expose), 1, "expose len");
+    assert_eq(vec_get(cfg.expose, 0), 8080, "expose[0] 8080");
+    assert_eq(streq(cfg.user, "nobody"), 1, "user nobody");
+    assert_eq(streq(cfg.workdir, "/app"), 1, "config workdir");
+    return 0;
+}
+
+# rust-old: parse_minimal_spec — omitted tag defaults to "latest", config empty.
+fn test_build_parse_minimal_spec() {
+    test_group("build_parse_minimal_spec");
+    var src = "[image]\nbase = \"ubuntu:22.04\"\nname = \"minimal\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hello\"]\n";
+    var spec = parse_build_spec(src);
+    assert_neq(spec, 0, "non-null spec");
+    var ss: BuildSpec = spec;
+    var img: ImageDef = ss.image;
+    assert_eq(streq(img.tag, "latest"), 1, "default tag latest");
+    assert_eq(vec_len(ss.steps), 1, "1 step");
+    var cfg: BuildConfig = ss.config;
+    assert_eq(vec_len(cfg.entrypoint), 0, "entrypoint empty");
+    assert_eq(vec_len(cfg.expose), 0, "expose empty");
+    assert_eq(cfg.user, 0, "user none");
+    assert_eq(cfg.workdir, 0, "workdir none");
+    return 0;
+}
+
+# rust-old: parse_no_steps — [image] only, no steps.
+fn test_build_parse_no_steps() {
+    test_group("build_parse_no_steps");
+    var src = "[image]\nbase = \"alpine:3.19\"\nname = \"empty\"\n";
+    var spec = parse_build_spec(src);
+    assert_neq(spec, 0, "non-null spec");
+    var ss: BuildSpec = spec;
+    assert_eq(vec_len(ss.steps), 0, "no steps");
+    return 0;
+}
+
+# rust-old: parse_missing_image_section — missing [image] → parse error (0).
+fn test_build_parse_missing_image() {
+    test_group("build_parse_missing_image");
+    assert_eq(parse_build_spec("[config]\nuser = \"nobody\"\n"), 0, "missing image -> 0");
+    return 0;
+}
+
+# rust-old: parse_unknown_step_type — unknown `type` → parse error (0).
+fn test_build_parse_unknown_step_type() {
+    test_group("build_parse_unknown_step_type");
+    var src = "[image]\nbase = \"alpine:3.19\"\nname = \"bad\"\n\n[[steps]]\ntype = \"frobnicate\"\narg = \"baz\"\n";
+    assert_eq(parse_build_spec(src), 0, "unknown step type -> 0");
     return 0;
 }
 
@@ -1695,8 +1939,8 @@ fn test_container_serde_round_trip() {
     cfg.memory_limit = 256 * 1024 * 1024;
     cfg.user = "nobody";
     var c: Container = container_new("abc-123", "web", "sha256:img",
-        "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
-        1000, 2000, cfg, 0);
+    "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
+    1000, 2000, cfg, 0);
     assert_eq(streq(c.id, "abc-123"), 1, "id");
     assert_eq(c.state, CONTAINER_STATE_STOPPED, "state Stopped");
     assert_eq(c.exit_code, 0, "exit_code 0");
@@ -1710,7 +1954,7 @@ fn test_migration_bundle_serde() {
     test_group("migration_bundle_serde");
     var cfg = container_config_default();
     var b: MigrationBundle = migration_bundle_new("abc-123",
-        "docker.io/library/nginx:latest", cfg, "/tmp/checkpoint", "node-1", 42);
+    "docker.io/library/nginx:latest", cfg, "/tmp/checkpoint", "node-1", 42);
     assert_eq(streq(b.source_container_id, "abc-123"), 1, "source id");
     assert_eq(streq(b.image_ref, "docker.io/library/nginx:latest"), 1, "image_ref");
     assert_eq(streq(b.source_node, "node-1"), 1, "source_node");
@@ -2174,8 +2418,8 @@ fn test_agent_build_registration_from_container() {
     vec_push(ports, "8080:80");
     var cfg = _agent_test_config(ports);
     var c = _agent_test_container("abc123def456", "web-server",
-        "sha256:img", "docker.io/library/nginx:latest",
-        CONTAINER_STATE_RUNNING, cfg);
+    "sha256:img", "docker.io/library/nginx:latest",
+    CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);
     var r: AgentRegistration = reg;
@@ -2183,7 +2427,7 @@ fn test_agent_build_registration_from_container() {
     assert_eq(streq(r.name, "web-server"), 1, "name");
     assert_eq(streq(r.agent_type, "container"), 1, "agent_type is container");
     assert_eq(_agent_caps_contains(r.capabilities, "stiva"), 1,
-        "capabilities contains stiva");
+    "capabilities contains stiva");
     return 0;
 }
 
@@ -2193,8 +2437,8 @@ fn test_agent_build_registration_no_name() {
     var cfg = _agent_test_config(ports);
     # name = 0 (None) → falls back to first 12 chars of id.
     var c = _agent_test_container("abc123def456", 0,
-        "sha256:img", "docker.io/library/nginx:latest",
-        CONTAINER_STATE_RUNNING, cfg);
+    "sha256:img", "docker.io/library/nginx:latest",
+    CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);
     var r: AgentRegistration = reg;
@@ -2245,7 +2489,7 @@ fn test_agent_status_serde() {
 fn test_agent_default_registry_url() {
     test_group("agent_default_registry_url");
     assert_eq(streq(agent_default_registry_url(), "http://localhost:8090"), 1,
-        "default registry url");
+    "default registry url");
     return 0;
 }
 
@@ -2412,17 +2656,169 @@ fn test_lib_default_config() {
 fn test_lib_config_custom_values() {
     test_group("lib::config_custom_values");
     var d: StivaConfig = stiva_config_new(
-        "/custom/containers",
-        "/custom/images",
-        network_mode_new(NETWORK_MODE_HOST, 0),
-        128,
-        0
+    "/custom/containers",
+    "/custom/images",
+    network_mode_new(NETWORK_MODE_HOST, 0),
+    128,
+    0
     );
     assert_eq(streq(d.root_path, "/custom/containers"), 1, "custom root_path");
     assert_eq(streq(d.image_path, "/custom/images"), 1, "custom image_path");
     assert_eq(d.max_containers, 128, "custom max_containers");
     var dn: NetworkModeVal = d.default_network;
     assert_eq(dn.tag, NETWORK_MODE_HOST, "custom default_network is Host");
+    return 0;
+}
+
+
+# ── image.cyr images.json index (rust-old/src/image.rs) ──
+# ── image.cyr images.json index (rust-old/src/image.rs) ──────────
+# Exercises the JSON round-trip index: load/save/add_to_index/list/remove.
+
+# Build a one-layer Image* for the index tests.
+fn _test_img_make(id, ref_str, size, layer_digest, layer_size) {
+    var reference = image_ref_parse(ref_str);
+    var layers = vec_new();
+    vec_push(layers, layer_new(layer_digest, layer_size,
+    "application/vnd.oci.image.layer.v1.tar+gzip"));
+    return image_new(id, reference, size, layers, 1700000000);
+}
+
+fn test_image_index_round_trip() {
+    test_group("image_index_round_trip");
+    var root = "/tmp/stiva_img_idx_rt";
+    xunlink("/tmp/stiva_img_idx_rt/images.json");
+    var store = image_store_new(root);
+    assert_eq(store != 0, 1, "store created");
+
+    # Empty index → empty list (rust-old: Ok(vec![])).
+    assert_eq(vec_len(image_store_list(store)), 0, "empty index lists nothing");
+
+    var img = _test_img_make("sha256:config123", "alpine:3.19", 4096,
+    "sha256:layer1", 4096);
+    assert_eq(image_store_add_to_index(store, img), 1, "add_to_index ok");
+
+    var listed = image_store_list(store);
+    assert_eq(vec_len(listed), 1, "one image listed");
+    var got: Image = vec_get(listed, 0);
+    assert_eq(streq(got.id, "sha256:config123"), 1, "id round-trips");
+    assert_eq(got.size_bytes, 4096, "size_bytes round-trips");
+    assert_eq(vec_len(got.layers), 1, "one layer round-trips");
+    var gl: Layer = vec_get(got.layers, 0);
+    assert_eq(streq(gl.digest, "sha256:layer1"), 1, "layer digest round-trips");
+    assert_eq(gl.size_bytes, 4096, "layer size round-trips");
+    assert_eq(got.created_at, 1700000000, "created_at round-trips");
+    # reference nested object round-trips.
+    var gref: ImageRef = got.reference;
+    assert_eq(streq(gref.registry, "docker.io"), 1, "ref registry round-trips");
+    assert_eq(streq(gref.repository, "library/alpine"), 1, "ref repo round-trips");
+    assert_eq(streq(gref.tag, "3.19"), 1, "ref tag round-trips");
+    assert_eq(gref.digest, 0, "ref digest None round-trips as null");
+    return 0;
+}
+
+fn test_image_index_dedup_on_re_add() {
+    test_group("image_index_dedup_on_re_add");
+    var root = "/tmp/stiva_img_idx_dedup";
+    xunlink("/tmp/stiva_img_idx_dedup/images.json");
+    var store = image_store_new(root);
+
+    var img1 = _test_img_make("sha256:v1", "app:latest", 100,
+    "sha256:l1", 100);
+    var img2 = _test_img_make("sha256:v2", "app:latest", 200,
+    "sha256:l2", 200);
+    image_store_add_to_index(store, img1);
+    image_store_add_to_index(store, img2);
+
+    # Same reference "app:latest" → replaced, not duplicated.
+    var listed = image_store_list(store);
+    assert_eq(vec_len(listed), 1, "same reference replaced");
+    var got: Image = vec_get(listed, 0);
+    assert_eq(streq(got.id, "sha256:v2"), 1, "newest id kept");
+    return 0;
+}
+
+fn test_image_index_multiple() {
+    test_group("image_index_multiple");
+    var root = "/tmp/stiva_img_idx_multi";
+    xunlink("/tmp/stiva_img_idx_multi/images.json");
+    var store = image_store_new(root);
+
+    image_store_add_to_index(store, _test_img_make("sha256:a", "app:v0", 1, "sha256:la", 1));
+    image_store_add_to_index(store, _test_img_make("sha256:b", "app:v1", 1, "sha256:lb", 1));
+    image_store_add_to_index(store, _test_img_make("sha256:c", "app:v2", 1, "sha256:lc", 1));
+
+    assert_eq(vec_len(image_store_list(store)), 3, "three distinct references");
+    return 0;
+}
+
+fn test_image_index_remove() {
+    test_group("image_index_remove");
+    var root = "/tmp/stiva_img_idx_rm";
+    xunlink("/tmp/stiva_img_idx_rm/images.json");
+    var store = image_store_new(root);
+
+    # A real blob backing the image, so remove's cleanup can unlink it.
+    var data = "layer data";
+    var digest = sha256_digest(data, 10);
+    xunlink(_img_blob_path(root, digest));
+    image_store_store_blob(store, digest, data, 10);
+    assert_eq(image_store_has_blob(store, digest), 1, "blob present before remove");
+
+    var reference = image_ref_parse("nginx:latest");
+    var layers = vec_new();
+    vec_push(layers, layer_new(digest, 10,
+    "application/vnd.oci.image.layer.v1.tar+gzip"));
+    var img = image_new("sha256:configrm", reference, 10, layers, 1700000000);
+    image_store_add_to_index(store, img);
+    assert_eq(vec_len(image_store_list(store)), 1, "one image before remove");
+
+    assert_eq(image_store_remove(store, "sha256:configrm"), 1, "remove ok");
+    assert_eq(vec_len(image_store_list(store)), 0, "index empty after remove");
+    # Unreferenced blob cleaned up (rust-old: read_dir + remove_file walk).
+    assert_eq(image_store_has_blob(store, digest), 0, "unreferenced blob deleted");
+    return 0;
+}
+
+fn test_image_index_remove_missing() {
+    test_group("image_index_remove_missing");
+    var root = "/tmp/stiva_img_idx_rmmiss";
+    xunlink("/tmp/stiva_img_idx_rmmiss/images.json");
+    var store = image_store_new(root);
+    # rust-old: Err(ImageNotFound) → sentinel -1 here.
+    assert_eq(image_store_remove(store, "sha256:doesnotexist"), 0 - 1,
+    "remove nonexistent -> -1");
+    return 0;
+}
+
+fn test_image_index_remove_shared_blob() {
+    test_group("image_index_remove_shared_blob");
+    var root = "/tmp/stiva_img_idx_shared";
+    xunlink("/tmp/stiva_img_idx_shared/images.json");
+    var store = image_store_new(root);
+
+    var data = "shared layer";
+    var digest = sha256_digest(data, 12);
+    xunlink(_img_blob_path(root, digest));
+    image_store_store_blob(store, digest, data, 12);
+
+    var ref1 = image_ref_parse("app:v1");
+    var lv1 = vec_new();
+    vec_push(lv1, layer_new(digest, 12, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    image_store_add_to_index(store, image_new("sha256:img1", ref1, 12, lv1, 1700000000));
+
+    var ref2 = image_ref_parse("app:v2");
+    var lv2 = vec_new();
+    vec_push(lv2, layer_new(digest, 12, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    image_store_add_to_index(store, image_new("sha256:img2", ref2, 12, lv2, 1700000000));
+
+    # Remove img1 — shared blob survives (img2 still references it).
+    assert_eq(image_store_remove(store, "sha256:img1"), 1, "remove img1 ok");
+    assert_eq(image_store_has_blob(store, digest), 1, "shared blob survives");
+
+    # Remove img2 — now unreferenced → cleaned up.
+    assert_eq(image_store_remove(store, "sha256:img2"), 1, "remove img2 ok");
+    assert_eq(image_store_has_blob(store, digest), 0, "blob cleaned when unreferenced");
     return 0;
 }
 
@@ -2528,11 +2924,22 @@ fn main() {
     test_setup_overlay_no_layers();
     test_overlay_paths_fields();
     test_mount_volumes_empty();
+    test_stor_parse_octal();
+    test_unpack_layer_gz_roundtrip();
+    test_unpack_layer_missing_blob();
+    test_unpack_layer_not_gzip();
+    test_prepare_layers_missing_blob();
+    test_prepare_layers_dedup();
     test_build_default_tag();
     test_build_config_default();
     test_build_step_type_names();
     test_build_step_variants();
     test_build_sha256_digest();
+    test_build_parse_full_spec();
+    test_build_parse_minimal_spec();
+    test_build_parse_no_steps();
+    test_build_parse_missing_image();
+    test_build_parse_unknown_step_type();
     # network_nat + network_manager + encrypted
     test_nat_parse();
     test_network_manager_creates_default_network();
@@ -2624,6 +3031,13 @@ fn main() {
     test_mcp_content_part_resource();
     test_lib_default_config();
     test_lib_config_custom_values();
+    # image index
+    test_image_index_round_trip();
+    test_image_index_dedup_on_re_add();
+    test_image_index_multiple();
+    test_image_index_remove();
+    test_image_index_remove_missing();
+    test_image_index_remove_shared_blob();
     return assert_summary();
 }
 

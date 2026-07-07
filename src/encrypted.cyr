@@ -295,4 +295,5 @@ fn encrypt_layer(data, data_len, key_source, out_len) {
 #       AES-256-GCM; result = nonce(12) || ciphertext || tag; key must be 32 bytes
 #   fn rand_nonce() -> [u8; 12]                     getrandom::fill (→ lib/random.cyr random_bytes)
 # agnodrm exposes LUKS/verity via cryptsetup/veritysetup shells; AES-256-GCM
-# has no Cyrius stdlib codec yet — mirrors storage.cyr's gzip/zstd deferral.
+# is achievable via sigil's aes_gcm (this module is the no-`encrypted`-feature
+# arm anyway); the crypto bodies just aren't wired — NOT a Cyrius gap.

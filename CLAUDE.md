@@ -18,10 +18,16 @@
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0** = all 16 Rust modules → 25 Cyrius `src/*.cyr` domain modules
 + the CLI, **697 tests green**, `dist/stiva.cyr` built, pin 6.4.15. The **async
-container-execution surface** (kavach exec, cgroups, CRIU, tar/gzip/zstd, the
-registry HTTP client, JSON/YAML codecs, the async `Stiva` facade in
-`stiva_core.cyr`) is **DEFERRED to v3.1** in per-module `# ── DEFERRED ──` blocks
-— it needs Cyrius async runtime + codecs. `rust-old/` stays the oracle until then.
+container-execution surface** (kavach exec, cgroups, CRIU, layer codecs, the
+registry HTTP client, JSON assembly, the async `Stiva` facade in
+`stiva_core.cyr`) is **DEFERRED to v3.1 as porting work not yet done — NOT mostly
+Cyrius gaps**: JSON (`bayan`), HTTP/TLS (`sandhi`/`tls_native`), gzip/deflate
+(`sankoch`), and async (`lib/async.cyr`) all EXIST and are already in
+`[deps].stdlib`; the work is wiring them + mapping tokio async onto Cyrius's
+cooperative futures. TOML+JSON+base64 are in `bayan`, gzip/xz/lz4/bzip2 in `sankoch`. Only **zstd**,
+a **tar** codec, and a **YAML** parser are genuine stdlib gaps (see the roadmap's
+deferred-surface accounting; the per-module `# ── DEFERRED ──` blocks overstate
+"needs async/codec"). `rust-old/` stays the oracle until then.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.
