@@ -150,7 +150,10 @@ struct Container {
     created_at;  # DateTime<Utc> → epoch millis
     started_at;  # Option<DateTime<Utc>> → epoch millis | -1
     config;      # ContainerConfig*
-    exit_code;   # Option<i32> → exit code | -1
+    exit_status; # Option<i32> → exit code | -1. NB: named exit_status, NOT
+    # exit_code, to avoid a cycc field-name/offset collision with
+    # ContainerExecResult.exit_code (@0) that mis-resolves reads in a
+    # large compilation unit. JSON key stays "exit_code" (Rust parity).
 }
 
 # Construct a Container record (rust-old: struct literal in `create`).
@@ -167,7 +170,7 @@ fn container_new(id, name, image_id, image_ref, state, pid, created_at, started_
     c.created_at = created_at;
     c.started_at = started_at;
     c.config = config;
-    c.exit_code = exit_code;
+    c.exit_status = exit_code;
     return p;
 }
 
@@ -341,6 +344,293 @@ fn _container_cat2(a, b) {
     memcpy(out + la, b, lb);
     store8(out + la + lb, 0);
     return out;
+}
+
+# ── Container state persistence (rust-old: state.json round-trip) ─────
+# The stateful ContainerManager (RwLock/PubSub) is deferred, but its DISK
+# format is not async: state.json is a JSON array of Container records
+# (serde_json Vec<Container>). These fns implement the SYNCHRONOUS save/load
+# used by the single-shot CLI, via the bayan JSON codec (same pattern as
+# image.cyr's images.json index).
+#
+# Divergences (documented): `secrets` (Vec<kavach::SecretRef>) and `scan_policy`
+# are runtime handles with no persisted meaning here — serialized as [] / null
+# and dropped on load (re-injected at start in v3.1). `created_at`/`started_at`
+# are epoch-millis ints (the port's convention), not chrono RFC3339 strings.
+
+# cstr → JSON string value, or JSON null when 0 (Option<String>=None).
+fn _ct_str_or_null(s) {
+    if (s == 0) { return json_v_null(); }
+    return json_v_str_new(str_from(s));
+}
+
+# i64 → JSON int, or JSON null when the -1 None sentinel (pid/started_at/exit_code/score).
+fn _ct_int_or_null(v) {
+    if (v == 0 - 1) { return json_v_null(); }
+    return json_v_int_new(v);
+}
+
+# vec of cstr → JSON array of strings (empty array when 0).
+fn _ct_vec_str_to_jv(vec) {
+    var a = json_v_arr_new();
+    if (vec == 0) { return a; }
+    var n = vec_len(vec);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(a, json_v_str_new(str_from(vec_get(vec, i))));
+        i = i + 1;
+    }
+    return a;
+}
+
+# hashmap (cstr keys+vals) → JSON object (empty object when 0).
+fn _ct_map_to_jv(m) {
+    var o = json_v_obj_new();
+    if (m == 0) { return o; }
+    var keys = map_keys(m);
+    var n = vec_len(keys);
+    var i = 0;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        json_v_obj_set(o, str_from(k), json_v_str_new(str_from(map_get(m, k))));
+        i = i + 1;
+    }
+    return o;
+}
+
+# ContainerConfig* → JSON object.
+fn _container_config_to_jv(config) {
+    var c: ContainerConfig = config;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("name"), _ct_str_or_null(c.name));
+    json_v_obj_set(o, str_from("command"), _ct_vec_str_to_jv(c.command));
+    json_v_obj_set(o, str_from("env"), _ct_map_to_jv(c.env));
+    json_v_obj_set(o, str_from("volumes"), _ct_vec_str_to_jv(c.volumes));
+    json_v_obj_set(o, str_from("ports"), _ct_vec_str_to_jv(c.ports));
+    json_v_obj_set(o, str_from("network"), _ct_str_or_null(c.network));
+    json_v_obj_set(o, str_from("memory_limit"), json_v_int_new(c.memory_limit));
+    json_v_obj_set(o, str_from("cpu_shares"), json_v_int_new(c.cpu_shares));
+    json_v_obj_set(o, str_from("max_pids"), json_v_int_new(c.max_pids));
+    json_v_obj_set(o, str_from("user"), _ct_str_or_null(c.user));
+    json_v_obj_set(o, str_from("workdir"), _ct_str_or_null(c.workdir));
+    json_v_obj_set(o, str_from("detach"), json_v_bool_new(c.detach));
+    json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
+    json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
+    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # TODO(v3.1): kavach SecretRef handles
+    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # TODO(v3.1)
+    json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
+    json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
+    json_v_obj_set(o, str_from("min_isolation_score"), _ct_int_or_null(c.min_isolation_score));
+    json_v_obj_set(o, str_from("agent_id"), _ct_str_or_null(c.agent_id));
+    json_v_obj_set(o, str_from("domainname"), _ct_str_or_null(c.domainname));
+    json_v_obj_set(o, str_from("annotations"), _ct_map_to_jv(c.annotations));
+    json_v_obj_set(o, str_from("seccomp_profile"), _ct_str_or_null(c.seccomp_profile));
+    json_v_obj_set(o, str_from("log_max_bytes"), json_v_int_new(c.log_max_bytes));
+    json_v_obj_set(o, str_from("log_max_files"), json_v_int_new(c.log_max_files));
+    return o;
+}
+
+# Container* → JSON object (rust-old: serde on Container).
+fn container_to_jv(container) {
+    var ct: Container = container;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(ct.id)));
+    json_v_obj_set(o, str_from("name"), _ct_str_or_null(ct.name));
+    json_v_obj_set(o, str_from("image_id"), json_v_str_new(str_from(ct.image_id)));
+    json_v_obj_set(o, str_from("image_ref"), json_v_str_new(str_from(ct.image_ref)));
+    json_v_obj_set(o, str_from("state"), json_v_str_new(str_from(container_state_name(ct.state))));
+    json_v_obj_set(o, str_from("pid"), _ct_int_or_null(ct.pid));
+    json_v_obj_set(o, str_from("created_at"), json_v_int_new(ct.created_at));
+    json_v_obj_set(o, str_from("started_at"), _ct_int_or_null(ct.started_at));
+    json_v_obj_set(o, str_from("config"), _container_config_to_jv(ct.config));
+    json_v_obj_set(o, str_from("exit_code"), _ct_int_or_null(ct.exit_status));
+    return o;
+}
+
+# Read a JSON string field as a fresh cstr, or 0 if absent/null/non-string.
+fn _ct_jv_str(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return 0; }
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# Read a JSON int field, or `dflt` if absent/null.
+fn _ct_jv_int_or(v, key, dflt) {
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return dflt; }
+    if (json_v_is_null(f) == 1) { return dflt; }
+    return json_v_int(f);
+}
+
+# Read a JSON bool field as 1/0 (0 if absent).
+fn _ct_jv_bool(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return 0; }
+    if (json_v_is_bool(f) == 1) { return json_v_bool(f); }
+    return 0;
+}
+
+# Read a JSON string array as a vec of cstr (empty vec if absent).
+fn _ct_jv_vec_str(v, key) {
+    var out = vec_new();
+    var a = json_v_obj_get(v, key);
+    if (a == 0) { return out; }
+    if (json_v_is_arr(a) == 0) { return out; }
+    var n = json_v_arr_len(a);
+    var i = 0;
+    while (i < n) {
+        var e = json_v_arr_get(a, i);
+        if (json_v_is_str(e) == 1) { vec_push(out, str_cstr(json_v_str(e))); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Read a JSON object as a hashmap (cstr keys), or 0 when absent/empty.
+fn _ct_jv_map(v, key) {
+    var o = json_v_obj_get(v, key);
+    if (o == 0) { return 0; }
+    if (json_v_is_obj(o) == 0) { return 0; }
+    var n = json_v_obj_len(o);
+    if (n == 0) { return 0; }
+    var m = map_new();
+    var i = 0;
+    while (i < n) {
+        var val = json_v_obj_val(o, i);
+        if (json_v_is_str(val) == 1) {
+            map_set(m, str_cstr(json_v_obj_key(o, i)), str_cstr(json_v_str(val)));
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+# JSON object → ContainerConfig* (rust-old: deserialize ContainerConfig).
+fn _container_config_from_jv(v) {
+    var config = container_config_default();
+    if (v == 0) { return config; }
+    var c: ContainerConfig = config;
+    c.name = _ct_jv_str(v, "name");
+    c.command = _ct_jv_vec_str(v, "command");
+    c.env = _ct_jv_map(v, "env");
+    c.volumes = _ct_jv_vec_str(v, "volumes");
+    c.ports = _ct_jv_vec_str(v, "ports");
+    c.network = _ct_jv_str(v, "network");
+    c.memory_limit = _ct_jv_int_or(v, "memory_limit", 0);
+    c.cpu_shares = _ct_jv_int_or(v, "cpu_shares", 0);
+    c.max_pids = _ct_jv_int_or(v, "max_pids", 0);
+    c.user = _ct_jv_str(v, "user");
+    c.workdir = _ct_jv_str(v, "workdir");
+    c.detach = _ct_jv_bool(v, "detach");
+    c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
+    c.rootless = _ct_jv_bool(v, "rootless");
+    c.secrets = 0;                                       # TODO(v3.1)
+    c.scan_policy = 0;                                   # TODO(v3.1)
+    c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
+    c.backend = _ct_jv_str(v, "backend");
+    c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
+    c.agent_id = _ct_jv_str(v, "agent_id");
+    c.domainname = _ct_jv_str(v, "domainname");
+    c.annotations = _ct_jv_map(v, "annotations");
+    c.seccomp_profile = _ct_jv_str(v, "seccomp_profile");
+    c.log_max_bytes = _ct_jv_int_or(v, "log_max_bytes", 0);
+    c.log_max_files = _ct_jv_int_or(v, "log_max_files", 0);
+    return config;
+}
+
+# JSON object → Container* (rust-old: deserialize Container). 0 if id is missing.
+fn container_from_jv(v) {
+    if (v == 0) { return 0; }
+    var id = _ct_jv_str(v, "id");
+    if (id == 0) { return 0; }
+    var name = _ct_jv_str(v, "name");
+    var image_id = _ct_jv_str(v, "image_id");
+    if (image_id == 0) { image_id = ""; }
+    var image_ref = _ct_jv_str(v, "image_ref");
+    if (image_ref == 0) { image_ref = ""; }
+    var state = CONTAINER_STATE_CREATED;
+    var sname = _ct_jv_str(v, "state");
+    if (sname != 0) {
+        var s = container_state_from_name(sname);
+        if (s != 0 - 1) { state = s; }
+    }
+    var pid = _ct_jv_int_or(v, "pid", 0 - 1);
+    var created_at = _ct_jv_int_or(v, "created_at", 0);
+    var started_at = _ct_jv_int_or(v, "started_at", 0 - 1);
+    var config = _container_config_from_jv(json_v_obj_get(v, "config"));
+    var exit_code = _ct_jv_int_or(v, "exit_code", 0 - 1);
+    return container_new(id, name, image_id, image_ref, state, pid, created_at, started_at, config, exit_code);
+}
+
+# Persist a vec of Container* to `{root}/state.json` (atomic tmp+rename).
+# Best-effort: returns 1 on success, 0 on write/rename failure (only warns).
+fn container_state_save(root, containers) {
+    var arr = json_v_arr_new();
+    var n = vec_len(containers);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(arr, container_to_jv(vec_get(containers, i)));
+        i = i + 1;
+    }
+    var s = json_v_build_pretty(arr, 2);
+    var path = _container_cat2(root, "/state.json");
+    var tmp = _container_cat2(path, ".tmp");
+    if (file_write_all(tmp, str_data(s), str_len(s)) < 0) {
+        sakshi_warn("failed to write container state", strlen("failed to write container state"));
+        return 0;
+    }
+    if (sys_rename(tmp, path) < 0) {
+        sakshi_warn("failed to rename container state file", strlen("failed to rename container state file"));
+        return 0;
+    }
+    return 1;
+}
+
+# Load container records from `{root}/state.json` (rust-old: load_persisted_state).
+# Applies the Running/Paused → Stopped, pid → -1 restart fixup. A missing/
+# unparseable file yields a fresh empty vec.
+fn container_state_load(root) {
+    var out = vec_new();
+    var path = _container_cat2(root, "/state.json");
+    if (file_exists(path) == 0) { return out; }
+    var cap = 16777216;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap);
+    if (n <= 0) { return out; }
+    var rv = bayan_json_v_parse_str(buf, n);
+    if (rv == 0) {
+        sakshi_warn("failed to parse container state, starting fresh",
+        strlen("failed to parse container state, starting fresh"));
+        return out;
+    }
+    if (json_v_is_arr(rv) == 0) { return out; }
+    var cnt = json_v_arr_len(rv);
+    var i = 0;
+    while (i < cnt) {
+        var c = container_from_jv(json_v_arr_get(rv, i));
+        if (c != 0) {
+            container_fixup_after_restart(c);
+            vec_push(out, c);
+        }
+        i = i + 1;
+    }
+    sakshi_info("restored container state from disk", strlen("restored container state from disk"));
+    return out;
+}
+
+# Find a container by id OR name in a loaded vec. Returns the Container* or 0.
+fn container_state_find(containers, id) {
+    var n = vec_len(containers);
+    var i = 0;
+    while (i < n) {
+        var c = vec_get(containers, i);
+        var cc: Container = c;
+        if (streq(cc.id, id) == 1) { return c; }
+        if (cc.name != 0 && streq(cc.name, id) == 1) { return c; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # ── DEFERRED (needs async runtime + pub/sub + shared locks) ──────

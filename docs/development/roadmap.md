@@ -115,11 +115,18 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > image/storage/build/audit/network/registry surface. Verified emitting via ring
 > assertions in `tests/runpath.tcyr`.
 >
-> **CLI WIRED to the run path (3.0.0).** `stiva run <image> [cmd…]` runs a
-> container end-to-end (index lookup → `prepare_layers` → `setup_overlay` w/
-> rootfs fallback → `generate_spec` → `exec_container`, prints output + returns
-> exit code); `stiva images` and `stiva info` are live too. Verified against the
-> built binary. The other verbs still route to `_cli_deferred` (async surface).
+> **CLI WIRED to the run path + container-state layer (3.0.0).** `stiva run
+> <image> [cmd…]` runs a container end-to-end (index lookup → `prepare_layers` →
+> `setup_overlay` w/ rootfs fallback → `generate_spec` → `exec_container`, prints
+> output + returns exit code) and persists the record to `state.json`. The
+> synchronous container-state serde (`container_to_jv`/`from_jv` via bayan +
+> `container_state_save`/`load` w/ restart fixup) is ported. Live verbs: **run,
+> ps, stop, rm, inspect, images, rmi, info, convert** — verified against the
+> built binary. Deferred (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`,
+> `pause`/`unpause`, `checkpoint`/`restore`, pull/push/build-image, the stateful
+> async `ContainerManager` (RwLock/PubSub). Two cycc bugs filed + worked around
+> (identifier-dedup cap → test split; `exit_code` field-name/offset collision →
+> `Container.exit_code` renamed `exit_status`). Pin → 6.4.18.
 >
 > **Tests split** — the monolithic `tests/stiva.tcyr` hit the cycc identifier
 > dedup cap (16384); run-path tests live in `tests/runpath.tcyr`, both run via

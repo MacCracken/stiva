@@ -29,13 +29,26 @@ path was never async-blocked — the kavach Cyrius bundle is 100% blocking (0
 `security_score` are now implemented against it. stiva **launches containers in
 the kavach sandbox** as of 3.0.0.
 
-**CLI wired to the run path.** `stiva run <image> [cmd…]` now works end-to-end —
-image lookup (images.json index) → `prepare_layers` → `setup_overlay` (with the
-`container_root/rootfs` fallback) → `generate_spec` → `exec_container`, printing
-stdout/stderr and returning the container exit code (mirrors rust-old
-`container.rs` create()+start()). `stiva images` (list the index) and
-`stiva info` (version + kavach security score + backend availability) are also
-live. Detached `run -d`, `exec` (nsenter), and the rest remain deferred to v3.1.
+**CLI wired to the run path + container-state layer.** `stiva run <image> [cmd…]`
+works end-to-end — image lookup (images.json index) → `prepare_layers` →
+`setup_overlay` (with the `container_root/rootfs` fallback) → `generate_spec` →
+`exec_container`, printing stdout/stderr, returning the exit code, and
+**persisting the record to `state.json`** (mirrors rust-old `container.rs`
+create()+start()). The synchronous **container-state layer** is ported:
+`container_to_jv`/`container_from_jv` (full Container↔JSON serde via `bayan`) +
+`container_state_save`/`load` (atomic tmp+rename, with the Running→Stopped restart
+fixup). Live CLI verbs: **`run`, `ps` (-a), `stop`, `rm`, `inspect` (JSON),
+`images`, `rmi`, `info`, `convert`**. Detached `run -d`, `exec` (nsenter), `logs`,
+and the rest remain deferred to v3.1.
+
+Surfaced + filed a second cycc bug: a **struct field-name/offset collision** —
+`exit_code` declared in both `Container` (@72) and `ContainerExecResult` (@0)
+mis-resolved reads in a large compilation unit (silent 0). Worked around by
+renaming the Cyrius field `Container.exit_code` → `exit_status` (JSON key stays
+`exit_code`); filed `2026-07-07-struct-field-name-offset-collision.md`. Also
+filed the identifier-dedup-cap issue (the test suite is split into
+`tests/stiva.tcyr` + `tests/runpath.tcyr`, run via `cyrius tests tests/`).
+Toolchain pin → 6.4.18. **847 tests green.**
 
 **sakshi structured logging folded in.** The dropped Rust `tracing::*` surface is
 restored: `sakshi_set_level(SK_INFO)` at the CLI entry, run-path + implemented
