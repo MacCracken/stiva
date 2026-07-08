@@ -121,13 +121,17 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > output + returns exit code) and persists the record to `state.json`. The
 > synchronous container-state serde (`container_to_jv`/`from_jv` via bayan +
 > `container_state_save`/`load` w/ restart fixup) is ported. Live verbs: **run,
-> ps, stop, rm, inspect, images, rmi, tag, import, info, convert** — verified
-> against the built binary. **`import`** (rootfs tar → gzip → sha256 layer +
-> config blob → index) + **`tag`** land the real-image path: `import` → `run`
-> gunzips+untars the layer and executes it (codec round-trip closes). Deferred
-> (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`, `pause`/`unpause`,
-> `checkpoint`/`restore`, pull/push, `build` (needs a tar *writer*), the stateful
-> async `ContainerManager` (RwLock/PubSub). Two cycc bugs filed + worked around
+> ps, stop, rm, inspect, images, rmi, tag, import, export, gc, prune, info,
+> convert** — verified against the built binary. **`import`**/**`tag`** land the
+> real-image path (`import` → `run` gunzips+untars → executes). The **USTAR tar
+> writer** (`create_tar`/`export_rootfs`, GNU-`tar`-verified) closes the last
+> codec gap → **`export`** (rootfs → tar); **`gc`** (unreferenced-blob sweep) +
+> **`prune`** (stopped containers + unreferenced images) finish the management
+> surface. Deferred (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`,
+> `pause`/`unpause`, `checkpoint`/`restore`, pull/push, `build` (needs a
+> perms-preserving tar + build-step exec), the stateful async `ContainerManager`
+> (RwLock/PubSub). Genuine stdlib gap left: **zstd** (gzip layers work), **YAML**
+> (compose). Tests: 4 files (stiva/runpath/mgmt/integration = 851), pin 6.4.19. Two cycc bugs filed + worked around
 > (identifier-dedup cap → test split; `exit_code` field-name/offset collision →
 > `Container.exit_code` renamed `exit_status`). Pin → 6.4.18.
 >

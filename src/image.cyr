@@ -720,6 +720,53 @@ fn _image_reference(image) {
     return ii.reference;
 }
 
+# Garbage-collect unreferenced blobs (rust-old: gc). Collects the referenced
+# digest set (each indexed image's config id + layer digests), then unlinks
+# every blob in blobs/sha256 whose "sha256:<hex>" is not referenced. Returns
+# the count of blobs removed.
+fn image_store_gc(store) {
+    var root = _img_store_root(store);
+    var images = image_store_load_index(store);
+
+    var referenced = vec_new();
+    var ii = 0;
+    while (ii < vec_len(images)) {
+        var im: Image = vec_get(images, ii);
+        vec_push(referenced, im.id);
+        var layers = im.layers;
+        var lj = 0;
+        while (lj < vec_len(layers)) {
+            var ll: Layer = vec_get(layers, lj);
+            vec_push(referenced, ll.digest);
+            lj = lj + 1;
+        }
+        ii = ii + 1;
+    }
+
+    var removed = 0;
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var hex = str_cstr(vec_get(entries, ei));
+        var digest = _img_cat2("sha256:", hex);
+        var found = 0;
+        var ri = 0;
+        while (ri < vec_len(referenced)) {
+            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
+            ri = ri + 1;
+        }
+        if (found == 0) {
+            var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
+            xunlink(blob_path);
+            removed = removed + 1;
+        }
+        ei = ei + 1;
+    }
+    return removed;
+}
+
 # ── ImageRef constructor + import + tag ─────────────────────────
 
 # Construct an ImageRef directly (rust-old: ImageRef { .. }). Kept here in

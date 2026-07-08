@@ -480,6 +480,95 @@ fn _cli_import(h, root) {
     return CMDIT_EXIT_OK;
 }
 
+# `export <container> <output>` — tar a container's rootfs (rust-old:
+# Commands::Export → export_rootfs). The rootfs is {root}/containers/<id>/rootfs
+# (created by `run`).
+fn _cli_export(h, root) {
+    var vh = cmdit_new("stiva export");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 2) { _cli_puts("stiva export: usage: export <container> <output.tar>\n"); return CMDIT_EXIT_USAGE; }
+    var id = cmdit_positional(vh, 0);
+    var output = cmdit_positional(vh, 1);
+    var c = container_state_find(container_state_load(root), id);
+    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
+    var cc: Container = c;
+    var rootfs = _rt_cat3(root, "/containers/", _rt_cat2(cc.id, "/rootfs"));
+    if (export_rootfs(rootfs, output) == 0) { return CMDIT_EXIT_RUN; }
+    _cli_puts(output); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
+# `gc` — remove unreferenced blobs (rust-old: Commands::Gc → ImageStore gc).
+fn _cli_gc(h, root) {
+    var vh = cmdit_new("stiva gc");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    var store = image_store_new(root);
+    if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    var removed = image_store_gc(store);
+    _cli_puts("Removed "); _cli_puts(_rt_int_to_cstr(removed)); _cli_puts(" unreferenced blobs\n");
+    return CMDIT_EXIT_OK;
+}
+
+# `prune` — remove stopped containers + images no remaining container uses
+# (rust-old: Commands::Prune → lib.rs prune).
+fn _cli_prune(h, root) {
+    var vh = cmdit_new("stiva prune");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    var store = image_store_new(root);
+    if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+
+    # 1. drop Stopped containers.
+    var cs = container_state_load(root);
+    var kept = vec_new();
+    var removed_c = 0;
+    var n = vec_len(cs);
+    var i = 0;
+    while (i < n) {
+        var cc: Container = vec_get(cs, i);
+        if (cc.state == CONTAINER_STATE_STOPPED) {
+            removed_c = removed_c + 1;
+        } else {
+            vec_push(kept, vec_get(cs, i));
+        }
+        i = i + 1;
+    }
+    container_state_save(root, kept);
+
+    # 2. drop images no remaining container references (by image_id).
+    var images = image_store_load_index(store);
+    var removed_i = 0;
+    var m = vec_len(images);
+    var j = 0;
+    while (j < m) {
+        var im: Image = vec_get(images, j);
+        var refd = 0;
+        var k = 0;
+        while (k < vec_len(kept)) {
+            var kc: Container = vec_get(kept, k);
+            if (streq(kc.image_id, im.id) == 1) { refd = 1; }
+            k = k + 1;
+        }
+        if (refd == 0) {
+            image_store_remove(store, im.id);
+            removed_i = removed_i + 1;
+        }
+        j = j + 1;
+    }
+
+    _cli_puts("Removed "); _cli_puts(_rt_int_to_cstr(removed_c)); _cli_puts(" containers, ");
+    _cli_puts(_rt_int_to_cstr(removed_i)); _cli_puts(" images\n");
+    return CMDIT_EXIT_OK;
+}
+
 fn main() {
     alloc_init();
     kavach_init();               # register sandbox backends (idempotent; needed by the run path)
@@ -507,6 +596,9 @@ fn main() {
     if (v == V_INSPECT) { return _cli_inspect(h, _cli_root(h, f_root)); }
     if (v == V_TAG) { return _cli_tag(h, _cli_root(h, f_root)); }
     if (v == V_IMPORT) { return _cli_import(h, _cli_root(h, f_root)); }
+    if (v == V_EXPORT) { return _cli_export(h, _cli_root(h, f_root)); }
+    if (v == V_GC) { return _cli_gc(h, _cli_root(h, f_root)); }
+    if (v == V_PRUNE) { return _cli_prune(h, _cli_root(h, f_root)); }
     if (v == V_INFO) { return _cli_info(); }
     # Every other verb is the deferred async surface.
     return _cli_deferred(_cli_verb_name(v));

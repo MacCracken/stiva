@@ -4920,6 +4920,53 @@ fn _image_reference(image) {
     return ii.reference;
 }
 
+# Garbage-collect unreferenced blobs (rust-old: gc). Collects the referenced
+# digest set (each indexed image's config id + layer digests), then unlinks
+# every blob in blobs/sha256 whose "sha256:<hex>" is not referenced. Returns
+# the count of blobs removed.
+fn image_store_gc(store) {
+    var root = _img_store_root(store);
+    var images = image_store_load_index(store);
+
+    var referenced = vec_new();
+    var ii = 0;
+    while (ii < vec_len(images)) {
+        var im: Image = vec_get(images, ii);
+        vec_push(referenced, im.id);
+        var layers = im.layers;
+        var lj = 0;
+        while (lj < vec_len(layers)) {
+            var ll: Layer = vec_get(layers, lj);
+            vec_push(referenced, ll.digest);
+            lj = lj + 1;
+        }
+        ii = ii + 1;
+    }
+
+    var removed = 0;
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var hex = str_cstr(vec_get(entries, ei));
+        var digest = _img_cat2("sha256:", hex);
+        var found = 0;
+        var ri = 0;
+        while (ri < vec_len(referenced)) {
+            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
+            ri = ri + 1;
+        }
+        if (found == 0) {
+            var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
+            xunlink(blob_path);
+            removed = removed + 1;
+        }
+        ei = ei + 1;
+    }
+    return removed;
+}
+
 # ── ImageRef constructor + import + tag ─────────────────────────
 
 # Construct an ImageRef directly (rust-old: ImageRef { .. }). Kept here in
@@ -6169,6 +6216,182 @@ fn prepare_layers(store, layers) {
         i = i + 1;
     }
     return layer_dirs;
+}
+
+# ── USTAR tar WRITER + export ─────────────────────
+# rust-old/src/runtime.rs export_rootfs (~line 783) drives tar::Builder::
+# append_dir_all(".", rootfs) — a PLAIN (uncompressed) USTAR archive of the
+# whole rootfs, no gzip. This is the one genuine codec gap in the port (the
+# reader above extracts USTAR; nothing wrote it). The writer below produces
+# headers the _stor_extract_tar reader reads back (round-trip verified) and
+# that GNU `tar` accepts (checksum + magic exact).
+#
+# IN-MEMORY CAVEAT: the archive is assembled in a single heap buffer sized to
+# the full uncompressed total (sum over files of 512 header + roundup512(size),
+# plus the trailing 1024-byte zero terminator), then written in one shot. A
+# rootfs larger than addressable RAM is out of scope here — rust-old streamed
+# via tar::Builder; a streaming writer lands if that ever matters.
+
+# Round a byte count up to the next multiple of 512.
+#[must_use]
+fn _tar_round512(n) {
+    return ((n + 511) / 512) * 512;
+}
+
+# Write `val` as `width` zero-padded octal ASCII digits at `dst`, then a NUL
+# terminator at dst+width (USTAR numeric fields: `width` octal digits + NUL,
+# e.g. size = 11 digits + NUL @124, mode = 7 digits + NUL @100). The field
+# occupies width+1 bytes total. Digits are emitted right-to-left.
+fn _tar_octal(dst, val, width) {
+    var i = width - 1;
+    var v = val;
+    while (i >= 0) {
+        store8(dst + i, 48 + (v % 8));    # '0' + low octal digit
+        v = v / 8;
+        i = i - 1;
+    }
+    store8(dst + width, 0);               # trailing NUL
+    return 0;
+}
+
+# Fill a 512-byte USTAR header block at `hdr` for a regular file named `name`
+# (cstr, must be < 100 bytes) of `size` bytes. The block is assumed already
+# zeroed by the caller. Field layout (offsets/lengths per USTAR/POSIX.1-1988):
+#   name@0(100) mode@100(8) uid@108(8) gid@116(8) size@124(12) mtime@136(12)
+#   chksum@148(8) typeflag@156(1) linkname@157(100) magic@257(6) version@263(2)
+# Numeric fields are octal ASCII (digits + NUL). typeflag '0' (48) = regular
+# file. magic = "ustar\0", version = "00". mtime = 0.
+#
+# Checksum: the 8 chksum bytes are first set to ASCII spaces (0x20), ALL 512
+# header bytes are summed as unsigned, and that sum is written back as 6
+# zero-padded octal digits + NUL(0) + space(0x20) — the GNU-compatible form
+# _stor_parse_octal also reads.
+fn _tar_fill_header(hdr, name, size) {
+    var nlen = strlen(name);
+    memcpy(hdr, name, nlen);              # name@0 (rest stays NUL from zeroed block)
+
+    _tar_octal(hdr + 100, 420, 7);        # mode 0644 = 420 → "0000644"+NUL @100
+    _tar_octal(hdr + 108, 0, 7);          # uid 0 @108
+    _tar_octal(hdr + 116, 0, 7);          # gid 0 @116
+    _tar_octal(hdr + 124, size, 11);      # size @124 (11 octal + NUL)
+    _tar_octal(hdr + 136, 0, 11);         # mtime 0 @136
+
+    store8(hdr + 156, 48);                # typeflag '0' = regular file @156
+
+    # magic "ustar\0" @257, version "00" @263.
+    store8(hdr + 257, 117);  # 'u'
+    store8(hdr + 258, 115);  # 's'
+    store8(hdr + 259, 116);  # 't'
+    store8(hdr + 260, 97);   # 'a'
+    store8(hdr + 261, 114);  # 'r'
+    store8(hdr + 262, 0);    # NUL
+    store8(hdr + 263, 48);   # '0'
+    store8(hdr + 264, 48);   # '0'
+
+    # Checksum: fill chksum field with spaces, sum all 512 bytes.
+    var k = 0;
+    while (k < 8) { store8(hdr + 148 + k, 32); k = k + 1; }   # 8 spaces
+    var sum = 0;
+    var j = 0;
+    while (j < 512) { sum = sum + load8(hdr + j); j = j + 1; }
+    # Write: 6 octal digits + NUL(0) + space(0x20).
+    _tar_octal(hdr + 148, sum, 6);        # 6 digits + NUL @148..154 (NUL @154)
+    store8(hdr + 154, 0);                 # NUL after 6 digits
+    store8(hdr + 155, 32);                # trailing space
+    return 0;
+}
+
+# Build a plain (uncompressed) USTAR tar of ALL files under `src_dir` (cstr),
+# writing it to `out_path` (cstr). Mirrors rust-old export_rootfs
+# (tar::Builder::append_dir_all(".", rootfs) — PLAIN tar, no gzip). Entry
+# names are each file's path RELATIVE to src_dir (the src_dir prefix and a
+# leading '/' stripped). Returns 1 on success, 0 on failure (a read error, or
+# a name that overflows the 100-byte USTAR name field) with
+# stiva_err_print(STIVA_ERR_STORAGE, detail).
+#
+# See the IN-MEMORY CAVEAT above: the whole archive is held in one heap buffer.
+fn create_tar(src_dir, out_path) {
+    var src = str_from(src_dir);          # dir_walk needs a Str; str_data(path)
+    var files = vec_new();
+    dir_walk(src, files);
+    var nf = vec_len(files);
+
+    # src_dir prefix length to strip from each absolute walk path. dir_walk
+    # joins entries onto `src` with '/', so a child is "<src_dir>/<rel>"; we
+    # strip len(src_dir) then any leading '/'.
+    var srclen = strlen(src_dir);
+
+    # ── Pass 1: read every file, compute the relative name, tally the total
+    # archive size (512 header + roundup512(size) per file). Cache the cstr
+    # name, the data buffer, and the size so pass 2 needs no re-read.
+    var names = vec_new();
+    var datas = vec_new();
+    var sizes = vec_new();
+    var total = 0;
+    var i = 0;
+    while (i < nf) {
+        var full = str_cstr(vec_get(files, i));   # Str → fresh cstr
+        # Relative name = full[srclen..], minus any leading '/'.
+        var rstart = srclen;
+        if (load8(full + rstart) == 47) { rstart = rstart + 1; }   # '/' = 47
+        var rel = _stor_dup(full + rstart);
+
+        if (strlen(rel) >= 100) {
+            stiva_err_print(STIVA_ERR_STORAGE, "tar entry name exceeds 100 bytes");
+            return 0;
+        }
+
+        var len_cell = alloc(8);
+        var data = _stor_read_file(full, len_cell);
+        if (data == 0) {
+            stiva_err_print(STIVA_ERR_STORAGE, "tar: cannot read source file");
+            return 0;
+        }
+        var sz = load64(len_cell);
+
+        vec_push(names, rel);
+        vec_push(datas, data);
+        vec_push(sizes, sz);
+        total = total + 512 + _tar_round512(sz);
+        i = i + 1;
+    }
+    total = total + 1024;                 # two trailing all-zero blocks
+
+    # ── Pass 2: assemble. alloc zeroes the buffer, so header padding, name
+    # tails, data tails, and the terminator are already NUL.
+    var buf = alloc(total);
+    var pos = 0;
+    var k = 0;
+    while (k < nf) {
+        var name = vec_get(names, k);
+        var data = vec_get(datas, k);
+        var sz = vec_get(sizes, k);
+
+        _tar_fill_header(buf + pos, name, sz);
+        pos = pos + 512;
+        if (sz > 0) {
+            memcpy(buf + pos, data, sz);
+            pos = pos + _tar_round512(sz);
+        }
+        k = k + 1;
+    }
+    # pos now sits at the start of the (already-zeroed) 1024-byte terminator.
+
+    var wrote = file_write_all(out_path, buf, total);
+    if (wrote < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "tar: cannot write output archive");
+        return 0;
+    }
+    return 1;
+}
+
+# Export a container rootfs as a plain USTAR tarball (rust-old runtime.rs
+# export_rootfs, ~line 783). Thin wrapper over create_tar. `rootfs` and
+# `output` are cstrs. Returns 1 on success, 0 on failure (create_tar has
+# already reported via stiva_err_print).
+fn export_rootfs(rootfs, output) {
+    sakshi_info("exporting rootfs to tar", strlen("exporting rootfs to tar"));
+    return create_tar(rootfs, output);
 }
 
 # ── DEFERRED (needs a zstd codec) ────────────────────

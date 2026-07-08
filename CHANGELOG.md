@@ -50,6 +50,21 @@ image (`image_import`, mirrors rust-old `import_rootfs`). `stiva tag <src>
 (the gzip↔tar codec round-trip closes), so stiva runs real imported images
 without a hand-written `images.json`.
 
+**Tar WRITER (the one genuine codec gap) + `export` + `gc` + `prune`.**
+`create_tar`/`export_rootfs` (`storage.cyr`) emit a byte-exact USTAR archive
+(header + checksum + 512-padding + two-zero-block terminator) — verified GNU
+`tar tf`/`tvf`/`xf`-readable and round-tripping through the extractor. `stiva
+export <ctr> <out.tar>` tars a container rootfs; `stiva gc` sweeps unreferenced
+blobs (`image_store_gc`); `stiva prune` drops Stopped containers + unreferenced
+images. Live CLI is now **run · ps · stop · rm · inspect · images · rmi · tag ·
+import · export · gc · prune · info · convert**. Remaining deferred (async):
+`run -d`, `exec`, `logs -f`, `stats`, `pause`/`unpause`, `checkpoint`/`restore`,
+`pull`/`push`, `build` (needs perms-preserving tar + build-step exec).
+
+Tests split into **four files** (`stiva.tcyr` 610 · `runpath.tcyr` 163 ·
+`mgmt.tcyr` 76 · integration 2 = **851**), run via `cyrius tests tests/`, to stay
+under the cycc identifier-dedup cap. Pin → 6.4.19.
+
 Surfaced + filed a second cycc bug: a **struct field-name/offset collision** —
 `exit_code` declared in both `Container` (@72) and `ContainerExecResult` (@0)
 mis-resolved reads in a large compilation unit (silent 0). Worked around by
