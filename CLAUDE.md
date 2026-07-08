@@ -13,21 +13,27 @@
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ⚠️ Porting Status — v3.0.0: Rust → Cyrius (STRUCTURE COMPLETE; async → v3.1)
+## ✅ Porting Status — v3.0.0 RELEASED: Rust → Cyrius (synchronous single-node runtime; async → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
-pattern). **v3.0.0** = all 16 Rust modules → 25 Cyrius `src/*.cyr` domain modules
-+ the CLI, **697 tests green**, `dist/stiva.cyr` built, pin 6.4.15. The **async
-container-execution surface** (kavach exec, cgroups, CRIU, layer codecs, the
-registry HTTP client, JSON assembly, the async `Stiva` facade in
-`stiva_core.cyr`) is **DEFERRED to v3.1 as porting work not yet done — NOT mostly
-Cyrius gaps**: JSON (`bayan`), HTTP/TLS (`sandhi`/`tls_native`), gzip/deflate
-(`sankoch`), and async (`lib/async.cyr`) all EXIST and are already in
-`[deps].stdlib`; the work is wiring them + mapping tokio async onto Cyrius's
-cooperative futures. TOML+JSON+base64 are in `bayan`, gzip/xz/lz4/bzip2 in `sankoch`. Only **zstd**,
-a **tar** codec, and a **YAML** parser are genuine stdlib gaps (see the roadmap's
-deferred-surface accounting; the per-module `# ── DEFERRED ──` blocks overstate
-"needs async/codec"). `rust-old/` stays the oracle until then.
+pattern). **v3.0.0 = a working single-node OCI runtime**: all 16 Rust modules → 25
+Cyrius `src/*.cyr` domain modules + a **19-verb CLI** (run/ps/stop/rm/inspect/
+images/rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert)
+that imports, runs, and manages real containers end-to-end. **859 tests** across 4
+`.tcyr` files (run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.19**.
+Parity ≈ **61%** of the Rust surface (314/515 items) — the port stops cleanly at the
+sync/async boundary (algorithm-dense modules 85–100%; the low-parity ones are async
+wrappers whose capability is delivered synchronously). See `docs/development/roadmap.md`
+for the parity snapshot + v3.0.x (sync backlog) / v3.1 (async) split.
+
+The remaining **async container-orchestration surface** — the async `ContainerManager`
++ `Stiva` facade, registry HTTP pull/push, detached `run -d`, nsenter `exec`, CRIU,
+MCP live dispatch — is the **v3.1 async milestone**: mapping tokio-shaped async onto
+Cyrius `lib/async.cyr` (weaker cooperative futures; tracked in a filed cyrius issue).
+NOT mostly Cyrius gaps — JSON/TOML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
+gzip/xz/lz4/bzip2 (`sankoch`), async (`lib/async.cyr`) all EXIST. Genuine stdlib gaps
+are narrow: **zstd** (sankoch) and a **YAML** parser (bayan); the USTAR **tar writer**
+is now implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle until v3.1.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.

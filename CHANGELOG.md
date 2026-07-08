@@ -3,12 +3,22 @@
 All notable changes to stiva are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.0.0] — Cyrius Port
+## [3.0.0] — Cyrius Port · synchronous single-node runtime
 
-Ported stiva from Rust to the **Cyrius** language (AGNOS ecosystem port pattern).
-All 16 Rust modules → 25 Cyrius domain modules + the CLI. The Rust crate is
-frozen at `rust-old/` as the parity oracle. See `docs/development/roadmap.md`
-(v3.0.0) for the module-by-module ledger.
+**Milestone: a working single-node OCI runtime in Cyrius.** Ported stiva from Rust
+to the **Cyrius** language (AGNOS ecosystem port pattern). All 16 Rust modules → 25
+Cyrius domain modules + the CLI. The Rust crate is frozen at `rust-old/` as the
+parity oracle. See `docs/development/roadmap.md` for the module-by-module ledger
+and the v3.0.0 parity snapshot.
+
+**Parity: ~61% of the Rust surface (314/515 items), 8 true gaps** — the port stops
+cleanly at the sync/async boundary. Algorithm-dense modules are at 85–100% (audit
+100 · network 94 · health 92 · storage 89 · ansamblu 85); the low-parity modules
+(container 20 · core+cli 13) are async orchestration wrappers whose *capability* is
+delivered by a synchronous re-architecture — `stiva run <image>` launches a real
+container end-to-end. Full 1:1 parity (pull/push, `run -d`, `exec`, CRIU, MCP live
+dispatch) is the **v3.1 async milestone**. **855 tests** across 4 files, pin 6.4.19.
+Three cycc bugs found + filed upstream; the language was never modified from stiva.
 
 **Scope**: the port covers every module's types, pure logic, and syscall-driven
 surface, **plus the synchronous sandbox run path**, with **820 tests green**
@@ -64,11 +74,17 @@ reads `memory.current`/`memory.max`/`cpu.stat:usage_usec`/`pids.{current,max}`;
 `apply_cgroup_limits`). The read/parse helpers are unit-tested against fixture
 files ("max"→0, usage_usec parse); the CLI verbs gate on a live PID (our one-shot
 foreground containers are Stopped, so they correctly report "no running process"
-— the happy path needs detached containers, v3.1). Live CLI is now **run · ps ·
-stop · rm · inspect · images · rmi · tag · import · export · stats · pause ·
-unpause · gc · prune · info · convert** (17 verbs). Remaining deferred (async):
-`run -d`, `exec` (nsenter), `logs -f`, `checkpoint`/`restore`, `pull`/`push`,
-`build` (needs perms-preserving tar + build-step exec).
+— the happy path needs detached containers, v3.1).
+
+**`logs` + `wait`.** `run` now writes each container's output to
+`{root}/containers/<id>/container.log` (byte-exact `write_log` template);
+`stiva logs <ctr> [-n N]` tails it (`container_log_tail` via the ported
+`container_tail_start`); `stiva wait <ctr>` prints + exits with the recorded
+exit code. Live CLI is now **run · ps · stop · rm · inspect · images · rmi · tag ·
+import · export · stats · pause · unpause · logs · wait · gc · prune · info ·
+convert** (19 verbs). Remaining deferred (async/privileged): `run -d`, `exec`
+(nsenter), `logs -f` (follow), `top`, `checkpoint`/`restore`, `pull`/`push`,
+`build` (build-step exec + perms tar).
 
 Tests split into **four files** (`stiva.tcyr` 610 · `runpath.tcyr` 163 ·
 `mgmt.tcyr` 76 · integration 2 = **851**), run via `cyrius tests tests/`, to stay

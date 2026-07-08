@@ -75,94 +75,76 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] **Test parity** — 697 Cyrius tests (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`, all green; `cyrius bench`/`fmt`/`lint` clean.
 - [x] **distlib** → `dist/stiva.cyr` (8,863-line bundle); version → **3.0.0**.
 
-> **v3.0.0 = the PORT (structure + pure logic + syscall surface). The rest is
-> DEFERRED to v3.1 — as PORTING WORK, not (mostly) Cyrius gaps.**
+> ## ✅ v3.0.0 — RELEASE: synchronous single-node runtime
 >
-> **CLOSED before the 3.0.0 tag** (the achievable ones, using the existing stdlib
-> I'd wrongly blamed as "no codec"):
-> - `build.parse_build_spec` — Stivafile TOML → BuildSpec via **`bayan`** TOML.
-> - `image` **images.json index** — load/save/add/list/remove via **`bayan`** JSON.
-> - `storage.unpack_layer`/`prepare_layers` — **gzip** via **`sankoch`** + a
->   hand-rolled USTAR **tar reader**.
+> **Called here (2026-07-07).** stiva is a working single-node OCI runtime in
+> Cyrius: it imports, runs, and manages real containers via a 19-verb CLI, with
+> the algorithm-dense subsystems at 85–100% parity. Full 1:1 parity with the Rust
+> oracle is the v3.1 async milestone. **855 tests** (stiva 610 · runpath 171 ·
+> mgmt 76 · integration 2), `dist/stiva.cyr` built, pin 6.4.19. Three cycc bugs
+> found + filed upstream (identifier-dedup cap, async-parity gaps, struct
+> field-name/offset collision) — the language was never modified from stiva.
 >
-> **Still deferred, but achievable now (bayan/sankoch — just not ported):**
-> `ansamblu.parse_ansamblu` (bayan TOML), `oci.parse_bundle` (bayan JSON),
-> `build_cache_key` (bayan JSON), audit metadata round-trip, `build` tar.gz layer
-> **writer**. Labeled accurately in each module ("achievable via bayan, not a
-> Cyrius gap").
+> ### Parity snapshot (16-module audit, 2026-07-07)
+> **Structural parity ≈ 61% (314 / 515 Rust surface items); only 8 true gaps.**
+> The remaining surface is one coherent band — the port stopped exactly at the
+> sync/async boundary, not on scattered holes.
 >
-> **Genuine stdlib gaps (real v3.1 stdlib work):**
-> - **zstd** — `sankoch` has gzip/xz/lz4/bzip2 but not zstd → zstd-compressed
->   OCI layers (`unpack_tar_zstd`) blocked; gzip layers work.
-> - **YAML** — `bayan` has JSON/TOML/base64 but no YAML → `compose_yaml_to_toml`
->   blocked.
+> | Tier | Modules (parity %) |
+> |---|---|
+> | **done 85–100%** | audit 100 · network 94 · health 92 · storage 89 · ansamblu 85 |
+> | **mid 46–76%** | fleet+agent 76 · image 72 · oci/intents 67 · encrypted 67 · build 64 · runtime 61 · mcp 47 · registry 46 |
+> | **async-wrapped** | container 20 · core+cli 13 (the ContainerManager / Stiva-facade methods aren't ported 1:1) |
 >
- **SANDBOX RUN PATH — NOW WIRED (synchronous, 3.0.0).** The audit that claimed
-> the run path was "async-blocked" was WRONG: the kavach Cyrius bundle is 100%
-> blocking (0 `async fn` in 9061 lines). So the core execution surface is now
-> implemented against it, no async runtime needed:
-> - `generate_spec` (Container → RuntimeSpec, pure),
-> - `build_sandbox` (policy_basic + mem/cpu/pid limits + backend cascade +
->   config + `sandbox_create` + transition-to-RUNNING),
-> - `exec_container` (`sandbox_exec` → `ExecResult` → `ContainerExecResult`),
-> - `send_signal` (`sys_kill`), `resolve_cgroup_base` + `apply_cgroup_limits`
->   (cgroup v2 fs writes), `security_score`/`security_score_for` (`score_backend`).
+> **Capability ≠ shape.** container(20%)/core+cli(13%) count the async
+> `ContainerManager` + 40-method `Stiva` facade as unported — structurally true —
+> but the run path was **re-architected synchronously** and the CLI wired directly
+> to it, so `stiva run <image>` launches a container end-to-end (verified on the
+> binary). The audit measured shape parity, not capability.
 >
-> **sakshi structured logging FOLDED IN (3.0.0).** The 210 dropped Rust `tracing::*`
-> calls are being restored: the run path emits `sakshi_info`/`_debug`/`_warn`/
-> `_error` (init `sakshi_set_level(SK_INFO)` at the CLI entry), and a byte-exact,
-> identifier-neutral sweep added the oracle's log points to the implemented
-> image/storage/build/audit/network/registry surface. Verified emitting via ring
-> assertions in `tests/runpath.tcyr`.
+> **Deferred by blocker:** async 123 (69%) · not-ported 17 · codec 15 · privilege
+> 11 · subprocess 7 · http 6.
 >
-> **CLI WIRED to the run path + container-state layer (3.0.0).** `stiva run
-> <image> [cmd…]` runs a container end-to-end (index lookup → `prepare_layers` →
-> `setup_overlay` w/ rootfs fallback → `generate_spec` → `exec_container`, prints
-> output + returns exit code) and persists the record to `state.json`. The
-> synchronous container-state serde (`container_to_jv`/`from_jv` via bayan +
-> `container_state_save`/`load` w/ restart fixup) is ported. Live verbs: **run,
-> ps, stop, rm, inspect, images, rmi, tag, import, export, stats, pause, unpause,
-> gc, prune, info, convert** (17) — verified against the built binary. **`stats`**
-> (cgroup v2 reads) + **`pause`/`unpause`** (cgroup.freeze writes) are synchronous
-> (mis-marked async in the oracle); read/parse helpers unit-tested, CLI gates on a
-> live PID. **`import`**/**`tag`** land the
-> real-image path (`import` → `run` gunzips+untars → executes). The **USTAR tar
-> writer** (`create_tar`/`export_rootfs`, GNU-`tar`-verified) closes the last
-> codec gap → **`export`** (rootfs → tar); **`gc`** (unreferenced-blob sweep) +
-> **`prune`** (stopped containers + unreferenced images) finish the management
-> surface. Deferred (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`,
-> `pause`/`unpause`, `checkpoint`/`restore`, pull/push, `build` (needs a
-> perms-preserving tar + build-step exec), the stateful async `ContainerManager`
-> (RwLock/PubSub). Genuine stdlib gap left: **zstd** (gzip layers work), **YAML**
-> (compose). Tests: 4 files (stiva/runpath/mgmt/integration = 851), pin 6.4.19. Two cycc bugs filed + worked around
-> (identifier-dedup cap → test split; `exit_code` field-name/offset collision →
-> `Container.exit_code` renamed `exit_status`). Pin → 6.4.18.
->
-> **Tests split** — the monolithic `tests/stiva.tcyr` hit the cycc identifier
-> dedup cap (16384); run-path tests live in `tests/runpath.tcyr`, both run via
-> `cyrius tests tests/`. Cap filed as cyrius issue
-> `2026-07-07-lexid-dedup-cap-too-low-for-large-consumers.md`.
->
-> **Still deferred to v3.1 — the genuinely async / non-trivial surface:**
-> detached `run -d` (needs a policy-threading `spawn` in kavach — `persistent_spawn`
-> can't apply the seccomp/cgroup/secret pipeline, so a half-isolated daemon path
-> is intentionally NOT shipped), streaming `logs -f`, concurrent layer downloads,
-> the registry HTTP client, CRIU checkpoint/restore (criu subprocess), nsenter
-> `exec`, and the ~40-method async `Stiva` facade in `stiva_core.cyr`. HTTP/TLS
-> (`sandhi`/`tls_native`) + `lib/async.cyr` EXIST but the cooperative-future model
-> is weaker than tokio — tracked in cyrius issue
-> `2026-07-07-async-runtime-tokio-parity-gaps.md`. Plus the codec gaps: **zstd**
-> and a **tar writer** (`sankoch`), **YAML** (`bayan`).
->
-> So v3.1 is chiefly: the tokio→`lib/async.cyr` async port (detached/logs/registry
-> HTTP/facade) + zstd/tar-writer/YAML. `rust-old/` stays the oracle until then.
-> (NB: the per-module `# ── DEFERRED ──` blocks still carry the old "needs async/
-> codec" overstatement for the un-ported surface — read them against this
-> accounting.)
+> **Live CLI (19):** run · ps · stop · rm · inspect · images · rmi · tag · import ·
+> export · stats · pause · unpause · logs · wait · gc · prune · info · convert.
 
 ---
 
-## v3.1.0 — Agnos Container Support
+## v3.0.x — Synchronous backlog (bring modules toward 100%, NO async)
+
+Achievable now with the existing stdlib (bayan JSON/TOML, sankoch gzip, the new
+USTAR tar writer, syscall dir-walks) — the `not-ported` + sync-`codec` items. Each
+lifts a mid-tier module without touching the async runtime:
+
+- [ ] `oci` — `parse_bundle` / `build_state` / `to_oci_status` (JSON via bayan) → oci 67% → ~100%
+- [ ] `intents` — variant payload fields (Run/Stop/Pull/Ansamblu/Scale/Inspect)
+- [ ] `image` — `verify_integrity` (blob dir-walk + re-hash) → image 72% → ~90%
+- [ ] `build` — `build_cache_key` + OCI config/manifest JSON assembly; layer tar via the new tar writer (gzip only; zstd → v3.1) → build 64% → ~85%
+- [ ] `registry` — credential store (fs + JSON) + `RegistryConfig`/`MirrorConfig` structs (the async HTTP client stays v3.1)
+- [ ] `mcp` — structured-output JSON assembly for the handlers that don't need the async driver
+- [ ] `runtime` — `is_descendant_of` + `container_top` (/proc walk); `copy_into/from_container` (fs recursion)
+
+---
+
+## v3.1.0 — Async milestone (complete the port)
+
+The one architectural band that remains: ~69% of the deferred surface is a single
+blocker — mapping the Rust tokio-shaped async onto Cyrius `lib/async.cyr`. Landing
+it unblocks ~123 items at once and takes parity 61% → ~90%+ (most "unported"
+surface is thin async wrappers over the already-ported sync core).
+
+- [ ] **Async runtime mapping** — tokio → `lib/async.cyr` (cooperative futures); tracked in cyrius issue `2026-07-07-async-runtime-tokio-parity-gaps.md` (may warrant its own repo, folded back to stdlib)
+- [ ] **Async ContainerManager + Stiva facade** — `RwLock<HashMap>` state + majra PubSub events + the ~40 facade methods → full create/start/stop/exec/wait/`logs -f` lifecycle (supersedes the synchronous CLI re-architecture)
+- [ ] **Registry HTTP client** — pull/push/auth/token over `sandhi`/`tls_native` (async net + JSON)
+- [ ] **Detached `run -d`** — needs a policy-threading spawn in kavach (`persistent_spawn` can't apply seccomp/cgroup/secrets); no half-isolated daemon ships until it lands
+- [ ] **exec (nsenter) + CRIU checkpoint/restore** — external-subprocess paths, gated on a running/detached container
+- [ ] **Codec gaps** — **zstd** (sankoch) for zstd layers; **YAML** (bayan) for `convert compose`; perms-preserving tar for `build`/`export` fidelity
+- [ ] **MCP live dispatch** — wire the 9 tool handlers to the async Stiva driver
+
+---
+
+## v3.2.0 — Agnos Container Support
+
 
 Run containers on the AGNOS kernel itself (the native target, not a Linux host).
 Unblocked by the agnos 1.45.x ring-3 net/socket syscall surface (#45–#57,

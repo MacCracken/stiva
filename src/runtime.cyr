@@ -920,6 +920,24 @@ fn exec_container(spec) {
     ExecResult_timed_out(r));
 }
 
+# Write a container's exec output to its log file (rust-old: write_log). The
+# template is byte-exact: "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code:
+# {} | duration: {}ms | timed_out: {} ===\n". Best-effort; ignores write errors.
+fn write_container_log(log_path, result) {
+    var rr: ContainerExecResult = result;
+    var so = rr.stdout;
+    if (so == 0) { so = ""; }
+    var se = rr.stderr;
+    if (se == 0) { se = ""; }
+    var s = _rt_cat3("=== stdout ===\n", so, "\n=== stderr ===\n");
+    s = _rt_cat3(s, se, "\n=== exit_code: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.exit_code), " | duration: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.duration_ms), "ms | timed_out: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.timed_out), " ===\n");
+    file_write_all(log_path, s, strlen(s));
+    return 0;
+}
+
 # ── Security scoring (rust-old: security_score / security_score_for) ──
 # kavach score_backend returns the isolation strength as an i64 (0..100); the
 # Rust StrengthScore wrapper collapses to that integer in the dist. No async.

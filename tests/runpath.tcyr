@@ -622,8 +622,22 @@ fn test_cgroup_read_helpers() {
     return 0;
 }
 
+# ── container_log_tail (rust-old log_tail) ──
+fn test_container_log_tail() {
+    test_group("container_log_tail");
+    var lp = _rt_cat2("/tmp/stiva-log-", _rt_int_to_cstr(getpid()));
+    var content = "line1\nline2\nline3\nline4\n";
+    file_write_all(lp, content, strlen(content));
+    assert_eq(streq(container_log_tail(lp, 2), "line3\nline4\n"), 1, "tail 2 lines");
+    assert_eq(streq(container_log_tail(lp, 0), content), 1, "tail 0 = whole file");
+    assert_eq(streq(container_log_tail(lp, 99), content), 1, "tail > total = whole file");
+    assert_eq(container_log_tail("/tmp/stiva-nolog-xyz-zzz", 5), 0, "missing -> 0");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_container_log_tail();
     test_cgroup_read_helpers();
     test_image_ref_new();
     test_image_store_tag();

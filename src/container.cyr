@@ -306,6 +306,39 @@ fn container_tail_start(total, want) {
     return total - want;
 }
 
+# Read a container log file and return the last `n` lines (rust-old: log_tail;
+# content.lines() + saturating_sub). n <= 0 → the whole file. Returns a cstr
+# pointer (into the read buffer), or 0 if the log file is absent. 4 MiB cap.
+fn container_log_tail(log_path, n) {
+    var cap = 4194304;
+    var buf = alloc(cap);
+    var len = file_read_all(log_path, buf, cap - 1);
+    if (len < 0) { return 0; }
+    store8(buf + len, 0);
+    if (n <= 0) { return buf; }
+
+    # total line count (lines() ignores a single trailing newline).
+    var nl = 0;
+    var i = 0;
+    while (i < len) {
+        if (load8(buf + i) == 10) { nl = nl + 1; }
+        i = i + 1;
+    }
+    var total = nl;
+    if (len > 0 && load8(buf + len - 1) != 10) { total = total + 1; }
+
+    var start = container_tail_start(total, n);
+    if (start <= 0) { return buf; }
+    # advance past `start` newlines to the start of the tail.
+    var seen = 0;
+    var pos = 0;
+    while (pos < len && seen < start) {
+        if (load8(buf + pos) == 10) { seen = seen + 1; }
+        pos = pos + 1;
+    }
+    return buf + pos;
+}
+
 # ── small local string helpers (no external deps) ───────────────
 
 # Format a non-negative i64 as a fresh decimal NUL-terminated cstr. Used

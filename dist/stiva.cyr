@@ -8131,6 +8131,24 @@ fn exec_container(spec) {
     ExecResult_timed_out(r));
 }
 
+# Write a container's exec output to its log file (rust-old: write_log). The
+# template is byte-exact: "=== stdout ===\n{}\n=== stderr ===\n{}\n=== exit_code:
+# {} | duration: {}ms | timed_out: {} ===\n". Best-effort; ignores write errors.
+fn write_container_log(log_path, result) {
+    var rr: ContainerExecResult = result;
+    var so = rr.stdout;
+    if (so == 0) { so = ""; }
+    var se = rr.stderr;
+    if (se == 0) { se = ""; }
+    var s = _rt_cat3("=== stdout ===\n", so, "\n=== stderr ===\n");
+    s = _rt_cat3(s, se, "\n=== exit_code: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.exit_code), " | duration: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.duration_ms), "ms | timed_out: ");
+    s = _rt_cat3(s, _rt_int_to_cstr(rr.timed_out), " ===\n");
+    file_write_all(log_path, s, strlen(s));
+    return 0;
+}
+
 # ── Security scoring (rust-old: security_score / security_score_for) ──
 # kavach score_backend returns the isolation strength as an i64 (0..100); the
 # Rust StrengthScore wrapper collapses to that integer in the dist. No async.
@@ -8482,6 +8500,39 @@ fn container_should_rotate(log_max_bytes, log_max_files, current_size, pending_l
 fn container_tail_start(total, want) {
     if (want >= total) { return 0; }
     return total - want;
+}
+
+# Read a container log file and return the last `n` lines (rust-old: log_tail;
+# content.lines() + saturating_sub). n <= 0 → the whole file. Returns a cstr
+# pointer (into the read buffer), or 0 if the log file is absent. 4 MiB cap.
+fn container_log_tail(log_path, n) {
+    var cap = 4194304;
+    var buf = alloc(cap);
+    var len = file_read_all(log_path, buf, cap - 1);
+    if (len < 0) { return 0; }
+    store8(buf + len, 0);
+    if (n <= 0) { return buf; }
+
+    # total line count (lines() ignores a single trailing newline).
+    var nl = 0;
+    var i = 0;
+    while (i < len) {
+        if (load8(buf + i) == 10) { nl = nl + 1; }
+        i = i + 1;
+    }
+    var total = nl;
+    if (len > 0 && load8(buf + len - 1) != 10) { total = total + 1; }
+
+    var start = container_tail_start(total, n);
+    if (start <= 0) { return buf; }
+    # advance past `start` newlines to the start of the tail.
+    var seen = 0;
+    var pos = 0;
+    while (pos < len && seen < start) {
+        if (load8(buf + pos) == 10) { seen = seen + 1; }
+        pos = pos + 1;
+    }
+    return buf + pos;
 }
 
 # ── small local string helpers (no external deps) ───────────────
