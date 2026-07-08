@@ -7902,6 +7902,87 @@ fn apply_cgroup_limits(pid, spec) {
     return 0;
 }
 
+# ── Container stats + pause/unpause (rust-old: cgroup v2 reads/writes) ──
+# The oracle marked these async, but they are plain cgroup-fs reads/writes —
+# synchronous here (same as apply_cgroup_limits).
+
+# Read a cgroup v2 u64 file {base}/{filename}. "max" → 0 (unlimited); absent or
+# unparseable → 0 (rust-old read_cgroup_u64 + unwrap_or(0)).
+fn _rt_read_cgroup_u64(base, filename) {
+    var path = _rt_cat3(base, "/", filename);
+    var buf = alloc(256);
+    var n = file_read_all(path, buf, 255);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    # trim trailing whitespace.
+    while (n > 0) {
+        var ch = load8(buf + n - 1);
+        if (ch == 10 || ch == 13 || ch == 32 || ch == 9) { n = n - 1; } else { break; }
+    }
+    store8(buf + n, 0);
+    if (streq(buf, "max") == 1) { return 0; }
+    return atoi(buf);
+}
+
+# Read usage_usec from {base}/cpu.stat (rust-old read_cpu_usage). 0 if absent.
+fn _rt_read_cpu_usage(base) {
+    var path = _rt_cat2(base, "/cpu.stat");
+    var buf = alloc(4096);
+    var n = file_read_all(path, buf, 4095);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    var i = 0;
+    while (i < n) {
+        if (memeq(buf + i, "usage_usec ", 11) == 1) {
+            return atoi(buf + i + 11);
+        }
+        while (i < n && load8(buf + i) != 10) { i = i + 1; }   # skip to '\n'
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Container resource stats from cgroup v2 (rust-old: container_stats). Returns a
+# ContainerStats*, or 0 if the cgroup base can't be resolved.
+fn container_stats(pid) {
+    var base = resolve_cgroup_base(pid);
+    if (base == 0) { return 0; }
+    return container_stats_new(
+    _rt_read_cgroup_u64(base, "memory.current"),
+    _rt_read_cgroup_u64(base, "memory.max"),
+    _rt_read_cpu_usage(base),
+    _rt_read_cgroup_u64(base, "pids.current"),
+    _rt_read_cgroup_u64(base, "pids.max"));
+}
+
+# Write to a cgroup v2 control file (rust-old: write_cgroup_file). Resolves the
+# base, writes `value` to {base}/{filename}. Returns STIVA_ERR_OK or a
+# STIVA_ERR_RUNTIME sentinel (detail printed).
+fn _rt_write_cgroup_file(pid, filename, value) {
+    var base = resolve_cgroup_base(pid);
+    if (base == 0) { return STIVA_ERR_RUNTIME; }
+    var path = _rt_cat3(base, "/", filename);
+    if (file_write_all(path, value, strlen(value)) < 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("failed to write cgroup file: ", path));
+        return STIVA_ERR_RUNTIME;
+    }
+    return STIVA_ERR_OK;
+}
+
+# Pause a container by freezing its cgroup (rust-old: pause_container).
+fn pause_container(pid) {
+    var lm = _rt_cat2("pausing container via cgroup freezer, pid=", _rt_int_to_cstr(pid));
+    sakshi_info(lm, strlen(lm));
+    return _rt_write_cgroup_file(pid, "cgroup.freeze", "1");
+}
+
+# Unpause a container by thawing its cgroup (rust-old: unpause_container).
+fn unpause_container(pid) {
+    var lm = _rt_cat2("unpausing container via cgroup freezer, pid=", _rt_int_to_cstr(pid));
+    sakshi_info(lm, strlen(lm));
+    return _rt_write_cgroup_file(pid, "cgroup.freeze", "0");
+}
+
 # ── Sandbox build (rust-old: build_sandbox) ───────────────────────
 # Assemble a kavach SandboxPolicy + SandboxConfig from a RuntimeSpec, create the
 # sandbox, and transition it to RUNNING. Returns the sandbox ptr, or 0 on
@@ -8088,9 +8169,6 @@ fn security_score_for(backend, policy) {
 # import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
 #     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
 # copy_into_container / copy_from_container / copy_dir_recursive  [fs recursion]
-# pause_container / unpause_container                  [async cgroup.freeze write]
-# container_stats(pid) -> ContainerStats               [async cgroup fs reads]
-# read_cgroup_u64 / read_cpu_usage                     [async cgroup fs reads]
 # checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
 # pre_dump_container(pid, dump_dir, parent_dir)        [async criu pre-dump]
 # restore_lazy(dump_dir, rootfs, page_server_addr) -> pid  [async criu lazy restore]

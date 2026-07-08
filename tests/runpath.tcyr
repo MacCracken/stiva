@@ -604,8 +604,27 @@ fn test_image_store_tag() {
     return 0;
 }
 
+# ── cgroup stats read helpers (rust-old container_stats/read_cgroup_u64) ──
+fn test_cgroup_read_helpers() {
+    test_group("cgroup_read_helpers");
+    var d = _rt_cat2("/tmp/stiva-cg-", _rt_int_to_cstr(getpid()));
+    sys_mkdir(d, 493);
+    var mx = "max\n";
+    file_write_all(_rt_cat2(d, "/memory.max"), mx, strlen(mx));
+    assert_eq(_rt_read_cgroup_u64(d, "memory.max"), 0, "\"max\" -> 0 (unlimited)");
+    var pc = "42\n";
+    file_write_all(_rt_cat2(d, "/pids.current"), pc, strlen(pc));
+    assert_eq(_rt_read_cgroup_u64(d, "pids.current"), 42, "pids.current 42");
+    assert_eq(_rt_read_cgroup_u64(d, "missing.file"), 0, "absent -> 0");
+    var cst = "usage_usec 123456\nuser_usec 100\nsystem_usec 50\n";
+    file_write_all(_rt_cat2(d, "/cpu.stat"), cst, strlen(cst));
+    assert_eq(_rt_read_cpu_usage(d), 123456, "cpu.stat usage_usec parsed");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_cgroup_read_helpers();
     test_image_ref_new();
     test_image_store_tag();
     test_container_serde_roundtrip();

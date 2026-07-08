@@ -56,10 +56,19 @@ without a hand-written `images.json`.
 `tar tf`/`tvf`/`xf`-readable and round-tripping through the extractor. `stiva
 export <ctr> <out.tar>` tars a container rootfs; `stiva gc` sweeps unreferenced
 blobs (`image_store_gc`); `stiva prune` drops Stopped containers + unreferenced
-images. Live CLI is now **run · ps · stop · rm · inspect · images · rmi · tag ·
-import · export · gc · prune · info · convert**. Remaining deferred (async):
-`run -d`, `exec`, `logs -f`, `stats`, `pause`/`unpause`, `checkpoint`/`restore`,
-`pull`/`push`, `build` (needs perms-preserving tar + build-step exec).
+images.
+
+**`stats` + `pause`/`unpause` — cgroup v2 (also mis-marked async).** `container_stats`
+reads `memory.current`/`memory.max`/`cpu.stat:usage_usec`/`pids.{current,max}`;
+`pause`/`unpause` write `cgroup.freeze` (all synchronous fs, like
+`apply_cgroup_limits`). The read/parse helpers are unit-tested against fixture
+files ("max"→0, usage_usec parse); the CLI verbs gate on a live PID (our one-shot
+foreground containers are Stopped, so they correctly report "no running process"
+— the happy path needs detached containers, v3.1). Live CLI is now **run · ps ·
+stop · rm · inspect · images · rmi · tag · import · export · stats · pause ·
+unpause · gc · prune · info · convert** (17 verbs). Remaining deferred (async):
+`run -d`, `exec` (nsenter), `logs -f`, `checkpoint`/`restore`, `pull`/`push`,
+`build` (needs perms-preserving tar + build-step exec).
 
 Tests split into **four files** (`stiva.tcyr` 610 · `runpath.tcyr` 163 ·
 `mgmt.tcyr` 76 · integration 2 = **851**), run via `cyrius tests tests/`, to stay

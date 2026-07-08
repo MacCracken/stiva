@@ -121,8 +121,11 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > output + returns exit code) and persists the record to `state.json`. The
 > synchronous container-state serde (`container_to_jv`/`from_jv` via bayan +
 > `container_state_save`/`load` w/ restart fixup) is ported. Live verbs: **run,
-> ps, stop, rm, inspect, images, rmi, tag, import, export, gc, prune, info,
-> convert** — verified against the built binary. **`import`**/**`tag`** land the
+> ps, stop, rm, inspect, images, rmi, tag, import, export, stats, pause, unpause,
+> gc, prune, info, convert** (17) — verified against the built binary. **`stats`**
+> (cgroup v2 reads) + **`pause`/`unpause`** (cgroup.freeze writes) are synchronous
+> (mis-marked async in the oracle); read/parse helpers unit-tested, CLI gates on a
+> live PID. **`import`**/**`tag`** land the
 > real-image path (`import` → `run` gunzips+untars → executes). The **USTAR tar
 > writer** (`create_tar`/`export_rootfs`, GNU-`tar`-verified) closes the last
 > codec gap → **`export`** (rootfs → tar); **`gc`** (unreferenced-blob sweep) +

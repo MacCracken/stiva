@@ -480,6 +480,75 @@ fn _cli_import(h, root) {
     return CMDIT_EXIT_OK;
 }
 
+# Find a container by id/name in state.json, or print not-found + return 0.
+fn _cli_find_container(root, id) {
+    var c = container_state_find(container_state_load(root), id);
+    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); }
+    return c;
+}
+
+# `stats <container>` — cgroup v2 resource stats (rust-old: Commands::Stats).
+fn _cli_stats(h, root) {
+    var vh = cmdit_new("stiva stats");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva stats: missing <container>\n"); return CMDIT_EXIT_USAGE; }
+    var c = _cli_find_container(root, cmdit_positional(vh, 0));
+    if (c == 0) { return CMDIT_EXIT_RUN; }
+    var cc: Container = c;
+    if (cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container has no running process"); return CMDIT_EXIT_RUN; }
+    var st = container_stats(cc.pid);
+    if (st == 0) { stiva_err_print(STIVA_ERR_RUNTIME, "cannot read cgroup stats"); return CMDIT_EXIT_RUN; }
+    # ContainerStats fields via raw offsets (memory_limit_bytes collides by NAME
+    # with RuntimeSpec's field — cycc field-offset collision; read by offset).
+    _cli_puts("Memory:       "); _cli_puts(_rt_int_to_cstr(load64(st + 0))); _cli_puts(" bytes\n");
+    _cli_puts("Memory limit: "); _cli_puts(_rt_int_to_cstr(load64(st + 8))); _cli_puts(" bytes (0 = unlimited)\n");
+    _cli_puts("CPU usage:    "); _cli_puts(_rt_int_to_cstr(load64(st + 16))); _cli_puts(" us\n");
+    _cli_puts("PIDs:         "); _cli_puts(_rt_int_to_cstr(load64(st + 24))); _cli_puts(" / "); _cli_puts(_rt_int_to_cstr(load64(st + 32))); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
+# `pause <container>` / `unpause` — cgroup freezer (rust-old: Commands::Pause/Unpause).
+fn _cli_pause(h, root) {
+    var vh = cmdit_new("stiva pause");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva pause: missing <container>\n"); return CMDIT_EXIT_USAGE; }
+    var cs = container_state_load(root);
+    var c = container_state_find(cs, cmdit_positional(vh, 0));
+    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
+    var cc: Container = c;
+    if (cc.state != CONTAINER_STATE_RUNNING || cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not running"); return CMDIT_EXIT_RUN; }
+    if (pause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    cc.state = CONTAINER_STATE_PAUSED;
+    container_state_save(root, cs);
+    _cli_puts(cc.id); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
+fn _cli_unpause(h, root) {
+    var vh = cmdit_new("stiva unpause");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva unpause: missing <container>\n"); return CMDIT_EXIT_USAGE; }
+    var cs = container_state_load(root);
+    var c = container_state_find(cs, cmdit_positional(vh, 0));
+    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
+    var cc: Container = c;
+    if (cc.state != CONTAINER_STATE_PAUSED || cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not paused"); return CMDIT_EXIT_RUN; }
+    if (unpause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    cc.state = CONTAINER_STATE_RUNNING;
+    container_state_save(root, cs);
+    _cli_puts(cc.id); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
 # `export <container> <output>` — tar a container's rootfs (rust-old:
 # Commands::Export → export_rootfs). The rootfs is {root}/containers/<id>/rootfs
 # (created by `run`).
@@ -596,6 +665,9 @@ fn main() {
     if (v == V_INSPECT) { return _cli_inspect(h, _cli_root(h, f_root)); }
     if (v == V_TAG) { return _cli_tag(h, _cli_root(h, f_root)); }
     if (v == V_IMPORT) { return _cli_import(h, _cli_root(h, f_root)); }
+    if (v == V_STATS) { return _cli_stats(h, _cli_root(h, f_root)); }
+    if (v == V_PAUSE) { return _cli_pause(h, _cli_root(h, f_root)); }
+    if (v == V_UNPAUSE) { return _cli_unpause(h, _cli_root(h, f_root)); }
     if (v == V_EXPORT) { return _cli_export(h, _cli_root(h, f_root)); }
     if (v == V_GC) { return _cli_gc(h, _cli_root(h, f_root)); }
     if (v == V_PRUNE) { return _cli_prune(h, _cli_root(h, f_root)); }
