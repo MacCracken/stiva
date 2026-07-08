@@ -720,6 +720,110 @@ fn _image_reference(image) {
     return ii.reference;
 }
 
+# ── ImageRef constructor + import + tag ─────────────────────────
+
+# Construct an ImageRef directly (rust-old: ImageRef { .. }). Kept here in
+# image.cyr (where the struct is defined) so field access resolves correctly.
+#[must_use]
+fn image_ref_new(registry, repository, tag, digest) {
+    var r = alloc(32);
+    var rr: ImageRef = r;
+    rr.registry = registry;
+    rr.repository = repository;
+    rr.tag = tag;
+    rr.digest = digest;
+    return r;
+}
+
+# Import a rootfs tar as a single-layer image (rust-old: import_rootfs +
+# lib.rs import). Reads the tar, gzips it, content-addresses it as a layer
+# blob, builds+stores a minimal OCI config blob, and indexes the image under
+# reference `local/<name>:<tag>`. Returns the Image*, or 0 on failure (detail
+# printed to stderr). Synchronous — gzip via sankoch, sha256 via sigil.
+# NOTE: the tar is read with a 64 MiB cap (no stdlib file-size helper).
+fn image_import(store, tar_path, name, tag) {
+    var cap = 67108864;
+    var tarbuf = alloc(cap);
+    var tarlen = file_read_all(tar_path, tarbuf, cap);
+    if (tarlen < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("failed to read import tar: ", tar_path));
+        return 0;
+    }
+
+    # gzip the tar (rust-old used flate2 fast; sankoch default level).
+    var gzcap = tarlen + tarlen / 50 + 8192;
+    var gzbuf = alloc(gzcap);
+    var gzlen = gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
+    if (gzlen < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to gzip import tar");
+        return 0;
+    }
+
+    # content-addressed layer blob.
+    var layer_digest = sha256_digest(gzbuf, gzlen);
+    if (image_store_store_blob(store, layer_digest, gzbuf, gzlen) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store layer blob");
+        return 0;
+    }
+    var layer = layer_new(layer_digest, gzlen, "application/vnd.oci.image.layer.v1.tar+gzip");
+
+    # minimal OCI config: {"os":"linux","rootfs":{"type":"layers","diff_ids":[<digest>]}}.
+    var cfg = json_v_obj_new();
+    json_v_obj_set(cfg, str_from("os"), json_v_str_new(str_from("linux")));
+    var rootfs = json_v_obj_new();
+    json_v_obj_set(rootfs, str_from("type"), json_v_str_new(str_from("layers")));
+    var diffids = json_v_arr_new();
+    json_v_arr_push(diffids, json_v_str_new(str_from(layer_digest)));
+    json_v_obj_set(rootfs, str_from("diff_ids"), diffids);
+    json_v_obj_set(cfg, str_from("rootfs"), rootfs);
+    var cfgstr = json_v_build_pretty(cfg, 2);
+    var cfgdata = str_data(cfgstr);
+    var cfglen = str_len(cfgstr);
+    var config_digest = sha256_digest(cfgdata, cfglen);
+    if (image_store_store_blob(store, config_digest, cfgdata, cfglen) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store config blob");
+        return 0;
+    }
+
+    var layers = vec_new();
+    vec_push(layers, layer);
+    # reference registry is the literal "local" (rust-old), created_at=0 (no now()).
+    var ref = image_ref_new("local", name, tag, 0);
+    var image = image_new(config_digest, ref, gzlen, layers, 0);
+    if (image_store_add_to_index(store, image) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "failed to update image index");
+        return 0;
+    }
+    sakshi_info("import complete", strlen("import complete"));
+    return image;
+}
+
+# Tag a local image with a new reference (rust-old: lib.rs tag). Finds the
+# source by id OR full_ref, clones it under the parsed new reference, and
+# re-indexes. Returns 1 on success, 0 if the source is not found, -2 if the
+# new reference is unparseable, -3 on index save failure.
+fn image_store_tag(store, source, new_ref) {
+    var images = image_store_load_index(store);
+    var found = 0;
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        if (streq(ii.id, source) == 1 || streq(image_ref_full_ref(ii.reference), source) == 1) {
+            found = im;
+        }
+        i = i + 1;
+    }
+    if (found == 0) { return 0; }
+    var parsed = image_ref_parse(new_ref);
+    if (parsed == 0) { return 0 - 2; }
+    var fi: Image = found;
+    var tagged = image_new(fi.id, parsed, fi.size_bytes, fi.layers, fi.created_at);
+    if (image_store_add_to_index(store, tagged) == 0) { return 0 - 3; }
+    return 1;
+}
+
 # ── DEFERRED (blob dir-walk + async network layer) ──────────────
 # rust-old/src/image.rs also defines, still deferred here:
 #

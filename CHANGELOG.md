@@ -38,8 +38,17 @@ create()+start()). The synchronous **container-state layer** is ported:
 `container_to_jv`/`container_from_jv` (full Container↔JSON serde via `bayan`) +
 `container_state_save`/`load` (atomic tmp+rename, with the Running→Stopped restart
 fixup). Live CLI verbs: **`run`, `ps` (-a), `stop`, `rm`, `inspect` (JSON),
-`images`, `rmi`, `info`, `convert`**. Detached `run -d`, `exec` (nsenter), `logs`,
-and the rest remain deferred to v3.1.
+`images`, `rmi`, `tag`, `import`, `info`, `convert`**. Detached `run -d`,
+`exec` (nsenter), `logs`, and the rest remain deferred to v3.1.
+
+**`import` + `tag` — real images, no hand-staging.** `stiva import <tar> [name]
+[tag]` reads a rootfs tar, **gzips it** (`sankoch`), content-addresses it as a
+layer blob (`sigil` sha256), writes a minimal OCI config blob, and indexes the
+image (`image_import`, mirrors rust-old `import_rootfs`). `stiva tag <src>
+<dst>` aliases a local image (`image_store_tag`). Verified end-to-end: `import` →
+`run` **gunzips + untars** the imported layer into the overlay and executes it
+(the gzip↔tar codec round-trip closes), so stiva runs real imported images
+without a hand-written `images.json`.
 
 Surfaced + filed a second cycc bug: a **struct field-name/offset collision** —
 `exit_code` declared in both `Container` (@72) and `ContainerExecResult` (@0)

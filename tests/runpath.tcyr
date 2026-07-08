@@ -582,8 +582,32 @@ fn test_container_state_load_missing() {
     return 0;
 }
 
+# ── image_ref_new + tag (rust-old lib.rs tag) ──
+fn test_image_ref_new() {
+    test_group("image_ref_new");
+    var r = image_ref_new("local", "demo", "v1", 0);
+    assert_eq(streq(image_ref_full_ref(r), "local/demo:v1"), 1, "full_ref local/demo:v1");
+    return 0;
+}
+
+fn test_image_store_tag() {
+    test_group("image_store_tag");
+    var root = _rt_cat2("/tmp/stiva-tag-", _rt_int_to_cstr(getpid()));
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = image_new("sha256:abc", image_ref_new("local", "src", "1", 0), 10, vec_new(), 0);
+    image_store_add_to_index(store, img);
+    assert_eq(image_store_tag(store, "sha256:abc", "dest:2"), 1, "tag by id ok");
+    assert_eq(image_store_tag(store, "sha256:missing", "x:1"), 0, "tag missing -> 0");
+    # src:1 + the new dest:2 alias → 2 entries.
+    assert_eq(vec_len(image_store_load_index(store)), 2, "2 index entries after tag");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_image_ref_new();
+    test_image_store_tag();
     test_container_serde_roundtrip();
     test_container_serde_nulls();
     test_container_state_save_load();

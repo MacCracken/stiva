@@ -121,9 +121,12 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > output + returns exit code) and persists the record to `state.json`. The
 > synchronous container-state serde (`container_to_jv`/`from_jv` via bayan +
 > `container_state_save`/`load` w/ restart fixup) is ported. Live verbs: **run,
-> ps, stop, rm, inspect, images, rmi, info, convert** — verified against the
-> built binary. Deferred (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`,
-> `pause`/`unpause`, `checkpoint`/`restore`, pull/push/build-image, the stateful
+> ps, stop, rm, inspect, images, rmi, tag, import, info, convert** — verified
+> against the built binary. **`import`** (rootfs tar → gzip → sha256 layer +
+> config blob → index) + **`tag`** land the real-image path: `import` → `run`
+> gunzips+untars the layer and executes it (codec round-trip closes). Deferred
+> (async): `run -d`, `exec` (nsenter), `logs -f`, `stats`, `pause`/`unpause`,
+> `checkpoint`/`restore`, pull/push, `build` (needs a tar *writer*), the stateful
 > async `ContainerManager` (RwLock/PubSub). Two cycc bugs filed + worked around
 > (identifier-dedup cap → test split; `exit_code` field-name/offset collision →
 > `Container.exit_code` renamed `exit_status`). Pin → 6.4.18.
