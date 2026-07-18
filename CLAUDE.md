@@ -6,7 +6,7 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **MSRV**: 1.89
+- **Toolchain**: Cyrius, pin **6.4.66** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
 - **Version**: SemVer, currently 3.0.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
@@ -42,9 +42,8 @@ is now implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle unti
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.
-- **Use the Cyrius toolchain, NOT cargo.** The sections below that reference
-  `cargo` / `clippy` / `rustc` / `cargo-audit` / `cargo-deny` describe the
-  pre-port Rust flow and are STALE for the project. Rust survives only as the
+- **Use the Cyrius toolchain, NOT cargo.** Any lingering `cargo` / `clippy` /
+  `rustc` reference describes the pre-port Rust flow; Rust survives only as the
   `rust-old/` oracle. The live commands are:
 
   | Action | Command |
@@ -75,9 +74,10 @@ is now implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle unti
 | majra | Job queue, heartbeat FSM, pub/sub |
 | nein | nftables firewall, NAT, port mapping |
 | bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) |
-| agnosys | LUKS + dm-verity (optional, `encrypted` feature) |
+| agnodrm | LUKS + dm-verity (the `encrypted` module) |
 
-All AGNOS crates are patched to local paths in `[patch.crates-io]`.
+All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cyml`
+`[deps.*]` with local `path = "../<dep>"` overrides (sibling repos).
 
 ## Consumers
 
@@ -104,7 +104,7 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` with 34 subcommands (see `docs/cli.md`).
+CLI binary: `stiva` — 33 registered verbs, **19 live** in v3.0.0; the rest print "deferred to v3.1" (see `docs/cli.md`).
 
 ## kavach Integration
 
@@ -127,7 +127,7 @@ Stiva uses these kavach features — keep them wired:
 
 0. Read roadmap, CHANGELOG, and open issues — know what was intended before auditing what was built
 1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Cleanliness check: `cyrius fmt <file> --check` + `cyrius lint <file>` (per changed file), then `cyrius audit`
 3. Get baseline benchmarks (`./scripts/bench-history.sh`)
 4. Initial refactor + audit (performance, memory, security, edge cases)
 5. Cleanliness check — must be clean after audit
@@ -139,7 +139,7 @@ Stiva uses these kavach features — keep them wired:
 ### Development Loop (continuous)
 
 1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
+2. Cleanliness check: `cyrius fmt <file> --check` + `cyrius lint <file>` (per changed file), then `cyrius audit`
 3. Test + benchmark additions for new code
 4. Run benchmarks (`./scripts/bench-history.sh`)
 5. Audit phase — review performance, memory, security, throughput, correctness
@@ -148,13 +148,13 @@ Stiva uses these kavach features — keep them wired:
 8. Run benchmarks again — prove the wins
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
-11. Version check — VERSION, Cargo.toml, recipe (in zugot) all in sync
+11. Version check — VERSION (cyrius.cyml reads it via `${file:VERSION}`) + recipe (in zugot) in sync
 12. Return to step 1
 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 434 tests, 20 criterion benchmarks. Keep adding.
+- **Tests + benchmarks are the way.** 1033 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases.
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -189,25 +189,23 @@ docs/ (when earned):
 
 ## Testing
 
-| Category | Count |
-|----------|-------|
-| Library unit tests | 423 |
-| Integration tests | 10 |
-| Doc-tests | 1 |
-| Criterion benchmarks | 20 |
+**1033 Cyrius tests** across `tests/*.tcyr` (stiva 734 · runpath 171 · mgmt 128), each
+mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split across files
+because a monolith hits the cycc identifier-dedup cap.
 
 ```bash
-cargo test --all-features                    # All tests
-cargo test --all-features --test integration # Integration only
-cargo bench --bench benchmarks               # Criterion benchmarks
-./scripts/bench-history.sh                   # Benchmarks + CSV + trend report
-./scripts/bench.sh                           # Test + build timing history
+cyrius tests tests/            # run every tests/*.tcyr (the full suite)
+cyrius test tests/stiva.tcyr   # run one test file
+cyrius bench tests/stiva.bcyr  # benchmarks
+./scripts/bench-history.sh     # benchmarks + CSV + trend report
+./scripts/bench.sh             # test + build timing history
 ```
 
 ## DO NOT
 
 - **Do not commit or push** — the user handles all git operations (commit, push, tag)
 - **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies — keep it lean
-- Do not `unwrap()` or `panic!()` in library code
+- Do not add unnecessary dependencies — keep `[deps].stdlib` honest/opt-in
+- Do not return dangling struct literals or use sentinel-less error paths in library code
+- Do not edit `rust-old/` — it is the frozen parity oracle
 - Do not skip benchmarks before claiming performance improvements

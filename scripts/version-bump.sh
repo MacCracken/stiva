@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bump version in VERSION file and Cargo.toml
+# Bump the project version. cyrius.cyml reads `version = "${file:VERSION}"`, so
+# the single source of truth is the VERSION file.
 NEW_VERSION="${1:?Usage: $0 <new-version>}"
 
 echo "$NEW_VERSION" > VERSION
 
-# Update Cargo.toml version
-sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
-
-# Update Cargo.lock
-cargo check --quiet 2>/dev/null || true
-
-echo "Bumped to $NEW_VERSION"
+echo "Bumped to $NEW_VERSION (VERSION file; cyrius.cyml reads it via \${file:VERSION})"
+echo "Remember to update the recipe version in zugot to match."

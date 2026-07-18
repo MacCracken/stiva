@@ -4,18 +4,19 @@ Stiva ships utility scripts in `scripts/` for version management and performance
 
 ## `scripts/version-bump.sh`
 
-Bumps the crate version across `VERSION` and `Cargo.toml`, then updates `Cargo.lock`.
+Writes the project version to the `VERSION` file, which is the single source of
+truth — `cyrius.cyml` reads it via `version = "${file:VERSION}"`, so nothing else
+needs editing.
 
 ```bash
-./scripts/version-bump.sh 0.23.3
+./scripts/version-bump.sh 3.0.1
 ```
 
 **What it does:**
-1. Writes the new version to `VERSION`
-2. Updates the `version = "..."` line in `Cargo.toml`
-3. Runs `cargo check --quiet` to regenerate `Cargo.lock`
+1. Writes the new version to `VERSION` (picked up by `cyrius.cyml` automatically).
 
-**When to use:** Before tagging a release. Run this, verify with `cargo check`, then commit.
+**When to use:** Before tagging a release. Also update the recipe version in
+[zugot](https://github.com/MacCracken/zugot) to match.
 
 ---
 
@@ -35,22 +36,22 @@ Benchmark runner that measures test suite timing and release build timing, appen
 ```
 
 **What it measures:**
-- **Test suite time** — `cargo test --all-features` wall-clock duration (ms)
-- **Release build time** — `cargo build --release` wall-clock duration (ms)
+- **Test suite time** — `cyrius tests tests/` wall-clock duration (ms)
+- **Build time** — `cyrius build src/main.cyr build/stiva` wall-clock duration (ms)
 - **Test count** — number of passing tests
-- **Lines of code** — total `.rs` lines in `src/`
+- **Lines of code** — total `.cyr` lines in `src/`
 
 **History file:** `benches/history.log`
 
 Each entry records:
 ```yaml
 ---
-timestamp: 2026-03-22T06:00:00Z
-version: 0.22.3
+timestamp: 2026-07-17T06:00:00Z
+version: 3.0.0
 commit: abc1234
 branch: main
-rustc: rustc 1.89.0
-tests: 290
+cyrius: cyrius 6.4.66
+tests: 1033
 test_ms: 150
 build_ms: 12000
 loc: 4500
@@ -70,7 +71,7 @@ make bench-history   # Runs scripts/bench.sh
 
 ## `scripts/bench-history.sh`
 
-Runs criterion benchmarks, appends results to a CSV history, and generates a `benchmarks.md` trend report (matching hisab's pattern).
+Runs the `cyrius bench tests/stiva.bcyr` benchmarks, appends results to a CSV history, and generates a `benchmarks.md` trend report (matching hisab's pattern).
 
 ```bash
 # Run benchmarks and generate report
@@ -81,7 +82,7 @@ Runs criterion benchmarks, appends results to a CSV history, and generates a `be
 ```
 
 **What it measures:**
-- All criterion benchmark groups (imageref, volume, port, blob, ippool, fleet, build)
+- All benchmark groups (imageref, volume, port, blob, ippool, fleet, build)
 - Median time per benchmark, normalized to nanoseconds
 
 **Output files:**
@@ -90,7 +91,7 @@ Runs criterion benchmarks, appends results to a CSV history, and generates a `be
 
 **Makefile integration:**
 ```bash
-make bench           # Runs criterion benchmarks
+make bench           # Runs cyrius bench tests/stiva.bcyr
 make bench-history   # Runs scripts/bench-history.sh
 ```
 

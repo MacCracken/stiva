@@ -257,7 +257,8 @@ fn _cli_run(h, root) {
     if (wd != 0) { cc.workdir = wd; }
     if (nm != 0) { cc.name = nm; }
 
-    var ctr = container_new(cid, nm, ii.id, image_ref_full_ref(ii.reference), CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
+    var ctr = container_new(cid, nm, ii.id, image_ref_full_ref(ii.reference),
+    CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
     var spec = generate_spec(ctr, rootfs);
     if (spec == 0) { return CMDIT_EXIT_RUN; }        # detail printed by generate_spec
     var res = exec_container(spec);
@@ -445,7 +446,10 @@ fn _cli_tag(h, root) {
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
-    if (cmdit_positional_count(vh) < 2) { _cli_puts("stiva tag: usage: tag <source> <target>\n"); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 2) {
+        _cli_puts("stiva tag: usage: tag <source> <target>\n");
+        return CMDIT_EXIT_USAGE;
+    }
     var source = cmdit_positional(vh, 0);
     var target = cmdit_positional(vh, 1);
     var store = image_store_new(root);
@@ -466,7 +470,10 @@ fn _cli_import(h, root) {
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
-    if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva import: usage: import <tarfile> [name] [tag]\n"); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva import: usage: import <tarfile> [name] [tag]\n");
+        return CMDIT_EXIT_USAGE;
+    }
     var file = cmdit_positional(vh, 0);
     var name = "imported";
     if (cmdit_positional_count(vh) >= 2) { name = cmdit_positional(vh, 1); }
@@ -536,7 +543,10 @@ fn _cli_stats(h, root) {
     var c = _cli_find_container(root, cmdit_positional(vh, 0));
     if (c == 0) { return CMDIT_EXIT_RUN; }
     var cc: Container = c;
-    if (cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container has no running process"); return CMDIT_EXIT_RUN; }
+    if (cc.pid <= 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "container has no running process");
+        return CMDIT_EXIT_RUN;
+    }
     var st = container_stats(cc.pid);
     if (st == 0) { stiva_err_print(STIVA_ERR_RUNTIME, "cannot read cgroup stats"); return CMDIT_EXIT_RUN; }
     # ContainerStats fields via raw offsets (memory_limit_bytes collides by NAME
@@ -544,7 +554,11 @@ fn _cli_stats(h, root) {
     _cli_puts("Memory:       "); _cli_puts(_rt_int_to_cstr(load64(st + 0))); _cli_puts(" bytes\n");
     _cli_puts("Memory limit: "); _cli_puts(_rt_int_to_cstr(load64(st + 8))); _cli_puts(" bytes (0 = unlimited)\n");
     _cli_puts("CPU usage:    "); _cli_puts(_rt_int_to_cstr(load64(st + 16))); _cli_puts(" us\n");
-    _cli_puts("PIDs:         "); _cli_puts(_rt_int_to_cstr(load64(st + 24))); _cli_puts(" / "); _cli_puts(_rt_int_to_cstr(load64(st + 32))); _cli_puts("\n");
+    _cli_puts("PIDs:         ");
+    _cli_puts(_rt_int_to_cstr(load64(st + 24)));
+    _cli_puts(" / ");
+    _cli_puts(_rt_int_to_cstr(load64(st + 32)));
+    _cli_puts("\n");
     return CMDIT_EXIT_OK;
 }
 
@@ -560,7 +574,10 @@ fn _cli_pause(h, root) {
     var c = container_state_find(cs, cmdit_positional(vh, 0));
     if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
     var cc: Container = c;
-    if (cc.state != CONTAINER_STATE_RUNNING || cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not running"); return CMDIT_EXIT_RUN; }
+    if (cc.state != CONTAINER_STATE_RUNNING || cc.pid <= 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not running");
+        return CMDIT_EXIT_RUN;
+    }
     if (pause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
     cc.state = CONTAINER_STATE_PAUSED;
     container_state_save(root, cs);
@@ -579,7 +596,10 @@ fn _cli_unpause(h, root) {
     var c = container_state_find(cs, cmdit_positional(vh, 0));
     if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
     var cc: Container = c;
-    if (cc.state != CONTAINER_STATE_PAUSED || cc.pid <= 0) { stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not paused"); return CMDIT_EXIT_RUN; }
+    if (cc.state != CONTAINER_STATE_PAUSED || cc.pid <= 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not paused");
+        return CMDIT_EXIT_RUN;
+    }
     if (unpause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
     cc.state = CONTAINER_STATE_RUNNING;
     container_state_save(root, cs);
@@ -596,7 +616,10 @@ fn _cli_export(h, root) {
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
-    if (cmdit_positional_count(vh) < 2) { _cli_puts("stiva export: usage: export <container> <output.tar>\n"); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 2) {
+        _cli_puts("stiva export: usage: export <container> <output.tar>\n");
+        return CMDIT_EXIT_USAGE;
+    }
     var id = cmdit_positional(vh, 0);
     var output = cmdit_positional(vh, 1);
     var c = container_state_find(container_state_load(root), id);

@@ -3,28 +3,31 @@
 ## Running Tests
 
 ```bash
-# All tests (default features)
-cargo test
+# All tests (every tests/*.tcyr file)
+cyrius tests tests/
 
-# All tests (all features including ansamblu)
-cargo test --all-features
+# A single test file
+cyrius test tests/stiva.tcyr
 
-# Specific module
-cargo test --all-features image::tests
-
-# With output
-cargo test --all-features -- --nocapture
+# Benchmarks
+cyrius bench tests/stiva.bcyr
 ```
+
+**1033 tests** across `tests/*.tcyr`: `stiva.tcyr` (734), `runpath.tcyr` (171),
+`mgmt.tcyr` (128).
 
 ## Test Organization
 
-Tests live alongside the code they test (Rust convention):
+Tests live in `tests/*.tcyr` as `fn test_*()` functions, grouped into three
+files (`stiva.tcyr`, `runpath.tcyr`, `mgmt.tcyr`) that mirror the `#[cfg(test)]`
+modules of the frozen `rust-old/` oracle. Each domain below maps to its test
+focus:
 
 | Module | Test focus |
 |--------|-----------|
-| `error` | Display messages, From impls, Send+Sync |
-| `image` | Reference parsing, blob store, index persistence, pull pipeline (wiremock) |
-| `registry` | Auth flow, manifest fetch, blob download, platform selection (wiremock) |
+| `error` | Error-code names + exact display strings (`stiva_err_name`) |
+| `image` | Reference parsing, blob store, index persistence, blob integrity verify (pull pipeline → v3.1) |
+| `registry` | Ref/manifest parsing, `www-authenticate` parse, credential store, platform selection (async HTTP client → v3.1) |
 | `container` | Lifecycle state machine, create/start/stop/remove, logging |
 | `runtime` | Spec generation, resource limits, mount conversion |
 | `storage` | Volume parsing, layer unpacking (real tar.gz), overlay dir structure |
@@ -34,34 +37,36 @@ Tests live alongside the code they test (Rust convention):
 | `network/manager` | Network create/delete, container connect/disconnect |
 | `ansamblu` | TOML parsing, DAG resolution, ServiceDef→ContainerConfig |
 | `health` | Heartbeat registration, restart policies, status tracking |
-| `agent` | Daimon HTTP registration (wiremock) |
-| `mcp` | Tool list, dispatcher, parameter validation |
-| `intents` | Serde round-trips for intent types |
-| `build` | Spec parsing, layer creation, import/export |
+| `agent` | Daimon registration record construction (live HTTP registration → v3.1) |
+| `mcp` | Tool list + schemas, `McpResult` shape, the 2 sync tool handlers (live dispatch → v3.1) |
+| `intents` | Externally-tagged JSON serde round-trips + strict deserialization |
+| `build` | Stivafile parse, `build_cache_key` (serde-exact), cache store (layer build → v3.1) |
 | `fleet` | Scheduling strategies (spread, binpack, pinned), node filtering |
 | `encrypted` | LUKS/verity config serde, availability checks |
-| `lib` | Stiva facade, config serde, mock-backed pull/run |
+| `stiva_core` | `StivaConfig` defaults (the async `Stiva` facade → v3.1) |
 
-### Integration Tests (`tests/integration.rs`)
+### Run-path + management tests (`tests/runpath.tcyr`, `tests/mgmt.tcyr`)
 
-| Test | Coverage |
-|------|----------|
-| `container_full_lifecycle` | create → start → logs → remove |
-| `daemon_container_lifecycle` | detach, stop, remove |
-| `state_persists_across_manager_instances` | state.json persistence |
-| `image_store_roundtrip` | blob store → has → read |
-| `image_tag_and_rmi` | tag + remove by ID |
-| `export_import_roundtrip` | rootfs tar → import as image |
-| `build_spec_parsing` | Stivafile parsing |
-| `fleet_schedule_spread` | spread strategy with 2 nodes |
-| `copy_into_and_out_of_container` | bidirectional file copy |
-| `restart_stopped_container` | stop → restart → stop cycle |
+The suite is split into three files to stay under the cycc identifier-dedup cap:
 
-## Mock HTTP Testing
+| File | Focus |
+|------|-------|
+| `tests/stiva.tcyr` (734) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
+| `tests/runpath.tcyr` (171) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and image ref/blob/index round-trips |
+| `tests/mgmt.tcyr` (128) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling, `agent` registration records, `health` policies |
 
-Registry and daimon tests use [wiremock](https://crates.io/crates/wiremock) to mock HTTP servers:
+Run one group by grepping its `test_group("...")` label, or run everything with
+`cyrius tests tests/`.
+
+## Mock HTTP Testing — v3.1
+
+Registry and daimon HTTP is deferred to the **v3.1 async milestone** (registry
+pull/push over HTTP is not yet in the Cyrius port). The mock-server tests below
+come from the frozen `rust-old/` oracle and illustrate the future async library
+API — they are **not part of the v3.0.0 Cyrius test suite**:
 
 ```rust
+// v3.1 (async library API — not yet in the Cyrius port)
 let server = MockServer::start().await;
 
 Mock::given(method("GET"))
@@ -73,20 +78,16 @@ Mock::given(method("GET"))
 let client = RegistryClient::with_base_url(&server.uri());
 ```
 
-The `RegistryClient::with_base_url()` constructor (test-only, `#[cfg(test)]`) redirects all API calls to the mock server.
+The `RegistryClient::with_base_url()` constructor (test-only) redirects all API
+calls to the mock server.
 
 ## Coverage
 
-```bash
-# Run coverage
-cargo tarpaulin --all-features --skip-clean --out stdout
-```
-
-**Uncoverable**: Linux mount syscalls (require root), overlay mounts, veth creation, CRIU checkpoint/restore, live container exec via nsenter.
+**Uncoverable**: Linux mount syscalls (require root), overlay mounts, veth creation, CRIU checkpoint/restore (v3.1), live container exec via nsenter (v3.1).
 
 ## Linux-Only Code
 
-Code guarded by `#[cfg(target_os = "linux")]` (overlay mounts, veth creation, bind mounts) cannot be tested without root. These paths are tested for:
+Linux-only code (overlay mounts, veth creation, bind mounts) cannot be tested without root. These paths are tested for:
 - Directory creation (works without root)
 - Error handling (mount failure returns proper error)
 - Command construction (verify args without executing)

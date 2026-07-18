@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Docs + hardening
+- **Documentation converted from the Rust/cargo era to Cyrius**: `README.md`,
+  `CONTRIBUTING.md`, `docs/cli.md`, `CLAUDE.md`, and the guides/dev docs
+  (quick-start, networking, security, testing, scripts) now describe the `cyrius`
+  toolchain, the accurate **1033**-test count, and the live-vs-**v3.1** split for
+  every CLI verb and capability. Async library examples are clearly labeled
+  "v3.1 (async library API — not yet in the Cyrius port)".
+- **Lint clean**: wrapped the 11 remaining `>120`-char lines in `main.cyr`/`runtime.cyr`
+  → `cyrius lint` is warning-free across all `src/*.cyr`.
+- **`scripts/version-bump.sh`** fixed to write only `VERSION` (the removed `Cargo.toml`
+  path is gone; `cyrius.cyml` reads `version = "${file:VERSION}"`).
+
 ### Changed
 - **cyrius toolchain pin 6.4.19 → 6.4.66** (`cyrius.cyml`); re-vendored the
   `[deps].stdlib` subset. The newer compiler is stricter about struct field access,

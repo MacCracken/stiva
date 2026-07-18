@@ -1,36 +1,31 @@
 # Quick Start
 
-This guide covers installing stiva, pulling images, running containers, basic networking, and cleanup.
+This guide covers installing stiva, importing images, running containers, basic networking, and cleanup.
 
 ## Installation
 
-Build from source (requires Rust 1.89+):
+Build from source with the cyrius toolchain (pin 6.4.66):
 
 ```bash
-cargo install --path .
+cyrius build src/main.cyr build/stiva
 ```
 
-The `stiva` binary provides 28 subcommands. Run `stiva --help` for the full list.
+The `stiva` binary provides 19 subcommands. Run `stiva --help` for the full list.
 
-## Pulling an Image
+## Importing an Image
+
+Registry pull over HTTP (`stiva pull`) is a v3.1 feature. In v3.0.0, load images
+from a local OCI archive with `import`:
 
 ### CLI
 
 ```bash
-stiva pull alpine:3.19
-stiva pull nginx:latest
-stiva images   # list local images
+stiva import alpine.tar alpine 3.19   # import <tarfile> [name] [tag]
+stiva images                          # list local images
 ```
 
-### Library
-
-```rust
-use stiva::Stiva;
-
-let mut s = Stiva::new()?;
-s.pull("alpine:3.19").await?;
-let images = s.list_images()?;
-```
+> **v3.1** — `stiva pull alpine:3.19` (registry pull/push over HTTP) is registered
+> but deferred to the v3.1 async milestone.
 
 ## Running a Container
 
@@ -40,40 +35,21 @@ One-shot (foreground):
 
 ```bash
 stiva run alpine:3.19 echo "hello from stiva"
-```
-
-Daemon (background):
-
-```bash
-stiva run -d --name web -p 8080:80 nginx:latest
-stiva ps          # list running containers
-stiva logs web    # view output
+stiva ps          # list containers
+stiva logs <id>   # view output
 ```
 
 With environment variables and secrets:
 
 ```bash
-stiva run -d -e APP_ENV=prod -s DB_PASSWORD=hunter2 myapp:latest
+stiva run -e APP_ENV=prod -s DB_PASSWORD=hunter2 myapp:latest
 ```
 
 Secrets are injected through kavach and never stored in the container config.
 
-### Library
-
-```rust
-use stiva::{Stiva, ContainerConfig};
-
-let mut s = Stiva::new()?;
-
-let config = ContainerConfig {
-    image: "nginx:latest".into(),
-    detach: true,
-    ports: vec!["8080:80".into()],
-    ..Default::default()
-};
-
-let id = s.run(config)?;
-```
+> **v3.1** — detached/background runs (`run -d`), streaming logs (`logs -f`), and the
+> async `Stiva` library facade are part of the v3.1 async milestone. In v3.0.0 `run`
+> executes in the foreground.
 
 ## Basic Networking
 
@@ -82,7 +58,7 @@ Stiva creates a default bridge network (`stiva0`, subnet `172.17.0.0/16`) on sta
 Port mapping forwards host ports to container ports:
 
 ```bash
-stiva run -d -p 8080:80 -p 8443:443 nginx:latest
+stiva run -p 8080:80 -p 8443:443 nginx:latest
 ```
 
 See the [networking guide](networking.md) for custom networks, IPv6, and DNS.
@@ -91,10 +67,11 @@ See the [networking guide](networking.md) for custom networks, IPv6, and DNS.
 
 ```bash
 stiva inspect <id>    # detailed JSON output (includes security score)
-stiva top <id>        # processes inside the container
 stiva stats <id>      # CPU, memory, PID stats from cgroups v2
-stiva exec <id> sh    # run a shell inside the container
 ```
+
+> **v3.1** — `stiva top <id>` (processes inside the container) and `stiva exec <id> sh`
+> (run a shell inside the container, via nsenter) are deferred to the v3.1 milestone.
 
 ## Building Images
 
@@ -123,6 +100,9 @@ entrypoint = ["/app/start.sh"]
 stiva build
 stiva build -f Stivafile -c ./project
 ```
+
+> **v3.1** — the Stivafile parser is implemented in v3.0.0, but running a layer build
+> (`stiva build`) is deferred to the v3.1 milestone.
 
 ## Cleanup
 

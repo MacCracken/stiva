@@ -13,11 +13,13 @@ On startup, stiva creates a default bridge network:
 Every container connected to a bridge gets an IPv4 address from the subnet pool, a veth pair linking it to the bridge, and NAT masquerade for outbound traffic.
 
 ```bash
-stiva run -d nginx:latest
+stiva run nginx:latest
 # Container receives 172.17.0.2, routed through stiva0
 ```
 
-### Library
+Detached (`run -d`) is deferred to v3.1; today `run` executes in the foreground.
+
+### Library — v3.1 (async library API — not yet in the Cyrius port)
 
 ```rust
 use stiva::network::NetworkManager;
@@ -31,10 +33,10 @@ let mut mgr = NetworkManager::new()?;
 Create isolated networks with their own subnets:
 
 ```bash
-# Not yet a CLI command -- use the library or ansamblu TOML
+# Not yet a CLI command -- use ansamblu TOML (or the v3.1 library API below)
 ```
 
-### Library
+### Library — v3.1 (async library API — not yet in the Cyrius port)
 
 ```rust
 let mut mgr = NetworkManager::new()?;
@@ -49,9 +51,11 @@ Containers on different networks are isolated from each other. A container can b
 Forward host ports to container ports using `-p`:
 
 ```bash
-stiva run -d -p 8080:80 nginx:latest         # single port
-stiva run -d -p 8080:80 -p 8443:443 myapp    # multiple ports
+stiva run -p 8080:80 nginx:latest         # single port
+stiva run -p 8080:80 -p 8443:443 myapp    # multiple ports
 ```
+
+(Detached `run -d` is a v3.1 feature; the examples above run in the foreground.)
 
 Port mapping creates nftables DNAT rules via nein. The rules are cleaned up when the container stops.
 
@@ -59,7 +63,7 @@ Port mapping creates nftables DNAT rules via nein. The rules are cleaned up when
 
 Stiva supports IPv6 through `DualStackPool`, which wraps an `IpPool` (v4) and an optional `Ipv6Pool` (v6).
 
-### Library
+### Library — v3.1 (async library API — not yet in the Cyrius port)
 
 ```rust
 use stiva::network::pool::DualStackPool;

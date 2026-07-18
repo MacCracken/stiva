@@ -15,7 +15,7 @@ Stiva supports rootless operation via Linux user namespaces. When `rootless` is 
 # user = "nobody"
 ```
 
-### Library
+### Library (v3.1 — async library API, not yet in the Cyrius port)
 
 ```rust
 use stiva::runtime::RuntimeConfig;
@@ -47,10 +47,12 @@ Secrets are injected into containers through kavach's `CredentialProxy` and `Sec
 ### CLI
 
 ```bash
-stiva run -d -s DB_PASSWORD=secret123 -s API_KEY=abc myapp:latest
+stiva run -s DB_PASSWORD=secret123 -s API_KEY=abc myapp:latest
 ```
 
-### Library
+(Detached secret injection with `run -d` lands in v3.1.)
+
+### Library (v3.1 — async library API, not yet in the Cyrius port)
 
 ```rust
 use kavach::SecretRef;
@@ -69,9 +71,10 @@ Key properties:
 
 ## Output Scanning (ExternalizationGate)
 
-kavach's `ExternalizationGate` scans container output for leaked secrets, PII, and sensitive data. This runs on the output of `stiva exec` and `stiva logs`.
+kavach's `ExternalizationGate` scans container output for leaked secrets, PII, and sensitive data. This runs on the output of `stiva logs` (and `stiva exec`, which arrives in v3.1).
 
 ```rust
+// v3.1 — async library API, not yet in the Cyrius port
 use stiva::runtime::scan_output;
 
 let findings = scan_output(&output)?;
@@ -95,7 +98,7 @@ stiva info              # includes overall security score
 stiva inspect <id>      # includes per-container score
 ```
 
-### Library
+### Library (v3.1 — async library API, not yet in the Cyrius port)
 
 ```rust
 let score = stiva.security_score();
@@ -119,7 +122,7 @@ Factors that increase the score:
 2. **Non-root user** -- set `user = "nobody"` in Stivafile `[config]`.
 3. **Read-only rootfs** -- mount the container rootfs read-only where possible.
 4. **Resource limits** -- set memory, CPU, and PID limits in `SandboxPolicy` to prevent resource exhaustion.
-5. **Dependency auditing** -- run `cargo audit` and `cargo deny check` regularly on stiva itself.
+5. **Dependency auditing** -- run `cyrius audit` regularly on stiva itself.
 6. **Image provenance** -- verify image digests after pull. Stiva stores and validates content digests for all layers.
 7. **Network isolation** -- place containers on separate bridge networks to limit lateral movement.
 8. **Secret rotation** -- use `CredentialProxy` for runtime injection; rotate secrets without rebuilding images.

@@ -8267,7 +8267,7 @@ fn generate_spec(container, rootfs) {
     return s;
 }
 
-# ── Signals (rust-old: send_signal) ───────────────────────────────
+# ── Signals (rust-old: send_signal) ──────────────
 # Send `signal` to `pid`. Returns STIVA_ERR_OK (0) on success, or an
 # STIVA_ERR_RUNTIME sentinel on failure (the detail is printed to stderr).
 # Validation order mirrors the oracle: signal first, then pid.
@@ -8316,11 +8316,15 @@ fn _rt_cgroup_base_from_content(content) {
         if (at_end == 1) {
             var line_len = i - start;
             # prefix "0::" ('0'=48, ':'=58) at the line start.
-            if (line_len >= 3 && load8(content + start) == 48 && load8(content + start + 1) == 58 && load8(content + start + 2) == 58) {
+            if (line_len >= 3 && load8(content + start) == 48
+            && load8(content + start + 1) == 58 && load8(content + start + 2) == 58) {
                 var pstart = start + 3;
                 var pend = i;
                 # trim() both ends (space/tab/CR/LF).
-                while (pstart < pend && (load8(content + pstart) == 32 || load8(content + pstart) == 9)) { pstart = pstart + 1; }
+                while (pstart < pend
+                && (load8(content + pstart) == 32 || load8(content + pstart) == 9)) {
+                    pstart = pstart + 1;
+                }
                 while (pend > pstart) {
                     var ch = load8(content + pend - 1);
                     if (ch == 32 || ch == 9 || ch == 13 || ch == 10) { pend = pend - 1; } else { break; }

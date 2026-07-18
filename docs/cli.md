@@ -1,6 +1,12 @@
 # CLI Reference
 
-Stiva provides a `stiva` binary with 34 subcommands.
+Stiva provides a `stiva` binary. Every command below is **registered** (visible in
+`--help`), but in **v3.0.0** only the synchronous subset executes end-to-end; the rest
+print a clear "deferred to v3.1" message (their module logic is ported — only the async
+execution path remains). The **Status** column marks each:
+
+- **Live** — works end-to-end in v3.0.0.
+- **v3.1** — registered, deferred to the async milestone.
 
 ## Global Options
 
@@ -13,51 +19,53 @@ Stiva provides a `stiva` binary with 34 subcommands.
 
 ### Images
 
-| Command | Description |
-|---------|-------------|
-| `stiva pull <IMAGE>` | Pull an image from a registry |
-| `stiva push <IMAGE> [TARGET]` | Push a local image to a registry |
-| `stiva build [-f FILE] [-c CONTEXT]` | Build image from `Stivafile` (default: `./Stivafile`) |
-| `stiva images` | List local images |
-| `stiva rmi <IMAGE>` | Remove a local image (by ID or tag) |
-| `stiva tag <SOURCE> <TARGET>` | Tag a local image with a new reference |
-| `stiva import <FILE> --name NAME [--tag TAG]` | Import tar archive as a local image |
+| Command | Status | Description |
+|---------|--------|-------------|
+| `stiva import <FILE> [NAME] [TAG]` | **Live** | Import tar archive as a local image (name→`imported`, tag→`latest` if omitted) |
+| `stiva images` | **Live** | List local images |
+| `stiva tag <SOURCE> <TARGET>` | **Live** | Tag a local image with a new reference |
+| `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
+| `stiva pull <IMAGE>` | v3.1 | Pull an image from a registry (needs the async HTTP client) |
+| `stiva push <IMAGE> [TARGET]` | v3.1 | Push a local image to a registry |
+| `stiva build [-f FILE] [-c CONTEXT]` | v3.1 | Build from `Stivafile` (parse is done; the layer build is async) |
 
 ### Containers
 
-| Command | Description |
-|---------|-------------|
-| `stiva run <IMAGE> [-d] [-p PORT] [-e ENV] [-s SECRET] [CMD...]` | Run a container |
-| `stiva ps` | List containers |
-| `stiva stop <ID>` | Stop a container (SIGTERM → SIGKILL) |
-| `stiva rm <ID>` | Remove a stopped container |
-| `stiva restart <ID>` | Restart a stopped container |
-| `stiva exec <ID> <CMD...>` | Execute command in a running container |
-| `stiva kill <ID> [-s SIGNAL]` | Send signal (default: 15/SIGTERM) |
-| `stiva pause <ID>` | Pause via cgroups v2 freezer |
-| `stiva unpause <ID>` | Unpause a paused container |
-| `stiva inspect <ID>` | Inspect container or image (JSON output) |
-| `stiva top <ID>` | List processes inside a running container |
-| `stiva stats <ID>` | Show CPU/memory/PID stats from cgroups v2 |
-| `stiva logs <ID> [-n LINES]` | Show last N lines of container logs |
-| `stiva export <ID> -o FILE` | Export container rootfs as tar archive |
-| `stiva cp <SRC> <DST>` | Copy files between host and container |
-| `stiva wait <ID>` | Wait for container to exit, return exit code |
+| Command | Status | Description |
+|---------|--------|-------------|
+| `stiva run <IMAGE> [-p PORT] [-e ENV] [-s SECRET] [CMD...]` | **Live** | Run a container (synchronous, one-shot) |
+| `stiva ps` | **Live** | List containers |
+| `stiva stop <ID>` | **Live** | Stop a container (SIGTERM → SIGKILL) |
+| `stiva rm <ID>` | **Live** | Remove a stopped container |
+| `stiva pause <ID>` | **Live** | Pause via cgroups v2 freezer |
+| `stiva unpause <ID>` | **Live** | Unpause a paused container |
+| `stiva inspect <ID>` | **Live** | Inspect container or image (JSON output) |
+| `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
+| `stiva logs <ID> [-n LINES]` | **Live** | Show last N lines of container logs |
+| `stiva export <ID> -o FILE` | **Live** | Export container rootfs as tar archive |
+| `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
+| `stiva run <IMAGE> -d ...` | v3.1 | Detached `run -d` (needs policy-threading spawn) |
+| `stiva exec <ID> <CMD...>` | v3.1 | Execute command in a running container (nsenter) |
+| `stiva top <ID>` | v3.1 | List processes inside a running container (`/proc` walk is ported) |
+| `stiva cp <SRC> <DST>` | v3.1 | Copy files host↔container (the copy logic is ported) |
+| `stiva kill <ID> [-s SIGNAL]` | v3.1 | Send a signal (needs a live PID) |
+| `stiva restart <ID>` | v3.1 | Restart a container |
+| `stiva rename <ID> <NAME>` | v3.1 | Rename a container |
 
 ### Operations
 
-| Command | Description |
-|---------|-------------|
-| `stiva prune` | Remove stopped containers and unused images |
-| `stiva checkpoint <ID> [--leave-running]` | CRIU checkpoint a running container |
-| `stiva restore <ID> <DIR>` | Restore container from CRIU checkpoint |
-| `stiva convert <FILE> [-f FORMAT] [-o OUT]` | Convert YAML to TOML (compose or dockerfile) |
-| `stiva rename <ID> <NAME>` | Rename a container |
-| `stiva gc` | Garbage-collect unreferenced image blobs and layers |
-| `stiva events` | Stream container lifecycle events in real time |
-| `stiva diff <ID>` | Show filesystem changes in a container vs its image |
-| `stiva completions <SHELL>` | Generate shell completions (bash, zsh, fish) |
-| `stiva info` | Show system information and security score |
+| Command | Status | Description |
+|---------|--------|-------------|
+| `stiva prune` | **Live** | Remove stopped containers and unused images |
+| `stiva gc` | **Live** | Garbage-collect unreferenced image blobs |
+| `stiva info` | **Live** | Show system information and security score |
+| `stiva convert <FILE> -f dockerfile [-o OUT]` | **Live** | Convert a Dockerfile to a `Stivafile` |
+| `stiva convert <FILE> -f compose ...` | v3.1 | Convert compose YAML (needs a Cyrius YAML parser) |
+| `stiva checkpoint <ID> [--leave-running]` | v3.1 | CRIU checkpoint a running container |
+| `stiva restore <ID> <DIR>` | v3.1 | Restore container from CRIU checkpoint |
+| `stiva events` | v3.1 | Stream container lifecycle events |
+| `stiva diff <ID>` | v3.1 | Show filesystem changes in a container vs its image |
+| `stiva completions <SHELL>` | v3.1 | Generate shell completions (bash, zsh, fish) |
 
 ## `stiva run` Flags
 
@@ -80,8 +88,11 @@ Stiva provides a `stiva` binary with 34 subcommands.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-f, --format <FORMAT>` | `compose` | Input format: `compose` or `dockerfile` |
+| `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.1 — needs a YAML parser) |
 | `-o, --output <PATH>` | stdout | Output file path |
+
+> In v3.0.0, `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose`
+> prints a "deferred to v3.1" message pending a Cyrius YAML parser.
 
 ## `Stivafile` Format
 
