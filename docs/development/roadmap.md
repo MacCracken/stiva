@@ -159,18 +159,118 @@ lifts a mid-tier module without touching the async runtime:
 
 ## v3.1.0 — Async milestone (complete the port)
 
-The one architectural band that remains: ~69% of the deferred surface is a single
-blocker — mapping the Rust tokio-shaped async onto Cyrius `lib/async.cyr`. Landing
-it unblocks ~123 items at once and takes parity 61% → ~90%+ (most "unported"
-surface is thin async wrappers over the already-ported sync core).
+**Re-scoped 2026-07-18 after a 4-subsystem, code-grounded analysis (registry / container-
+manager / subprocess / codecs+mcp+streaming).** The earlier framing — "one big blocker:
+map tokio-shaped async onto a weak `lib/async.cyr`" — is **out of date and overstated**.
+v3.1 is now mostly *glue over the already-ported synchronous core*, plus a **blocking**
+registry client, with the genuinely hard bits narrow and well-isolated.
 
-- [ ] **Async runtime mapping** — tokio → `lib/async.cyr` (cooperative futures); tracked in cyrius issue `2026-07-07-async-runtime-tokio-parity-gaps.md` (may warrant its own repo, folded back to stdlib)
-- [ ] **Async ContainerManager + Stiva facade** — `RwLock<HashMap>` state + majra PubSub events + the ~40 facade methods → full create/start/stop/exec/wait/`logs -f` lifecycle (supersedes the synchronous CLI re-architecture)
-- [ ] **Registry HTTP client** — pull/push/auth/token over `sandhi`/`tls_native` (async net + JSON)
-- [ ] **Detached `run -d`** — needs a policy-threading spawn in kavach (`persistent_spawn` can't apply seccomp/cgroup/secrets); no half-isolated daemon ships until it lands
-- [ ] **exec (nsenter) + CRIU checkpoint/restore** — external-subprocess paths, gated on a running/detached container
-- [ ] **Codec gaps** — **zstd** (sankoch) for zstd layers; **YAML** (bayan) for `convert compose`; perms-preserving tar for `build`/`export` fidelity
-- [ ] **MCP live dispatch** — wire the 9 tool handlers to the async Stiva driver
+### Substrate readiness (the de-risk)
+
+- **The async primitives already shipped.** The 5 tokio-parity gaps (async subprocess via
+  pidfd, `interval`/`with_timeout`, joinable `task_join`, async TCP client +
+  `join_all`/`select`, cooperative `async_rwlock`) landed in **cyrius 6.4.33–6.4.42**; the
+  toolchain is pinned at **6.4.66**, so they are all present. The cyrius issue
+  `2026-07-07-async-runtime-tokio-parity-gaps.md` is **archived/resolved**.
+- **Run-to-completion model** (the shaping constraint): no mid-body suspend/resume — `await`
+  re-runs the future body, and only the *try-family* `async_rwlock` exists. Consequences:
+  (1) `Arc<RwLock<HashMap>>` state collapses to a **plain single-threaded heap map** (no
+  contention, no locking) — the manager is simpler than the Rust; (2) **blocking** primitives
+  inside a task are fine for one-shot flows (single-threaded, single-node — a blocking wait
+  starves nothing); (3) true **multiplexed streaming** (`select!` over many streams) and
+  interactive `exec -it` genuinely need the deferred stackless-coroutine work.
+- **`sandhi` ships a complete blocking HTTPS client** (`sandhi_http_request_auto` + get/head/
+  post/put/patch/delete, URL parse, `tls_native`, redirect-follow with cross-origin header
+  stripping, chunked decode) and **`bayan` has base64** — so the registry client is a
+  *blocking* port, not an async one.
+
+### Tracks (dependency-ordered — four can start **now**, zero external blockers)
+
+**Track M — Async `ContainerManager` + `Stiva` facade** (the spine; mostly glue). Build the
+`ContainerManager` (two plain maps: id→Container, id→ContainerInternals) + majra PubSub over
+the ported sync run path (`prepare_layers`→`setup_overlay`→`generate_spec`→`exec_container`),
+then the `Stiva` facade (~40 methods) and route the CLI verbs through it.
+  - [ ] **First PR**: `container_manager_new` + `create`/`start`(one-shot)/`stop`/`wait`/`list`/
+    `remove` + `publish_event`/`event_bus`, restoring state from `state.json`. **Zero blockers**,
+    testable in a `.tcyr` (create→event→start→list→persist-reload→remove).
+  - [ ] `remove`/`rename`/`get_rootfs`/`restart`; `signal`/`pause`/`unpause`/`stats`/`update`;
+    `logs`/`log_tail` (snapshot); `connect_network`/`disconnect_network`.
+  - [ ] `Stiva` facade struct + method wrappers; **migrate `main.cyr` verbs through the manager**
+    (replacing the per-verb load/save re-architecture).
+  - [ ] `ansamblu_up`/`down`/`scale` + `service_logs` facade methods.
+  - *(internal prereq: port `audit_log_new` — audit.cyr has `_log`/`_read`/`_path` but not the
+    constructor the facade's audit field needs.)*
+
+**Track R — Registry HTTP client** (blocking over `sandhi`/`tls_native` + bayan JSON). Every
+method — `acquire_token`/`authenticated_request` bearer state machine, `fetch_manifest`/
+`resolve_manifest`/`fetch_blob`, `blob_exists`/`push_blob`/`push_blob_chunked`/`push_manifest`,
+`list_tags`/`catalog`/`referrers` — is a run-to-completion blocking flow. Token cache = plain map.
+  - [ ] **First PR**: `RegistryClient` struct + `acquire_token` (WWW-Authenticate→bearer) +
+    `fetch_manifest` for a public image over TLS. **Zero blockers.**
+  - [ ] `fetch_blob` + `image_store_pull` driver → **live `stiva pull`**; then push path
+    (`blob_exists`/`push_blob`/`push_manifest`) → `stiva push`; then `build` layer fetch.
+  - [ ] Concurrent layer download (`buffer_unordered(4)`) → a **sequential loop** (true
+    parallelism needs the async net + a multi-threaded runtime; not worth it single-node).
+
+**Track X — `exec` + CRIU** (fork+exec host tools; needs one new primitive).
+  - [ ] **First PR**: `_exec_capture2` (dual-pipe fork+exec: child `close(3..max)` [CVE-2024-21626]
+    + `PR_SET_NO_NEW_PRIVS` + `dup2`; parent drains both fds via blocking `poll()` + `waitpid`)
+    → `exec_in_container` (nsenter). NB: `async_spawn_process` inherits fds and captures no
+    output, so exec needs this custom primitive, not the reactor spawn.
+  - [ ] CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` — fire-and-wait `criu` execs,
+    gated by the already-ported `criu_available()` probe (testable with no criu/root).
+
+**Track C — Fidelity codecs.**
+  - [ ] **First PR**: perms-preserving tar **writer + reader** (real mode/uid/gid, dir + symlink
+    entries via `sys_stat`/`sys_lstat`/`sys_readlink`/`sys_fchmodat`). **100% in-repo, zero blockers.**
+  - [ ] `zstd` **decode** in `sankoch` (upstream stdlib; decode-only — stiva builds gzip) → zstd layers.
+  - [ ] `YAML`-subset value layer in `bayan` (upstream) → `compose_yaml_to_toml` renderer (`convert compose`).
+
+### Track P — depends on M/R/X
+
+- [ ] **MCP live dispatch** — `handle_tool` + the 7 async handlers (`ps`/`stop`/`inspect`/
+  `pull`/`push`/`run`/`exec`) + `list_resources`/`read_resource`, one-shot request/response
+  over the facade (not streaming-blocked). `handle_ps`/`stop`/`inspect` land first (need only Track M).
+- [ ] **Streaming as CLI poll-loops** — `logs -f` (read-from-offset + sleep) and `events`
+  (majra `pubsub_subscribe` + `chan_try_recv` + sleep) are deliverable as **foreground CLI
+  loops** at the outermost frame. *Partial:* true multiplexed/backpressured streaming is deferred.
+
+### External blockers to file
+
+- [ ] **kavach — policy-threaded detached spawn** (the critical path for `run -d`).
+  **PLANNED: kavach minor release.** Precise API (mirrors `sandbox_exec`, matches the oracle's
+  `Sandbox::spawn` → `SpawnedProcess` contract at `rust-old/src/runtime.rs:401-481`):
+  - `sandbox_spawn(sandbox, command) -> SpawnedProcess*` — the **detached** twin of
+    `sandbox_exec(sandbox, command)`: runs the same backend dispatch so it applies the sandbox's
+    `SandboxPolicy`/`SandboxConfig` (seccomp, cgroup mem/cpu/pid, user-ns UID/GID, network-ns,
+    secret injection, NO_NEW_PRIVS + `close(3..)` fd-cleanup), but fork+exec's the child and
+    returns immediately with a live handle carrying the pid (does **not** `waitpid`). The daemon's
+    stdout/stderr are `dup2`'d to the caller-provided log fd before `execve` (stiva passes the
+    `container.log` fd). Non-spawnable backends (noop/wasm) return 0 → caller falls back to `exec`
+    (the existing `SpawnedProcess` doc comment already promises this).
+  - `spawned_wait(sp) -> ExecResult*` — block on `waitpid` until exit; fill `exit_code`/`duration_ms`.
+  - `spawned_try_wait(sp) -> i32` — `waitpid(WNOHANG)`; exit code if exited, a "still-running"
+    sentinel otherwise.
+  - `spawned_kill(sp, grace_ms) -> ExecResult*` — SIGTERM, poll ≤ `grace_ms`, SIGKILL, reap.
+  Reuses the existing `struct SpawnedProcess {pid,backend,started_at}` (+ accessors) and `ExecResult`.
+  Today only `persistent_spawn` exists (raw fork+exec, **no** policy) and `SpawnedProcess` is an
+  inert record with no wait/kill. **Do not ship a half-isolated `run -d` over `persistent_spawn`** —
+  it would be strictly less isolated than the sync `run`. Blocks detached `run -d`,
+  `spawn_container`/`DaemonHandle`, and live daemon log capture. Stiva-side `spawn_container` is
+  then ~10 lines: `build_sandbox` (already ported) → `sandbox_spawn` → `DaemonHandle{sp, sandbox}`.
+- [ ] **kavach — `ExternalizationGate` dist binding** for `scan_output` (the secret/PII scan
+  branch of `exec`/`logs`; the unscanned path works without it).
+- [ ] **sankoch (cyrius stdlib)** — zstd frame decoder.  **bayan (cyrius stdlib)** — YAML subset.
+- [ ] **cyrius (roadmap-future)** — stackless coroutines / mid-body suspend, for interactive
+  `exec -it` and true multiplexed streaming servers. **Not** a blocker for the CLI poll-loops above.
+
+### Recommended sequencing
+
+Start **Track M's first PR** (the manager spine — zero blockers, turns the ~14 "deferred to
+v3.1" verbs into a real facade) and **Track R's first PR** (`acquire_token` + `fetch_manifest`
+— zero blockers, high user value) **in parallel**; drop in **Track C's perms-tar** as a quick
+fidelity win; and **file the kavach policy-spawn issue early** since it's the long pole for
+detached `run -d`. `exec` (Track X) and MCP dispatch (Track P) compose on top of M once it lands.
 
 ---
 
