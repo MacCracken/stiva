@@ -35,10 +35,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   headers. Plus `restart_policy_from_name` in `health`.
 - **`mcp`**: `mcp_handle_build` / `mcp_handle_ansamblu` — the two fully-synchronous tool handlers
   (parse the Stivafile / ansamblu spec via the ported parsers, assemble a structured `McpResult`).
-- **45 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
-  regression tests for a directory-copy `is_dir` bug, OCI negative-limit handling, strict
-  credential-file deserialization, and 5 strict-parse cases in `parse_ansamblu` that adversarial
-  parity-verify passes surfaced). Suite: **1001 tests** green (stiva 702 · runpath 171 · mgmt 128).
+- **`intents`**: the `Intent` value type + constructors + externally-tagged JSON serde
+  (`intent_to_jv` / `intent_from_jv`, `ansamblu_action_from_name`) — the variant payloads
+  (Run/Stop/Pull/Ansamblu/Scale/Inspect), independent of the still-deferred NL parser.
+- **57 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
+  regression tests for a directory-copy `is_dir` bug, OCI negative-limit handling, and strict
+  deserialization of credential files, `parse_ansamblu`, and `intent_from_jv` — all surfaced by
+  adversarial parity-verify passes). Suite: **1033 tests** green (stiva 734 · runpath 171 · mgmt 128).
 
 ## [3.0.0] — Cyrius Port · synchronous single-node runtime
 

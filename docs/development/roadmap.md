@@ -118,7 +118,10 @@ lifts a mid-tier module without touching the async runtime:
 
 - [x] `oci` — `parse_bundle` / `build_state` / `to_oci_status` + `OciState` (bayan JSON;
   landed in `container.cyr`, coupled to the container types) → oci 67% → ~100%. **2026-07-18.**
-- [ ] `intents` — variant payload fields (Run/Stop/Pull/Ansamblu/Scale/Inspect)
+- [x] `intents` — variant payload fields (Run/Stop/Pull/Ansamblu/Scale/Inspect): the
+  `Intent` value type + constructors + externally-tagged JSON serde (`intent_to_jv`/
+  `intent_from_jv`, `ansamblu_action_from_name`). **2026-07-18.** The serde round-trip is
+  independent of the NL parser; only `parse_intent` (needs the agnoshi project) stays deferred.
 - [x] `image` — `verify_integrity` (blob dir-walk + whole-blob re-hash, `image_store_verify_integrity`)
   → image 72% → ~90%. **2026-07-18.**
 - [~] `build` — `build_cache_key` + `build_step_to_jv` (serde-exact tagged-enum JSON via

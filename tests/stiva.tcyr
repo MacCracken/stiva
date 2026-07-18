@@ -196,6 +196,83 @@ fn test_intent_serde() {
     return 0;
 }
 
+# Intent payload JSON round-trip (rust-old intents.rs: intent_serde) — the
+# externally-tagged {"<Variant>": { fields }} form, every variant.
+fn test_intent_payload_serde() {
+    test_group("intents::intent_payload_serde");
+    # Run { image, name: Some } — check the wire shape too.
+    var rj = json_v_build(intent_to_jv(intent_run("nginx", "web")));
+    var rcs = str_cstr(rj);
+    assert_eq(strstr(rcs, "\"Run\":") >= 0, 1, "Run externally-tagged");
+    assert_eq(strstr(rcs, "\"image\":\"nginx\"") >= 0, 1, "Run image wire");
+    assert_eq(strstr(rcs, "\"name\":\"web\"") >= 0, 1, "Run name wire");
+    var rb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(rj), str_len(rj)));
+    assert_eq(rb.kind, INTENT_KIND_RUN, "Run kind");
+    assert_eq(streq(rb.image, "nginx"), 1, "Run image");
+    assert_eq(streq(rb.name, "web"), 1, "Run name");
+    # Run with name None → null on the wire, 0 back.
+    var rn = json_v_build(intent_to_jv(intent_run("alpine", 0)));
+    var rnb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(rn), str_len(rn)));
+    assert_eq(rnb.name, 0, "Run name None round-trips");
+    # Stop { id }
+    var sj = json_v_build(intent_to_jv(intent_stop("abc123")));
+    var sb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(sj), str_len(sj)));
+    assert_eq(sb.kind, INTENT_KIND_STOP, "Stop kind");
+    assert_eq(streq(sb.id, "abc123"), 1, "Stop id");
+    # Pull { image }
+    var pj = json_v_build(intent_to_jv(intent_pull("alpine")));
+    var pb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(pj), str_len(pj)));
+    assert_eq(pb.kind, INTENT_KIND_PULL, "Pull kind");
+    assert_eq(streq(pb.image, "alpine"), 1, "Pull image");
+    # Ansamblu { action: Up }
+    var aj = json_v_build(intent_to_jv(intent_ansamblu(ANSAMBLU_ACTION_UP)));
+    assert_eq(strstr(str_cstr(aj), "\"action\":\"Up\"") >= 0, 1, "Ansamblu action wire");
+    var ab: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(aj), str_len(aj)));
+    assert_eq(ab.kind, INTENT_KIND_ANSAMBLU, "Ansamblu kind");
+    assert_eq(ab.action, ANSAMBLU_ACTION_UP, "Ansamblu action Up");
+    # Scale { service, replicas }
+    var scj = json_v_build(intent_to_jv(intent_scale("worker", 3)));
+    var scb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(scj), str_len(scj)));
+    assert_eq(scb.kind, INTENT_KIND_SCALE, "Scale kind");
+    assert_eq(streq(scb.service, "worker"), 1, "Scale service");
+    assert_eq(scb.replicas, 3, "Scale replicas");
+    # Inspect { target }
+    var ij = json_v_build(intent_to_jv(intent_inspect("nginx")));
+    var ibk: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(ij), str_len(ij)));
+    assert_eq(ibk.kind, INTENT_KIND_INSPECT, "Inspect kind");
+    assert_eq(streq(ibk.target, "nginx"), 1, "Inspect target");
+    # AnsambluAction name↔ordinal round-trip (rust: ansamblu_action_serde).
+    assert_eq(ansamblu_action_from_name("Up"), ANSAMBLU_ACTION_UP, "Up");
+    assert_eq(ansamblu_action_from_name("Down"), ANSAMBLU_ACTION_DOWN, "Down");
+    assert_eq(ansamblu_action_from_name("Restart"), ANSAMBLU_ACTION_RESTART, "Restart");
+    assert_eq(ansamblu_action_from_name("Bogus"), 0 - 1, "unknown -> -1");
+    return 0;
+}
+
+# STRICT deserialization parity: serde's externally-tagged enum rejects a missing
+# required field, a wrong-typed value, an unknown variant/action, and an object
+# without exactly one variant key. (Adversarial parity-verify pass.)
+fn _t_intent_parse(j) {
+    return intent_from_jv(bayan_json_v_parse_str(j, strlen(j)));
+}
+
+fn test_intent_from_jv_strict() {
+    test_group("intents::intent_from_jv_strict");
+    assert_eq(_t_intent_parse("{\"Run\":{\"name\":\"web\"}}"), 0, "Run missing image -> 0");
+    assert_eq(_t_intent_parse("{\"Scale\":{\"service\":\"w\",\"replicas\":\"3\"}}"), 0, "Scale replicas string -> 0");
+    assert_eq(_t_intent_parse("{\"Scale\":{\"service\":\"w\"}}"), 0, "Scale missing replicas -> 0");
+    assert_eq(_t_intent_parse("{\"Ansamblu\":{\"action\":\"Sideways\"}}"), 0, "unknown action -> 0");
+    assert_eq(_t_intent_parse("{\"Run\":{\"image\":\"a\"},\"Stop\":{\"id\":\"b\"}}"), 0, "two variant keys -> 0");
+    assert_eq(_t_intent_parse("{\"Frobnicate\":{}}"), 0, "unknown variant -> 0");
+    assert_eq(_t_intent_parse("{}"), 0, "empty object -> 0");
+    # A valid Run with empty-string image is accepted (serde: "" is a valid String).
+    var ok = _t_intent_parse("{\"Run\":{\"image\":\"\"}}");
+    assert(ok != 0, "Run with empty image string still ok");
+    var okv: Intent = ok;
+    assert_eq(okv.name, 0, "absent name -> None");
+    return 0;
+}
+
 # ── audit.cyr (rust-old/src/audit.rs) ────────────────────────────
 fn test_audit_operation_display() {
     test_group("audit_operation_display");
@@ -2639,6 +2716,8 @@ fn main() {
     # intents
     test_parse_intent_not_implemented();
     test_intent_serde();
+    test_intent_payload_serde();
+    test_intent_from_jv_strict();
     # audit
     test_audit_operation_display();
     test_audit_entry_container_serde();

@@ -289,18 +289,204 @@ fn parse_intent(text) {
     return 0 - 6;
 }
 
+# ── Intent value type (rust-old: enum Intent with payload fields) ────
+# A tagged union: `kind` selects which fields are live; one flat struct holds
+# every field (unused = 0). The serde round-trip (externally-tagged
+# {"<Variant>": { fields }}) is real and Rust-tested (intent_serde), and is
+# independent of parse_intent (the NL parser above, still deferred).
+struct Intent {
+    kind;      # INTENT_KIND_* ordinal
+    image;     # String (Run, Pull)
+    name;      # Option<String> → cstr | 0 (Run)
+    id;        # String (Stop)
+    action;    # ANSAMBLU_ACTION_* ordinal (Ansamblu)
+    service;   # String (Scale)
+    replicas;  # u32 (Scale)
+    target;    # String (Inspect)
+}
+
+fn _intent_new(kind) {
+    var p = alloc(64);
+    var i: Intent = p;
+    i.kind = kind;
+    i.image = 0;
+    i.name = 0;
+    i.id = 0;
+    i.action = 0;
+    i.service = 0;
+    i.replicas = 0;
+    i.target = 0;
+    return p;
+}
+
+#[must_use]
+fn intent_run(image, name) {
+    var p = _intent_new(INTENT_KIND_RUN);
+    var i: Intent = p;
+    i.image = image;
+    i.name = name;
+    return p;
+}
+
+#[must_use]
+fn intent_stop(id) {
+    var p = _intent_new(INTENT_KIND_STOP);
+    var i: Intent = p;
+    i.id = id;
+    return p;
+}
+
+#[must_use]
+fn intent_pull(image) {
+    var p = _intent_new(INTENT_KIND_PULL);
+    var i: Intent = p;
+    i.image = image;
+    return p;
+}
+
+#[must_use]
+fn intent_ansamblu(action) {
+    var p = _intent_new(INTENT_KIND_ANSAMBLU);
+    var i: Intent = p;
+    i.action = action;
+    return p;
+}
+
+#[must_use]
+fn intent_scale(service, replicas) {
+    var p = _intent_new(INTENT_KIND_SCALE);
+    var i: Intent = p;
+    i.service = service;
+    i.replicas = replicas;
+    return p;
+}
+
+#[must_use]
+fn intent_inspect(target) {
+    var p = _intent_new(INTENT_KIND_INSPECT);
+    var i: Intent = p;
+    i.target = target;
+    return p;
+}
+
+# Inverse of ansamblu_action_name: wire tag → ANSAMBLU_ACTION_* ordinal, or -1.
+#[must_use]
+fn ansamblu_action_from_name(name) {
+    if (streq(name, "Up") == 1) { return ANSAMBLU_ACTION_UP; }
+    if (streq(name, "Down") == 1) { return ANSAMBLU_ACTION_DOWN; }
+    if (streq(name, "Restart") == 1) { return ANSAMBLU_ACTION_RESTART; }
+    return 0 - 1;
+}
+
+# Required String field of a JSON object → fresh cstr, or 0 when the field is
+# absent or not a string (serde: a missing required field is an error). An empty
+# string "" is valid and returns a non-zero (1-byte) cstr, distinct from 0.
+fn _intent_req_str(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# Intent* → JSON object (rust-old: serde Serialize on Intent). Externally
+# tagged: {"<Variant>": { field: value, ... }}. Run's Option<String> `name`
+# serializes as null when None (no skip_serializing_if in the oracle).
+fn intent_to_jv(intent) {
+    var i: Intent = intent;
+    var inner = json_v_obj_new();
+    if (i.kind == INTENT_KIND_RUN) {
+        json_v_obj_set(inner, str_from("image"), json_v_str_new(str_from(i.image)));
+        if (i.name != 0) {
+            json_v_obj_set(inner, str_from("name"), json_v_str_new(str_from(i.name)));
+        } else {
+            json_v_obj_set(inner, str_from("name"), json_v_null());
+        }
+    }
+    if (i.kind == INTENT_KIND_STOP) {
+        json_v_obj_set(inner, str_from("id"), json_v_str_new(str_from(i.id)));
+    }
+    if (i.kind == INTENT_KIND_PULL) {
+        json_v_obj_set(inner, str_from("image"), json_v_str_new(str_from(i.image)));
+    }
+    if (i.kind == INTENT_KIND_ANSAMBLU) {
+        json_v_obj_set(inner, str_from("action"), json_v_str_new(str_from(ansamblu_action_name(i.action))));
+    }
+    if (i.kind == INTENT_KIND_SCALE) {
+        json_v_obj_set(inner, str_from("service"), json_v_str_new(str_from(i.service)));
+        json_v_obj_set(inner, str_from("replicas"), json_v_int_new(i.replicas));
+    }
+    if (i.kind == INTENT_KIND_INSPECT) {
+        json_v_obj_set(inner, str_from("target"), json_v_str_new(str_from(i.target)));
+    }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from(intent_kind_name(i.kind)), inner);
+    return o;
+}
+
+# JSON object → Intent* (rust-old: serde Deserialize). STRICT, to match serde's
+# externally-tagged enum: the object must have EXACTLY ONE key (the variant tag),
+# each variant's required fields must be present and correctly typed, and an
+# unknown variant/action is an error. Returns 0 on any of these (rust: Err).
+fn intent_from_jv(v) {
+    if (json_v_is_obj(v) == 0) { return 0; }
+    if (json_v_obj_len(v) != 1) { return 0; }   # externally tagged: exactly one variant key
+
+    var run = json_v_obj_get(v, "Run");
+    if (json_v_is_obj(run) == 1) {
+        var img = _intent_req_str(run, "image");
+        if (img == 0) { return 0; }
+        # name is Option<String>: absent/null → None; a string → Some; else error.
+        var nf = json_v_obj_get(run, "name");
+        var nm = 0;
+        if (nf != 0) {
+            if (json_v_is_str(nf) == 1) { nm = str_cstr(json_v_str(nf)); }
+            else {
+                if (json_v_is_null(nf) == 0) { return 0; }
+            }
+        }
+        return intent_run(img, nm);
+    }
+    var stop = json_v_obj_get(v, "Stop");
+    if (json_v_is_obj(stop) == 1) {
+        var id = _intent_req_str(stop, "id");
+        if (id == 0) { return 0; }
+        return intent_stop(id);
+    }
+    var pull = json_v_obj_get(v, "Pull");
+    if (json_v_is_obj(pull) == 1) {
+        var img2 = _intent_req_str(pull, "image");
+        if (img2 == 0) { return 0; }
+        return intent_pull(img2);
+    }
+    var ans = json_v_obj_get(v, "Ansamblu");
+    if (json_v_is_obj(ans) == 1) {
+        var af = json_v_obj_get(ans, "action");
+        if (json_v_is_str(af) == 0) { return 0; }
+        var act = ansamblu_action_from_name(str_cstr(json_v_str(af)));
+        if (act == 0 - 1) { return 0; }          # unknown AnsambluAction variant
+        return intent_ansamblu(act);
+    }
+    var scale = json_v_obj_get(v, "Scale");
+    if (json_v_is_obj(scale) == 1) {
+        var svc = _intent_req_str(scale, "service");
+        if (svc == 0) { return 0; }
+        var rf = json_v_obj_get(scale, "replicas");
+        if (json_v_is_int(rf) == 0) { return 0; }   # u32 required, must be an integer
+        return intent_scale(svc, json_v_int(rf));
+    }
+    var insp = json_v_obj_get(v, "Inspect");
+    if (json_v_is_obj(insp) == 1) {
+        var tgt = _intent_req_str(insp, "target");
+        if (tgt == 0) { return 0; }
+        return intent_inspect(tgt);
+    }
+    return 0;                                     # unknown variant tag
+}
+
 # ── DEFERRED (land with a real agnoshi NL parser) ───────────────
-# rust-old/src/intents.rs models each Intent variant with payload fields:
-#   Intent::Run { image: String, name: Option<String> }
-#   Intent::Stop { id: String }
-#   Intent::Pull { image: String }
-#   Intent::Ansamblu { action: AnsambluAction }
-#   Intent::Scale { service: String, replicas: u32 }
-#   Intent::Inspect { target: String }
-# The variant payloads (and their serde round-trip, tested in Rust) are
-# meaningful only once `parse_intent` actually produces them. Until the
-# agnoshi project exists, only the not-implemented sentinel above is live;
-# the field-carrying Intent value type ports alongside that parser.
+# Only `parse_intent` (the natural-language → Intent parser) remains deferred:
+# it needs the agnoshi project, which does not exist yet, so the sentinel above
+# is the live behaviour. The field-carrying Intent value type and its serde
+# round-trip (the "variant payloads" item) are now ported above.
 
 # --- audit.cyr ---
 
