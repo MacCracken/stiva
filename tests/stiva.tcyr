@@ -958,6 +958,107 @@ fn test_registry_credential() {
     return 0;
 }
 
+# CredentialStore set/get/remove (rust-old registry.rs: CredentialStore::set/get/remove).
+fn test_credential_store_set_get_remove() {
+    test_group("credential_store_set_get_remove");
+    var store = credential_store_new();
+    assert_eq(credential_store_get(store, "docker.io"), 0, "empty -> none");
+    credential_store_set(store, "docker.io", "alice", "s3cret");
+    var cred = credential_store_get(store, "docker.io");
+    assert(cred != 0, "cred present");
+    var cc: RegistryCredential = cred;
+    assert_eq(streq(cc.username, "alice"), 1, "username");
+    assert_eq(streq(cc.password, "s3cret"), 1, "password");
+    assert_eq(credential_store_remove(store, "docker.io"), 1, "remove existing -> 1");
+    assert_eq(credential_store_remove(store, "docker.io"), 0, "remove missing -> 0");
+    assert_eq(credential_store_get(store, "docker.io"), 0, "gone");
+    return 0;
+}
+
+# CredentialStore::to_config — creds present vs default (rust-old: to_config).
+fn test_credential_store_to_config() {
+    test_group("credential_store_to_config");
+    var store = credential_store_new();
+    credential_store_set(store, "ghcr.io", "bob", "tok");
+    var cfg: RegistryConfig = credential_store_to_config(store, "ghcr.io");
+    assert_eq(streq(cfg.username, "bob"), 1, "config username");
+    assert_eq(streq(cfg.password, "tok"), 1, "config password");
+    var cfg2: RegistryConfig = credential_store_to_config(store, "quay.io");
+    assert_eq(cfg2.username, 0, "default username None");
+    assert_eq(cfg2.password, 0, "default password None");
+    return 0;
+}
+
+# CredentialStore JSON round-trip (the serde path underneath save/load).
+fn test_credential_store_json_round_trip() {
+    test_group("credential_store_json_round_trip");
+    var store = credential_store_new();
+    credential_store_set(store, "docker.io", "alice", "pw1");
+    credential_store_set(store, "ghcr.io", "bob", "pw2");
+    var json = json_v_build(credential_store_to_jv(store));
+    var back = credential_store_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var c1: RegistryCredential = credential_store_get(back, "docker.io");
+    assert(c1 != 0, "docker.io present");
+    assert_eq(streq(c1.username, "alice"), 1, "docker user");
+    var c2: RegistryCredential = credential_store_get(back, "ghcr.io");
+    assert(c2 != 0, "ghcr.io present");
+    assert_eq(streq(c2.password, "pw2"), 1, "ghcr pw");
+    return 0;
+}
+
+# CredentialStore save→load through a temp path (NOT the real ~/.stiva — uses the
+# internal path-parameterized helpers to avoid clobbering the user's file).
+fn test_credential_store_save_load() {
+    test_group("credential_store_save_load");
+    var path = "/tmp/stiva_cred_test/credentials.json";
+    xunlink(path);
+    var store = credential_store_new();
+    credential_store_set(store, "docker.io", "alice", "pw");
+    assert_eq(_credential_store_save_to(store, path), 0, "save ok");
+    var loaded = _credential_store_load_from(path);
+    assert(loaded != 0, "load ok");
+    var c: RegistryCredential = credential_store_get(loaded, "docker.io");
+    assert(c != 0, "loaded cred present");
+    assert_eq(streq(c.username, "alice"), 1, "loaded username");
+    # Missing file → empty (non-zero) store, not an error.
+    var empty = _credential_store_load_from("/tmp/stiva_cred_test/nope.json");
+    assert(empty != 0, "missing -> empty store non-zero");
+    assert_eq(credential_store_get(empty, "docker.io"), 0, "empty has nothing");
+    return 0;
+}
+
+# default_path lands under ~/.stiva (rust-old: default_path via dirs_path).
+fn test_credential_store_default_path() {
+    test_group("credential_store_default_path");
+    var p = credential_store_default_path();
+    assert_eq(strstr(p, "/.stiva/credentials.json") >= 0, 1, "path under /.stiva");
+    return 0;
+}
+
+# STRICT deserialization parity: serde rejects a malformed credentials file
+# (missing `registries`, or a cred missing a required field) — load returns an
+# error, not a lenient empty/partial store. A valid empty store is accepted.
+fn test_credential_store_load_malformed() {
+    test_group("credential_store_load_malformed");
+    var dir = "/tmp/stiva_cred_bad";
+    sys_mkdir(dir, 0x1ED);
+    var p1 = "/tmp/stiva_cred_bad/no_registries.json";
+    var j1 = "{}";
+    file_write_all(p1, j1, strlen(j1));
+    assert_eq(_credential_store_load_from(p1), 0, "{} missing registries -> 0");
+    var p2 = "/tmp/stiva_cred_bad/no_pw.json";
+    var j2 = "{\"registries\":{\"docker.io\":{\"username\":\"u\"}}}";
+    file_write_all(p2, j2, strlen(j2));
+    assert_eq(_credential_store_load_from(p2), 0, "missing password -> 0");
+    var p3 = "/tmp/stiva_cred_bad/empty.json";
+    var j3 = "{\"registries\":{}}";
+    file_write_all(p3, j3, strlen(j3));
+    var s = _credential_store_load_from(p3);
+    assert(s != 0, "empty registries -> non-zero store");
+    assert_eq(credential_store_get(s, "docker.io"), 0, "empty store has nothing");
+    return 0;
+}
+
 
 # ── storage.cyr (rust-old/src/storage.rs) ──
 fn test_parse_volume_rw() {
@@ -1324,6 +1425,41 @@ fn test_build_sha256_digest() {
     var a = sha256_digest("hello world", 11);
     var b = sha256_digest("hello world", 11);
     assert_eq(streq(a, b), 1, "sha256 deterministic");
+    return 0;
+}
+
+# build_cache_key hashes "{base}:{index}:{serde_json(step)}". These pin the exact
+# serde-compatible BuildStep JSON by comparing against a hand-built hash input
+# (rust-old: build_cache_key + serde tag="type" rename_all="lowercase").
+fn test_build_cache_key_env() {
+    test_group("build_cache_key_env");
+    var step = build_step_env("KEY", "VAL");
+    var key = build_cache_key("sha256:base", 0, step);
+    var input = "sha256:base:0:{\"type\":\"env\",\"key\":\"KEY\",\"value\":\"VAL\"}";
+    assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "env key == manual hash");
+    return 0;
+}
+
+fn test_build_cache_key_run() {
+    test_group("build_cache_key_run");
+    var cmd = vec_new();
+    vec_push(cmd, "echo");
+    vec_push(cmd, "hi");
+    var key = build_cache_key("sha256:b", 2, build_step_run(cmd));
+    var input = "sha256:b:2:{\"type\":\"run\",\"command\":[\"echo\",\"hi\"]}";
+    assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "run key == manual hash");
+    return 0;
+}
+
+fn test_build_cache_key_distinct() {
+    test_group("build_cache_key_distinct");
+    var s1 = build_step_env("A", "1");
+    var s2 = build_step_env("A", "2");
+    var k1 = build_cache_key("sha256:x", 0, s1);
+    assert_eq(streq(k1, build_cache_key("sha256:x", 0, s1)), 1, "deterministic");
+    assert_eq(streq(k1, build_cache_key("sha256:x", 0, s2)), 0, "value change -> different key");
+    assert_eq(streq(k1, build_cache_key("sha256:x", 1, s1)), 0, "index change -> different key");
+    assert_eq(strstr(k1, "sha256:") >= 0, 1, "sha256 prefix");
     return 0;
 }
 
@@ -2529,6 +2665,12 @@ fn main() {
     test_registry_platform_eq();
     test_registry_descriptor();
     test_registry_credential();
+    test_credential_store_set_get_remove();
+    test_credential_store_to_config();
+    test_credential_store_json_round_trip();
+    test_credential_store_save_load();
+    test_credential_store_default_path();
+    test_credential_store_load_malformed();
     # storage + build
     test_parse_volume_rw();
     test_parse_volume_ro();
@@ -2552,6 +2694,9 @@ fn main() {
     test_build_config_default();
     test_build_step_type_names();
     test_build_step_variants();
+    test_build_cache_key_env();
+    test_build_cache_key_run();
+    test_build_cache_key_distinct();
     test_build_sha256_digest();
     test_build_parse_full_spec();
     test_build_parse_minimal_spec();

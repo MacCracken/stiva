@@ -299,6 +299,66 @@ fn record_build_cache(store, cache_key, layer_digest) {
     return 0;
 }
 
+# BuildStep* → JSON object, matching serde's internally-tagged encoding
+# (`#[serde(tag = "type", rename_all = "lowercase")]`): the "type" tag first,
+# then the variant's fields in declaration order. bayan's compact json_v_build
+# then reproduces serde_json::to_string(step) byte-for-byte for the well-formed
+# case (the only consumer is build_cache_key's hash input).
+fn build_step_to_jv(step) {
+    var s: BuildStep = step;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("type"), json_v_str_new(str_from(build_step_type_name(s.kind))));
+    if (s.kind == BUILD_STEP_RUN) {
+        var arr = json_v_arr_new();
+        if (s.command != 0) {
+            var n = vec_len(s.command);
+            var i = 0;
+            while (i < n) {
+                json_v_arr_push(arr, json_v_str_new(str_from(vec_get(s.command, i))));
+                i = i + 1;
+            }
+        }
+        json_v_obj_set(o, str_from("command"), arr);
+    }
+    if (s.kind == BUILD_STEP_COPY) {
+        json_v_obj_set(o, str_from("source"), json_v_str_new(str_from(s.source)));
+        json_v_obj_set(o, str_from("destination"), json_v_str_new(str_from(s.destination)));
+    }
+    if (s.kind == BUILD_STEP_ENV) {
+        json_v_obj_set(o, str_from("key"), json_v_str_new(str_from(s.key)));
+        json_v_obj_set(o, str_from("value"), json_v_str_new(str_from(s.value)));
+    }
+    if (s.kind == BUILD_STEP_WORKDIR) {
+        json_v_obj_set(o, str_from("path"), json_v_str_new(str_from(s.source)));
+    }
+    if (s.kind == BUILD_STEP_LABEL) {
+        json_v_obj_set(o, str_from("key"), json_v_str_new(str_from(s.key)));
+        json_v_obj_set(o, str_from("value"), json_v_str_new(str_from(s.value)));
+    }
+    if (s.kind == BUILD_STEP_FROM_STAGE) {
+        json_v_obj_set(o, str_from("stage"), json_v_str_new(str_from(s.stage)));
+        json_v_obj_set(o, str_from("source"), json_v_str_new(str_from(s.source)));
+        json_v_obj_set(o, str_from("destination"), json_v_str_new(str_from(s.destination)));
+    }
+    return o;
+}
+
+# Cache key for a build step (rust-old: build_cache_key). Hashes the string
+# "{base_digest}:{step_index}:{serde_json(step)}" with SHA-256; returns the
+# "sha256:{hex}" digest cstr.
+#[must_use]
+fn build_cache_key(base_digest, step_index, step) {
+    var step_json = json_v_build(build_step_to_jv(step));   # Str (compact)
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base_digest);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_int(sb, step_index);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_str(sb, step_json);
+    var input = str_builder_build(sb);
+    return sha256_digest(str_data(input), str_len(input));
+}
+
 # Store a layer blob and return its digest (rust-old: store_layer).
 # Computes sha256 over the `len` bytes at `data`, stores it in the blob
 # store keyed by that digest, and returns the `sha256:{hex}` digest cstr.
@@ -469,12 +529,10 @@ fn parse_build_spec(toml_str) {
     return build_spec_new(image, steps, config, vec_new());
 }
 
-# ── DEFERRED (land with a JSON codec + tar/gzip + async net) ──
-# rust-old/src/build.rs also defines, coupled to serde_json, to a
-# tar.gz layer builder (flate2 + tar), and to async RegistryClient network:
-#
-#   JSON codec (serde_json::to_string of the tagged BuildStep enum):
-#     fn build_cache_key(base_digest, step_index, step: &BuildStep) -> String
+# ── DEFERRED (land with tar/gzip layer builder + async net) ──
+# rust-old/src/build.rs also defines, coupled to a tar.gz layer builder
+# (flate2 + tar) and to async RegistryClient network (build_cache_key +
+# build_step_to_jv are now ported above via bayan JSON):
 #
 #   tar.gz layer builders (flate2 GzEncoder + tar::Builder/Header; not in
 #   the ported base):

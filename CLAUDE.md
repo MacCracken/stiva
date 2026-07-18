@@ -19,14 +19,15 @@ Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**: all 16 Rust modules → 25
 Cyrius `src/*.cyr` domain modules + a **19-verb CLI** (run/ps/stop/rm/inspect/
 images/rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert)
-that imports, runs, and manages real containers end-to-end. **897 tests** across the
+that imports, runs, and manages real containers end-to-end. **933 tests** across the
 `.tcyr` files (run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.66**.
-Parity ≈ **63%** of the Rust surface — the port stops cleanly at the sync/async
+Parity ≈ **64%** of the Rust surface — the port stops cleanly at the sync/async
 boundary (algorithm-dense modules 85–100%; the low-parity ones are async wrappers whose
 capability is delivered synchronously). The v3.0.x sync backlog is in progress: `oci`
-(parse_bundle/build_state/to_oci_status/OciState), `image` (verify_integrity), and
-`runtime` (/proc walk + host↔rootfs copy) are ported. See `docs/development/roadmap.md`
-for the parity snapshot + v3.0.x (sync backlog) / v3.1 (async) split.
+(parse_bundle/build_state/to_oci_status/OciState), `image` (verify_integrity), `runtime`
+(/proc walk + host↔rootfs copy), `registry` (credential store), and `build`
+(build_cache_key) are ported. See `docs/development/roadmap.md` for the parity snapshot
++ v3.0.x (sync backlog) / v3.1 (async) split.
 
 The remaining **async container-orchestration surface** — the async `ContainerManager`
 + `Stiva` facade, registry HTTP pull/push, detached `run -d`, nsenter `exec`, CRIU,

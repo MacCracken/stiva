@@ -505,18 +505,212 @@ fn _reg_trim_quotes(s) {
     return _reg_slice(s, start, end);
 }
 
-# ── DEFERRED (land with the async transport / serde layer) ──────
-# rust-old/src/registry.rs also defines, all coupled to reqwest / tokio /
-# serde_json which have no ported base:
+# ── RegistryConfig / MirrorConfig (rust-old: struct RegistryConfig / MirrorConfig) ──
+# RegistryConfig carries optional basic-auth creds + mirror config. MirrorConfig
+# is a single-field wrapper over HashMap<hostname, Vec<mirror-url>>; per the port's
+# single-field-struct rule it collapses to a bare map handle (0 = empty/default).
+struct RegistryConfig {
+    username;   # Option<String> → cstr | 0
+    password;   # Option<String> → cstr | 0
+    mirrors;    # MirrorConfig → map handle (hostname → vec of URL cstr) | 0 = empty
+}
+
+#[must_use]
+fn registry_config_new(username, password, mirrors) {
+    var c = alloc(24);
+    var cc: RegistryConfig = c;
+    cc.username = username;
+    cc.password = password;
+    cc.mirrors = mirrors;
+    return c;
+}
+
+# rust-old: RegistryConfig::default — all fields None/empty.
+#[must_use]
+fn registry_config_default() {
+    return registry_config_new(0, 0, 0);
+}
+
+# ── CredentialStore (rust-old: struct CredentialStore + impl) ──
+# Persistent registry-auth store, JSON at {HOME}/.stiva/credentials.json. Modeled
+# as a cstr-keyed map (registry hostname → RegistryCredential*) — the sole
+# `registries` field collapses to the map (single-field-struct rule).
+
+# Concatenate two cstrs into a fresh cstr (registry-local path join).
+#[must_use]
+fn _reg_cat2(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Directory portion of a file path (up to the last '/'), or 0 if none.
+#[must_use]
+fn _reg_parent_dir(path) {
+    var len = strlen(path);
+    var slash = 0 - 1;
+    var i = 0;
+    while (i < len) {
+        if (load8(path + i) == 47) { slash = i; }   # '/'
+        i = i + 1;
+    }
+    if (slash <= 0) { return 0; }
+    return _reg_slice(path, 0, slash);
+}
+
+# Stiva config dir (rust-old: dirs_path) — {HOME}/.stiva, or /tmp/.stiva if HOME unset.
+#[must_use]
+fn _cred_dirs_path() {
+    var home = getenv("HOME");
+    if (home == 0) { return "/tmp/.stiva"; }
+    return _reg_cat2(home, "/.stiva");
+}
+
+# Default credential-store path (rust-old: CredentialStore::default_path).
+#[must_use]
+fn credential_store_default_path() {
+    return _reg_cat2(_cred_dirs_path(), "/credentials.json");
+}
+
+# A fresh empty store (rust-old: CredentialStore::default).
+#[must_use]
+fn credential_store_new() {
+    return map_new();
+}
+
+# CredentialStore → JSON object {"registries": {host: {username, password}}}.
+fn credential_store_to_jv(store) {
+    var o = json_v_obj_new();
+    var regs = json_v_obj_new();
+    if (store != 0) {
+        var keys = map_keys(store);
+        var n = vec_len(keys);
+        var i = 0;
+        while (i < n) {
+            var k = vec_get(keys, i);
+            var cred: RegistryCredential = map_get(store, k);
+            var co = json_v_obj_new();
+            json_v_obj_set(co, str_from("username"), json_v_str_new(str_from(cred.username)));
+            json_v_obj_set(co, str_from("password"), json_v_str_new(str_from(cred.password)));
+            json_v_obj_set(regs, str_from(k), co);
+            i = i + 1;
+        }
+    }
+    json_v_obj_set(o, str_from("registries"), regs);
+    return o;
+}
+
+# JSON object → CredentialStore map (registry → RegistryCredential*). STRICT, to
+# match serde: `registries` is a required field, and RegistryCredential requires
+# both `username` and `password` (no serde defaults). Returns 0 (invalid — the
+# caller maps to Err) when the top level isn't an object, `registries` is
+# missing/non-object, or any entry is not an object with both string fields. A
+# valid-but-empty `{"registries":{}}` yields a fresh (non-zero) empty store.
+fn credential_store_from_jv(v) {
+    if (v == 0) { return 0; }
+    var regs = json_v_obj_get(v, "registries");
+    if (json_v_is_obj(regs) == 0) { return 0; }
+    var store = map_new();
+    var n = json_v_obj_len(regs);
+    var i = 0;
+    while (i < n) {
+        var key = str_cstr(json_v_obj_key(regs, i));
+        var cv = json_v_obj_val(regs, i);
+        if (json_v_is_obj(cv) == 0) { return 0; }
+        var uf = json_v_obj_get(cv, "username");
+        if (json_v_is_str(uf) == 0) { return 0; }
+        var pf = json_v_obj_get(cv, "password");
+        if (json_v_is_str(pf) == 0) { return 0; }
+        map_set(store, key, registry_credential_new(str_cstr(json_v_str(uf)), str_cstr(json_v_str(pf))));
+        i = i + 1;
+    }
+    return store;
+}
+
+# Load a store from `path` (internal; the public load uses default_path).
+# Missing file → fresh empty store; read/parse/schema error → 0 (caller maps to
+# Err — matches serde's "missing field" rejection of a malformed file).
+fn _credential_store_load_from(path) {
+    if (file_exists(path) == 0) { return map_new(); }
+    var cap = 1048576;
+    var buf = alloc(cap);
+    var n = file_read_all(path, buf, cap);
+    if (n < 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "failed to read credentials");
+        return 0;
+    }
+    var v = bayan_json_v_parse_str(buf, n);
+    if (v == 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "invalid credentials file");
+        return 0;
+    }
+    var store = credential_store_from_jv(v);
+    if (store == 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "invalid credentials file");
+        return 0;
+    }
+    return store;
+}
+
+# Load credentials from disk (rust-old: CredentialStore::load).
+fn credential_store_load() {
+    return _credential_store_load_from(credential_store_default_path());
+}
+
+# Save a store to `path` (internal; the public save uses default_path). Creates
+# the parent dir (create_dir_all). Returns 0 / -1.
+fn _credential_store_save_to(store, path) {
+    var dir = _reg_parent_dir(path);
+    if (dir != 0) { sys_mkdir(dir, 493); }
+    var s = json_v_build_pretty(credential_store_to_jv(store), 2);
+    if (file_write_all(path, str_data(s), str_len(s)) < 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "failed to write credentials");
+        return 0 - 1;
+    }
+    return 0;
+}
+
+# Save credentials to disk (rust-old: CredentialStore::save).
+fn credential_store_save(store) {
+    return _credential_store_save_to(store, credential_store_default_path());
+}
+
+# Store credentials for a registry (rust-old: set) — overwrites any existing entry.
+fn credential_store_set(store, registry, username, password) {
+    map_set(store, registry, registry_credential_new(username, password));
+    return 0;
+}
+
+# Get credentials for a registry (rust-old: get) — RegistryCredential* or 0.
+#[must_use]
+fn credential_store_get(store, registry) {
+    if (map_has(store, registry) == 0) { return 0; }
+    return map_get(store, registry);
+}
+
+# Remove credentials for a registry (rust-old: remove) — 1 if an entry existed.
+fn credential_store_remove(store, registry) {
+    return map_delete(store, registry);
+}
+
+# Build a RegistryConfig for a registry from its stored creds (rust-old: to_config).
+#[must_use]
+fn credential_store_to_config(store, registry) {
+    var cred = credential_store_get(store, registry);
+    if (cred == 0) { return registry_config_default(); }
+    var cc: RegistryCredential = cred;
+    return registry_config_new(cc.username, cc.password, 0);
+}
+
+# ── DEFERRED (land with the async transport layer) ──────
+# rust-old/src/registry.rs also defines the HTTP client surface, all coupled to
+# reqwest / tokio (the sync CredentialStore/RegistryConfig/MirrorConfig above are
+# now ported):
 #
-#   struct RegistryConfig { username, password, mirrors: MirrorConfig }
-#   struct MirrorConfig { mirrors: HashMap<String, Vec<String>> }
-#   struct CredentialStore { registries: HashMap<String, RegistryCredential> }
-#     - default_path() -> PathBuf
-#     - load() -> Result<Self, StivaError>        (fs + serde_json)
-#     - save() -> Result<(), StivaError>          (fs + serde_json)
-#     - set/get/remove/to_config
-#   fn dirs_path() -> PathBuf                      (std::env HOME)
 #   struct AuthToken { token, expires_at: Option<tokio::time::Instant> }
 #   struct RegistryClient { reqwest::Client, config, tokens: Arc<RwLock<..>> }
 #     - new / with_config / with_base_url / default

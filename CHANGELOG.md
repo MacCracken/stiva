@@ -23,8 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`runtime`**: the `/proc` process-tree walk (`container_top`, `is_descendant_of`,
   `read_process_info`) and host↔rootfs copy (`copy_into_container`, `copy_from_container`,
   `copy_dir_recursive`), plus `ProcessInfo` JSON — all synchronous.
-- **12 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases.
-  Suite: **897 tests** green (stiva 650 · runpath 171 · mgmt 76).
+- **`registry`**: `CredentialStore` (persistent `~/.stiva/credentials.json` via bayan JSON —
+  `default_path`/`load`/`save`/`set`/`get`/`remove`/`to_config`) + `RegistryConfig`/`MirrorConfig`.
+- **`build`**: `build_cache_key` + `build_step_to_jv` — serde-exact JSON for the internally-tagged
+  `BuildStep` enum (`tag="type"`, lowercase), so cache keys hash-match the Rust oracle
+  (pinned by tests against a hand-built hash input).
+- **20 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
+  regression tests for a directory-copy `is_dir` bug and OCI negative-limit handling that an
+  adversarial parity-verify pass surfaced). Suite: **933 tests** green (stiva 686 · runpath 171 · mgmt 76).
 
 ## [3.0.0] — Cyrius Port · synchronous single-node runtime
 

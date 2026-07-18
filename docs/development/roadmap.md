@@ -121,8 +121,11 @@ lifts a mid-tier module without touching the async runtime:
 - [ ] `intents` — variant payload fields (Run/Stop/Pull/Ansamblu/Scale/Inspect)
 - [x] `image` — `verify_integrity` (blob dir-walk + whole-blob re-hash, `image_store_verify_integrity`)
   → image 72% → ~90%. **2026-07-18.**
-- [ ] `build` — `build_cache_key` + OCI config/manifest JSON assembly; layer tar via the new tar writer (gzip only; zstd → v3.1) → build 64% → ~85%
-- [ ] `registry` — credential store (fs + JSON) + `RegistryConfig`/`MirrorConfig` structs (the async HTTP client stays v3.1)
+- [~] `build` — `build_cache_key` + `build_step_to_jv` (serde-exact tagged-enum JSON via
+  bayan, hash-pinned by tests). **2026-07-18.** Remaining: OCI config/manifest JSON assembly
+  + layer tar via the tar writer (gzip only; zstd → v3.1).
+- [x] `registry` — credential store (`CredentialStore` fs+JSON: default_path/load/save/set/
+  get/remove/to_config) + `RegistryConfig`/`MirrorConfig`. **2026-07-18.** (async HTTP client stays v3.1.)
 - [ ] `mcp` — structured-output JSON assembly for the handlers that don't need the async driver
 - [x] `runtime` — `is_descendant_of` + `container_top` + `read_process_info` (/proc walk);
   `copy_into/from_container` + `copy_dir_recursive` (fs recursion); `ProcessInfo` JSON.
