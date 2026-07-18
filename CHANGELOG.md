@@ -33,10 +33,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `[volumes.NAME]` headers, inline-table `env`, `restart`/`replicas`/`health_check` with serde
   defaults). Empty `[volumes.x]` sections (which bayan drops) are recovered by scanning the raw
   headers. Plus `restart_policy_from_name` in `health`.
-- **33 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
-  regression tests for a directory-copy `is_dir` bug, OCI negative-limit handling, and strict
-  credential-file deserialization that adversarial parity-verify passes surfaced).
-  Suite: **983 tests** green (stiva 690 · runpath 171 · mgmt 122).
+- **`mcp`**: `mcp_handle_build` / `mcp_handle_ansamblu` — the two fully-synchronous tool handlers
+  (parse the Stivafile / ansamblu spec via the ported parsers, assemble a structured `McpResult`).
+- **45 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
+  regression tests for a directory-copy `is_dir` bug, OCI negative-limit handling, strict
+  credential-file deserialization, and 5 strict-parse cases in `parse_ansamblu` that adversarial
+  parity-verify passes surfaced). Suite: **1001 tests** green (stiva 702 · runpath 171 · mgmt 128).
 
 ## [3.0.0] — Cyrius Port · synchronous single-node runtime
 

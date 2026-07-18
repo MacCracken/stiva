@@ -2509,6 +2509,53 @@ fn test_mcp_result_resource() {
     return 0;
 }
 
+# mcp_handle_build (rust-old mcp.rs: handle_build — a fully-sync handler).
+fn test_mcp_handle_build() {
+    test_group("mcp_handle_build");
+    var params = json_v_obj_new();
+    json_v_obj_set(params, str_from("spec"),
+    json_v_str_new(str_from("[image]\nbase = \"alpine\"\nname = \"myapp\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hi\"]\n")));
+    var r = mcp_handle_build(params);
+    assert_eq(mcp_result_success(r), 1, "build ok");
+    var text = content_part_text_of(vec_get(mcp_result_content(r), 0));
+    assert_eq(strstr(text, "alpine") >= 0, 1, "reports base");
+    assert_eq(strstr(text, "myapp") >= 0, 1, "reports name");
+    assert_eq(strstr(text, "parsed") >= 0, 1, "status parsed");
+    # missing spec -> error result
+    var r2 = mcp_handle_build(json_v_obj_new());
+    assert_eq(mcp_result_success(r2), 0, "missing spec -> err");
+    return 0;
+}
+
+# mcp_handle_ansamblu (rust-old mcp.rs: handle_ansamblu — fully sync).
+fn test_mcp_handle_ansamblu() {
+    test_group("mcp_handle_ansamblu");
+    # up: parse the ansamblu file, report service count.
+    var up = json_v_obj_new();
+    json_v_obj_set(up, str_from("action"), json_v_str_new(str_from("up")));
+    json_v_obj_set(up, str_from("file"),
+    json_v_str_new(str_from("[services.web]\nimage = \"nginx\"\n\n[services.db]\nimage = \"postgres\"\n")));
+    var r = mcp_handle_ansamblu(up);
+    assert_eq(mcp_result_success(r), 1, "up ok");
+    var text = content_part_text_of(vec_get(mcp_result_content(r), 0));
+    assert_eq(strstr(text, "ansamblu_up") >= 0, 1, "action ansamblu_up");
+    # down: queued.
+    var down = json_v_obj_new();
+    json_v_obj_set(down, str_from("action"), json_v_str_new(str_from("down")));
+    json_v_obj_set(down, str_from("session_id"), json_v_str_new(str_from("s-42")));
+    var rd = mcp_handle_ansamblu(down);
+    assert_eq(mcp_result_success(rd), 1, "down ok");
+    var dtext = content_part_text_of(vec_get(mcp_result_content(rd), 0));
+    assert_eq(strstr(dtext, "queued") >= 0, 1, "status queued");
+    assert_eq(strstr(dtext, "s-42") >= 0, 1, "echoes session_id");
+    # missing action -> error; unknown action -> error.
+    assert_eq(mcp_result_success(mcp_handle_ansamblu(json_v_obj_new())), 0, "missing action -> err");
+    var bad = json_v_obj_new();
+    json_v_obj_set(bad, str_from("action"), json_v_str_new(str_from("sideways")));
+    assert_eq(mcp_result_success(mcp_handle_ansamblu(bad)), 0, "unknown action -> err");
+    return 0;
+}
+
 fn test_mcp_content_type_names() {
     test_group("mcp_content_type_names");
     # ContentPart #[serde(tag = "type")] wire values.
@@ -2775,6 +2822,8 @@ fn main() {
     test_mcp_tool_list_has_nine_tools();
     test_mcp_tool_schemas_are_valid();
     test_mcp_result_ok();
+    test_mcp_handle_build();
+    test_mcp_handle_ansamblu();
     test_mcp_result_err();
     test_mcp_result_resource();
     test_mcp_content_type_names();

@@ -273,25 +273,90 @@ fn tool_list() {
     return tools;
 }
 
+# ── Synchronous tool handlers (rust-old: handle_build / handle_ansamblu) ──────
+# These two rust handlers are marked `async` but have fully SYNCHRONOUS bodies —
+# they only drive the ported parse_build_spec / parse_ansamblu and assemble a
+# structured McpResult (no `.await`). `params` is a bayan JSON object value; the
+# response JSON is serialized pretty (the caller's job here, per McpResult::ok).
+
+# Read a string param → fresh cstr, or 0 if absent/non-string
+# (rust: params.get(key).and_then(|v| v.as_str())).
+fn _mcp_param_str(params, key) {
+    var v = json_v_obj_get(params, key);
+    if (json_v_is_str(v) == 0) { return 0; }
+    return str_cstr(json_v_str(v));
+}
+
+# stiva_build tool (rust-old: handle_build): parse the Stivafile spec and report
+# a summary. Missing `spec` or a parse failure → an error McpResult.
+fn mcp_handle_build(params) {
+    var spec = _mcp_param_str(params, "spec");
+    if (spec == 0) { return mcp_result_err("missing required parameter: spec"); }
+    var ctx = _mcp_param_str(params, "context_dir");
+    if (ctx == 0) { ctx = "."; }
+    var build_spec = parse_build_spec(spec);
+    if (build_spec == 0) { return mcp_result_err("build spec parse failed"); }
+    var bs: BuildSpec = build_spec;
+    var img: ImageDef = bs.image;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("action"), json_v_str_new(str_from("build")));
+    json_v_obj_set(o, str_from("base"), json_v_str_new(str_from(img.base)));
+    json_v_obj_set(o, str_from("name"), json_v_str_new(str_from(img.name)));
+    json_v_obj_set(o, str_from("tag"), json_v_str_new(str_from(img.tag)));
+    json_v_obj_set(o, str_from("steps"), json_v_int_new(vec_len(bs.steps)));
+    json_v_obj_set(o, str_from("context_dir"), json_v_str_new(str_from(ctx)));
+    json_v_obj_set(o, str_from("status"), json_v_str_new(str_from("parsed")));
+    return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+}
+
+# stiva_ansamblu tool (rust-old: handle_ansamblu): "up" parses the ansamblu file
+# and reports the service count; "down" queues a teardown; other actions → error.
+fn mcp_handle_ansamblu(params) {
+    var action = _mcp_param_str(params, "action");
+    if (action == 0) { return mcp_result_err("missing required parameter: action"); }
+    if (streq(action, "up") == 1) {
+        var file = _mcp_param_str(params, "file");
+        if (file == 0) { file = ""; }
+        var af = parse_ansamblu(file);
+        if (af == 0) { return mcp_result_err("ansamblu parse failed"); }
+        var aa: AnsambluFile = af;
+        var o = json_v_obj_new();
+        json_v_obj_set(o, str_from("action"), json_v_str_new(str_from("ansamblu_up")));
+        json_v_obj_set(o, str_from("services"), json_v_int_new(map_size(aa.services)));
+        json_v_obj_set(o, str_from("status"), json_v_str_new(str_from("parsed")));
+        return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+    }
+    if (streq(action, "down") == 1) {
+        var sid = _mcp_param_str(params, "session_id");
+        if (sid == 0) { sid = "unknown"; }
+        var o = json_v_obj_new();
+        json_v_obj_set(o, str_from("action"), json_v_str_new(str_from("ansamblu_down")));
+        json_v_obj_set(o, str_from("session_id"), json_v_str_new(str_from(sid)));
+        json_v_obj_set(o, str_from("status"), json_v_str_new(str_from("queued")));
+        return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+    }
+    return mcp_result_err(_img_cat2("unknown ansamblu action: ", action));
+}
+
 # ── DEFERRED (land with the Stiva async runtime driver) ───────────
 # rust-old/src/mcp.rs also defines the live tool-dispatch + resource layer,
 # coupled to the async `Stiva` instance (rust-old/src/lib.rs), an async
-# runtime, and serde_json::Value construction the ported base lacks:
+# runtime, and serde_json::Value construction the ported base lacks. The two
+# fully-synchronous handlers (handle_build / handle_ansamblu) are ported above;
+# the rest drive the async Stiva facade:
 #
 #   async fn handle_tool(stiva: &Arc<Stiva>, name, params) -> McpResult
-#     — dispatch by tool name to the handle_* fns below; unknown → err.
+#     — dispatch by tool name to the handle_* fns; the two sync ones route to
+#       mcp_handle_build / mcp_handle_ansamblu, the rest stay async.
 #   async fn handle_pull(stiva, params) -> McpResult      (stiva.pull)
 #   async fn handle_run(stiva, params) -> McpResult       (stiva.run; builds
 #       container::ContainerConfig with name/command/ports/volumes, detach=true)
 #   async fn handle_ps(stiva) -> McpResult                (stiva.ps)
 #   async fn handle_stop(stiva, params) -> McpResult      (stiva.stop)
 #   async fn handle_exec(stiva, params) -> McpResult      (stiva.exec)
-#   async fn handle_build(params) -> McpResult            (build::parse_build_spec)
 #   async fn handle_push(stiva, params) -> McpResult      (stiva.push)
 #   async fn handle_inspect(stiva, params) -> McpResult   (stiva.inspect /
 #       stiva.inspect_image; type ∈ {"container","image"})
-#   async fn handle_ansamblu(params) -> McpResult         (ansamblu::parse_ansamblu;
-#       action ∈ {"up","down"})
 #   async fn list_resources(stiva: &Arc<Stiva>) -> Vec<serde_json::Value>
 #       — container + image resources (stiva.ps + stiva.images)
 #   async fn read_resource(stiva: &Arc<Stiva>, uri) -> Result<Value, String>

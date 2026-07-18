@@ -126,7 +126,9 @@ lifts a mid-tier module without touching the async runtime:
   + layer tar via the tar writer (gzip only; zstd → v3.1).
 - [x] `registry` — credential store (`CredentialStore` fs+JSON: default_path/load/save/set/
   get/remove/to_config) + `RegistryConfig`/`MirrorConfig`. **2026-07-18.** (async HTTP client stays v3.1.)
-- [ ] `mcp` — structured-output JSON assembly for the handlers that don't need the async driver
+- [x] `mcp` — the two fully-synchronous tool handlers `mcp_handle_build` / `mcp_handle_ansamblu`
+  (parse the Stivafile/ansamblu spec, assemble a structured `McpResult`). **2026-07-18.**
+  (The remaining handlers drive the async `Stiva` facade → v3.1.)
 - [x] `runtime` — `is_descendant_of` + `container_top` + `read_process_info` (/proc walk);
   `copy_into/from_container` + `copy_dir_recursive` (fs recursion); `ProcessInfo` JSON.
   **2026-07-18.** (export/import rootfs + exec/spawn stay v3.1.)
