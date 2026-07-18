@@ -116,13 +116,32 @@ Achievable now with the existing stdlib (bayan JSON/TOML, sankoch gzip, the new
 USTAR tar writer, syscall dir-walks) — the `not-ported` + sync-`codec` items. Each
 lifts a mid-tier module without touching the async runtime:
 
-- [ ] `oci` — `parse_bundle` / `build_state` / `to_oci_status` (JSON via bayan) → oci 67% → ~100%
+- [x] `oci` — `parse_bundle` / `build_state` / `to_oci_status` + `OciState` (bayan JSON;
+  landed in `container.cyr`, coupled to the container types) → oci 67% → ~100%. **2026-07-18.**
 - [ ] `intents` — variant payload fields (Run/Stop/Pull/Ansamblu/Scale/Inspect)
-- [ ] `image` — `verify_integrity` (blob dir-walk + re-hash) → image 72% → ~90%
+- [x] `image` — `verify_integrity` (blob dir-walk + whole-blob re-hash, `image_store_verify_integrity`)
+  → image 72% → ~90%. **2026-07-18.**
 - [ ] `build` — `build_cache_key` + OCI config/manifest JSON assembly; layer tar via the new tar writer (gzip only; zstd → v3.1) → build 64% → ~85%
 - [ ] `registry` — credential store (fs + JSON) + `RegistryConfig`/`MirrorConfig` structs (the async HTTP client stays v3.1)
 - [ ] `mcp` — structured-output JSON assembly for the handlers that don't need the async driver
-- [ ] `runtime` — `is_descendant_of` + `container_top` (/proc walk); `copy_into/from_container` (fs recursion)
+- [x] `runtime` — `is_descendant_of` + `container_top` + `read_process_info` (/proc walk);
+  `copy_into/from_container` + `copy_dir_recursive` (fs recursion); `ProcessInfo` JSON.
+  **2026-07-18.** (export/import rootfs + exec/spawn stay v3.1.)
+
+### Toolchain + dependency refresh (2026-07-18)
+
+- **cyrius pin 6.4.19 → 6.4.66.** Re-vendored the `[deps].stdlib` subset (`cyrius lib
+  sync`). The newer compiler is stricter about struct field access: a latent test bug
+  (`c.exit_code` on a `Container` whose field is `exit_status`) that 6.4.19 tolerated is
+  now a hard error — fixed in `tests/stiva.tcyr`.
+- **AGNOS deps → latest release tags:** kavach 3.7.0→3.7.1 · majra 2.5.0→2.5.1 · nein
+  1.6.2→1.6.4 · bote 3.0.0→3.1.4 (core) · agnodrm 1.4.5→1.5.0 · sakshi 2.4.4→2.4.6 ·
+  libro 2.7.10→2.8.2 · cmdit 1.1.0 (unchanged). Path-override resolution already consumed
+  the newer bundles; the `cyrius.cyml` tag pins now match.
+- Build + **897 tests** green (stiva 650 · runpath 171 · mgmt 76), `dist/stiva.cyr` rebuilt.
+  The `fn_table` (87%) and `identifier buffer` (89%) scaling warnings persist — the
+  filed cycc identifier-dedup cap is the ceiling the remaining sync backlog must fit under
+  or force the compilation-unit split.
 
 ---
 

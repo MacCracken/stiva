@@ -33,6 +33,17 @@ fn oci_status_name(status) {
     return "unknown";
 }
 
+# Inverse of oci_status_name: serde wire name → OciStatus ordinal, or -1 for
+# an unknown token (used by OciState deserialization in container.cyr).
+#[must_use]
+fn oci_status_from_name(name) {
+    if (streq(name, "creating") == 1) { return OCI_STATUS_CREATING; }
+    if (streq(name, "created") == 1) { return OCI_STATUS_CREATED; }
+    if (streq(name, "running") == 1) { return OCI_STATUS_RUNNING; }
+    if (streq(name, "stopped") == 1) { return OCI_STATUS_STOPPED; }
+    return 0 - 1;
+}
+
 # True (1) iff every byte of NUL-terminated `s` is an ASCII digit and `s`
 # is non-empty. Used to decide the numeric-vs-name branch in parse_signal.
 #[must_use]
@@ -89,11 +100,12 @@ fn parse_signal(s) {
     return 0 - 1;
 }
 
-# ── DEFERRED (land with src/container.cyr) ───────────────────────
+# ── Container-coupled OCI surface (now implemented in container.cyr) ──
 # rust-old/src/oci.rs also defines, coupled to container.rs types:
 #   struct OciState { oci_version, id, status, pid, bundle, annotations }
 #   fn to_oci_status(state: ContainerState) -> OciStatus
 #   fn build_state(container: &Container, bundle_path) -> OciState
 #   fn parse_bundle(bundle_path) -> Result<ContainerConfig, StivaError>
-# These reference Container / ContainerState / ContainerConfig and are
-# ported alongside container.cyr for parity. Tracked in the roadmap.
+# These reference Container / ContainerState / ContainerConfig plus the
+# bayan JSON codec, so they land in src/container.cyr (see its
+# "OCI runtime state" section) alongside ContainerConfig construction.

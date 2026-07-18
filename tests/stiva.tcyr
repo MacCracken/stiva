@@ -91,6 +91,88 @@ fn test_parse_signal_invalid() {
     return 0;
 }
 
+# to_oci_status / OciState / build_state / parse_bundle live in container.cyr
+# (they couple to the container types + bayan) but mirror rust-old/src/oci.rs
+# #[cfg(test)], so they're grouped here with the rest of the oci surface.
+fn test_oci_status_all_variants() {
+    test_group("oci_status_all_variants");
+    assert_eq(to_oci_status(CONTAINER_STATE_CREATED), OCI_STATUS_CREATED, "Created");
+    assert_eq(to_oci_status(CONTAINER_STATE_RUNNING), OCI_STATUS_RUNNING, "Running");
+    assert_eq(to_oci_status(CONTAINER_STATE_PAUSED), OCI_STATUS_RUNNING, "Paused->Running");
+    assert_eq(to_oci_status(CONTAINER_STATE_STOPPED), OCI_STATUS_STOPPED, "Stopped");
+    assert_eq(to_oci_status(CONTAINER_STATE_REMOVING), OCI_STATUS_STOPPED, "Removing->Stopped");
+    return 0;
+}
+
+fn test_oci_state_serde() {
+    test_group("oci_state_serde");
+    var st = oci_state_new("1.2.0", "test-container", OCI_STATUS_RUNNING, 1234,
+    "/run/containers/test", 0);
+    var json = json_v_build(oci_state_to_jv(st));
+    var cs = str_cstr(json);
+    assert_eq(strstr(cs, "\"ociVersion\":\"1.2.0\"") >= 0, 1, "has ociVersion");
+    assert_eq(strstr(cs, "\"status\":\"running\"") >= 0, 1, "has status running");
+    var back = oci_state_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var bs: OciState = back;
+    assert_eq(streq(bs.id, "test-container"), 1, "id round-trip");
+    assert_eq(bs.status, OCI_STATUS_RUNNING, "status round-trip");
+    assert_eq(bs.pid, 1234, "pid round-trip");
+    return 0;
+}
+
+fn test_build_state_json() {
+    test_group("build_state_json");
+    var cfg = container_config_default();
+    var c: Container = container_new("abc123", "test", "sha256:dead", "",
+    CONTAINER_STATE_RUNNING, 42, 1000, 2000, cfg, 0 - 1);
+    var s: OciState = build_state(c, "/run/bundle");
+    assert_eq(streq(s.oci_version, "1.2.0"), 1, "oci_version 1.2.0");
+    assert_eq(s.status, OCI_STATUS_RUNNING, "status Running");
+    assert_eq(s.pid, 42, "pid 42");
+    assert_eq(streq(s.bundle, "/run/bundle"), 1, "bundle");
+    return 0;
+}
+
+fn test_parse_bundle_minimal() {
+    test_group("parse_bundle_minimal");
+    var dir = "/tmp/stiva_oci_min";
+    sys_mkdir(dir, 0x1ED);
+    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/sh\",\"-c\",\"echo hello\"],\"env\":[\"PATH=/usr/bin\",\"HOME=/root\"]},\"root\":{\"path\":\"rootfs\"}}";
+    file_write_all("/tmp/stiva_oci_min/config.json", cfg, strlen(cfg));
+    var config = parse_bundle(dir);
+    assert_eq(config != 0, 1, "parsed non-null");
+    var c: ContainerConfig = config;
+    assert_eq(vec_len(c.command), 3, "3 args");
+    assert_eq(streq(vec_get(c.command, 0), "/bin/sh"), 1, "arg0");
+    assert_eq(streq(vec_get(c.command, 1), "-c"), 1, "arg1");
+    assert_eq(streq(vec_get(c.command, 2), "echo hello"), 1, "arg2");
+    assert_eq(streq(map_get(c.env, "PATH"), "/usr/bin"), 1, "env PATH");
+    assert_eq(streq(map_get(c.env, "HOME"), "/root"), 1, "env HOME");
+    assert_eq(c.detach, 1, "detach true");
+    return 0;
+}
+
+fn test_parse_bundle_with_resources() {
+    test_group("parse_bundle_with_resources");
+    var dir = "/tmp/stiva_oci_res";
+    sys_mkdir(dir, 0x1ED);
+    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/true\"]},\"root\":{\"path\":\"rootfs\"},\"hostname\":\"test-host\",\"linux\":{\"resources\":{\"memory\":{\"limit\":268435456},\"pids\":{\"limit\":100}}}}";
+    file_write_all("/tmp/stiva_oci_res/config.json", cfg, strlen(cfg));
+    var c: ContainerConfig = parse_bundle(dir);
+    assert_eq(c.memory_limit, 268435456, "memory_limit");
+    assert_eq(c.max_pids, 100, "max_pids");
+    assert_eq(streq(c.domainname, "test-host"), 1, "domainname");
+    return 0;
+}
+
+fn test_parse_bundle_missing_config() {
+    test_group("parse_bundle_missing_config");
+    var dir = "/tmp/stiva_oci_missing";
+    sys_mkdir(dir, 0x1ED);
+    assert_eq(parse_bundle(dir), 0, "missing config.json -> 0");
+    return 0;
+}
+
 # ── intents.cyr (rust-old/src/intents.rs) ────────────────────────
 fn test_parse_intent_not_implemented() {
     test_group("intents::parse_intent_not_implemented");
@@ -1118,6 +1200,42 @@ fn test_prepare_layers_dedup() {
     return 0;
 }
 
+# verify_integrity on an untampered store reports no corruption (rust-old:
+# verify_integrity — no #[cfg(test)] in the oracle, so this exercises the
+# happy path the Rust doc promises).
+fn test_verify_integrity_clean() {
+    test_group("verify_integrity_clean");
+    var root = "/tmp/stiva-verify-clean";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var data = "hello integrity";
+    var digest = sha256_digest(data, strlen(data));
+    assert(image_store_store_blob(store, digest, data, strlen(data)) != 0, "stored");
+    var corrupted = image_store_verify_integrity(store);
+    assert_eq(vec_len(corrupted), 0, "no corruption");
+    return 0;
+}
+
+# verify_integrity detects a blob whose on-disk contents no longer hash to its
+# content-addressed name, reporting its digest.
+fn test_verify_integrity_detects_corruption() {
+    test_group("verify_integrity_detects_corruption");
+    var root = "/tmp/stiva-verify-corrupt";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var data = "original blob bytes";
+    var digest = sha256_digest(data, strlen(data));
+    assert(image_store_store_blob(store, digest, data, strlen(data)) != 0, "stored");
+    # Tamper: overwrite the blob file (same name) with different bytes.
+    var blob_path = _img_blob_path(image_store_root(store), digest);
+    var bad = "tampered contents!!!";
+    file_write_all(blob_path, bad, strlen(bad));
+    var corrupted = image_store_verify_integrity(store);
+    assert_eq(vec_len(corrupted), 1, "one corrupted");
+    assert_eq(streq(vec_get(corrupted, 0), digest), 1, "reports the digest");
+    return 0;
+}
+
 # ── build.cyr (rust-old/src/build.rs) ──
 # ── build.cyr (rust-old/src/build.rs) ────────────────────────────
 # Mirrors the portable subset of build.rs's #[cfg(test)] module. The
@@ -1781,6 +1899,116 @@ fn test_runtime_criu_available_returns_bool() {
     return 0;
 }
 
+# ProcessInfo JSON round-trip (rust-old runtime.rs: process_info_serde).
+fn test_runtime_process_info_serde() {
+    test_group("runtime_process_info_serde");
+    var info = process_info_new(123, 1, "sleep", "sleep 60", 83);   # 'S' = 83
+    var json = json_v_build(process_info_to_jv(info));
+    var back = process_info_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var b: ProcessInfo = back;
+    assert_eq(b.pid, 123, "pid round-trip");
+    assert_eq(b.state, 83, "state 'S' round-trip");
+    return 0;
+}
+
+# copy_into_container places a host file under the rootfs, creating parent dirs
+# (rust-old runtime.rs: copy_into_container_creates_file).
+fn test_runtime_copy_into_container() {
+    test_group("runtime_copy_into_container");
+    sys_mkdir("/tmp/stiva_cp_in", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_in/rootfs", 0x1ED);
+    file_write_all("/tmp/stiva_cp_in/hello.txt", "hello", 5);
+    assert_eq(copy_into_container("/tmp/stiva_cp_in/rootfs",
+    "/tmp/stiva_cp_in/hello.txt", "/app/hello.txt"), 0, "copy ok");
+    var buf = alloc(64);
+    var n = file_read_all("/tmp/stiva_cp_in/rootfs/app/hello.txt", buf, 63);
+    store8(buf + n, 0);
+    assert_eq(streq(buf, "hello"), 1, "content hello");
+    return 0;
+}
+
+# copy_from_container extracts a rootfs file to the host (rust-old runtime.rs:
+# copy_from_container_reads_file).
+fn test_runtime_copy_from_container() {
+    test_group("runtime_copy_from_container");
+    sys_mkdir("/tmp/stiva_cp_out", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_out/rootfs", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_out/rootfs/data", 0x1ED);
+    file_write_all("/tmp/stiva_cp_out/rootfs/data/out.txt", "result", 6);
+    assert_eq(copy_from_container("/tmp/stiva_cp_out/rootfs", "/data/out.txt",
+    "/tmp/stiva_cp_out/output.txt"), 0, "copy ok");
+    var buf = alloc(64);
+    var n = file_read_all("/tmp/stiva_cp_out/output.txt", buf, 63);
+    store8(buf + n, 0);
+    assert_eq(streq(buf, "result"), 1, "content result");
+    return 0;
+}
+
+# copy_from_container errors when the source is absent (rust-old runtime.rs:
+# copy_from_container_missing_source).
+fn test_runtime_copy_from_missing() {
+    test_group("runtime_copy_from_missing");
+    sys_mkdir("/tmp/stiva_cp_miss", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_miss/rootfs", 0x1ED);
+    assert_eq(copy_from_container("/tmp/stiva_cp_miss/rootfs", "/nope",
+    "/tmp/stiva_cp_miss/out"), 0 - 1, "missing source -> -1");
+    return 0;
+}
+
+# copy_dir_recursive copies a nested tree (rust-old runtime.rs:
+# copy_dir_recursive_works). Exercises the is_dir() directory branch that a
+# file-only copy test cannot reach.
+fn test_runtime_copy_dir_recursive() {
+    test_group("runtime_copy_dir_recursive");
+    sys_mkdir("/tmp/stiva_cp_dir", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_dir/src", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_dir/src/sub", 0x1ED);
+    file_write_all("/tmp/stiva_cp_dir/src/a.txt", "a", 1);
+    file_write_all("/tmp/stiva_cp_dir/src/sub/b.txt", "b", 1);
+    assert_eq(copy_dir_recursive("/tmp/stiva_cp_dir/src", "/tmp/stiva_cp_dir/dst"), 0, "copy ok");
+    var b1 = alloc(8);
+    var n1 = file_read_all("/tmp/stiva_cp_dir/dst/a.txt", b1, 7);
+    store8(b1 + n1, 0);
+    assert_eq(streq(b1, "a"), 1, "a.txt copied");
+    var b2 = alloc(8);
+    var n2 = file_read_all("/tmp/stiva_cp_dir/dst/sub/b.txt", b2, 7);
+    store8(b2 + n2, 0);
+    assert_eq(streq(b2, "b"), 1, "sub/b.txt copied (recursion)");
+    return 0;
+}
+
+# copy_into_container recursively copies a directory source into the rootfs
+# (regression for the is_dir(cstr) bug — a dir source must land as a tree).
+fn test_runtime_copy_into_container_dir() {
+    test_group("runtime_copy_into_container_dir");
+    sys_mkdir("/tmp/stiva_cp_ind", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_ind/rootfs", 0x1ED);
+    sys_mkdir("/tmp/stiva_cp_ind/srcdir", 0x1ED);
+    file_write_all("/tmp/stiva_cp_ind/srcdir/x.txt", "xyz", 3);
+    assert_eq(copy_into_container("/tmp/stiva_cp_ind/rootfs",
+    "/tmp/stiva_cp_ind/srcdir", "/app/data"), 0, "dir copy ok");
+    var buf = alloc(16);
+    var n = file_read_all("/tmp/stiva_cp_ind/rootfs/app/data/x.txt", buf, 15);
+    store8(buf + n, 0);
+    assert_eq(streq(buf, "xyz"), 1, "nested file copied into rootfs");
+    return 0;
+}
+
+# parse_bundle ignores a negative resource limit / uid, matching serde_json
+# as_u64 (which returns None for negatives) — regression for the sign guard.
+fn test_parse_bundle_negative_limits() {
+    test_group("parse_bundle_negative_limits");
+    var dir = "/tmp/stiva_oci_neg";
+    sys_mkdir(dir, 0x1ED);
+    var cfg = "{\"process\":{\"args\":[\"/bin/true\"],\"user\":{\"uid\":-1}},\"linux\":{\"resources\":{\"memory\":{\"limit\":-1},\"pids\":{\"limit\":-5}}}}";
+    file_write_all("/tmp/stiva_oci_neg/config.json", cfg, strlen(cfg));
+    var c: ContainerConfig = parse_bundle(dir);
+    assert_eq(c.rootless, 0, "negative uid -> not rootless");
+    assert_eq(c.memory_limit, 0, "negative memory -> default 0");
+    assert_eq(c.max_pids, 0, "negative pids -> default 0");
+    return 0;
+}
+
 # ── container.cyr (rust-old/src/container.rs) ──
 # Mirrors rust-old container.rs #[cfg(test)] (portable subset).
 fn test_container_state_serde() {
@@ -1835,7 +2063,7 @@ fn test_container_serde_round_trip() {
     1000, 2000, cfg, 0);
     assert_eq(streq(c.id, "abc-123"), 1, "id");
     assert_eq(c.state, CONTAINER_STATE_STOPPED, "state Stopped");
-    assert_eq(c.exit_code, 0, "exit_code 0");
+    assert_eq(c.exit_status, 0, "exit_code 0");
     var ccfg: ContainerConfig = c.config;
     assert_eq(ccfg.memory_limit, 256 * 1024 * 1024, "config memory_limit");
     assert_eq(streq(ccfg.user, "nobody"), 1, "config user");
@@ -2218,6 +2446,13 @@ fn main() {
     test_parse_signal_numeric();
     test_parse_signal_names();
     test_parse_signal_invalid();
+    test_oci_status_all_variants();
+    test_oci_state_serde();
+    test_build_state_json();
+    test_parse_bundle_minimal();
+    test_parse_bundle_with_resources();
+    test_parse_bundle_missing_config();
+    test_parse_bundle_negative_limits();
     # intents
     test_parse_intent_not_implemented();
     test_intent_serde();
@@ -2311,6 +2546,8 @@ fn main() {
     test_unpack_layer_not_gzip();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
+    test_verify_integrity_clean();
+    test_verify_integrity_detects_corruption();
     test_build_default_tag();
     test_build_config_default();
     test_build_step_type_names();
@@ -2360,6 +2597,12 @@ fn main() {
     test_runtime_volume_mounts_invalid();
     test_runtime_parse_ppid_from_stat();
     test_runtime_criu_available_returns_bool();
+    test_runtime_process_info_serde();
+    test_runtime_copy_into_container();
+    test_runtime_copy_from_container();
+    test_runtime_copy_from_missing();
+    test_runtime_copy_dir_recursive();
+    test_runtime_copy_into_container_dir();
     test_container_state_serde();
     test_container_config_defaults();
     test_default_stop_grace_ms();

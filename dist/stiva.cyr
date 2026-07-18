@@ -139,6 +139,17 @@ fn oci_status_name(status) {
     return "unknown";
 }
 
+# Inverse of oci_status_name: serde wire name → OciStatus ordinal, or -1 for
+# an unknown token (used by OciState deserialization in container.cyr).
+#[must_use]
+fn oci_status_from_name(name) {
+    if (streq(name, "creating") == 1) { return OCI_STATUS_CREATING; }
+    if (streq(name, "created") == 1) { return OCI_STATUS_CREATED; }
+    if (streq(name, "running") == 1) { return OCI_STATUS_RUNNING; }
+    if (streq(name, "stopped") == 1) { return OCI_STATUS_STOPPED; }
+    return 0 - 1;
+}
+
 # True (1) iff every byte of NUL-terminated `s` is an ASCII digit and `s`
 # is non-empty. Used to decide the numeric-vs-name branch in parse_signal.
 #[must_use]
@@ -195,14 +206,15 @@ fn parse_signal(s) {
     return 0 - 1;
 }
 
-# ── DEFERRED (land with src/container.cyr) ───────────────────────
+# ── Container-coupled OCI surface (now implemented in container.cyr) ──
 # rust-old/src/oci.rs also defines, coupled to container.rs types:
 #   struct OciState { oci_version, id, status, pid, bundle, annotations }
 #   fn to_oci_status(state: ContainerState) -> OciStatus
 #   fn build_state(container: &Container, bundle_path) -> OciState
 #   fn parse_bundle(bundle_path) -> Result<ContainerConfig, StivaError>
-# These reference Container / ContainerState / ContainerConfig and are
-# ported alongside container.cyr for parity. Tracked in the roadmap.
+# These reference Container / ContainerState / ContainerConfig plus the
+# bayan JSON codec, so they land in src/container.cyr (see its
+# "OCI runtime state" section) alongside ContainerConfig construction.
 
 # --- intents.cyr ---
 
@@ -4967,6 +4979,63 @@ fn image_store_gc(store) {
     return removed;
 }
 
+# Read the whole file at `path` into a fresh buffer (SEEK_END-sized, so no
+# maxlen truncation — an integrity check must hash the ENTIRE blob, and layer
+# blobs can exceed image_import's 64 MiB read cap). Writes the byte length to
+# `out_len`; returns the buffer, or 0 (out_len < 0) on open/seek failure.
+# Mirrors storage.cyr's _stor_read_file, kept local to image.cyr.
+fn _img_read_file(path, out_len) {
+    var fd = file_open(path, 0, 0);            # O_RDONLY
+    if (fd < 0) { store64(out_len, fd); return 0; }
+    var size = xlseek(fd, 0, 2);               # SEEK_END → byte length
+    xlseek(fd, 0, 0);                          # SEEK_SET → rewind
+    if (size < 0) { file_close(fd); store64(out_len, 0 - 1); return 0; }
+    var buf = alloc(size + 1);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, size - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= size) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# Verify blob integrity: walk {root}/blobs/sha256, re-hash each blob, and
+# compare against its content-addressed name (rust-old: verify_integrity).
+# Returns a vec of the "sha256:<hex>" digests whose contents mismatch, or that
+# could not be read. An empty vec means every blob verified.
+fn image_store_verify_integrity(store) {
+    sakshi_info("verifying blob integrity", strlen("verifying blob integrity"));
+    var root = _img_store_root(store);
+    var corrupted = vec_new();
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var hex = str_cstr(vec_get(entries, ei));
+        var expected = _img_cat2("sha256:", hex);
+        var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
+        var len_cell = alloc(8);
+        var data = _img_read_file(blob_path, len_cell);
+        var n = load64(len_cell);
+        if (data == 0) {
+            vec_push(corrupted, expected);
+        } else {
+            var actual = sha256_digest(data, n);
+            if (streq(actual, expected) == 0) { vec_push(corrupted, expected); }
+        }
+        ei = ei + 1;
+    }
+    return corrupted;
+}
+
 # ── ImageRef constructor + import + tag ─────────────────────────
 
 # Construct an ImageRef directly (rust-old: ImageRef { .. }). Kept here in
@@ -5074,13 +5143,11 @@ fn image_store_tag(store, source, new_ref) {
 # ── DEFERRED (blob dir-walk + async network layer) ──────────────
 # rust-old/src/image.rs also defines, still deferred here:
 #
-#   gc / verify_integrity (full blobs/ + layers/ dir-walk + re-hash):
-#     fn gc(&self) -> Result<(u32, u32), StivaError>
-#     fn verify_integrity(&self) -> Result<Vec<String>, StivaError>
-#   (gc walks read_dir(blobs)/read_dir(layers) and removes every entry not
-#    referenced by the index; verify_integrity re-reads every blob and
-#    re-hashes it to detect corruption. Ported alongside the layer-unpack
-#    surface for full parity.)
+#   gc → image_store_gc (blobs dir-walk + drop-unreferenced); verify_integrity
+#   → image_store_verify_integrity (re-read + re-hash every blob) — both ported
+#   above. gc's Rust return is (u32 blobs, u32 layers); the port removes from the
+#   single blobs/ store and returns the count (the split layers/ dir is a v3.1
+#   layer-unpack concern).
 #
 #   async network (RegistryClient reqwest/tokio; not in ported registry):
 #     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
@@ -7225,6 +7292,10 @@ fn encrypt_layer(data, data_len, key_source, out_len) {
 #   * standard_mounts()  — the fixed /proc,/sys,/dev,/dev/pts,/dev/shm list.
 #   * volume_mounts(vols, rootless) — SpecMount conversion via storage.parse_volume.
 #   * parse_ppid_from_stat(stat) — pure /proc/<pid>/stat PPID field parser.
+#   * container_top(pid) / is_descendant_of / read_process_info — the /proc
+#     process-tree walk (synchronous; the oracle marked it async).
+#   * copy_into_container / copy_from_container / copy_dir_recursive — host<->rootfs
+#     file/dir copy (fs recursion via storage's mkdir/read helpers).
 #   * criu_available() — PATH scan for the `criu` binary.
 #
 # Enum members are namespaced RUNTIME_NS_* for global uniqueness (see error.cyr).
@@ -8167,12 +8238,279 @@ fn security_score_for(backend, policy) {
     return score_backend(backend, policy);
 }
 
+# ── Container top — list processes inside a container (rust-old: /proc walk) ──
+# The oracle marked container_top/read_process_info async, but they are plain
+# /proc reads — synchronous here (same as the cgroup stats above).
+
+# ASCII-whitespace test (space/tab/LF/CR) for the /proc/<pid>/stat field scan.
+#[must_use]
+fn _rt_is_ws(ch) {
+    if (ch == 32) { return 1; }
+    if (ch == 9) { return 1; }
+    if (ch == 10) { return 1; }
+    if (ch == 13) { return 1; }
+    return 0;
+}
+
+# True iff NUL-terminated `s` is non-empty and all ASCII digits (a /proc PID
+# dir name; rust-old: name_str.parse::<u32>() succeeds).
+#[must_use]
+fn _rt_all_digits(s) {
+    if (load8(s) == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        var ch = load8(s + i);
+        if (ch < 48 || ch > 57) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# comm field of a /proc stat line: between the FIRST '(' and the LAST ')'
+# (rust-old: stat.find('(') .. stat.rfind(')')). "?" when absent.
+#[must_use]
+fn _rt_comm_from_stat(stat) {
+    var len = strlen(stat);
+    var lp = 0;
+    while (lp < len && load8(stat + lp) != 40) { lp = lp + 1; }   # '('
+    if (lp >= len) { return "?"; }
+    var rp = len - 1;
+    while (rp > lp && load8(stat + rp) != 41) { rp = rp - 1; }    # ')'
+    if (rp <= lp) { return "?"; }
+    return str_cstr(str_from_buf(stat + lp + 1, rp - lp - 1));
+}
+
+# State char of a /proc stat line: the byte at rfind(')')+2 (rust-old). '?'(63)
+# when absent.
+#[must_use]
+fn _rt_state_from_stat(stat) {
+    var len = strlen(stat);
+    var rp = len - 1;
+    while (rp >= 0) {
+        if (load8(stat + rp) == 41) { break; }   # ')'
+        rp = rp - 1;
+    }
+    if (rp < 0) { return 63; }
+    var si = rp + 2;
+    if (si >= len) { return 63; }
+    return load8(stat + si);
+}
+
+# Trim leading/trailing ASCII whitespace → fresh cstr (rust-old: str::trim).
+#[must_use]
+fn _rt_trim(s) {
+    var len = strlen(s);
+    var start = 0;
+    while (start < len && _rt_is_ws(load8(s + start)) == 1) { start = start + 1; }
+    var end = len;
+    while (end > start && _rt_is_ws(load8(s + end - 1)) == 1) { end = end - 1; }
+    return str_cstr(str_from_buf(s + start, end - start));
+}
+
+# True (1) iff `child` is a descendant of `ancestor` by walking the PPID chain
+# via /proc/<pid>/stat (rust-old: is_descendant_of). 64-iteration safety cap;
+# a read failure or reaching PID<=1 without a match returns 0.
+#[must_use]
+fn is_descendant_of(child, ancestor) {
+    if (child == ancestor) { return 1; }
+    var current = child;
+    var iter = 0;
+    while (iter < 64) {
+        var path = _rt_cat3("/proc/", _rt_int_to_cstr(current), "/stat");
+        var buf = alloc(4096);
+        var n = file_read_all(path, buf, 4095);
+        if (n < 0) { return 0; }
+        store8(buf + n, 0);
+        var ppid = parse_ppid_from_stat(buf);
+        if (ppid == ancestor) { return 1; }
+        if (ppid <= 1) { return 0; }
+        current = ppid;
+        iter = iter + 1;
+    }
+    return 0;
+}
+
+# Read a ProcessInfo* from /proc/<pid>/ (rust-old: read_process_info). Returns 0
+# when /proc/<pid>/stat is unreadable (rust-old: Err); cmdline is best-effort
+# (NULs → spaces, trimmed; empty on failure).
+fn read_process_info(pid) {
+    var stat_path = _rt_cat3("/proc/", _rt_int_to_cstr(pid), "/stat");
+    var sbuf = alloc(4096);
+    var sn = file_read_all(stat_path, sbuf, 4095);
+    if (sn < 0) { return 0; }
+    store8(sbuf + sn, 0);
+
+    var cmd_path = _rt_cat3("/proc/", _rt_int_to_cstr(pid), "/cmdline");
+    var cbuf = alloc(65536);
+    var cn = file_read_all(cmd_path, cbuf, 65535);
+    var cmdline = "";
+    if (cn > 0) {
+        var j = 0;
+        while (j < cn) {
+            if (load8(cbuf + j) == 0) { store8(cbuf + j, 32); }   # '\0' → ' '
+            j = j + 1;
+        }
+        store8(cbuf + cn, 0);
+        cmdline = _rt_trim(cbuf);
+    }
+
+    var comm = _rt_comm_from_stat(sbuf);
+    var ppid = parse_ppid_from_stat(sbuf);
+    var state = _rt_state_from_stat(sbuf);
+    return process_info_new(pid, ppid, comm, cmdline, state);
+}
+
+# List processes inside a container: every /proc PID whose PPID chain leads to
+# `pid` (rust-old: container_top). Returns a vec of ProcessInfo*.
+fn container_top(pid) {
+    var lm = _rt_cat2("listing container processes, pid=", _rt_int_to_cstr(pid));
+    sakshi_info(lm, strlen(lm));
+    var processes = vec_new();
+    var entries = dir_list(str_from("/proc"));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var name = str_cstr(vec_get(entries, ei));
+        if (_rt_all_digits(name) == 1) {
+            var child_pid = atoi(name);
+            if (is_descendant_of(child_pid, pid) == 1) {
+                var info = read_process_info(child_pid);
+                if (info != 0) { vec_push(processes, info); }
+            }
+        }
+        ei = ei + 1;
+    }
+    var dm = _rt_cat3("container processes listed, pid=", _rt_int_to_cstr(pid),
+    _rt_cat2(" count=", _rt_int_to_cstr(vec_len(processes))));
+    sakshi_info(dm, strlen(dm));
+    return processes;
+}
+
+# ProcessInfo* → JSON object (rust-old: serde on ProcessInfo). `state` is a char,
+# serialized as a one-character JSON string (serde's char representation).
+fn process_info_to_jv(info) {
+    var p: ProcessInfo = info;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("pid"), json_v_int_new(p.pid));
+    json_v_obj_set(o, str_from("ppid"), json_v_int_new(p.ppid));
+    json_v_obj_set(o, str_from("comm"), json_v_str_new(str_from(p.comm)));
+    json_v_obj_set(o, str_from("cmdline"), json_v_str_new(str_from(p.cmdline)));
+    var sb = alloc(2);
+    store8(sb, p.state);
+    store8(sb + 1, 0);
+    json_v_obj_set(o, str_from("state"), json_v_str_new(str_from(sb)));
+    return o;
+}
+
+# JSON object → ProcessInfo* (rust-old: deserialize ProcessInfo). 0 when v is 0.
+fn process_info_from_jv(v) {
+    if (v == 0) { return 0; }
+    var pf = json_v_obj_get(v, "pid");
+    var pid = 0;
+    if (json_v_is_int(pf) == 1) { pid = json_v_int(pf); }
+    var ppf = json_v_obj_get(v, "ppid");
+    var ppid = 0;
+    if (json_v_is_int(ppf) == 1) { ppid = json_v_int(ppf); }
+    var cf = json_v_obj_get(v, "comm");
+    var comm = "";
+    if (json_v_is_str(cf) == 1) { comm = str_cstr(json_v_str(cf)); }
+    var clf = json_v_obj_get(v, "cmdline");
+    var cmdline = "";
+    if (json_v_is_str(clf) == 1) { cmdline = str_cstr(json_v_str(clf)); }
+    var state = 63;                               # '?'
+    var sf = json_v_obj_get(v, "state");
+    if (json_v_is_str(sf) == 1) {
+        var sc = str_cstr(json_v_str(sf));
+        if (load8(sc) != 0) { state = load8(sc); }
+    }
+    return process_info_new(pid, ppid, comm, cmdline, state);
+}
+
+# ── Container copy — files in/out (rust-old: copy_into/from_container) ────────
+
+# Join base + "/" + rel, collapsing a double slash when base ends in '/'
+# (rust-old: Path::join). Both args are cstr; returns a fresh cstr. NB: distinct
+# from _rt_join above, which joins a vec of cstrs with a separator.
+#[must_use]
+fn _rt_path_join(base, rel) {
+    var bl = strlen(base);
+    if (bl > 0 && load8(base + bl - 1) == 47) { return _rt_cat2(base, rel); }
+    return _rt_cat3(base, "/", rel);
+}
+
+# Copy one file src → dst by value (rust-old: std::fs::copy). Whole-file read via
+# storage's SEEK_END reader (no truncation). Returns 0 on success, -1 on failure.
+fn _rt_copy_file(src, dst) {
+    var len_cell = alloc(8);
+    var data = _stor_read_file(src, len_cell);
+    var n = load64(len_cell);
+    if (n < 0) { return 0 - 1; }
+    if (file_write_all(dst, data, n) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# Recursively copy directory src → dst (rust-old: copy_dir_recursive). Creates
+# dst, then copies each entry (recursing into subdirs). Returns 0 / -1.
+fn copy_dir_recursive(src, dst) {
+    _stor_mkdir_p(dst);
+    var entries = dir_list(str_from(src));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var name = str_cstr(vec_get(entries, ei));
+        var sp = _rt_path_join(src, name);
+        var dp = _rt_path_join(dst, name);
+        if (is_dir(str_from(sp)) == 1) {
+            if (copy_dir_recursive(sp, dp) != 0) { return 0 - 1; }
+        } else {
+            if (_rt_copy_file(sp, dp) != 0) { return 0 - 1; }
+        }
+        ei = ei + 1;
+    }
+    return 0;
+}
+
+# Copy a host path into a container's rootfs (rust-old: copy_into_container).
+# `container_dst` is rooted at the rootfs (leading '/' stripped). Creates the
+# target's parent dirs; dirs are copied recursively. Returns 0 / -1.
+fn copy_into_container(rootfs, host_src, container_dst) {
+    var lm = _rt_cat3("copying file into container: ", host_src,
+    _rt_cat2(" -> ", container_dst));
+    sakshi_info(lm, strlen(lm));
+    var rel = container_dst;
+    if (load8(rel) == 47) { rel = rel + 1; }      # strip leading '/'
+    var target = _rt_path_join(rootfs, rel);
+    _stor_mkdir_parents(target);
+    if (is_dir(str_from(host_src)) == 1) { return copy_dir_recursive(host_src, target); }
+    return _rt_copy_file(host_src, target);
+}
+
+# Copy a container-rootfs path out to the host (rust-old: copy_from_container).
+# Errors (-1) when the source path is absent in the container. Creates the host
+# destination's parent dirs; dirs are copied recursively. Returns 0 / -1.
+fn copy_from_container(rootfs, container_src, host_dst) {
+    var lm = _rt_cat3("copying file from container: ", container_src,
+    _rt_cat2(" -> ", host_dst));
+    sakshi_info(lm, strlen(lm));
+    var rel = container_src;
+    if (load8(rel) == 47) { rel = rel + 1; }
+    var source = _rt_path_join(rootfs, rel);
+    if (file_exists(source) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE,
+        _rt_cat2("source path does not exist in container: ", container_src));
+        return 0 - 1;
+    }
+    _stor_mkdir_parents(host_dst);
+    if (is_dir(str_from(source)) == 1) { return copy_dir_recursive(source, host_dst); }
+    return _rt_copy_file(source, host_dst);
+}
+
 # ── DEFERRED (land with the async runtime + codecs + kavach exec) ─────────
 # rust-old/src/runtime.rs additionally defines the execution/orchestration
 # surface below. Each needs infrastructure the ported base does not yet expose
 # — the tokio async runtime, subprocess spawning (nsenter/criu), tar/gzip/zstd
-# codecs, cgroups-v2 fs writes, and the deeper kavach sandbox exec/spawn +
-# ExternalizationGate handles — so they are ported alongside those landings.
+# codecs, and the deeper kavach sandbox exec/spawn + ExternalizationGate
+# handles — so they are ported alongside those landings.
 #
 # spawn_container(spec) -> DaemonHandle                    [async, kavach spawn]
 # struct DaemonHandle { process: SpawnedProcess, _sandbox: Sandbox }
@@ -8180,13 +8518,9 @@ fn security_score_for(backend, policy) {
 # exec_in_container(pid, command, env, workdir) -> ContainerExecResult
 #     [async, nsenter subprocess + pre_exec fd-close CVE-2024-21626 mitigation]
 # scan_output(result, policy) -> ContainerExecResult   [kavach ExternalizationGate handle unported]
-# container_top(pid) -> Vec<ProcessInfo>               [async /proc dir walk]
-# is_descendant_of(child, ancestor) -> bool            [reads /proc/<pid>/stat]
-# read_process_info(pid) -> ProcessInfo                [async /proc reads]
 # export_rootfs(rootfs, output)                        [async, tar builder]
 # import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
 #     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
-# copy_into_container / copy_from_container / copy_dir_recursive  [fs recursion]
 # checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
 # pre_dump_container(pid, dump_dir, parent_dir)        [async criu pre-dump]
 # restore_lazy(dump_dir, rootfs, page_server_addr) -> pid  [async criu lazy restore]
@@ -8860,6 +9194,177 @@ fn container_state_find(containers, id) {
         i = i + 1;
     }
     return 0;
+}
+
+# ── OCI runtime state (rust-old/src/oci.rs: OciState / to_oci_status /
+#    build_state / parse_bundle) ──────────────────────────
+# These couple oci.rs to the container.rs types (ContainerState / Container /
+# ContainerConfig) and, in the port, to the bayan JSON codec — so they land
+# here next to ContainerConfig construction rather than in the oci.cyr leaf.
+# OCI_STATUS_* / oci_version / oci_status_name / oci_status_from_name come
+# from the earlier oci.cyr module.
+
+# OCI runtime state — the `state` command's output (rust-old: struct OciState).
+# pid = -1 encodes Option<u32>::None; annotations = 0 encodes Option::None.
+struct OciState {
+    oci_version;  # String  → cstr
+    id;           # String  → cstr
+    status;       # OciStatus ordinal
+    pid;          # Option<u32> → pid | -1
+    bundle;       # String  → cstr
+    annotations;  # Option<HashMap<String,String>> → hashmap handle | 0
+}
+
+#[must_use]
+fn oci_state_new(oci_version, id, status, pid, bundle, annotations) {
+    var p = alloc(48);
+    var s: OciState = p;
+    s.oci_version = oci_version;
+    s.id = id;
+    s.status = status;
+    s.pid = pid;
+    s.bundle = bundle;
+    s.annotations = annotations;
+    return p;
+}
+
+# Map internal ContainerState → OCI spec status (rust-old: to_oci_status).
+# Created→Created, Running|Paused→Running, Stopped|Removing→Stopped.
+#[must_use]
+fn to_oci_status(state) {
+    if (state == CONTAINER_STATE_CREATED) { return OCI_STATUS_CREATED; }
+    if (state == CONTAINER_STATE_RUNNING) { return OCI_STATUS_RUNNING; }
+    if (state == CONTAINER_STATE_PAUSED) { return OCI_STATUS_RUNNING; }
+    return OCI_STATUS_STOPPED;
+}
+
+# Build the OCI state for a container (rust-old: build_state). annotations=None.
+#[must_use]
+fn build_state(container, bundle_path) {
+    var ct: Container = container;
+    return oci_state_new(oci_version(), ct.id, to_oci_status(ct.state), ct.pid,
+    bundle_path, 0);
+}
+
+# OciState* → JSON object (rust-old: serde Serialize on OciState). `pid` and
+# `annotations` use skip_serializing_if = Option::is_none: emitted only when set.
+fn oci_state_to_jv(state) {
+    var s: OciState = state;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("ociVersion"), json_v_str_new(str_from(s.oci_version)));
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(s.id)));
+    json_v_obj_set(o, str_from("status"), json_v_str_new(str_from(oci_status_name(s.status))));
+    if (s.pid != 0 - 1) {
+        json_v_obj_set(o, str_from("pid"), json_v_int_new(s.pid));
+    }
+    json_v_obj_set(o, str_from("bundle"), json_v_str_new(str_from(s.bundle)));
+    if (s.annotations != 0) {
+        json_v_obj_set(o, str_from("annotations"), _ct_map_to_jv(s.annotations));
+    }
+    return o;
+}
+
+# JSON object → OciState* (rust-old: serde Deserialize on OciState). 0 if v is 0.
+fn oci_state_from_jv(v) {
+    if (v == 0) { return 0; }
+    var oci_version = _ct_jv_str(v, "ociVersion");
+    if (oci_version == 0) { oci_version = ""; }
+    var id = _ct_jv_str(v, "id");
+    if (id == 0) { id = ""; }
+    var status = OCI_STATUS_CREATING;
+    var sname = _ct_jv_str(v, "status");
+    if (sname != 0) {
+        var st = oci_status_from_name(sname);
+        if (st != 0 - 1) { status = st; }
+    }
+    var pid = _ct_jv_int_or(v, "pid", 0 - 1);
+    var bundle = _ct_jv_str(v, "bundle");
+    if (bundle == 0) { bundle = ""; }
+    var annotations = _ct_jv_map(v, "annotations");
+    return oci_state_new(oci_version, id, status, pid, bundle, annotations);
+}
+
+# Parse an OCI bundle's `config.json` into a ContainerConfig* (rust-old:
+# parse_bundle). Reads {bundle_path}/config.json, extracts the fields stiva
+# needs, and forces detach=true (OCI runtime containers are daemon-style).
+# Returns 0 on a missing/unreadable/invalid config.json (rust-old:
+# Err(StivaError::OciBundle) — the caller maps 0 → STIVA_ERR_OCI_BUNDLE).
+fn parse_bundle(bundle_path) {
+    var config_path = _container_cat2(bundle_path, "/config.json");
+    sakshi_info("parsing OCI bundle", strlen("parsing OCI bundle"));
+    if (file_exists(config_path) == 0) { return 0; }
+    var cap = 1048576;
+    var buf = alloc(cap);
+    var n = file_read_all(config_path, buf, cap);
+    if (n <= 0) { return 0; }
+    var root = bayan_json_v_parse_str(buf, n);
+    if (root == 0) { return 0; }
+
+    var config = container_config_default();
+    var c: ContainerConfig = config;
+    var process = json_v_obj_get(root, "process");
+
+    # process.args → command (Vec<String>).
+    var args = json_v_obj_get(process, "args");
+    if (json_v_is_arr(args) == 1) {
+        var cmd = vec_new();
+        var na = json_v_arr_len(args);
+        var i = 0;
+        while (i < na) {
+            var e = json_v_arr_get(args, i);
+            if (json_v_is_str(e) == 1) { vec_push(cmd, str_cstr(json_v_str(e))); }
+            i = i + 1;
+        }
+        c.command = cmd;
+    }
+
+    # process.env → env (HashMap), each "KEY=VALUE" split on the first '='.
+    var env = json_v_obj_get(process, "env");
+    if (json_v_is_arr(env) == 1) {
+        var m = map_new();
+        var ne = json_v_arr_len(env);
+        var j = 0;
+        while (j < ne) {
+            var ee = json_v_arr_get(env, j);
+            if (json_v_is_str(ee) == 1) {
+                var es = json_v_str(ee);
+                var eq = str_index_of(es, 61);          # '='
+                if (eq >= 0) {
+                    var key = str_cstr(str_substr(es, 0, eq));
+                    var val = str_cstr(str_substr(es, eq + 1, str_len(es)));
+                    map_set(m, key, val);
+                }
+            }
+            j = j + 1;
+        }
+        c.env = m;
+    }
+
+    # process.user.uid != 0 → rootless. Rust reads uid via serde_json as_u64,
+    # which is None for negatives/floats — so only a positive integer counts
+    # (uid > 0 ⇔ as_u64 succeeded AND != 0).
+    var uidv = json_v_obj_get(json_v_obj_get(process, "user"), "uid");
+    if (json_v_is_int(uidv) == 1) {
+        if (json_v_int(uidv) > 0) { c.rootless = 1; }
+    }
+
+    # hostname → domainname (OCI "hostname" maps to stiva's domainname).
+    var hn = json_v_obj_get(root, "hostname");
+    if (json_v_is_str(hn) == 1) { c.domainname = str_cstr(json_v_str(hn)); }
+
+    # linux.resources.memory.limit → memory_limit. Guard >= 0 to match as_u64
+    # (a negative limit is ignored by Rust, leaving the default 0).
+    var res = json_v_obj_get(json_v_obj_get(root, "linux"), "resources");
+    var mem = json_v_obj_get(json_v_obj_get(res, "memory"), "limit");
+    if (json_v_is_int(mem) == 1 && json_v_int(mem) >= 0) { c.memory_limit = json_v_int(mem); }
+
+    # linux.resources.pids.limit → max_pids (same as_u64 >= 0 guard).
+    var pids = json_v_obj_get(json_v_obj_get(res, "pids"), "limit");
+    if (json_v_is_int(pids) == 1 && json_v_int(pids) >= 0) { c.max_pids = json_v_int(pids); }
+
+    # OCI runtime containers are always daemon-style.
+    c.detach = 1;
+    return config;
 }
 
 # ── DEFERRED (needs async runtime + pub/sub + shared locks) ──────

@@ -666,6 +666,177 @@ fn container_state_find(containers, id) {
     return 0;
 }
 
+# ── OCI runtime state (rust-old/src/oci.rs: OciState / to_oci_status /
+#    build_state / parse_bundle) ──────────────────────────
+# These couple oci.rs to the container.rs types (ContainerState / Container /
+# ContainerConfig) and, in the port, to the bayan JSON codec — so they land
+# here next to ContainerConfig construction rather than in the oci.cyr leaf.
+# OCI_STATUS_* / oci_version / oci_status_name / oci_status_from_name come
+# from the earlier oci.cyr module.
+
+# OCI runtime state — the `state` command's output (rust-old: struct OciState).
+# pid = -1 encodes Option<u32>::None; annotations = 0 encodes Option::None.
+struct OciState {
+    oci_version;  # String  → cstr
+    id;           # String  → cstr
+    status;       # OciStatus ordinal
+    pid;          # Option<u32> → pid | -1
+    bundle;       # String  → cstr
+    annotations;  # Option<HashMap<String,String>> → hashmap handle | 0
+}
+
+#[must_use]
+fn oci_state_new(oci_version, id, status, pid, bundle, annotations) {
+    var p = alloc(48);
+    var s: OciState = p;
+    s.oci_version = oci_version;
+    s.id = id;
+    s.status = status;
+    s.pid = pid;
+    s.bundle = bundle;
+    s.annotations = annotations;
+    return p;
+}
+
+# Map internal ContainerState → OCI spec status (rust-old: to_oci_status).
+# Created→Created, Running|Paused→Running, Stopped|Removing→Stopped.
+#[must_use]
+fn to_oci_status(state) {
+    if (state == CONTAINER_STATE_CREATED) { return OCI_STATUS_CREATED; }
+    if (state == CONTAINER_STATE_RUNNING) { return OCI_STATUS_RUNNING; }
+    if (state == CONTAINER_STATE_PAUSED) { return OCI_STATUS_RUNNING; }
+    return OCI_STATUS_STOPPED;
+}
+
+# Build the OCI state for a container (rust-old: build_state). annotations=None.
+#[must_use]
+fn build_state(container, bundle_path) {
+    var ct: Container = container;
+    return oci_state_new(oci_version(), ct.id, to_oci_status(ct.state), ct.pid,
+    bundle_path, 0);
+}
+
+# OciState* → JSON object (rust-old: serde Serialize on OciState). `pid` and
+# `annotations` use skip_serializing_if = Option::is_none: emitted only when set.
+fn oci_state_to_jv(state) {
+    var s: OciState = state;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("ociVersion"), json_v_str_new(str_from(s.oci_version)));
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(s.id)));
+    json_v_obj_set(o, str_from("status"), json_v_str_new(str_from(oci_status_name(s.status))));
+    if (s.pid != 0 - 1) {
+        json_v_obj_set(o, str_from("pid"), json_v_int_new(s.pid));
+    }
+    json_v_obj_set(o, str_from("bundle"), json_v_str_new(str_from(s.bundle)));
+    if (s.annotations != 0) {
+        json_v_obj_set(o, str_from("annotations"), _ct_map_to_jv(s.annotations));
+    }
+    return o;
+}
+
+# JSON object → OciState* (rust-old: serde Deserialize on OciState). 0 if v is 0.
+fn oci_state_from_jv(v) {
+    if (v == 0) { return 0; }
+    var oci_version = _ct_jv_str(v, "ociVersion");
+    if (oci_version == 0) { oci_version = ""; }
+    var id = _ct_jv_str(v, "id");
+    if (id == 0) { id = ""; }
+    var status = OCI_STATUS_CREATING;
+    var sname = _ct_jv_str(v, "status");
+    if (sname != 0) {
+        var st = oci_status_from_name(sname);
+        if (st != 0 - 1) { status = st; }
+    }
+    var pid = _ct_jv_int_or(v, "pid", 0 - 1);
+    var bundle = _ct_jv_str(v, "bundle");
+    if (bundle == 0) { bundle = ""; }
+    var annotations = _ct_jv_map(v, "annotations");
+    return oci_state_new(oci_version, id, status, pid, bundle, annotations);
+}
+
+# Parse an OCI bundle's `config.json` into a ContainerConfig* (rust-old:
+# parse_bundle). Reads {bundle_path}/config.json, extracts the fields stiva
+# needs, and forces detach=true (OCI runtime containers are daemon-style).
+# Returns 0 on a missing/unreadable/invalid config.json (rust-old:
+# Err(StivaError::OciBundle) — the caller maps 0 → STIVA_ERR_OCI_BUNDLE).
+fn parse_bundle(bundle_path) {
+    var config_path = _container_cat2(bundle_path, "/config.json");
+    sakshi_info("parsing OCI bundle", strlen("parsing OCI bundle"));
+    if (file_exists(config_path) == 0) { return 0; }
+    var cap = 1048576;
+    var buf = alloc(cap);
+    var n = file_read_all(config_path, buf, cap);
+    if (n <= 0) { return 0; }
+    var root = bayan_json_v_parse_str(buf, n);
+    if (root == 0) { return 0; }
+
+    var config = container_config_default();
+    var c: ContainerConfig = config;
+    var process = json_v_obj_get(root, "process");
+
+    # process.args → command (Vec<String>).
+    var args = json_v_obj_get(process, "args");
+    if (json_v_is_arr(args) == 1) {
+        var cmd = vec_new();
+        var na = json_v_arr_len(args);
+        var i = 0;
+        while (i < na) {
+            var e = json_v_arr_get(args, i);
+            if (json_v_is_str(e) == 1) { vec_push(cmd, str_cstr(json_v_str(e))); }
+            i = i + 1;
+        }
+        c.command = cmd;
+    }
+
+    # process.env → env (HashMap), each "KEY=VALUE" split on the first '='.
+    var env = json_v_obj_get(process, "env");
+    if (json_v_is_arr(env) == 1) {
+        var m = map_new();
+        var ne = json_v_arr_len(env);
+        var j = 0;
+        while (j < ne) {
+            var ee = json_v_arr_get(env, j);
+            if (json_v_is_str(ee) == 1) {
+                var es = json_v_str(ee);
+                var eq = str_index_of(es, 61);          # '='
+                if (eq >= 0) {
+                    var key = str_cstr(str_substr(es, 0, eq));
+                    var val = str_cstr(str_substr(es, eq + 1, str_len(es)));
+                    map_set(m, key, val);
+                }
+            }
+            j = j + 1;
+        }
+        c.env = m;
+    }
+
+    # process.user.uid != 0 → rootless. Rust reads uid via serde_json as_u64,
+    # which is None for negatives/floats — so only a positive integer counts
+    # (uid > 0 ⇔ as_u64 succeeded AND != 0).
+    var uidv = json_v_obj_get(json_v_obj_get(process, "user"), "uid");
+    if (json_v_is_int(uidv) == 1) {
+        if (json_v_int(uidv) > 0) { c.rootless = 1; }
+    }
+
+    # hostname → domainname (OCI "hostname" maps to stiva's domainname).
+    var hn = json_v_obj_get(root, "hostname");
+    if (json_v_is_str(hn) == 1) { c.domainname = str_cstr(json_v_str(hn)); }
+
+    # linux.resources.memory.limit → memory_limit. Guard >= 0 to match as_u64
+    # (a negative limit is ignored by Rust, leaving the default 0).
+    var res = json_v_obj_get(json_v_obj_get(root, "linux"), "resources");
+    var mem = json_v_obj_get(json_v_obj_get(res, "memory"), "limit");
+    if (json_v_is_int(mem) == 1 && json_v_int(mem) >= 0) { c.memory_limit = json_v_int(mem); }
+
+    # linux.resources.pids.limit → max_pids (same as_u64 >= 0 guard).
+    var pids = json_v_obj_get(json_v_obj_get(res, "pids"), "limit");
+    if (json_v_is_int(pids) == 1 && json_v_int(pids) >= 0) { c.max_pids = json_v_int(pids); }
+
+    # OCI runtime containers are always daemon-style.
+    c.detach = 1;
+    return config;
+}
+
 # ── DEFERRED (needs async runtime + pub/sub + shared locks) ──────
 # rust-old/src/container.rs also defines the stateful manager, whose every
 # method is `async` and depends on tokio::sync::RwLock, majra PubSub, the

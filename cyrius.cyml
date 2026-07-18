@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.4.19"
+cyrius = "6.4.66"
 
 [build]
 entry = "src/main.cyr"
@@ -83,21 +83,21 @@ stdlib = [
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
 path = "../sakshi"
-tag = "2.4.4"
+tag = "2.4.6"
 modules = ["dist/sakshi.cyr"]
 
 # Audit-chain crypto tools (bote's + nein's transitive).
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
 path = "../libro"
-tag = "2.7.10"
+tag = "2.8.2"
 modules = ["dist/libro.cyr"]
 
 # Job queue, heartbeat FSM, pub/sub — fleet / health / ansamblu / container.
 [deps.majra]
 git = "https://github.com/MacCracken/majra.git"
 path = "../majra"
-tag = "2.5.0"
+tag = "2.5.1"
 modules = ["dist/majra.cyr"]
 
 # MCP core (JSON-RPC 2.0, tool registry, structured output) — mcp. `bote-core`
@@ -106,14 +106,14 @@ modules = ["dist/majra.cyr"]
 [deps.bote]
 git = "https://github.com/MacCracken/bote.git"
 path = "../bote"
-tag = "3.0.0"
+tag = "3.1.4"
 modules = ["dist/bote-core.cyr"]
 
 # nftables firewall, NAT, port mapping — network/nat + network/manager.
 [deps.nein]
 git = "https://github.com/MacCracken/nein.git"
 path = "../nein"
-tag = "1.6.2"
+tag = "1.6.4"
 modules = ["dist/nein.cyr"]
 
 # Sandbox isolation — runtime + container (Sandbox, SandboxPolicy/Config,
@@ -121,14 +121,14 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.7.0"
+tag = "3.7.1"
 modules = ["dist/kavach.cyr"]
 
 # LUKS + dm-verity — encrypted.
 [deps.agnodrm]
 git = "https://github.com/MacCracken/agnodrm.git"
 path = "../agnodrm"
-tag = "1.4.5"
+tag = "1.5.0"
 modules = ["dist/agnodrm.cyr"]
 
 # CLI / argument parsing (getopt-long + verb dispatch) — src/main.cyr registers

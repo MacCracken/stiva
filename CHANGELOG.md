@@ -3,6 +3,29 @@
 All notable changes to stiva are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — toolchain refresh + v3.0.x sync backlog
+
+### Changed
+- **cyrius toolchain pin 6.4.19 → 6.4.66** (`cyrius.cyml`); re-vendored the
+  `[deps].stdlib` subset. The newer compiler is stricter about struct field access,
+  which surfaced a latent test bug (`c.exit_code` on a `Container` whose field is
+  `exit_status`), now fixed.
+- **AGNOS dependency pins bumped to latest release tags:** kavach 3.7.1, majra 2.5.1,
+  nein 1.6.4, bote 3.1.4 (core), agnodrm 1.5.0, sakshi 2.4.6, libro 2.8.2 (cmdit 1.1.0
+  unchanged).
+
+### Added (v3.0.x synchronous backlog — no async)
+- **`oci`**: `parse_bundle` (OCI bundle `config.json` → `ContainerConfig` via bayan JSON),
+  `build_state`, `to_oci_status`, and the `OciState` struct + JSON round-trip. Lands in
+  `container.cyr` (coupled to the container types). oci ~67% → ~100%.
+- **`image`**: `image_store_verify_integrity` — walks `blobs/sha256`, re-hashes every blob
+  (whole-file read, no truncation) and reports content-address mismatches. image ~72% → ~90%.
+- **`runtime`**: the `/proc` process-tree walk (`container_top`, `is_descendant_of`,
+  `read_process_info`) and host↔rootfs copy (`copy_into_container`, `copy_from_container`,
+  `copy_dir_recursive`), plus `ProcessInfo` JSON — all synchronous.
+- **12 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases.
+  Suite: **897 tests** green (stiva 650 · runpath 171 · mgmt 76).
+
 ## [3.0.0] — Cyrius Port · synchronous single-node runtime
 
 **Milestone: a working single-node OCI runtime in Cyrius.** Ported stiva from Rust

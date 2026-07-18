@@ -767,6 +767,63 @@ fn image_store_gc(store) {
     return removed;
 }
 
+# Read the whole file at `path` into a fresh buffer (SEEK_END-sized, so no
+# maxlen truncation — an integrity check must hash the ENTIRE blob, and layer
+# blobs can exceed image_import's 64 MiB read cap). Writes the byte length to
+# `out_len`; returns the buffer, or 0 (out_len < 0) on open/seek failure.
+# Mirrors storage.cyr's _stor_read_file, kept local to image.cyr.
+fn _img_read_file(path, out_len) {
+    var fd = file_open(path, 0, 0);            # O_RDONLY
+    if (fd < 0) { store64(out_len, fd); return 0; }
+    var size = xlseek(fd, 0, 2);               # SEEK_END → byte length
+    xlseek(fd, 0, 0);                          # SEEK_SET → rewind
+    if (size < 0) { file_close(fd); store64(out_len, 0 - 1); return 0; }
+    var buf = alloc(size + 1);
+    var total = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(fd, buf + total, size - total);
+        if (n <= 0) { rgo = 0; }
+        else {
+            total = total + n;
+            if (total >= size) { rgo = 0; }
+        }
+    }
+    file_close(fd);
+    store64(out_len, total);
+    return buf;
+}
+
+# Verify blob integrity: walk {root}/blobs/sha256, re-hash each blob, and
+# compare against its content-addressed name (rust-old: verify_integrity).
+# Returns a vec of the "sha256:<hex>" digests whose contents mismatch, or that
+# could not be read. An empty vec means every blob verified.
+fn image_store_verify_integrity(store) {
+    sakshi_info("verifying blob integrity", strlen("verifying blob integrity"));
+    var root = _img_store_root(store);
+    var corrupted = vec_new();
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var hex = str_cstr(vec_get(entries, ei));
+        var expected = _img_cat2("sha256:", hex);
+        var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
+        var len_cell = alloc(8);
+        var data = _img_read_file(blob_path, len_cell);
+        var n = load64(len_cell);
+        if (data == 0) {
+            vec_push(corrupted, expected);
+        } else {
+            var actual = sha256_digest(data, n);
+            if (streq(actual, expected) == 0) { vec_push(corrupted, expected); }
+        }
+        ei = ei + 1;
+    }
+    return corrupted;
+}
+
 # ── ImageRef constructor + import + tag ─────────────────────────
 
 # Construct an ImageRef directly (rust-old: ImageRef { .. }). Kept here in
@@ -874,13 +931,11 @@ fn image_store_tag(store, source, new_ref) {
 # ── DEFERRED (blob dir-walk + async network layer) ──────────────
 # rust-old/src/image.rs also defines, still deferred here:
 #
-#   gc / verify_integrity (full blobs/ + layers/ dir-walk + re-hash):
-#     fn gc(&self) -> Result<(u32, u32), StivaError>
-#     fn verify_integrity(&self) -> Result<Vec<String>, StivaError>
-#   (gc walks read_dir(blobs)/read_dir(layers) and removes every entry not
-#    referenced by the index; verify_integrity re-reads every blob and
-#    re-hashes it to detect corruption. Ported alongside the layer-unpack
-#    surface for full parity.)
+#   gc → image_store_gc (blobs dir-walk + drop-unreferenced); verify_integrity
+#   → image_store_verify_integrity (re-read + re-hash every blob) — both ported
+#   above. gc's Rust return is (u32 blobs, u32 layers); the port removes from the
+#   single blobs/ store and returns the count (the split layers/ dir is a v3.1
+#   layer-unpack concern).
 #
 #   async network (RegistryClient reqwest/tokio; not in ported registry):
 #     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
