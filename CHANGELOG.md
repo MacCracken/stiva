@@ -5,6 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Added — OCI image-layout (group A, A1+A2 → v3.0.1)
+The local image store is now a **valid OCI image layout** (Docker/Podman/skopeo-interop),
+net-new work with the OCI **image-spec** as the oracle (rust-old had only the ad-hoc
+`images.json`). New module **`src/imagelayout.cyr`**.
+- **A1 — OCI image config blob**: `oci_config_build` / `oci_config_object_jv` assemble a full
+  `application/vnd.oci.image.config.v1+json` (`architecture`/`os`/optional `created`/`config{…}`/
+  `rootfs{type,diff_ids}`/optional `history`), deterministic bytes (bayan objects are
+  insertion-ordered — no HashMap-ordering problem). **`rootfs.diff_ids` is the UNCOMPRESSED tar
+  digest** per spec (the rust oracle used the compressed digest — fixed here).
+- **A2 — manifest + `index.json` + `oci-layout`**: each image gets an OCI **manifest blob**
+  (`registry.cyr` gains `Descriptor`/`OciManifest` JSON serde + `media_oci_config`/`media_oci_layer`);
+  the store root now carries an **`oci-layout`** marker and a top-level **`index.json`** (descriptor
+  list annotated with `org.opencontainers.image.ref.name`). The ad-hoc **`images.json` is retired** —
+  the store’s index/import/tag/remove/gc layer moved to `imagelayout.cyr` and reconstructs `Image`
+  records from the on-disk manifest + config blobs. GC roots now include the manifest + config digests.
+  Verified end-to-end (`stiva import`→`images`→`rmi`) and byte-validated against the OCI spec on disk.
+- **Hardening** (adversarial review): `image_import` now reads the rootfs tar whole-file (was a silent
+  64 MiB truncation → incomplete-but-valid-looking image); `_il_index_read_jv` reads `index.json`
+  whole-file (no 16 MiB cap) and `add_to_index` **refuses to overwrite a present-but-unparseable index**
+  (prevents a corrupt/edited index from orphaning every other image on the next add); `descriptor_from_jv`
+  now rejects a non-integer `size` (was coerced to 0).
+- **Tests/bench**: registry descriptor/manifest serde round-trips (incl. strict `size`), config-assembly +
+  `_il_parse_full_ref` round-trip, a corrupt-index guard test, and the image-store tests rewritten onto the
+  real import→layout path (**1106** tests green); new `oci_config_build` (~7µs) / `oci_manifest_to_jv`
+  (~15µs) serialize benchmarks.
+- **A3** (perms-preserving tar) and **A4** (`save`/`load` as `oci-archive`) are staged for **v3.0.2**.
+  Deferred to v3.0.2 with A4 (external-ref interop): `_il_parse_full_ref` handling of a port-registry
+  ref.name without a tag, an empty-registry ref.name, and per-image `platform` in index descriptors —
+  all only reachable via *externally-produced* layouts (stiva writes `local/<name>:<tag>`, which round-trips).
+
 ### Docs + hardening
 - **Documentation converted from the Rust/cargo era to Cyrius**: `README.md`,
   `CONTRIBUTING.md`, `docs/cli.md`, `CLAUDE.md`, and the guides/dev docs

@@ -17,6 +17,7 @@ include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
+include "src/imagelayout.cyr"
 include "src/build.cyr"
 include "src/encrypted.cyr"
 include "src/runtime.cyr"
@@ -1023,6 +1024,157 @@ fn test_registry_descriptor() {
     assert_eq(streq(dd.media_type, media_oci_manifest()), 1, "descriptor media_type");
     assert_eq(streq(dd.digest, "sha256:abc"), 1, "descriptor digest");
     assert_eq(dd.size, 1234, "descriptor size");
+    return 0;
+}
+
+fn test_registry_media_oci_types() {
+    test_group("registry_media_oci_types");
+    assert_eq(streq(media_oci_config(), "application/vnd.oci.image.config.v1+json"), 1, "oci config media type");
+    assert_eq(streq(media_oci_layer(), "application/vnd.oci.image.layer.v1.tar+gzip"), 1, "oci gzip layer media type");
+    assert_eq(streq(media_oci_manifest(), "application/vnd.oci.image.manifest.v1+json"), 1, "oci manifest media type");
+    assert_eq(streq(media_oci_index(), "application/vnd.oci.image.index.v1+json"), 1, "oci index media type");
+    return 0;
+}
+
+fn test_registry_descriptor_serde() {
+    test_group("registry_descriptor_serde");
+    var d = descriptor_new(media_oci_config(), "sha256:cfg", 100);
+    var json = json_v_build(descriptor_to_jv(d));
+    var cs = str_cstr(json);
+    assert_eq(strstr(cs, "\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1, "has mediaType");
+    assert_eq(strstr(cs, "\"digest\":\"sha256:cfg\"") >= 0, 1, "has digest");
+    assert_eq(strstr(cs, "\"size\":100") >= 0, 1, "has size");
+    assert_eq(strstr(cs, "urls") >= 0, 0, "no urls key when None");
+    var back = descriptor_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var bb: Descriptor = back;
+    assert_eq(streq(bb.media_type, media_oci_config()), 1, "media_type round-trip");
+    assert_eq(streq(bb.digest, "sha256:cfg"), 1, "digest round-trip");
+    assert_eq(bb.size, 100, "size round-trip");
+    assert_eq(bb.urls, 0, "urls None round-trip");
+    var badj = "{\"digest\":\"sha256:x\",\"size\":1}";
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing mediaType -> 0");
+    # size must be an integer (strict) — a string size is rejected, not coerced to 0.
+    var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:y\",\"size\":\"123\"}";
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badsize, strlen(badsize))), 0, "string size -> 0");
+    return 0;
+}
+
+fn test_registry_manifest_serde() {
+    test_group("registry_manifest_serde");
+    var cfg = descriptor_new(media_oci_config(), "sha256:cfg", 100);
+    var layers = vec_new();
+    vec_push(layers, descriptor_new(media_oci_layer(), "sha256:lay", 200));
+    var m = oci_manifest_new(cfg, layers);
+    var mm: OciManifest = m;
+    mm.media_type = media_oci_manifest();
+    var json = json_v_build(oci_manifest_to_jv(m));
+    var cs = str_cstr(json);
+    assert_eq(strstr(cs, "\"schemaVersion\":2,\"mediaType\":") >= 0, 1, "schemaVersion before mediaType");
+    assert_eq(strstr(cs, "\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1, "config descriptor");
+    assert_eq(strstr(cs, "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"") >= 0, 1, "layers array");
+    var json2 = json_v_build(oci_manifest_to_jv(m));
+    assert_eq(streq(str_cstr(json2), cs), 1, "deterministic build");
+    var back = oci_manifest_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var bm: OciManifest = back;
+    assert_eq(bm.schema_version, 2, "schema_version round-trip");
+    assert_eq(streq(bm.media_type, media_oci_manifest()), 1, "media_type round-trip");
+    var bcfg: Descriptor = bm.config;
+    assert_eq(streq(bcfg.digest, "sha256:cfg"), 1, "config digest round-trip");
+    assert_eq(vec_len(bm.layers), 1, "one layer round-trip");
+    var blay: Descriptor = vec_get(bm.layers, 0);
+    assert_eq(streq(blay.digest, "sha256:lay"), 1, "layer digest round-trip");
+    assert_eq(blay.size, 200, "layer size round-trip");
+    var badj = "{\"schemaVersion\":2,\"layers\":[]}";
+    assert_eq(oci_manifest_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing config -> 0");
+    return 0;
+}
+
+# ── imagelayout.cyr (OCI image-layout — net-new; OCI image-spec is the oracle) ──
+fn test_oci_config_object_minimal() {
+    test_group("oci_config_object_minimal");
+    var o = oci_config_object_jv(0, 0, 0, 0, 0, 0, 0);
+    assert_eq(streq(str_cstr(json_v_build(o)), "{}"), 1, "empty config object is {}");
+    return 0;
+}
+
+fn test_oci_config_object_fields() {
+    test_group("oci_config_object_fields");
+    var env = vec_new();
+    vec_push(env, "PATH=/usr/bin");
+    vec_push(env, "HOME=/root");
+    var cmd = vec_new();
+    vec_push(cmd, "/bin/sh");
+    var ep = vec_new();
+    vec_push(ep, "/entry");
+    var ports = vec_new();
+    vec_push(ports, "8080/tcp");
+    var labels = vec_new();
+    vec_push(labels, "org.opencontainers.image.authors");
+    vec_push(labels, "stiva");
+    var o = oci_config_object_jv(env, cmd, ep, "/app", "nobody", ports, labels);
+    var j = str_cstr(json_v_build(o));
+    assert_eq(strstr(j, "\"User\":\"nobody\"") >= 0, 1, "User");
+    assert_eq(strstr(j, "\"ExposedPorts\":{\"8080/tcp\":{}}") >= 0, 1, "ExposedPorts empty-object map");
+    assert_eq(strstr(j, "\"Env\":[\"PATH=/usr/bin\",\"HOME=/root\"]") >= 0, 1, "Env array");
+    assert_eq(strstr(j, "\"Entrypoint\":[\"/entry\"]") >= 0, 1, "Entrypoint");
+    assert_eq(strstr(j, "\"Cmd\":[\"/bin/sh\"]") >= 0, 1, "Cmd");
+    assert_eq(strstr(j, "\"WorkingDir\":\"/app\"") >= 0, 1, "WorkingDir");
+    assert_eq(strstr(j, "\"Labels\":{\"org.opencontainers.image.authors\":\"stiva\"}") >= 0, 1, "Labels");
+    assert_eq(strstr(j, "\"User\"") < strstr(j, "\"Env\""), 1, "canonical order: User before Env");
+    return 0;
+}
+
+fn test_oci_config_build_shape() {
+    test_group("oci_config_build_shape");
+    var diffs = vec_new();
+    vec_push(diffs, "sha256:aaa");
+    vec_push(diffs, "sha256:bbb");
+    var v = oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0);
+    var j = str_cstr(json_v_build(v));
+    assert_eq(strstr(j, "\"architecture\":\"amd64\"") >= 0, 1, "architecture");
+    assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "os");
+    assert_eq(strstr(j, "\"config\":{}") >= 0, 1, "empty config sub-object");
+    assert_eq(strstr(j, "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\",\"sha256:bbb\"]}") >= 0, 1, "rootfs diff_ids");
+    assert_eq(strstr(j, "created") >= 0, 0, "no created when 0");
+    assert_eq(strstr(j, "history") >= 0, 0, "no history when absent");
+    var j2 = str_cstr(json_v_build(oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0)));
+    assert_eq(streq(j, j2), 1, "deterministic bytes");
+    var v3 = oci_config_build("arm64", "linux", "2024-01-01T00:00:00Z", 0, diffs, 0);
+    var j3 = str_cstr(json_v_build(v3));
+    assert_eq(strstr(j3, "\"created\":\"2024-01-01T00:00:00Z\"") >= 0, 1, "created present when provided");
+    assert_eq(strstr(j3, "{\"created\":") == 0, 1, "created is the first key");
+    return 0;
+}
+
+fn test_il_oci_layout_version() {
+    test_group("il_oci_layout_version");
+    assert_eq(streq(oci_image_layout_version(), "1.0.0"), 1, "imageLayoutVersion 1.0.0");
+    return 0;
+}
+
+fn test_il_parse_full_ref() {
+    test_group("il_parse_full_ref");
+    # "local/demo:v1" — the import reference form.
+    var rr1: ImageRef = _il_parse_full_ref("local/demo:v1");
+    assert_eq(streq(rr1.registry, "local"), 1, "local registry");
+    assert_eq(streq(rr1.repository, "demo"), 1, "demo repo");
+    assert_eq(streq(rr1.tag, "v1"), 1, "v1 tag");
+    assert_eq(rr1.digest, 0, "no digest");
+    # multi-segment repository under a real registry.
+    var rr2: ImageRef = _il_parse_full_ref("ghcr.io/maccracken/agnosticos:latest");
+    assert_eq(streq(rr2.registry, "ghcr.io"), 1, "ghcr registry");
+    assert_eq(streq(rr2.repository, "maccracken/agnosticos"), 1, "nested repo preserved");
+    assert_eq(streq(rr2.tag, "latest"), 1, "latest tag");
+    # docker.io/library/alpine:3.19
+    var rr3: ImageRef = _il_parse_full_ref("docker.io/library/alpine:3.19");
+    assert_eq(streq(rr3.registry, "docker.io"), 1, "docker.io registry");
+    assert_eq(streq(rr3.repository, "library/alpine"), 1, "library/alpine repo");
+    assert_eq(streq(rr3.tag, "3.19"), 1, "3.19 tag");
+    # exact inverse of image_ref_full_ref (the round-trip the index relies on).
+    var bb: ImageRef = _il_parse_full_ref(image_ref_full_ref(image_ref_new("local", "app", "v2", 0)));
+    assert_eq(streq(bb.registry, "local"), 1, "inverse registry");
+    assert_eq(streq(bb.repository, "app"), 1, "inverse repo");
+    assert_eq(streq(bb.tag, "v2"), 1, "inverse tag");
     return 0;
 }
 
@@ -2692,11 +2844,6 @@ fn test_lib_config_custom_values() {
 }
 
 
-# ── image.cyr images.json index (rust-old/src/image.rs) ──
-# ── image.cyr images.json index (rust-old/src/image.rs) ──────────
-# Exercises the JSON round-trip index: load/save/add_to_index/list/remove.
-
-# Build a one-layer Image* for the index tests.
 fn main() {
     alloc_init();
     # error + oci
@@ -2790,6 +2937,14 @@ fn main() {
     test_registry_www_authenticate();
     test_registry_platform_eq();
     test_registry_descriptor();
+    test_registry_media_oci_types();
+    test_registry_descriptor_serde();
+    test_registry_manifest_serde();
+    test_oci_config_object_minimal();
+    test_oci_config_object_fields();
+    test_oci_config_build_shape();
+    test_il_oci_layout_version();
+    test_il_parse_full_ref();
     test_registry_credential();
     test_credential_store_set_get_remove();
     test_credential_store_to_config();

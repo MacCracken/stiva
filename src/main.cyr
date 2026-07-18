@@ -21,6 +21,7 @@ include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
+include "src/imagelayout.cyr"
 include "src/build.cyr"
 include "src/encrypted.cyr"
 include "src/runtime.cyr"
@@ -55,7 +56,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.0 — OCI container runtime (Cyrius port)";
+    return "3.0.1 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).

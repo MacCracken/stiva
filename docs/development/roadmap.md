@@ -169,11 +169,13 @@ collapses to a **plain heap map** and **blocking** primitives inside a task are 
 blocking work over the already-ported core*, not an async rewrite, and belongs here. Only the
 genuinely external- or coroutine-blocked residue stays in v3.1 (next).
 
-**A. OCI image-layout + transfer** (bayan JSON + tar — makes the store Docker/Podman/skopeo-interop):
-- [ ] Full OCI **image config** blob (`architecture`/`os`/`created`/`rootfs`/`history`/`config{Env,Cmd,Entrypoint,WorkingDir,User,ExposedPorts,Labels}`) — reuses build's `OciImageConfig` assembly.
-- [ ] OCI **manifest** blob per image; **`index.json` + `oci-layout`** at the store root; retire the ad-hoc `images.json`.
-- [ ] **Perms-preserving tar** writer + reader (real mode/uid/gid + dir/symlink entries) — `create_tar` currently hardcodes `0644`/uid 0.
-- [ ] **`stiva save`/`load`** as **`oci-archive`** (+ a `docker-archive` read path) — smooth machine-to-machine transfer, no registry needed.
+**A. OCI image-layout + transfer** (bayan JSON + tar — makes the store Docker/Podman/skopeo-interop).
+Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **A1+A2 → v3.0.1**
+(landed), **A3+A4 → v3.0.2**.
+- [x] **(v3.0.1)** Full OCI **image config** blob (`architecture`/`os`/`created`/`rootfs`/`history`/`config{Env,Cmd,Entrypoint,WorkingDir,User,ExposedPorts,Labels}`) — `imagelayout.cyr` `oci_config_build`; `rootfs.diff_ids` is the **uncompressed** tar digest (spec-correct). New module `src/imagelayout.cyr`.
+- [x] **(v3.0.1)** OCI **manifest** blob per image (`registry.cyr` `Descriptor`/`OciManifest` + serde); **`index.json` + `oci-layout`** at the store root; the ad-hoc `images.json` is **retired** — the store is now a valid OCI image layout, reconstructed into `Image` records on load. GC roots = config + manifest + layer digests. `stiva import`→`images`→`rmi` verified end-to-end + spec-valid on disk.
+- [ ] **(v3.0.2)** **Perms-preserving tar** writer + reader (real mode/uid/gid + dir/symlink entries) — `create_tar` currently hardcodes `0644`/uid 0.
+- [ ] **(v3.0.2)** **`stiva save`/`load`** as **`oci-archive`** (+ a `docker-archive` read path) — smooth machine-to-machine transfer, no registry needed. (Depends on the A3 perms tar for the archive envelope.) When reading **externally-produced** layouts, harden `_il_parse_full_ref` for a port-registry `ref.name` without a tag and an empty-registry `ref.name`, and carry each descriptor's real `platform` through the index rewrite instead of re-stamping `current_platform()` (A2 review follow-ups — unreachable for stiva-written `local/<name>:<tag>` layouts, which round-trip).
 
 **B. Registry client** — a **blocking** port over `sandhi`/`tls_native` + bayan JSON, not async:
 - [ ] `acquire_token`/`authenticated_request` bearer state machine → `fetch_manifest`/`fetch_blob` → the `image_store_pull` driver = live **`stiva pull`**; then `blob_exists`/`push_blob`/`push_manifest` = **`stiva push`**; `list_tags`/`catalog`/`referrers`. Token cache = plain map. Writes into the **A** layout. (Sequential layer download; true parallelism → v3.1.)

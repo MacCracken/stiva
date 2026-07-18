@@ -1,0 +1,591 @@
+# imagelayout.cyr — OCI image-layout: config/manifest assembly, `oci-layout`
+# marker, `index.json` store, and (v3.0.2) oci-archive save/load.
+#
+# NET-NEW work: the frozen rust-old oracle had NO OCI image-layout — it (like
+# the pre-A2 Cyrius port) kept an ad-hoc `images.json`. So the OCI **image-spec**
+# is the parity oracle here, not rust-old. Docker/Podman/skopeo interop is the
+# goal: the store root becomes a valid OCI image layout
+#   {root}/oci-layout   {root}/index.json   {root}/blobs/sha256/<hex>
+#
+# Depends on: image.cyr (blob store + sha256_digest/digest_hex + Image/Layer/
+# ImageRef), registry.cyr (Descriptor/OciManifest/OciIndex + media_* + serde),
+# and — for save/load only (v3.0.2) — storage.cyr (tar). Included AFTER those.
+
+# ── image-spec constants ──
+
+# imageLayoutVersion written to the `oci-layout` marker at the store root.
+#[must_use]
+fn oci_image_layout_version() {
+    return "1.0.0";
+}
+
+# ── OCI image config assembly (A1) ────────────────────────
+
+# vec<cstr> → JTAG_ARR of strings, or 0 when the vec is empty/absent (so the
+# caller omits the field — serde skip_serializing_if = Vec::is_empty parity).
+#[must_use]
+fn _il_str_arr(v) {
+    if (v == 0) { return 0; }
+    var n = vec_len(v);
+    if (n == 0) { return 0; }
+    var arr = json_v_arr_new();
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(arr, json_v_str_new(str_from(vec_get(v, i))));
+        i = i + 1;
+    }
+    return arr;
+}
+
+# Alternating [k,v,k,v,...] vec<cstr> → JTAG_OBJ, or 0 when empty. Insertion
+# order is preserved (deterministic bytes). A dangling final key is ignored.
+#[must_use]
+fn _il_kv_obj(v) {
+    if (v == 0) { return 0; }
+    var n = vec_len(v);
+    if (n < 2) { return 0; }
+    var o = json_v_obj_new();
+    var i = 0;
+    while (i + 1 < n) {
+        json_v_obj_set(o, str_from(vec_get(v, i)), json_v_str_new(str_from(vec_get(v, i + 1))));
+        i = i + 2;
+    }
+    return o;
+}
+
+# vec<cstr> port keys ("8080/tcp") → {"8080/tcp":{}} JTAG_OBJ, or 0 when empty.
+#[must_use]
+fn _il_ports_obj(v) {
+    if (v == 0) { return 0; }
+    var n = vec_len(v);
+    if (n == 0) { return 0; }
+    var o = json_v_obj_new();
+    var i = 0;
+    while (i < n) {
+        json_v_obj_set(o, str_from(vec_get(v, i)), json_v_obj_new());
+        i = i + 1;
+    }
+    return o;
+}
+
+# Build the `config` sub-object of an OCI image config. Every field is optional
+# and omitted when empty (serde skip_serializing_if parity). Canonical field
+# order mirrors the OCI image-spec struct: User, ExposedPorts, Env, Entrypoint,
+# Cmd, WorkingDir, Labels. Returns a fresh (possibly empty {}) JTAG_OBJ.
+#   env/cmd/entrypoint : vec<cstr> or 0    exposed_ports : vec<cstr "port/proto"> or 0
+#   workdir/user       : cstr or 0         labels        : alternating [k,v] vec<cstr> or 0
+#[must_use]
+fn oci_config_object_jv(env, cmd, entrypoint, workdir, user, exposed_ports, labels) {
+    var o = json_v_obj_new();
+    if (user != 0) {
+        json_v_obj_set(o, str_from("User"), json_v_str_new(str_from(user)));
+    }
+    var ports = _il_ports_obj(exposed_ports);
+    if (ports != 0) { json_v_obj_set(o, str_from("ExposedPorts"), ports); }
+    var ea = _il_str_arr(env);
+    if (ea != 0) { json_v_obj_set(o, str_from("Env"), ea); }
+    var epa = _il_str_arr(entrypoint);
+    if (epa != 0) { json_v_obj_set(o, str_from("Entrypoint"), epa); }
+    var ca = _il_str_arr(cmd);
+    if (ca != 0) { json_v_obj_set(o, str_from("Cmd"), ca); }
+    if (workdir != 0) {
+        json_v_obj_set(o, str_from("WorkingDir"), json_v_str_new(str_from(workdir)));
+    }
+    var lo = _il_kv_obj(labels);
+    if (lo != 0) { json_v_obj_set(o, str_from("Labels"), lo); }
+    return o;
+}
+
+# Build a full OCI image config value (application/vnd.oci.image.config.v1+json).
+#   architecture / os : required cstrs
+#   created_str       : RFC3339 cstr, or 0 to omit "created" (0 → reproducible)
+#   cfg_obj           : a config sub-object jv (0 → emit empty {})
+#   diff_ids          : vec<cstr> of UNCOMPRESSED layer digests (rootfs.diff_ids)
+#   history           : vec<jv> history entries, or 0 to omit
+# Canonical key order: created, architecture, os, config, rootfs, history — the
+# bytes (and the config-blob digest over them) are deterministic.
+#[must_use]
+fn oci_config_build(architecture, os, created_str, cfg_obj, diff_ids, history) {
+    var o = json_v_obj_new();
+    if (created_str != 0) {
+        json_v_obj_set(o, str_from("created"), json_v_str_new(str_from(created_str)));
+    }
+    json_v_obj_set(o, str_from("architecture"), json_v_str_new(str_from(architecture)));
+    json_v_obj_set(o, str_from("os"), json_v_str_new(str_from(os)));
+    var co = cfg_obj;
+    if (co == 0) { co = json_v_obj_new(); }
+    json_v_obj_set(o, str_from("config"), co);
+
+    var rootfs = json_v_obj_new();
+    json_v_obj_set(rootfs, str_from("type"), json_v_str_new(str_from("layers")));
+    var diffs = json_v_arr_new();
+    if (diff_ids != 0) {
+        var n = vec_len(diff_ids);
+        var i = 0;
+        while (i < n) {
+            json_v_arr_push(diffs, json_v_str_new(str_from(vec_get(diff_ids, i))));
+            i = i + 1;
+        }
+    }
+    json_v_obj_set(rootfs, str_from("diff_ids"), diffs);
+    json_v_obj_set(o, str_from("rootfs"), rootfs);
+
+    if (history != 0) {
+        var hn = vec_len(history);
+        if (hn > 0) {
+            var harr = json_v_arr_new();
+            var j = 0;
+            while (j < hn) {
+                json_v_arr_push(harr, vec_get(history, j));
+                j = j + 1;
+            }
+            json_v_obj_set(o, str_from("history"), harr);
+        }
+    }
+    return o;
+}
+
+# Compact JSON bytes (Str) for a config value — the exact bytes stored as the
+# config blob and content-addressed. Compact (json_v_build) matches the
+# registry convention and keeps the digest byte-stable.
+#[must_use]
+fn oci_config_json(cfg_v) {
+    return json_v_build(cfg_v);
+}
+
+# ── oci-layout marker + index.json store (A2) ──
+#
+# The store root becomes a valid OCI image layout: an `oci-layout` marker, a
+# top-level `index.json` (a descriptor list — one per image, annotated with its
+# ref.name), and the shared `blobs/sha256/<hex>` store (config/manifest/layer
+# blobs). The legacy ad-hoc `images.json` is RETIRED — index.json + the manifest
+# and config blobs are the single source of truth, reconstructed into Image
+# records on load. This replaces the pre-A2 store layer that lived in image.cyr.
+
+# The org.opencontainers.image.ref.name annotation key (image ref → descriptor).
+#[must_use]
+fn _il_ref_name_key() {
+    return "org.opencontainers.image.ref.name";
+}
+
+# {root}/oci-layout and {root}/index.json paths.
+#[must_use]
+fn _il_layout_path(root) {
+    return _img_cat2(root, "/oci-layout");
+}
+
+#[must_use]
+fn _il_index_path(root) {
+    return _img_cat2(root, "/index.json");
+}
+
+# Atomic write via a temp file + rename (mirrors the blob-store idiom).
+fn _il_atomic_write(path, data, len) {
+    var tmp = _img_cat2(path, ".tmp");
+    if (file_write_all(tmp, data, len) < 0) { return 0; }
+    if (sys_rename(tmp, path) < 0) { return 0; }
+    return 1;
+}
+
+# Read a JTAG_STR field `key` (cstr) from obj `v` as a fresh cstr, or 0 if the
+# field is absent/null/non-string.
+#[must_use]
+fn _il_jv_str_field(v, key) {
+    var f = json_v_obj_get(v, key);
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# Write {root}/oci-layout = {"imageLayoutVersion":"1.0.0"} if absent. 1/0.
+fn image_store_write_oci_layout(store) {
+    var path = _il_layout_path(image_store_root(store));
+    if (file_exists(path) == 1) { return 1; }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("imageLayoutVersion"), json_v_str_new(str_from(oci_image_layout_version())));
+    var s = json_v_build(o);
+    return _il_atomic_write(path, str_data(s), str_len(s));
+}
+
+# Parse index.json into its root jv object, or 0 (absent/empty/unparsable). Uses
+# the explicit 2-arg parse entry point (the 1-arg wrapper mis-lowers).
+#[must_use]
+fn _il_index_read_jv(store) {
+    var path = _il_index_path(image_store_root(store));
+    if (file_exists(path) == 0) { return 0; }
+    # Whole-file read (no fixed cap) so a large index is never truncated into a
+    # parse failure (which the add guard would then treat as corruption).
+    var len_cell = alloc(8);
+    var buf = _img_read_file(path, len_cell);
+    var n = load64(len_cell);
+    if (buf == 0) { return 0; }
+    if (n <= 0) { return 0; }
+    return bayan_json_v_parse_str(buf, n);
+}
+
+# The `manifests` array jv from a parsed index root, or 0.
+#[must_use]
+fn _il_index_manifests(idx) {
+    if (idx == 0) { return 0; }
+    var m = json_v_obj_get(idx, "manifests");
+    if (json_v_is_arr(m) == 0) { return 0; }
+    return m;
+}
+
+# The ref.name annotation of an index descriptor jv, or 0.
+#[must_use]
+fn _il_desc_ref_name(desc) {
+    var ann = json_v_obj_get(desc, "annotations");
+    if (json_v_is_obj(ann) == 0) { return 0; }
+    return _il_jv_str_field(ann, _il_ref_name_key());
+}
+
+# Reconstruct an ImageRef from a full_ref string "registry/repository:tag" — the
+# exact inverse of image_ref_full_ref (split the last ':' for the tag, the first
+# '/' of the remainder for the registry). Avoids image_ref_parse's Docker-hub
+# heuristics, which would not round-trip a "local/..." reference. Digest is None.
+#[must_use]
+fn _il_parse_full_ref(s) {
+    var len = strlen(s);
+    var lc = _img_rfind(s, 58);          # ':' → tag boundary
+    var tag = "latest";
+    var rest = s;
+    if (lc >= 0) {
+        tag = _img_slice(s, lc + 1, len);
+        rest = _img_slice(s, 0, lc);
+    }
+    var rlen = strlen(rest);
+    var fs = _img_find(rest, 47);         # '/' → registry boundary
+    if (fs < 0) {
+        return image_ref_new("", rest, tag, 0);
+    }
+    var registry = _img_slice(rest, 0, fs);
+    var repository = _img_slice(rest, fs + 1, rlen);
+    return image_ref_new(registry, repository, tag, 0);
+}
+
+# Build one index.json manifest descriptor for `image`:
+#   { mediaType, digest(manifest), size(manifest bytes), platform{arch,os},
+#     annotations{ ref.name: full_ref } }. Single-node store → current_platform.
+#[must_use]
+fn _il_manifest_descriptor_jv(image, manifest_size) {
+    var ii: Image = image;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("mediaType"), json_v_str_new(str_from(media_oci_manifest())));
+    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(ii.manifest_digest)));
+    json_v_obj_set(o, str_from("size"), json_v_int_new(manifest_size));
+    var pp: Platform = current_platform();
+    var po = json_v_obj_new();
+    json_v_obj_set(po, str_from("architecture"), json_v_str_new(str_from(pp.architecture)));
+    json_v_obj_set(po, str_from("os"), json_v_str_new(str_from(pp.os)));
+    json_v_obj_set(o, str_from("platform"), po);
+    var ann = json_v_obj_new();
+    json_v_obj_set(ann, str_from(_il_ref_name_key()), json_v_str_new(str_from(image_ref_full_ref(ii.reference))));
+    json_v_obj_set(o, str_from("annotations"), ann);
+    return o;
+}
+
+# Read + parse an image's manifest blob into an OciManifest*, or 0.
+#[must_use]
+fn _il_read_manifest(store, digest) {
+    var path = _img_blob_path(image_store_root(store), digest);
+    if (file_exists(path) == 0) { return 0; }
+    var len_cell = alloc(8);
+    var buf = _img_read_file(path, len_cell);
+    var n = load64(len_cell);
+    if (buf == 0) { return 0; }
+    if (n <= 0) { return 0; }
+    var jv = bayan_json_v_parse_str(buf, n);
+    if (jv == 0) { return 0; }
+    return oci_manifest_from_jv(jv);
+}
+
+# Load the image index (replaces the images.json load). Reads index.json, then
+# for each descriptor reads its manifest blob and rebuilds an Image: id = the
+# config-descriptor digest, layers from the manifest layer descriptors, size =
+# sum of layer sizes, reference from the ref.name annotation, created_at = 0
+# (import omits "created"), manifest_digest from the descriptor. Missing/empty
+# index → empty vec. A descriptor whose manifest blob is missing is skipped.
+#[must_use]
+fn image_store_load_index(store) {
+    var out = vec_new();
+    var manifests = _il_index_manifests(_il_index_read_jv(store));
+    if (manifests == 0) { return out; }
+    var n = json_v_arr_len(manifests);
+    var i = 0;
+    while (i < n) {
+        var desc = json_v_arr_get(manifests, i);
+        var mdigest = _il_jv_str_field(desc, "digest");
+        if (mdigest != 0) {
+            var man = _il_read_manifest(store, mdigest);
+            if (man != 0) {
+                var mm: OciManifest = man;
+                var cfg: Descriptor = mm.config;
+                var layers = vec_new();
+                var total = 0;
+                var mlayers = mm.layers;
+                var ln = vec_len(mlayers);
+                var lj = 0;
+                while (lj < ln) {
+                    var ld: Descriptor = vec_get(mlayers, lj);
+                    vec_push(layers, layer_new(ld.digest, ld.size, ld.media_type));
+                    total = total + ld.size;
+                    lj = lj + 1;
+                }
+                var refname = _il_desc_ref_name(desc);
+                var reference = 0;
+                if (refname != 0) { reference = _il_parse_full_ref(refname); }
+                if (reference == 0) { reference = image_ref_new("local", cfg.digest, "latest", 0); }
+                var img = image_new(cfg.digest, reference, total, layers, 0);
+                var ig: Image = img;
+                ig.manifest_digest = mdigest;
+                vec_push(out, img);
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Rewrite index.json from a vec of Image* (each must have manifest_digest set +
+# its manifest blob present). Emits {schemaVersion, mediaType, manifests[]}. 1/0.
+fn _il_index_rewrite(store, images) {
+    var manifests = json_v_arr_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        var msize = image_store_blob_size(store, ii.manifest_digest);
+        if (msize < 0) { msize = 0; }
+        json_v_arr_push(manifests, _il_manifest_descriptor_jv(im, msize));
+        i = i + 1;
+    }
+    var root = json_v_obj_new();
+    json_v_obj_set(root, str_from("schemaVersion"), json_v_int_new(2));
+    json_v_obj_set(root, str_from("mediaType"), json_v_str_new(str_from(media_oci_index())));
+    json_v_obj_set(root, str_from("manifests"), manifests);
+    var s = json_v_build_pretty(root, 2);
+    return _il_atomic_write(_il_index_path(image_store_root(store)), str_data(s), str_len(s));
+}
+
+# Add or replace an image in index.json (replaces any entry with the same
+# full_ref), ensuring the oci-layout marker exists. Precondition: the image's
+# manifest/config/layer blobs are already stored and manifest_digest is set
+# (import and tag guarantee this). Returns 1/0.
+fn image_store_add_to_index(store, image) {
+    # Refuse to clobber a present-but-unparseable index — otherwise the load →
+    # dedup → rewrite below would drop every other image (their blobs orphaned).
+    # An absent index is fine (this add creates it). `remove` is already safe
+    # (an empty load makes it report not-found without rewriting).
+    var ipath = _il_index_path(image_store_root(store));
+    if (file_exists(ipath) == 1) {
+        if (_il_index_read_jv(store) == 0) {
+            stiva_err_print(STIVA_ERR_IO, "index.json is present but unreadable; refusing to overwrite it");
+            return 0;
+        }
+    }
+    image_store_write_oci_layout(store);
+    var ii: Image = image;
+    var new_ref = image_ref_full_ref(ii.reference);
+    var images = image_store_load_index(store);
+    var kept = vec_new();
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var ex = vec_get(images, i);
+        var ee: Image = ex;
+        if (streq(image_ref_full_ref(ee.reference), new_ref) == 0) { vec_push(kept, ex); }
+        i = i + 1;
+    }
+    vec_push(kept, image);
+    return _il_index_rewrite(store, kept);
+}
+
+# List locally stored images (rust-old: list). Returns a vec of Image*.
+#[must_use]
+fn image_store_list(store) {
+    return image_store_load_index(store);
+}
+
+# Sweep unreferenced blobs: for each hex in blobs/sha256, form "sha256:{hex}"
+# and unlink when it is not in `referenced`. Returns the count removed.
+fn _il_sweep_blobs(root, referenced) {
+    var removed = 0;
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var ne = vec_len(entries);
+    var ei = 0;
+    while (ei < ne) {
+        var hex = str_cstr(vec_get(entries, ei));
+        var digest = _img_cat2("sha256:", hex);
+        var found = 0;
+        var ri = 0;
+        while (ri < vec_len(referenced)) {
+            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
+            ri = ri + 1;
+        }
+        if (found == 0) {
+            var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
+            xunlink(blob_path);
+            removed = removed + 1;
+        }
+        ei = ei + 1;
+    }
+    return removed;
+}
+
+# Collect the referenced-digest set of a vec of Image*: each image's config id,
+# its manifest digest, and every layer digest — the GC roots.
+#[must_use]
+fn _il_referenced_digests(images) {
+    var referenced = vec_new();
+    var ii = 0;
+    while (ii < vec_len(images)) {
+        var im: Image = vec_get(images, ii);
+        vec_push(referenced, im.id);
+        if (im.manifest_digest != 0) { vec_push(referenced, im.manifest_digest); }
+        var layers = im.layers;
+        var lj = 0;
+        while (lj < vec_len(layers)) {
+            var ll: Layer = vec_get(layers, lj);
+            vec_push(referenced, ll.digest);
+            lj = lj + 1;
+        }
+        ii = ii + 1;
+    }
+    return referenced;
+}
+
+# Remove an image by id (config digest), drop now-unreferenced blobs, and
+# rewrite index.json. Returns 1 on success, -1 when no image has `id`, 0 on a
+# rewrite failure. Shared blobs (config/manifest/layers) survive.
+fn image_store_remove(store, id) {
+    var root = image_store_root(store);
+    var images = image_store_load_index(store);
+    var before = vec_len(images);
+    var kept = vec_new();
+    var i = 0;
+    while (i < before) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        if (streq(ii.id, id) == 0) { vec_push(kept, im); }
+        i = i + 1;
+    }
+    if (vec_len(kept) == before) { return 0 - 1; }
+    _il_sweep_blobs(root, _il_referenced_digests(kept));
+    if (_il_index_rewrite(store, kept) == 0) { return 0; }
+    return 1;
+}
+
+# Garbage-collect unreferenced blobs (rust-old: gc). Referenced set = every
+# indexed image's config id + manifest digest + layer digests. Returns the count
+# of blobs removed. index.json is unchanged (only orphan blobs are dropped).
+fn image_store_gc(store) {
+    var images = image_store_load_index(store);
+    return _il_sweep_blobs(image_store_root(store), _il_referenced_digests(images));
+}
+
+# Import a rootfs tar as a single-layer OCI image (rust-old: import_rootfs +
+# lib.rs import), producing a full OCI image layout: a gzip layer blob, an OCI
+# image config blob (rootfs.diff_ids = the UNCOMPRESSED tar digest, per spec), an
+# OCI manifest blob, the oci-layout marker, and an index.json entry under
+# reference `local/<name>:<tag>`. Returns the Image*, or 0 on failure (detail to
+# stderr). Synchronous — gzip via sankoch, sha256 via sigil. 64 MiB tar cap.
+fn image_import(store, tar_path, name, tag) {
+    # Whole-file read (SEEK_END-sized) — a rootfs tar can exceed any fixed cap
+    # (base images run well past 64 MiB), and a truncated read would produce a
+    # self-consistent but silently-incomplete image.
+    var tlen_cell = alloc(8);
+    var tarbuf = _img_read_file(tar_path, tlen_cell);
+    var tarlen = load64(tlen_cell);
+    if (tarbuf == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("failed to read import tar: ", tar_path));
+        return 0;
+    }
+
+    # rootfs.diff_ids uses the UNCOMPRESSED tar digest (OCI spec); the layer blob
+    # is content-addressed over the COMPRESSED bytes.
+    var diff_id = sha256_digest(tarbuf, tarlen);
+
+    var gzcap = tarlen + tarlen / 50 + 8192;
+    var gzbuf = alloc(gzcap);
+    var gzlen = gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
+    if (gzlen < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to gzip import tar");
+        return 0;
+    }
+    var layer_digest = sha256_digest(gzbuf, gzlen);
+    if (image_store_store_blob(store, layer_digest, gzbuf, gzlen) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store layer blob");
+        return 0;
+    }
+    var layer = layer_new(layer_digest, gzlen, media_oci_layer());
+
+    # OCI image config blob.
+    var pp: Platform = current_platform();
+    var diff_ids = vec_new();
+    vec_push(diff_ids, diff_id);
+    var cfg_v = oci_config_build(pp.architecture, pp.os, 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diff_ids, 0);
+    var cfg_s = json_v_build(cfg_v);
+    var config_digest = sha256_digest(str_data(cfg_s), str_len(cfg_s));
+    if (image_store_store_blob(store, config_digest, str_data(cfg_s), str_len(cfg_s)) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store config blob");
+        return 0;
+    }
+    var config_desc = descriptor_new(media_oci_config(), config_digest, str_len(cfg_s));
+
+    # OCI manifest blob.
+    var layer_descs = vec_new();
+    vec_push(layer_descs, descriptor_new(media_oci_layer(), layer_digest, gzlen));
+    var man = oci_manifest_new(config_desc, layer_descs);
+    var mm: OciManifest = man;
+    mm.media_type = media_oci_manifest();
+    var man_s = json_v_build(oci_manifest_to_jv(man));
+    var manifest_digest = sha256_digest(str_data(man_s), str_len(man_s));
+    if (image_store_store_blob(store, manifest_digest, str_data(man_s), str_len(man_s)) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store manifest blob");
+        return 0;
+    }
+
+    var layers = vec_new();
+    vec_push(layers, layer);
+    var ref = image_ref_new("local", name, tag, 0);
+    var image = image_new(config_digest, ref, gzlen, layers, 0);
+    var ig: Image = image;
+    ig.manifest_digest = manifest_digest;
+
+    if (image_store_add_to_index(store, image) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "failed to update image index");
+        return 0;
+    }
+    sakshi_info("import complete", strlen("import complete"));
+    return image;
+}
+
+# Tag a local image with a new reference (rust-old: lib.rs tag). Finds the source
+# by id OR full_ref, clones it under the parsed new reference (the manifest/
+# config/layer blobs are shared — same manifest_digest), and re-indexes. Returns
+# 1, 0 (source not found), -2 (new ref unparseable), -3 (index save failure).
+fn image_store_tag(store, source, new_ref) {
+    var images = image_store_load_index(store);
+    var found = 0;
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        var ii: Image = im;
+        if (streq(ii.id, source) == 1 || streq(image_ref_full_ref(ii.reference), source) == 1) {
+            found = im;
+        }
+        i = i + 1;
+    }
+    if (found == 0) { return 0; }
+    var parsed = image_ref_parse(new_ref);
+    if (parsed == 0) { return 0 - 2; }
+    var fi: Image = found;
+    var tagged = image_new(fi.id, parsed, fi.size_bytes, fi.layers, fi.created_at);
+    var tg: Image = tagged;
+    tg.manifest_digest = fi.manifest_digest;
+    if (image_store_add_to_index(store, tagged) == 0) { return 0 - 3; }
+    return 1;
+}

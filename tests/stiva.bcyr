@@ -6,6 +6,25 @@
 # (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
 # the full overhead-vs-batching guidance.
 
+# Module prefix through imagelayout.cyr (the OCI image-layout hot paths: config +
+# manifest assembly and serialization — A1/A2).
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+
 fn bench_noop(): i64 { return 0; }
 
 fn main(): i64 {
@@ -16,6 +35,37 @@ fn main(): i64 {
     while (i < 1000000) { bench_noop(); i = i + 1; }
     bench_batch_stop(b, 1000000);
     bench_report(b);
+
+    # A1: OCI image config assembly + compact serialize.
+    var diffs = vec_new();
+    vec_push(diffs, "sha256:8a0c65959572fb0a32f88c20782ce7110d2f536539f8a3d3a1b6fd7c557160e0");
+    var bc = bench_new("oci_config_build+serialize");
+    bench_batch_start(bc);
+    var j = 0;
+    while (j < 100000) {
+        var cfg = oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0);
+        json_v_build(cfg);
+        j = j + 1;
+    }
+    bench_batch_stop(bc, 100000);
+    bench_report(bc);
+
+    # A2: OCI manifest assembly (config + one layer descriptor) + compact serialize.
+    var cfgd = descriptor_new(media_oci_config(), "sha256:e93fbbab999657e921e61a27fbacde563f2428130ec3532c1641def8cbac75f9", 163);
+    var bm = bench_new("oci_manifest_to_jv+serialize");
+    bench_batch_start(bm);
+    var k = 0;
+    while (k < 100000) {
+        var ld = vec_new();
+        vec_push(ld, descriptor_new(media_oci_layer(), "sha256:3cb0b54b0805a060f557bfec1ea2b40ccd42d49581860e2dcd9cf7b2b1a8aa34", 153));
+        var man = oci_manifest_new(cfgd, ld);
+        var mm: OciManifest = man;
+        mm.media_type = media_oci_manifest();
+        json_v_build(oci_manifest_to_jv(man));
+        k = k + 1;
+    }
+    bench_batch_stop(bm, 100000);
+    bench_report(bm);
     return 0;
 }
 

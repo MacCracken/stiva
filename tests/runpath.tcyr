@@ -18,6 +18,7 @@ include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
+include "src/imagelayout.cyr"
 include "src/build.cyr"
 include "src/encrypted.cyr"
 include "src/runtime.cyr"
@@ -278,12 +279,30 @@ fn _img_ck_ref(input, exp_reg, exp_repo, exp_tag) {
     return 0;
 }
 
-fn _test_img_make(id, ref_str, size, layer_digest, layer_size) {
-    var reference = image_ref_parse(ref_str);
-    var layers = vec_new();
-    vec_push(layers, layer_new(layer_digest, layer_size,
-    "application/vnd.oci.image.layer.v1.tar+gzip"));
-    return image_new(id, reference, size, layers, 1700000000);
+# Reset a fixed-path test store to empty: drop index.json, the oci-layout
+# marker, and every blob (the store dirs use stable /tmp paths reused across
+# runs, so clean the OCI-layout state that image_import + remove/gc act on).
+fn _test_store_reset(root) {
+    xunlink(_img_cat2(root, "/index.json"));
+    xunlink(_img_cat2(root, "/oci-layout"));
+    var blobs_dir = _img_cat2(root, "/blobs/sha256");
+    var entries = dir_list(str_from(blobs_dir));
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var hex = str_cstr(vec_get(entries, i));
+        xunlink(_img_cat2(_img_cat2(blobs_dir, "/"), hex));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Import `content` as a real single-layer OCI image (writes it to `tmpfile`
+# first). Returns the Image* — with real content-addressed config/layer/manifest
+# digests — so the store tests exercise the actual OCI-layout import path.
+fn _test_import(store, tmpfile, name, tag, content, clen) {
+    file_write_all(tmpfile, content, clen);
+    return image_import(store, tmpfile, name, tag);
 }
 
 # ── moved from stiva.tcyr (image ref/digest/blob/index) — cycc identifier cap ──
@@ -377,66 +396,78 @@ fn test_image_blob_store() {
 fn test_image_index_round_trip() {
     test_group("image_index_round_trip");
     var root = "/tmp/stiva_img_idx_rt";
-    xunlink("/tmp/stiva_img_idx_rt/images.json");
     var store = image_store_new(root);
     assert_eq(store != 0, 1, "store created");
+    _test_store_reset(root);
 
     # Empty index → empty list (rust-old: Ok(vec![])).
     assert_eq(vec_len(image_store_list(store)), 0, "empty index lists nothing");
 
-    var img = _test_img_make("sha256:config123", "alpine:3.19", 4096,
-    "sha256:layer1", 4096);
-    assert_eq(image_store_add_to_index(store, img), 1, "add_to_index ok");
+    var content = "rootfs-A-contents";
+    var img = _test_import(store, "/tmp/stiva_img_idx_rt.tar", "alpine", "3.19", content, strlen(content));
+    assert_eq(img != 0, 1, "import ok");
+    var im: Image = img;
+    assert_eq(memeq(im.id, "sha256:", 7), 1, "id is a config digest");
+    assert_eq(im.manifest_digest != 0, 1, "manifest_digest set on import");
+    var il: Layer = vec_get(im.layers, 0);
+
+    # oci-layout marker + index.json now exist (a valid OCI image layout).
+    assert_eq(file_exists("/tmp/stiva_img_idx_rt/oci-layout"), 1, "oci-layout marker written");
+    assert_eq(file_exists("/tmp/stiva_img_idx_rt/index.json"), 1, "index.json written");
 
     var listed = image_store_list(store);
     assert_eq(vec_len(listed), 1, "one image listed");
     var got: Image = vec_get(listed, 0);
-    assert_eq(streq(got.id, "sha256:config123"), 1, "id round-trips");
-    assert_eq(got.size_bytes, 4096, "size_bytes round-trips");
+    assert_eq(streq(got.id, im.id), 1, "id round-trips (config digest)");
+    assert_eq(got.size_bytes, im.size_bytes, "size_bytes round-trips");
+    assert_eq(streq(got.manifest_digest, im.manifest_digest), 1, "manifest_digest round-trips");
     assert_eq(vec_len(got.layers), 1, "one layer round-trips");
     var gl: Layer = vec_get(got.layers, 0);
-    assert_eq(streq(gl.digest, "sha256:layer1"), 1, "layer digest round-trips");
-    assert_eq(gl.size_bytes, 4096, "layer size round-trips");
-    assert_eq(got.created_at, 1700000000, "created_at round-trips");
-    # reference nested object round-trips.
+    assert_eq(streq(gl.digest, il.digest), 1, "layer digest round-trips");
+    assert_eq(gl.size_bytes, il.size_bytes, "layer size round-trips");
+    assert_eq(streq(gl.media_type, "application/vnd.oci.image.layer.v1.tar+gzip"), 1, "layer media type");
+    assert_eq(got.created_at, 0, "created_at 0 (import omits created)");
+    # reference "local/alpine:3.19" round-trips (split-inverse of full_ref).
     var gref: ImageRef = got.reference;
-    assert_eq(streq(gref.registry, "docker.io"), 1, "ref registry round-trips");
-    assert_eq(streq(gref.repository, "library/alpine"), 1, "ref repo round-trips");
+    assert_eq(streq(gref.registry, "local"), 1, "ref registry round-trips");
+    assert_eq(streq(gref.repository, "alpine"), 1, "ref repo round-trips");
     assert_eq(streq(gref.tag, "3.19"), 1, "ref tag round-trips");
-    assert_eq(gref.digest, 0, "ref digest None round-trips as null");
+    assert_eq(gref.digest, 0, "ref digest None round-trips");
     return 0;
 }
 
 fn test_image_index_dedup_on_re_add() {
     test_group("image_index_dedup_on_re_add");
     var root = "/tmp/stiva_img_idx_dedup";
-    xunlink("/tmp/stiva_img_idx_dedup/images.json");
     var store = image_store_new(root);
+    _test_store_reset(root);
 
-    var img1 = _test_img_make("sha256:v1", "app:latest", 100,
-    "sha256:l1", 100);
-    var img2 = _test_img_make("sha256:v2", "app:latest", 200,
-    "sha256:l2", 200);
-    image_store_add_to_index(store, img1);
-    image_store_add_to_index(store, img2);
+    var c1 = "app-content-one";
+    var c2 = "app-content-two-different";
+    _test_import(store, "/tmp/stiva_img_idx_dedup.tar", "app", "latest", c1, strlen(c1));
+    var img2 = _test_import(store, "/tmp/stiva_img_idx_dedup.tar", "app", "latest", c2, strlen(c2));
+    var i2: Image = img2;
 
-    # Same reference "app:latest" → replaced, not duplicated.
+    # Same reference "local/app:latest" → replaced, not duplicated.
     var listed = image_store_list(store);
     assert_eq(vec_len(listed), 1, "same reference replaced");
     var got: Image = vec_get(listed, 0);
-    assert_eq(streq(got.id, "sha256:v2"), 1, "newest id kept");
+    assert_eq(streq(got.id, i2.id), 1, "newest id kept");
     return 0;
 }
 
 fn test_image_index_multiple() {
     test_group("image_index_multiple");
     var root = "/tmp/stiva_img_idx_multi";
-    xunlink("/tmp/stiva_img_idx_multi/images.json");
     var store = image_store_new(root);
+    _test_store_reset(root);
 
-    image_store_add_to_index(store, _test_img_make("sha256:a", "app:v0", 1, "sha256:la", 1));
-    image_store_add_to_index(store, _test_img_make("sha256:b", "app:v1", 1, "sha256:lb", 1));
-    image_store_add_to_index(store, _test_img_make("sha256:c", "app:v2", 1, "sha256:lc", 1));
+    var ca = "content-a";
+    var cb = "content-b";
+    var cc = "content-c";
+    _test_import(store, "/tmp/stiva_img_idx_multi.tar", "app", "v0", ca, strlen(ca));
+    _test_import(store, "/tmp/stiva_img_idx_multi.tar", "app", "v1", cb, strlen(cb));
+    _test_import(store, "/tmp/stiva_img_idx_multi.tar", "app", "v2", cc, strlen(cc));
 
     assert_eq(vec_len(image_store_list(store)), 3, "three distinct references");
     return 0;
@@ -445,70 +476,88 @@ fn test_image_index_multiple() {
 fn test_image_index_remove() {
     test_group("image_index_remove");
     var root = "/tmp/stiva_img_idx_rm";
-    xunlink("/tmp/stiva_img_idx_rm/images.json");
     var store = image_store_new(root);
+    _test_store_reset(root);
 
-    # A real blob backing the image, so remove's cleanup can unlink it.
-    var data = "layer data";
-    var digest = sha256_digest(data, 10);
-    xunlink(_img_blob_path(root, digest));
-    image_store_store_blob(store, digest, data, 10);
-    assert_eq(image_store_has_blob(store, digest), 1, "blob present before remove");
-
-    var reference = image_ref_parse("nginx:latest");
-    var layers = vec_new();
-    vec_push(layers, layer_new(digest, 10,
-    "application/vnd.oci.image.layer.v1.tar+gzip"));
-    var img = image_new("sha256:configrm", reference, 10, layers, 1700000000);
-    image_store_add_to_index(store, img);
+    var content = "layer data to remove";
+    var img = _test_import(store, "/tmp/stiva_img_idx_rm.tar", "nginx", "latest", content, strlen(content));
+    var im: Image = img;
+    var layer: Layer = vec_get(im.layers, 0);
+    assert_eq(image_store_has_blob(store, layer.digest), 1, "layer blob present");
+    assert_eq(image_store_has_blob(store, im.id), 1, "config blob present");
+    assert_eq(image_store_has_blob(store, im.manifest_digest), 1, "manifest blob present");
     assert_eq(vec_len(image_store_list(store)), 1, "one image before remove");
 
-    assert_eq(image_store_remove(store, "sha256:configrm"), 1, "remove ok");
+    assert_eq(image_store_remove(store, im.id), 1, "remove ok");
     assert_eq(vec_len(image_store_list(store)), 0, "index empty after remove");
-    # Unreferenced blob cleaned up (rust-old: read_dir + remove_file walk).
-    assert_eq(image_store_has_blob(store, digest), 0, "unreferenced blob deleted");
+    # All of the removed image's now-unreferenced blobs are cleaned up.
+    assert_eq(image_store_has_blob(store, layer.digest), 0, "layer blob deleted");
+    assert_eq(image_store_has_blob(store, im.id), 0, "config blob deleted");
+    assert_eq(image_store_has_blob(store, im.manifest_digest), 0, "manifest blob deleted");
     return 0;
 }
 
 fn test_image_index_remove_missing() {
     test_group("image_index_remove_missing");
     var root = "/tmp/stiva_img_idx_rmmiss";
-    xunlink("/tmp/stiva_img_idx_rmmiss/images.json");
     var store = image_store_new(root);
+    _test_store_reset(root);
     # rust-old: Err(ImageNotFound) → sentinel -1 here.
     assert_eq(image_store_remove(store, "sha256:doesnotexist"), 0 - 1,
     "remove nonexistent -> -1");
     return 0;
 }
 
+# Removing one image leaves a distinct image's blobs intact — the sweep only
+# drops blobs no surviving image references. (Single-layer imports don't share
+# blobs across distinct content, so this exercises isolation rather than a
+# shared layer; a genuine cross-image shared layer awaits multi-layer builds.)
 fn test_image_index_remove_shared_blob() {
     test_group("image_index_remove_shared_blob");
     var root = "/tmp/stiva_img_idx_shared";
-    xunlink("/tmp/stiva_img_idx_shared/images.json");
     var store = image_store_new(root);
+    _test_store_reset(root);
 
-    var data = "shared layer";
-    var digest = sha256_digest(data, 12);
-    xunlink(_img_blob_path(root, digest));
-    image_store_store_blob(store, digest, data, 12);
+    var ca = "image-A-rootfs";
+    var cb = "image-B-rootfs";
+    var imgA = _test_import(store, "/tmp/stiva_img_idx_shared.tar", "app", "v1", ca, strlen(ca));
+    var imgB = _test_import(store, "/tmp/stiva_img_idx_shared.tar", "app", "v2", cb, strlen(cb));
+    var a: Image = imgA;
+    var b: Image = imgB;
+    var la: Layer = vec_get(a.layers, 0);
+    var lb: Layer = vec_get(b.layers, 0);
+    assert_eq(vec_len(image_store_list(store)), 2, "two images");
 
-    var ref1 = image_ref_parse("app:v1");
-    var lv1 = vec_new();
-    vec_push(lv1, layer_new(digest, 12, "application/vnd.oci.image.layer.v1.tar+gzip"));
-    image_store_add_to_index(store, image_new("sha256:img1", ref1, 12, lv1, 1700000000));
+    # Remove A — B's blobs are untouched.
+    assert_eq(image_store_remove(store, a.id), 1, "remove A ok");
+    assert_eq(image_store_has_blob(store, la.digest), 0, "A layer blob deleted");
+    assert_eq(image_store_has_blob(store, lb.digest), 1, "B layer blob survives");
+    assert_eq(image_store_has_blob(store, b.id), 1, "B config blob survives");
+    assert_eq(image_store_has_blob(store, b.manifest_digest), 1, "B manifest blob survives");
 
-    var ref2 = image_ref_parse("app:v2");
-    var lv2 = vec_new();
-    vec_push(lv2, layer_new(digest, 12, "application/vnd.oci.image.layer.v1.tar+gzip"));
-    image_store_add_to_index(store, image_new("sha256:img2", ref2, 12, lv2, 1700000000));
+    # Remove B — now everything is gone.
+    assert_eq(image_store_remove(store, b.id), 1, "remove B ok");
+    assert_eq(image_store_has_blob(store, lb.digest), 0, "B layer blob deleted when unreferenced");
+    return 0;
+}
 
-    # Remove img1 — shared blob survives (img2 still references it).
-    assert_eq(image_store_remove(store, "sha256:img1"), 1, "remove img1 ok");
-    assert_eq(image_store_has_blob(store, digest), 1, "shared blob survives");
+# A present-but-corrupt index.json must NOT be silently overwritten by the next
+# add (which would orphan every other image). The add is refused instead.
+fn test_image_index_corrupt_guard() {
+    test_group("image_index_corrupt_guard");
+    var root = "/tmp/stiva_img_idx_corrupt";
+    var store = image_store_new(root);
+    _test_store_reset(root);
+    var c1 = "keep-me";
+    _test_import(store, "/tmp/stiva_img_idx_corrupt.tar", "keep", "v1", c1, strlen(c1));
+    assert_eq(vec_len(image_store_list(store)), 1, "one image before corruption");
 
-    # Remove img2 — now unreferenced → cleaned up.
-    assert_eq(image_store_remove(store, "sha256:img2"), 1, "remove img2 ok");
-    assert_eq(image_store_has_blob(store, digest), 0, "blob cleaned when unreferenced");
+    # Corrupt the index, then attempt a second import.
+    var garbage = "{ this is not valid json";
+    file_write_all(_img_cat2(root, "/index.json"), garbage, strlen(garbage));
+    var c2 = "new-one";
+    var img2 = _test_import(store, "/tmp/stiva_img_idx_corrupt.tar", "new", "v1", c2, strlen(c2));
+    assert_eq(img2, 0, "import refused on corrupt index (not a silent wipe)");
     return 0;
 }
 
@@ -595,11 +644,13 @@ fn test_image_store_tag() {
     var root = _rt_cat2("/tmp/stiva-tag-", _rt_int_to_cstr(getpid()));
     sys_mkdir(root, 493);
     var store = image_store_new(root);
-    var img = image_new("sha256:abc", image_ref_new("local", "src", "1", 0), 10, vec_new(), 0);
-    image_store_add_to_index(store, img);
-    assert_eq(image_store_tag(store, "sha256:abc", "dest:2"), 1, "tag by id ok");
+    _test_store_reset(root);
+    var content = "tag-me-rootfs";
+    var img = _test_import(store, _rt_cat2(root, "/src.tar"), "src", "1", content, strlen(content));
+    var im: Image = img;
+    assert_eq(image_store_tag(store, im.id, "dest:2"), 1, "tag by id ok");
     assert_eq(image_store_tag(store, "sha256:missing", "x:1"), 0, "tag missing -> 0");
-    # src:1 + the new dest:2 alias → 2 entries.
+    # local/src:1 + the new dest alias → 2 index entries (manifest blob shared).
     assert_eq(vec_len(image_store_load_index(store)), 2, "2 index entries after tag");
     return 0;
 }
@@ -675,6 +726,7 @@ fn main() {
     test_image_index_remove();
     test_image_index_remove_missing();
     test_image_index_remove_shared_blob();
+    test_image_index_corrupt_guard();
     return assert_summary();
 }
 
