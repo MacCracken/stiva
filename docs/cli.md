@@ -2,11 +2,12 @@
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
 `--help`), but in **v3.0.0** only the synchronous subset executes end-to-end; the rest
-print a clear "deferred to v3.1" message (their module logic is ported — only the async
-execution path remains). The **Status** column marks each:
+print a clear "not yet wired" message (their module logic is ported — only the
+wiring over the sync core remains). The **Status** column marks each:
 
 - **Live** — works end-to-end in v3.0.0.
-- **v3.1** — registered, deferred to the async milestone.
+- **v3.0.x (planned)** — buildable now (blocking, over the ported sync core), just not wired yet.
+- **v3.1 (blocked)** — gated on an external landing (kavach spawn/gate, cyrius coroutines, bayan YAML, sankoch zstd).
 
 ## Global Options
 
@@ -25,9 +26,9 @@ execution path remains). The **Status** column marks each:
 | `stiva images` | **Live** | List local images |
 | `stiva tag <SOURCE> <TARGET>` | **Live** | Tag a local image with a new reference |
 | `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
-| `stiva pull <IMAGE>` | v3.1 | Pull an image from a registry (needs the async HTTP client) |
-| `stiva push <IMAGE> [TARGET]` | v3.1 | Push a local image to a registry |
-| `stiva build [-f FILE] [-c CONTEXT]` | v3.1 | Build from `Stivafile` (parse is done; the layer build is async) |
+| `stiva pull <IMAGE>` | v3.0.x (planned) | Pull an image from a registry (over the blocking registry client) |
+| `stiva push <IMAGE> [TARGET]` | v3.0.x (planned) | Push a local image to a registry |
+| `stiva build [-f FILE] [-c CONTEXT]` | v3.0.x (planned) | Build from `Stivafile` (parse is done; the layer build is blocking) |
 
 ### Containers
 
@@ -41,16 +42,16 @@ execution path remains). The **Status** column marks each:
 | `stiva unpause <ID>` | **Live** | Unpause a paused container |
 | `stiva inspect <ID>` | **Live** | Inspect container or image (JSON output) |
 | `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
-| `stiva logs <ID> [-n LINES]` | **Live** | Show last N lines of container logs |
+| `stiva logs <ID> [-n LINES]` | **Live** / v3.0.x (planned) | Show last N lines (snapshot live; `-f` poll-loop is v3.0.x) |
 | `stiva export <ID> -o FILE` | **Live** | Export container rootfs as tar archive |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
-| `stiva run <IMAGE> -d ...` | v3.1 | Detached `run -d` (needs policy-threading spawn) |
-| `stiva exec <ID> <CMD...>` | v3.1 | Execute command in a running container (nsenter) |
-| `stiva top <ID>` | v3.1 | List processes inside a running container (`/proc` walk is ported) |
-| `stiva cp <SRC> <DST>` | v3.1 | Copy files host↔container (the copy logic is ported) |
-| `stiva kill <ID> [-s SIGNAL]` | v3.1 | Send a signal (needs a live PID) |
-| `stiva restart <ID>` | v3.1 | Restart a container |
-| `stiva rename <ID> <NAME>` | v3.1 | Rename a container |
+| `stiva run <IMAGE> -d ...` | v3.1 (blocked) | Detached `run -d` (needs kavach sandbox_spawn) |
+| `stiva exec <ID> <CMD...>` | v3.0.x (planned) / v3.1 (blocked) | Execute command in a running container (nsenter; non-interactive is v3.0.x, `-it` needs cyrius stackless coroutines) |
+| `stiva top <ID>` | v3.0.x (planned) | List processes inside a running container (`/proc` walk is ported) |
+| `stiva cp <SRC> <DST>` | v3.0.x (planned) | Copy files host↔container (the copy logic is ported) |
+| `stiva kill <ID> [-s SIGNAL]` | v3.0.x (planned) | Send a signal (needs a live PID) |
+| `stiva restart <ID>` | v3.0.x (planned) | Restart a container |
+| `stiva rename <ID> <NAME>` | v3.0.x (planned) | Rename a container |
 
 ### Operations
 
@@ -60,12 +61,12 @@ execution path remains). The **Status** column marks each:
 | `stiva gc` | **Live** | Garbage-collect unreferenced image blobs |
 | `stiva info` | **Live** | Show system information and security score |
 | `stiva convert <FILE> -f dockerfile [-o OUT]` | **Live** | Convert a Dockerfile to a `Stivafile` |
-| `stiva convert <FILE> -f compose ...` | v3.1 | Convert compose YAML (needs a Cyrius YAML parser) |
-| `stiva checkpoint <ID> [--leave-running]` | v3.1 | CRIU checkpoint a running container |
-| `stiva restore <ID> <DIR>` | v3.1 | Restore container from CRIU checkpoint |
-| `stiva events` | v3.1 | Stream container lifecycle events |
-| `stiva diff <ID>` | v3.1 | Show filesystem changes in a container vs its image |
-| `stiva completions <SHELL>` | v3.1 | Generate shell completions (bash, zsh, fish) |
+| `stiva convert <FILE> -f compose ...` | v3.1 (blocked) | Convert compose YAML (needs a bayan YAML parser) |
+| `stiva checkpoint <ID> [--leave-running]` | v3.0.x (planned) | CRIU checkpoint a running container |
+| `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
+| `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
+| `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image |
+| `stiva completions <SHELL>` | v3.0.x (planned) | Generate shell completions (bash, zsh, fish) |
 
 ## `stiva run` Flags
 
@@ -88,11 +89,11 @@ execution path remains). The **Status** column marks each:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.1 — needs a YAML parser) |
+| `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.1 (blocked) — needs a bayan YAML parser) |
 | `-o, --output <PATH>` | stdout | Output file path |
 
 > In v3.0.0, `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose`
-> prints a "deferred to v3.1" message pending a Cyrius YAML parser.
+> is v3.1 (blocked), pending a bayan YAML parser.
 
 ## `Stivafile` Format
 
@@ -172,7 +173,7 @@ stiva push myapp:latest registry.example.com/myapp:latest
 
 # Export/import
 stiva export <id> -o rootfs.tar
-stiva import rootfs.tar --name imported --tag v1
+stiva import rootfs.tar imported v1
 
 # Copy files in/out
 stiva cp ./config.toml <id>:/etc/app/

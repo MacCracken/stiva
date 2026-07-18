@@ -16,9 +16,11 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 is a working single-node OCI runtime**: it imports, runs,
 and manages real containers end-to-end via a CLI, with the algorithm-dense subsystems
-at 85–100% parity with the Rust oracle. The port stops cleanly at the sync/async
-boundary — the remaining async container-orchestration surface is the **v3.1** milestone
-(see [below](#whats-v31)). **1033 tests** across `tests/*.tcyr`.
+at 85–100% parity with the Rust oracle. The runtime is single-node run-to-completion
+and the async substrate is already in place, so the remaining container-orchestration
+surface is mostly synchronous/blocking work over the ported sync core — the **v3.0.x
+line** (buildable now, just not wired yet); only a small externally-blocked residue is
+**v3.1** (see [below](#whats-next)). **1033 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -46,8 +48,8 @@ stiva stop <id> ; stiva rm <id>                      # stop + remove
 stiva prune                                          # remove stopped containers + unused images
 ```
 
-See [docs/cli.md](docs/cli.md) for every command, including which are live in v3.0.0
-and which are deferred to v3.1.
+See [docs/cli.md](docs/cli.md) for every command, including which are live in v3.0.0,
+which are planned for the v3.0.x line, and which are the blocked v3.1 residue.
 
 ## Live commands (v3.0.0)
 
@@ -56,30 +58,37 @@ and which are deferred to v3.1.
 `convert` (Dockerfile → Stivafile).
 
 Every other verb is registered (visible in `--help`) but prints a clear
-"deferred to v3.1" message — its module logic is ported; only the async execution
-path remains.
+"not yet wired" message — its module logic is ported. Most such verbs are planned
+for the v3.0.x line (blocking glue over the sync core); only a small residue is
+blocked on external landings (v3.1).
 
 ## Capabilities
 
-| Category | v3.0.0 (live) | v3.1 (async milestone) |
-|----------|---------------|------------------------|
-| **Images** | import, tag, list, rmi, gc, export; content-addressable store; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP, full multi-stage build layers |
-| **Containers** | run (synchronous), ps, stop, rm, inspect, stats, pause/unpause, logs, wait; state persistence | detached `run -d`, `exec` (nsenter), `restart`, streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring |
-| **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack) | live network attach on the async run path |
-| **Storage** | overlay FS, volume mounts, gzip layer unpack, cgroups v2 (CPU/mem/PID/IO), USTAR tar writer | zstd layers |
-| **Orchestration** | TOML ansamblu parse, DAG ordering, health-check / restart-policy / rolling-update / scaling logic | live deploy/scale driving the async facade |
-| **Security** | rootless mapping, seccomp/Landlock policy, NO_NEW_PRIVS, fd cleanup, credential store, strength scoring | — |
-| **Integration** | 9 MCP tool definitions + 2 sync tool handlers (build/ansamblu), lifecycle-event model | live MCP dispatch over the async runtime, daimon agent |
+| Category | v3.0.0 (live) | v3.0.x (planned) | v3.1 (blocked) |
+|----------|---------------|------------------|----------------|
+| **Images** | import, tag, list, rmi, gc, export; content-addressable store; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers, OCI image-layout + oci-archive save/load | — |
+| **Containers** | run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait; state persistence | non-interactive `exec` (nsenter), `restart`, `rename`, streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring; ContainerManager + Stiva facade | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
+| **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack) | live network attach on the run path | — |
+| **Storage** | overlay FS, volume mounts, gzip layer unpack, cgroups v2 (CPU/mem/PID/IO), USTAR tar writer | perms-tar | zstd layers (needs sankoch zstd) |
+| **Orchestration** | TOML ansamblu parse, DAG ordering, health-check / restart-policy / rolling-update / scaling logic | live deploy/scale driving the Stiva facade | — |
+| **Security** | rootless mapping, seccomp/Landlock policy, NO_NEW_PRIVS, fd cleanup, credential store, strength scoring | — | scan_output (kavach ExternalizationGate) |
+| **Integration** | 9 MCP tool definitions + 2 sync tool handlers (build/ansamblu), lifecycle-event model | live MCP dispatch (ps/stop/inspect/pull/push/exec), daimon agent | MCP handle_run (needs `run -d`) |
 
-## <a name="whats-v31"></a>What's v3.1
+## <a name="whats-next"></a>What's next: v3.0.x and v3.1
 
-The one remaining architectural band is ~async: mapping the Rust tokio-shaped async onto
-Cyrius `lib/async.cyr` (cooperative futures). Landing it unblocks the async `Stiva` facade
-+ `ContainerManager`, the registry HTTP client, detached/`exec`/CRIU flows, streaming logs,
-and live MCP dispatch. The stdlib pieces (JSON/TOML via `bayan`, HTTP/TLS via
-`sandhi`/`tls_native`, gzip/xz/lz4 via `sankoch`, async via `lib/async.cyr`) already
-exist — the narrow genuine gaps are **zstd** (sankoch) and a **YAML** parser (bayan, for
-`convert compose`). `intents.parse_intent` awaits the (nonexistent) agnoshi NL parser.
+The bulk of the remaining surface is not an async rewrite — the runtime is single-node
+run-to-completion and the async substrate already exists, so the `Stiva` facade +
+`ContainerManager`, the blocking registry client, non-interactive `exec`/CRIU flows,
+streaming `logs -f`, OCI image-layout / oci-archive, and MCP dispatch are all blocking
+glue over the ported sync core. That work is the **v3.0.x line** — buildable now, just
+not wired yet. The stdlib pieces (JSON/TOML via `bayan`, HTTP/TLS via `sandhi`/`tls_native`,
+gzip/xz/lz4 via `sankoch`) already exist.
+
+Only a small residue is genuinely **v3.1**, each gated on an external landing: detached
+`run -d` (kavach `sandbox_spawn`), interactive `exec -it` and true multiplexed streaming
+(cyrius stackless coroutines), `convert compose` (a **YAML** parser in `bayan`), **zstd**
+layers (sankoch zstd), `scan_output` (kavach `ExternalizationGate`), and MCP `handle_run`
+(needs `run -d`). `intents.parse_intent` awaits the (nonexistent) agnoshi NL parser.
 
 See [docs/development/roadmap.md](docs/development/roadmap.md) for the full parity snapshot.
 
@@ -97,8 +106,8 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 |----------|-------------|
 | [ADRs](docs/adr/) | Architecture decision records (11 decisions) |
 | [Architecture](docs/architecture.md) | System design, module map |
-| [CLI Reference](docs/cli.md) | Every command; live-vs-v3.1 status |
-| [Roadmap](docs/development/roadmap.md) | Port status, parity snapshot, v3.1 milestone |
+| [CLI Reference](docs/cli.md) | Every command; live / v3.0.x (planned) / v3.1 (blocked) status |
+| [Roadmap](docs/development/roadmap.md) | Port status, parity snapshot, v3.0.x + v3.1 split |
 | [Quick Start](docs/guides/quick-start.md) | Getting started guide |
 | [Networking](docs/guides/networking.md) | Network configuration guide |
 | [Security](docs/guides/security.md) | Security hardening guide |

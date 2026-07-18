@@ -13,7 +13,7 @@
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.0 RELEASED: Rust → Cyrius (synchronous single-node runtime; async → v3.1)
+## ✅ Porting Status — v3.0.0 RELEASED: Rust → Cyrius (single-node runtime; v3.0.x completes it, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**: all 16 Rust modules → 25
@@ -29,16 +29,23 @@ capability is delivered synchronously). The v3.0.x sync backlog is essentially c
 sync tool handlers), and `intents` (variant-payload serde) are ported. The only sync
 remainder is `build`'s OCI config/manifest JSON assembly (embedded in the async build_image;
 serde HashMap ordering is nondeterministic). See `docs/development/roadmap.md` for the parity
-snapshot + v3.0.x / v3.1 (async) split.
+snapshot + v3.0.x (Wave 2) / v3.1 (blocked residue) split.
 
-The remaining **async container-orchestration surface** — the async `ContainerManager`
-+ `Stiva` facade, registry HTTP pull/push, detached `run -d`, nsenter `exec`, CRIU,
-MCP live dispatch — is the **v3.1 async milestone**: mapping tokio-shaped async onto
-Cyrius `lib/async.cyr` (weaker cooperative futures; tracked in a filed cyrius issue).
+The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.cyr`) is
+ready and the runtime is single-threaded run-to-completion, so most of the remaining
+container-orchestration surface is **blocking** work now folded onto the **v3.0.x line
+(Wave 2)** — buildable now over the ported sync core: the `ContainerManager` + `Stiva`
+facade, the blocking registry client (pull/push), non-interactive `exec`, CRIU
+checkpoint/restore, and MCP dispatch (ps/stop/inspect/pull/push/exec). Only a small
+**externally-blocked residue** is **v3.1 (blocked)** — genuinely gated on an external
+landing: detached `run -d` (needs kavach `sandbox_spawn`), interactive `exec -it` and
+true multiplexed streaming (need cyrius stackless coroutines), MCP `handle_run` (needs
+`run -d`), and `scan_output` (needs kavach ExternalizationGate).
 NOT mostly Cyrius gaps — JSON/TOML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
 gzip/xz/lz4/bzip2 (`sankoch`), async (`lib/async.cyr`) all EXIST. Genuine stdlib gaps
-are narrow: **zstd** (sankoch) and a **YAML** parser (bayan); the USTAR **tar writer**
-is now implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle until v3.1.
+are narrow, and are the **v3.1 upstream residue**: **zstd** layers (sankoch) and
+`convert compose` / a **YAML** parser (bayan); the USTAR **tar writer** is now
+implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle until v3.1.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.
@@ -104,7 +111,7 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — 33 registered verbs, **19 live** in v3.0.0; the rest print "deferred to v3.1" (see `docs/cli.md`).
+CLI binary: `stiva` — 33 registered verbs, **19 live** in v3.0.0; the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
 
 ## kavach Integration
 

@@ -26,8 +26,8 @@ focus:
 | Module | Test focus |
 |--------|-----------|
 | `error` | Error-code names + exact display strings (`stiva_err_name`) |
-| `image` | Reference parsing, blob store, index persistence, blob integrity verify (pull pipeline → v3.1) |
-| `registry` | Ref/manifest parsing, `www-authenticate` parse, credential store, platform selection (async HTTP client → v3.1) |
+| `image` | Reference parsing, blob store, index persistence, blob integrity verify (pull pipeline → v3.0.x (planned)) |
+| `registry` | Ref/manifest parsing, `www-authenticate` parse, credential store, platform selection (blocking HTTP client → v3.0.x (planned)) |
 | `container` | Lifecycle state machine, create/start/stop/remove, logging |
 | `runtime` | Spec generation, resource limits, mount conversion |
 | `storage` | Volume parsing, layer unpacking (real tar.gz), overlay dir structure |
@@ -37,13 +37,13 @@ focus:
 | `network/manager` | Network create/delete, container connect/disconnect |
 | `ansamblu` | TOML parsing, DAG resolution, ServiceDef→ContainerConfig |
 | `health` | Heartbeat registration, restart policies, status tracking |
-| `agent` | Daimon registration record construction (live HTTP registration → v3.1) |
-| `mcp` | Tool list + schemas, `McpResult` shape, the 2 sync tool handlers (live dispatch → v3.1) |
+| `agent` | Daimon registration record construction (live HTTP registration → v3.0.x (planned)) |
+| `mcp` | Tool list + schemas, `McpResult` shape, the 2 sync tool handlers (live dispatch → v3.0.x (planned)) |
 | `intents` | Externally-tagged JSON serde round-trips + strict deserialization |
-| `build` | Stivafile parse, `build_cache_key` (serde-exact), cache store (layer build → v3.1) |
+| `build` | Stivafile parse, `build_cache_key` (serde-exact), cache store (layer build → v3.0.x (planned)) |
 | `fleet` | Scheduling strategies (spread, binpack, pinned), node filtering |
 | `encrypted` | LUKS/verity config serde, availability checks |
-| `stiva_core` | `StivaConfig` defaults (the async `Stiva` facade → v3.1) |
+| `stiva_core` | `StivaConfig` defaults (the `Stiva` facade → v3.0.x (planned)) |
 
 ### Run-path + management tests (`tests/runpath.tcyr`, `tests/mgmt.tcyr`)
 
@@ -58,15 +58,16 @@ The suite is split into three files to stay under the cycc identifier-dedup cap:
 Run one group by grepping its `test_group("...")` label, or run everything with
 `cyrius tests tests/`.
 
-## Mock HTTP Testing — v3.1
+## Mock HTTP Testing — v3.0.x (planned)
 
-Registry and daimon HTTP is deferred to the **v3.1 async milestone** (registry
-pull/push over HTTP is not yet in the Cyrius port). The mock-server tests below
-come from the frozen `rust-old/` oracle and illustrate the future async library
-API — they are **not part of the v3.0.0 Cyrius test suite**:
+Registry and daimon HTTP is folded onto the **v3.0.x line (Wave 2)** — the
+blocking registry client (registry pull/push over HTTP) is buildable over the
+ported sync core, just not yet wired in the Cyrius port. The mock-server tests
+below come from the frozen `rust-old/` oracle and illustrate the `Stiva` facade
+library API — they are **not part of the v3.0.0 Cyrius test suite**:
 
 ```rust
-// v3.1 (async library API — not yet in the Cyrius port)
+// v3.0.x (planned — blocking `Stiva` facade library API, not yet in the Cyrius port)
 let server = MockServer::start().await;
 
 Mock::given(method("GET"))
@@ -83,7 +84,7 @@ calls to the mock server.
 
 ## Coverage
 
-**Uncoverable**: Linux mount syscalls (require root), overlay mounts, veth creation, CRIU checkpoint/restore (v3.1), live container exec via nsenter (v3.1).
+**Uncoverable**: Linux mount syscalls (require root), overlay mounts, veth creation, CRIU checkpoint/restore (v3.0.x (planned)), live container exec via nsenter (v3.0.x (planned)).
 
 ## Linux-Only Code
 

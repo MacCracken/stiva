@@ -70,7 +70,7 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - **Idiom note**: this stdlib `strstr` returns a 0-based INDEX (`-1` absent), NOT a C pointer — the first audit port had a pointer-vs-index bug (`at + strlen(key)`) that only the integration build+test caught, not the agent's syntax-only `cyrius check`. Central build+test after each batch is mandatory.
 - [x] **All 16 Rust modules ported** → 25 Cyrius domain modules (network split into 7; `lib.rs` → `stiva_core.cyr` + the aggregation header): `health`(majra), `ansamblu`(majra), `agent`, `fleet`, `mcp`(bote), plus the crate-root `stiva_core` (StivaConfig + the deferred Stiva facade). Runtime memory bugs the agents introduced (dangling struct-literal returns, map-key-type, single-field-struct semantics) fixed + baked into the port playbook.
 - [x] **Re-wire AGNOS deps** to the Cyrius `dist/*.cyr` bundles (kavach 3.7.0, majra 2.5.0, nein 1.6.2, bote 3.0.0/core, agnodrm 1.4.5) + transitive `sigil`/`libro`/`sakshi` + stdlib union. Probe-validated in isolation first. `audit_log_new`/`port_mapping_new` → `stiva_*` to avoid bundle collisions.
-- [x] **Port the `stiva` CLI** — `src/main.cyr` uses the **cmdit** library (verb dispatch, getopt-long), NOT hand-rolled argv: all 33 subcommands registered as verbs with generated `--help`/`--version`. `convert` has ported backing (Dockerfile→Stivafile via `dockerfile_to_toml`); the container-lifecycle verbs print a clear "deferred to v3.1" message (they drive the async facade).
+- [x] **Port the `stiva` CLI** — `src/main.cyr` uses the **cmdit** library (verb dispatch, getopt-long), NOT hand-rolled argv: all 33 subcommands registered as verbs with generated `--help`/`--version`. `convert` has ported backing (Dockerfile→Stivafile via `dockerfile_to_toml`); the container-lifecycle verbs print a clear "deferred" message (they drive the container-manager facade — reclassified to v3.0.x Wave 2, except detached `run -d` → v3.1).
 - [x] **Parity validation** — every module cross-checked vs the Rust oracle by the workflow's adversarial verify stage; accepted divergences recorded above.
 - [x] **Test parity** — 697 Cyrius tests (`tests/stiva.tcyr`) mirroring the Rust `#[cfg(test)]`, all green; `cyrius bench`/`fmt`/`lint` clean.
 - [x] **distlib** → `dist/stiva.cyr` (8,863-line bundle); version → **3.0.0**.
@@ -80,7 +80,7 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 > **Called here (2026-07-07).** stiva is a working single-node OCI runtime in
 > Cyrius: it imports, runs, and manages real containers via a 19-verb CLI, with
 > the algorithm-dense subsystems at 85–100% parity. Full 1:1 parity with the Rust
-> oracle is the v3.1 async milestone. **855 tests** (stiva 610 · runpath 171 ·
+> oracle completes across v3.0.x Wave 2 (blocking) + the small v3.1 residue. **855 tests** (stiva 610 · runpath 171 ·
 > mgmt 76 · integration 2), `dist/stiva.cyr` built, pin 6.4.19. Three cycc bugs
 > found + filed upstream (identifier-dedup cap, async-parity gaps, struct
 > field-name/offset collision) — the language was never modified from stiva.
@@ -110,11 +110,15 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 
 ---
 
-## v3.0.x — Synchronous backlog (bring modules toward 100%, NO async)
+## v3.0.x — Complete the single-node runtime (synchronous / blocking — NO stackless-coroutine or external blocker)
 
-Achievable now with the existing stdlib (bayan JSON/TOML, sankoch gzip, the new
-USTAR tar writer, syscall dir-walks) — the `not-ported` + sync-`codec` items. Each
-lifts a mid-tier module without touching the async runtime:
+Two waves. **Wave 1 (below)** — the original module-parity backlog: achievable with the existing
+stdlib (bayan JSON/TOML, sankoch gzip, the USTAR tar writer, syscall dir-walks); each lifts a
+mid-tier module. **Wave 2 (the "Reclassified" block after it)** — the surface once parked as
+"v3.1 async" that the substrate-ready + run-to-completion analysis showed is actually
+synchronous/blocking work (OCI layout, blocking registry client, container manager + facade,
+exec/CRIU, MCP dispatch, poll-loop streaming). Together they take stiva to a full single-node
+runtime — pull/run/manage/save — with only a small externally-blocked residue left in v3.1.
 
 - [x] `oci` — `parse_bundle` / `build_state` / `to_oci_status` + `OciState` (bayan JSON;
   landed in `container.cyr`, coupled to the container types) → oci 67% → ~100%. **2026-07-18.**
@@ -126,15 +130,15 @@ lifts a mid-tier module without touching the async runtime:
   → image 72% → ~90%. **2026-07-18.**
 - [~] `build` — `build_cache_key` + `build_step_to_jv` (serde-exact tagged-enum JSON via
   bayan, hash-pinned by tests). **2026-07-18.** Remaining: OCI config/manifest JSON assembly
-  + layer tar via the tar writer (gzip only; zstd → v3.1).
+  + layer tar via the tar writer (gzip only) — now Wave 2 (§F); zstd stays v3.1.
 - [x] `registry` — credential store (`CredentialStore` fs+JSON: default_path/load/save/set/
-  get/remove/to_config) + `RegistryConfig`/`MirrorConfig`. **2026-07-18.** (async HTTP client stays v3.1.)
+  get/remove/to_config) + `RegistryConfig`/`MirrorConfig`. **2026-07-18.** (the *blocking* HTTP client is now Wave 2, §B.)
 - [x] `mcp` — the two fully-synchronous tool handlers `mcp_handle_build` / `mcp_handle_ansamblu`
   (parse the Stivafile/ansamblu spec, assemble a structured `McpResult`). **2026-07-18.**
-  (The remaining handlers drive the async `Stiva` facade → v3.1.)
+  (The remaining handlers are Wave 2, §E; `handle_run` needs detached run → v3.1.)
 - [x] `runtime` — `is_descendant_of` + `container_top` + `read_process_info` (/proc walk);
   `copy_into/from_container` + `copy_dir_recursive` (fs recursion); `ProcessInfo` JSON.
-  **2026-07-18.** (export/import rootfs + exec/spawn stay v3.1.)
+  **2026-07-18.** (`exec` + CRIU are Wave 2, §D; detached spawn / `run -d` → v3.1.)
 - [x] `ansamblu` — `parse_ansamblu` (TOML ansamblu file → `AnsambluFile` via bayan's flat
   section model: dotted service/network/volume headers, inline-table `env`, `restart`/
   `replicas`/`health_check`) + `restart_policy_from_name`. **2026-07-18.** (Was tracked as a
@@ -155,122 +159,65 @@ lifts a mid-tier module without touching the async runtime:
   filed cycc identifier-dedup cap is the ceiling the remaining sync backlog must fit under
   or force the compilation-unit split.
 
+### Reclassified: the now-doable "async" surface → folded onto the v3.0.x line (2026-07-18)
+
+A 4-subsystem, code-grounded analysis re-scoped what had been parked as "v3.1 async." The async
+primitives already shipped (cyrius 6.4.33–6.4.42; toolchain 6.4.66; the async-gaps issue is
+archived), the runtime is single-threaded **run-to-completion** — so `Arc<RwLock<HashMap>>`
+collapses to a **plain heap map** and **blocking** primitives inside a task are fine — and
+**`sandhi` ships a complete blocking HTTPS client**. So most of that surface is *synchronous/
+blocking work over the already-ported core*, not an async rewrite, and belongs here. Only the
+genuinely external- or coroutine-blocked residue stays in v3.1 (next).
+
+**A. OCI image-layout + transfer** (bayan JSON + tar — makes the store Docker/Podman/skopeo-interop):
+- [ ] Full OCI **image config** blob (`architecture`/`os`/`created`/`rootfs`/`history`/`config{Env,Cmd,Entrypoint,WorkingDir,User,ExposedPorts,Labels}`) — reuses build's `OciImageConfig` assembly.
+- [ ] OCI **manifest** blob per image; **`index.json` + `oci-layout`** at the store root; retire the ad-hoc `images.json`.
+- [ ] **Perms-preserving tar** writer + reader (real mode/uid/gid + dir/symlink entries) — `create_tar` currently hardcodes `0644`/uid 0.
+- [ ] **`stiva save`/`load`** as **`oci-archive`** (+ a `docker-archive` read path) — smooth machine-to-machine transfer, no registry needed.
+
+**B. Registry client** — a **blocking** port over `sandhi`/`tls_native` + bayan JSON, not async:
+- [ ] `acquire_token`/`authenticated_request` bearer state machine → `fetch_manifest`/`fetch_blob` → the `image_store_pull` driver = live **`stiva pull`**; then `blob_exists`/`push_blob`/`push_manifest` = **`stiva push`**; `list_tags`/`catalog`/`referrers`. Token cache = plain map. Writes into the **A** layout. (Sequential layer download; true parallelism → v3.1.)
+
+**C. `ContainerManager` + `Stiva` facade** — glue over the ported run path (plain maps + majra PubSub):
+- [ ] `container_manager_new` + create/start(one-shot)/stop/wait/list/remove/rename/signal/pause/unpause/stats/logs(snapshot)/connect_network + lifecycle events; the `Stiva` facade (~40 methods); **route `main.cyr` verbs through the manager** (retiring the per-verb load/save). *(internal prereq: port `audit_log_new`.)* Detached `run -d` is the exception → v3.1.
+
+**D. `exec` (nsenter) + CRIU** — fork+exec host tools:
+- [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
+
+**E. MCP live dispatch + streaming poll-loops**:
+- [ ] `handle_tool` + `handle_ps`/`stop`/`inspect`/`pull`/`push`/`exec` + `list_resources`/`read_resource` (one-shot over the facade); **`logs -f`/`events`** as foreground CLI poll-loops (file read / majra `chan_try_recv`). (`handle_run` needs detached run → v3.1; multiplexed streaming → v3.1.)
+
+**F. `build` completion**:
+- [ ] `build`'s OCI config/manifest JSON assembly + gzip layer tar (the remaining v3.0.x build item; zstd stays v3.1).
+
+**Order:** **A** (OCI layout) first — the store-format prerequisite; **B** (pull writes into it)
+alongside **C** (the manager spine, zero deps); **D**/**E** compose on **C**; **F** folds into
+**A**/build. Almost all synchronous — the only external dependency touching this line is *filing*
+the kavach spawn issue (which unblocks the v3.1 residue, not this work).
+
 ---
 
-## v3.1.0 — Async milestone (complete the port)
+## v3.1.0 — Blocked & external-dependency residue
 
-**Re-scoped 2026-07-18 after a 4-subsystem, code-grounded analysis (registry / container-
-manager / subprocess / codecs+mcp+streaming).** The earlier framing — "one big blocker:
-map tokio-shaped async onto a weak `lib/async.cyr`" — is **out of date and overstated**.
-v3.1 is now mostly *glue over the already-ported synchronous core*, plus a **blocking**
-registry client, with the genuinely hard bits narrow and well-isolated.
+Everything on the v3.0.x line above is doable now; this is the genuine remainder, each gated on a
+specific external landing (not on stiva effort). As each dependency ships they graduate
+individually — there is no monolithic "async milestone" gating them together.
 
-### Substrate readiness (the de-risk)
-
-- **The async primitives already shipped.** The 5 tokio-parity gaps (async subprocess via
-  pidfd, `interval`/`with_timeout`, joinable `task_join`, async TCP client +
-  `join_all`/`select`, cooperative `async_rwlock`) landed in **cyrius 6.4.33–6.4.42**; the
-  toolchain is pinned at **6.4.66**, so they are all present. The cyrius issue
-  `2026-07-07-async-runtime-tokio-parity-gaps.md` is **archived/resolved**.
-- **Run-to-completion model** (the shaping constraint): no mid-body suspend/resume — `await`
-  re-runs the future body, and only the *try-family* `async_rwlock` exists. Consequences:
-  (1) `Arc<RwLock<HashMap>>` state collapses to a **plain single-threaded heap map** (no
-  contention, no locking) — the manager is simpler than the Rust; (2) **blocking** primitives
-  inside a task are fine for one-shot flows (single-threaded, single-node — a blocking wait
-  starves nothing); (3) true **multiplexed streaming** (`select!` over many streams) and
-  interactive `exec -it` genuinely need the deferred stackless-coroutine work.
-- **`sandhi` ships a complete blocking HTTPS client** (`sandhi_http_request_auto` + get/head/
-  post/put/patch/delete, URL parse, `tls_native`, redirect-follow with cross-origin header
-  stripping, chunked decode) and **`bayan` has base64** — so the registry client is a
-  *blocking* port, not an async one.
-
-### Tracks (dependency-ordered — four can start **now**, zero external blockers)
-
-**Track M — Async `ContainerManager` + `Stiva` facade** (the spine; mostly glue). Build the
-`ContainerManager` (two plain maps: id→Container, id→ContainerInternals) + majra PubSub over
-the ported sync run path (`prepare_layers`→`setup_overlay`→`generate_spec`→`exec_container`),
-then the `Stiva` facade (~40 methods) and route the CLI verbs through it.
-  - [ ] **First PR**: `container_manager_new` + `create`/`start`(one-shot)/`stop`/`wait`/`list`/
-    `remove` + `publish_event`/`event_bus`, restoring state from `state.json`. **Zero blockers**,
-    testable in a `.tcyr` (create→event→start→list→persist-reload→remove).
-  - [ ] `remove`/`rename`/`get_rootfs`/`restart`; `signal`/`pause`/`unpause`/`stats`/`update`;
-    `logs`/`log_tail` (snapshot); `connect_network`/`disconnect_network`.
-  - [ ] `Stiva` facade struct + method wrappers; **migrate `main.cyr` verbs through the manager**
-    (replacing the per-verb load/save re-architecture).
-  - [ ] `ansamblu_up`/`down`/`scale` + `service_logs` facade methods.
-  - *(internal prereq: port `audit_log_new` — audit.cyr has `_log`/`_read`/`_path` but not the
-    constructor the facade's audit field needs.)*
-
-**Track R — Registry HTTP client** (blocking over `sandhi`/`tls_native` + bayan JSON). Every
-method — `acquire_token`/`authenticated_request` bearer state machine, `fetch_manifest`/
-`resolve_manifest`/`fetch_blob`, `blob_exists`/`push_blob`/`push_blob_chunked`/`push_manifest`,
-`list_tags`/`catalog`/`referrers` — is a run-to-completion blocking flow. Token cache = plain map.
-  - [ ] **First PR**: `RegistryClient` struct + `acquire_token` (WWW-Authenticate→bearer) +
-    `fetch_manifest` for a public image over TLS. **Zero blockers.**
-  - [ ] `fetch_blob` + `image_store_pull` driver → **live `stiva pull`**; then push path
-    (`blob_exists`/`push_blob`/`push_manifest`) → `stiva push`; then `build` layer fetch.
-  - [ ] Concurrent layer download (`buffer_unordered(4)`) → a **sequential loop** (true
-    parallelism needs the async net + a multi-threaded runtime; not worth it single-node).
-
-**Track X — `exec` + CRIU** (fork+exec host tools; needs one new primitive).
-  - [ ] **First PR**: `_exec_capture2` (dual-pipe fork+exec: child `close(3..max)` [CVE-2024-21626]
-    + `PR_SET_NO_NEW_PRIVS` + `dup2`; parent drains both fds via blocking `poll()` + `waitpid`)
-    → `exec_in_container` (nsenter). NB: `async_spawn_process` inherits fds and captures no
-    output, so exec needs this custom primitive, not the reactor spawn.
-  - [ ] CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` — fire-and-wait `criu` execs,
-    gated by the already-ported `criu_available()` probe (testable with no criu/root).
-
-**Track C — Fidelity codecs.**
-  - [ ] **First PR**: perms-preserving tar **writer + reader** (real mode/uid/gid, dir + symlink
-    entries via `sys_stat`/`sys_lstat`/`sys_readlink`/`sys_fchmodat`). **100% in-repo, zero blockers.**
-  - [ ] `zstd` **decode** in `sankoch` (upstream stdlib; decode-only — stiva builds gzip) → zstd layers.
-  - [ ] `YAML`-subset value layer in `bayan` (upstream) → `compose_yaml_to_toml` renderer (`convert compose`).
-
-### Track P — depends on M/R/X
-
-- [ ] **MCP live dispatch** — `handle_tool` + the 7 async handlers (`ps`/`stop`/`inspect`/
-  `pull`/`push`/`run`/`exec`) + `list_resources`/`read_resource`, one-shot request/response
-  over the facade (not streaming-blocked). `handle_ps`/`stop`/`inspect` land first (need only Track M).
-- [ ] **Streaming as CLI poll-loops** — `logs -f` (read-from-offset + sleep) and `events`
-  (majra `pubsub_subscribe` + `chan_try_recv` + sleep) are deliverable as **foreground CLI
-  loops** at the outermost frame. *Partial:* true multiplexed/backpressured streaming is deferred.
-
-### External blockers to file
-
-- [ ] **kavach — policy-threaded detached spawn** (the critical path for `run -d`).
-  **PLANNED: kavach minor release.** Precise API (mirrors `sandbox_exec`, matches the oracle's
-  `Sandbox::spawn` → `SpawnedProcess` contract at `rust-old/src/runtime.rs:401-481`):
-  - `sandbox_spawn(sandbox, command) -> SpawnedProcess*` — the **detached** twin of
-    `sandbox_exec(sandbox, command)`: runs the same backend dispatch so it applies the sandbox's
-    `SandboxPolicy`/`SandboxConfig` (seccomp, cgroup mem/cpu/pid, user-ns UID/GID, network-ns,
-    secret injection, NO_NEW_PRIVS + `close(3..)` fd-cleanup), but fork+exec's the child and
-    returns immediately with a live handle carrying the pid (does **not** `waitpid`). The daemon's
-    stdout/stderr are `dup2`'d to the caller-provided log fd before `execve` (stiva passes the
-    `container.log` fd). Non-spawnable backends (noop/wasm) return 0 → caller falls back to `exec`
-    (the existing `SpawnedProcess` doc comment already promises this).
-  - `spawned_wait(sp) -> ExecResult*` — block on `waitpid` until exit; fill `exit_code`/`duration_ms`.
-  - `spawned_try_wait(sp) -> i32` — `waitpid(WNOHANG)`; exit code if exited, a "still-running"
-    sentinel otherwise.
-  - `spawned_kill(sp, grace_ms) -> ExecResult*` — SIGTERM, poll ≤ `grace_ms`, SIGKILL, reap.
-  Reuses the existing `struct SpawnedProcess {pid,backend,started_at}` (+ accessors) and `ExecResult`.
-  Today only `persistent_spawn` exists (raw fork+exec, **no** policy) and `SpawnedProcess` is an
-  inert record with no wait/kill. **Do not ship a half-isolated `run -d` over `persistent_spawn`** —
-  it would be strictly less isolated than the sync `run`. Blocks detached `run -d`,
-  `spawn_container`/`DaemonHandle`, and live daemon log capture. Stiva-side `spawn_container` is
-  then ~10 lines: `build_sandbox` (already ported) → `sandbox_spawn` → `DaemonHandle{sp, sandbox}`.
-- [ ] **kavach — `ExternalizationGate` dist binding** for `scan_output` (the secret/PII scan
-  branch of `exec`/`logs`; the unscanned path works without it).
-- [ ] **sankoch (cyrius stdlib)** — zstd frame decoder.  **bayan (cyrius stdlib)** — YAML subset.
-- [ ] **cyrius (roadmap-future)** — stackless coroutines / mid-body suspend, for interactive
-  `exec -it` and true multiplexed streaming servers. **Not** a blocker for the CLI poll-loops above.
-
-### Recommended sequencing
-
-Start **Track M's first PR** (the manager spine — zero blockers, turns the ~14 "deferred to
-v3.1" verbs into a real facade) and **Track R's first PR** (`acquire_token` + `fetch_manifest`
-— zero blockers, high user value) **in parallel**; drop in **Track C's perms-tar** as a quick
-fidelity win; and **file the kavach policy-spawn issue early** since it's the long pole for
-detached `run -d`. `exec` (Track X) and MCP dispatch (Track P) compose on top of M once it lands.
+- [ ] **Detached `run -d`** — `spawn_container`/`DaemonHandle`/live daemon log capture, and MCP
+  `handle_run`. **Blocked on kavach ≥ 3.8.0 `sandbox_spawn`** (policy-threaded detached spawn +
+  `spawned_wait`/`try_wait`/`kill`; drafted and on kavach's roadmap). Do **not** ship a
+  half-isolated interim over `persistent_spawn` — it threads no policy. Once kavach ships, the
+  stiva side is ~10 lines (`build_sandbox` → `sandbox_spawn` → `DaemonHandle`).
+- [ ] **Interactive `exec -it`** (TTY) + a **true multiplexed streaming server** (`select!` over
+  many streams inside one task). **Blocked on cyrius stackless coroutines** (mid-body
+  suspend/resume — the run-to-completion model can't express them). The `logs -f`/`events`
+  poll-loops on the v3.0.x line cover the common cases; this is the interactive/multiplexed tier.
+- [ ] **zstd** layer decode — **upstream `sankoch`** (decode-only; stiva builds gzip). **YAML** /
+  `convert compose` — **upstream `bayan`** (a YAML-subset value layer).
+- [ ] **True concurrent layer downloads** (`buffer_unordered`) — needs a multi-threaded async
+  runtime; the v3.0.x pull uses a sequential loop (fine single-node).
+- [ ] **`scan_output`** — the kavach `ExternalizationGate` dist binding for the secret/PII scan
+  branch of `exec`/`logs`; the unscanned path ships on the v3.0.x line.
 
 ---
 

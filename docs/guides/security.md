@@ -15,7 +15,7 @@ Stiva supports rootless operation via Linux user namespaces. When `rootless` is 
 # user = "nobody"
 ```
 
-### Library (v3.1 — async library API, not yet in the Cyrius port)
+### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
 
 ```rust
 use stiva::runtime::RuntimeConfig;
@@ -52,7 +52,7 @@ stiva run -s DB_PASSWORD=secret123 -s API_KEY=abc myapp:latest
 
 (Detached secret injection with `run -d` lands in v3.1.)
 
-### Library (v3.1 — async library API, not yet in the Cyrius port)
+### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
 
 ```rust
 use kavach::SecretRef;
@@ -71,10 +71,10 @@ Key properties:
 
 ## Output Scanning (ExternalizationGate)
 
-kavach's `ExternalizationGate` scans container output for leaked secrets, PII, and sensitive data. This runs on the output of `stiva logs` (and `stiva exec`, which arrives in v3.1).
+kavach's `ExternalizationGate` scans container output for leaked secrets, PII, and sensitive data. This runs on the output of `stiva logs` (and non-interactive `stiva exec`, which arrives in v3.0.x).
 
 ```rust
-// v3.1 — async library API, not yet in the Cyrius port
+// v3.1 (blocked) — gated on kavach ExternalizationGate
 use stiva::runtime::scan_output;
 
 let findings = scan_output(&output)?;
@@ -98,7 +98,7 @@ stiva info              # includes overall security score
 stiva inspect <id>      # includes per-container score
 ```
 
-### Library (v3.1 — async library API, not yet in the Cyrius port)
+### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
 
 ```rust
 let score = stiva.security_score();

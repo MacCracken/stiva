@@ -19,7 +19,7 @@ stiva run nginx:latest
 
 Detached (`run -d`) is deferred to v3.1; today `run` executes in the foreground.
 
-### Library — v3.1 (async library API — not yet in the Cyrius port)
+### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
 
 ```rust
 use stiva::network::NetworkManager;
@@ -33,10 +33,10 @@ let mut mgr = NetworkManager::new()?;
 Create isolated networks with their own subnets:
 
 ```bash
-# Not yet a CLI command -- use ansamblu TOML (or the v3.1 library API below)
+# Not yet a CLI command -- use ansamblu TOML (or the v3.0.x (planned) library API below)
 ```
 
-### Library — v3.1 (async library API — not yet in the Cyrius port)
+### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
 
 ```rust
 let mut mgr = NetworkManager::new()?;
@@ -63,7 +63,7 @@ Port mapping creates nftables DNAT rules via nein. The rules are cleaned up when
 
 Stiva supports IPv6 through `DualStackPool`, which wraps an `IpPool` (v4) and an optional `Ipv6Pool` (v6).
 
-### Library — v3.1 (async library API — not yet in the Cyrius port)
+### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
 
 ```rust
 use stiva::network::pool::DualStackPool;

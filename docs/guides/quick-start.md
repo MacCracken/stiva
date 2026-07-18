@@ -14,7 +14,7 @@ The `stiva` binary provides 19 subcommands. Run `stiva --help` for the full list
 
 ## Importing an Image
 
-Registry pull over HTTP (`stiva pull`) is a v3.1 feature. In v3.0.0, load images
+Registry pull over HTTP (`stiva pull`) is a v3.0.x (planned) feature. In v3.0.0, load images
 from a local OCI archive with `import`:
 
 ### CLI
@@ -24,8 +24,8 @@ stiva import alpine.tar alpine 3.19   # import <tarfile> [name] [tag]
 stiva images                          # list local images
 ```
 
-> **v3.1** — `stiva pull alpine:3.19` (registry pull/push over HTTP) is registered
-> but deferred to the v3.1 async milestone.
+> **v3.0.x (planned)** — `stiva pull alpine:3.19` (registry pull/push over HTTP) is
+> registered but not yet wired; it is buildable now over the ported sync core.
 
 ## Running a Container
 
@@ -47,9 +47,10 @@ stiva run -e APP_ENV=prod -s DB_PASSWORD=hunter2 myapp:latest
 
 Secrets are injected through kavach and never stored in the container config.
 
-> **v3.1** — detached/background runs (`run -d`), streaming logs (`logs -f`), and the
-> async `Stiva` library facade are part of the v3.1 async milestone. In v3.0.0 `run`
-> executes in the foreground.
+> **Milestones** — streaming logs (`logs -f`) and the `Stiva` library facade are
+> **v3.0.x (planned)** — blocking glue over the sync core, buildable now but not yet
+> wired. Detached/background runs (`run -d`) stay **v3.1 (blocked)**, gated on kavach
+> `sandbox_spawn`. In v3.0.0 `run` executes in the foreground.
 
 ## Basic Networking
 
@@ -70,8 +71,10 @@ stiva inspect <id>    # detailed JSON output (includes security score)
 stiva stats <id>      # CPU, memory, PID stats from cgroups v2
 ```
 
-> **v3.1** — `stiva top <id>` (processes inside the container) and `stiva exec <id> sh`
-> (run a shell inside the container, via nsenter) are deferred to the v3.1 milestone.
+> **v3.0.x (planned)** — `stiva top <id>` (processes inside the container) and
+> non-interactive `stiva exec <id> <cmd>` (via nsenter) are buildable now over the
+> sync core, not yet wired. Interactive `exec -it` (a live shell) stays **v3.1
+> (blocked)**, gated on cyrius stackless coroutines.
 
 ## Building Images
 
@@ -101,8 +104,8 @@ stiva build
 stiva build -f Stivafile -c ./project
 ```
 
-> **v3.1** — the Stivafile parser is implemented in v3.0.0, but running a layer build
-> (`stiva build`) is deferred to the v3.1 milestone.
+> **v3.0.x (planned)** — the Stivafile parser is implemented in v3.0.0; running a layer
+> build (`stiva build`) is buildable now over the sync core but not yet wired.
 
 ## Cleanup
 

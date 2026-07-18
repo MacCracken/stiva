@@ -9,9 +9,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **Documentation converted from the Rust/cargo era to Cyrius**: `README.md`,
   `CONTRIBUTING.md`, `docs/cli.md`, `CLAUDE.md`, and the guides/dev docs
   (quick-start, networking, security, testing, scripts) now describe the `cyrius`
-  toolchain, the accurate **1033**-test count, and the live-vs-**v3.1** split for
-  every CLI verb and capability. Async library examples are clearly labeled
-  "v3.1 (async library API — not yet in the Cyrius port)".
+  toolchain, the accurate **1033**-test count, and the Live / **v3.0.x (planned)** /
+  **v3.1 (blocked)** split for every CLI verb and capability. The async library
+  examples are the blocking Stiva facade, labeled "**v3.0.x (planned)** — blocking
+  glue over the sync core, not an async rewrite".
 - **Lint clean**: wrapped the 11 remaining `>120`-char lines in `main.cyr`/`runtime.cyr`
   → `cyrius lint` is warning-free across all `src/*.cyr`.
 - **`scripts/version-bump.sh`** fixed to write only `VERSION` (the removed `Cargo.toml`
@@ -68,19 +69,22 @@ cleanly at the sync/async boundary. Algorithm-dense modules are at 85–100% (au
 100 · network 94 · health 92 · storage 89 · ansamblu 85); the low-parity modules
 (container 20 · core+cli 13) are async orchestration wrappers whose *capability* is
 delivered by a synchronous re-architecture — `stiva run <image>` launches a real
-container end-to-end. Full 1:1 parity (pull/push, `run -d`, `exec`, CRIU, MCP live
-dispatch) is the **v3.1 async milestone**. **855 tests** across 4 files, pin 6.4.19.
+container end-to-end. Full 1:1 parity (pull/push, `exec`, CRIU, MCP live dispatch)
+is now **v3.0.x (planned)** blocking work over the sync core, leaving only detached
+`run -d` and interactive `exec -it` as the externally-**blocked v3.1** residue.
+**855 tests** across 4 files, pin 6.4.19.
 Three cycc bugs found + filed upstream; the language was never modified from stiva.
 
 **Scope**: the port covers every module's types, pure logic, and syscall-driven
 surface, **plus the synchronous sandbox run path**, with **820 tests green**
 (`tests/stiva.tcyr` 779 + `tests/runpath.tcyr` 41) and a clean `dist/stiva.cyr`
-bundle. Only the genuinely **async** surface (detached `run -d`, streaming
-`logs -f`, concurrent layer downloads, the registry HTTP client, CRIU, nsenter
-`exec`, the ~40-method async `Stiva` facade) is **DEFERRED to v3.1**: HTTP/TLS
+bundle. Most of that surface (streaming `logs -f`, sequential layer downloads, the
+registry HTTP client, CRIU, nsenter `exec`, the ~40-method `Stiva` facade) is now
+**v3.0.x (planned)** blocking work over the sync core; HTTP/TLS
 (`sandhi`/`tls_native`) and the async runtime (`lib/async.cyr`) EXIST and are
-declared in `[deps].stdlib`; the deferral is mapping tokio-shaped async onto
-Cyrius's weaker cooperative futures (tracked in cyrius issue
+declared in `[deps].stdlib`. Only detached `run -d` and true multiplexed streaming
+remain **v3.1 (blocked)**, gated on kavach `sandbox_spawn` and cyrius stackless
+coroutines (tracked in cyrius issue
 `2026-07-07-async-runtime-tokio-parity-gaps.md`).
 
 **Sandbox run path WIRED (synchronous).** An adversarial audit proved the run
@@ -100,8 +104,9 @@ create()+start()). The synchronous **container-state layer** is ported:
 `container_to_jv`/`container_from_jv` (full Container↔JSON serde via `bayan`) +
 `container_state_save`/`load` (atomic tmp+rename, with the Running→Stopped restart
 fixup). Live CLI verbs: **`run`, `ps` (-a), `stop`, `rm`, `inspect` (JSON),
-`images`, `rmi`, `tag`, `import`, `info`, `convert`**. Detached `run -d`,
-`exec` (nsenter), `logs`, and the rest remain deferred to v3.1.
+`images`, `rmi`, `tag`, `import`, `info`, `convert`**. `exec` (nsenter), `logs`,
+and the rest are **v3.0.x (planned)** blocking work; only detached `run -d` is the
+**v3.1 (blocked)** residue.
 
 **`import` + `tag` — real images, no hand-staging.** `stiva import <tar> [name]
 [tag]` reads a rootfs tar, **gzips it** (`sankoch`), content-addresses it as a
@@ -134,9 +139,10 @@ foreground containers are Stopped, so they correctly report "no running process"
 `container_tail_start`); `stiva wait <ctr>` prints + exits with the recorded
 exit code. Live CLI is now **run · ps · stop · rm · inspect · images · rmi · tag ·
 import · export · stats · pause · unpause · logs · wait · gc · prune · info ·
-convert** (19 verbs). Remaining deferred (async/privileged): `run -d`, `exec`
-(nsenter), `logs -f` (follow), `top`, `checkpoint`/`restore`, `pull`/`push`,
-`build` (build-step exec + perms tar).
+convert** (19 verbs). Remaining **v3.0.x (planned)** (blocking, over the sync
+core): `exec` (nsenter, non-interactive), `logs -f` (follow), `top`,
+`checkpoint`/`restore`, `pull`/`push`, `build` (build-step exec + perms tar); only
+detached `run -d` is **v3.1 (blocked)**.
 
 Tests split into **four files** (`stiva.tcyr` 610 · `runpath.tcyr` 163 ·
 `mgmt.tcyr` 76 · integration 2 = **851**), run via `cyrius tests tests/`, to stay

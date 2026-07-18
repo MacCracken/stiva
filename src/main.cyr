@@ -35,9 +35,10 @@ include "src/stiva_core.cyr"
 # ── CLI (cmdit verb dispatch) ──
 # stiva's 33 subcommands (rust-old/src/main.rs) via the cmdit library
 # (dist/cmdit.cyr) — registered as verbs, not hand-rolled argv parsing.
-# `convert` has ported backing (dockerfile_to_toml); the container-lifecycle
-# verbs drive the async Stiva facade (stiva_core.cyr), deferred to v3.1
-# pending the Cyrius async runtime + tar/gzip/HTTP codec layers.
+# `convert` has ported backing (dockerfile_to_toml); the container-lifecycle +
+# registry verbs are the v3.0.x runtime-completion work (blocking, over the
+# ported sync core — the substrate is ready), except detached `run -d` and
+# `convert compose`, which are the v3.1 externally-blocked residue.
 
 # Verb ids — cmdit_verb returns these in registration order.
 enum StivaVerb {
@@ -146,15 +147,18 @@ fn _cli_convert(h) {
     return CMDIT_EXIT_OK;
 }
 
-# Container-lifecycle verbs drive the async Stiva facade (stiva_core.cyr),
-# deferred to v3.1. The module logic is ported; only the async execution
-# layer (kavach exec / cgroups / CRIU / tar / HTTP) awaits Cyrius async+codecs.
+# Container-lifecycle / registry verbs that aren't wired yet. The substrate is
+# ready (single-threaded run-to-completion + a blocking sandhi HTTP client), so
+# these are synchronous/blocking work on the v3.0.x runtime-completion line
+# (registry pull/push, container manager, exec/CRIU) — NOT async and NOT v3.1.
+# The small genuinely-blocked residue (detached `run -d`, `convert compose`) is
+# v3.1. See docs/development/roadmap.md.
 fn _cli_deferred(verb_name) {
     _cli_puts("stiva ");
     _cli_puts(verb_name);
-    _cli_puts(": not yet implemented in the Cyrius port.\n");
-    _cli_puts("  This command drives the async container runtime (kavach exec / cgroups /\n");
-    _cli_puts("  CRIU / tar / HTTP), deferred to v3.1. Ported: try `stiva convert`.\n");
+    _cli_puts(": not yet wired in the Cyrius port.\n");
+    _cli_puts("  Part of completing the single-node runtime (v3.0.x — registry pull/push,\n");
+    _cli_puts("  container lifecycle, exec/CRIU); see docs/development/roadmap.md.\n");
     return CMDIT_EXIT_RUN;
 }
 
@@ -735,7 +739,7 @@ fn main() {
     if (v == V_GC) { return _cli_gc(h, _cli_root(h, f_root)); }
     if (v == V_PRUNE) { return _cli_prune(h, _cli_root(h, f_root)); }
     if (v == V_INFO) { return _cli_info(); }
-    # Every other verb is the deferred async surface.
+    # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
     return _cli_deferred(_cli_verb_name(v));
 }
 
