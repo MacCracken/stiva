@@ -130,6 +130,10 @@ lifts a mid-tier module without touching the async runtime:
 - [x] `runtime` — `is_descendant_of` + `container_top` + `read_process_info` (/proc walk);
   `copy_into/from_container` + `copy_dir_recursive` (fs recursion); `ProcessInfo` JSON.
   **2026-07-18.** (export/import rootfs + exec/spawn stay v3.1.)
+- [x] `ansamblu` — `parse_ansamblu` (TOML ansamblu file → `AnsambluFile` via bayan's flat
+  section model: dotted service/network/volume headers, inline-table `env`, `restart`/
+  `replicas`/`health_check`) + `restart_policy_from_name`. **2026-07-18.** (Was tracked as a
+  "still-achievable, not-ported" item alongside the sync backlog.)
 
 ### Toolchain + dependency refresh (2026-07-18)
 

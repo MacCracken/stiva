@@ -36,6 +36,17 @@ fn restart_policy_name(kind) {
     return "never";
 }
 
+# Inverse of restart_policy_name: serde wire name → RESTART_* ordinal, or -1 for
+# an unknown token (used by ansamblu.parse_ansamblu for `restart = "..."`).
+#[must_use]
+fn restart_policy_from_name(name) {
+    if (streq(name, "never") == 1) { return HEALTH_RESTART_NEVER; }
+    if (streq(name, "always") == 1) { return HEALTH_RESTART_ALWAYS; }
+    if (streq(name, "on-failure") == 1) { return HEALTH_RESTART_ON_FAILURE; }
+    if (streq(name, "unless-stopped") == 1) { return HEALTH_RESTART_UNLESS_STOPPED; }
+    return 0 - 1;
+}
+
 # ── HealthStatus (rust-old: enum HealthStatus) ────────────────
 enum HealthStatus {
     HEALTH_STATUS_HEALTHY = 0;

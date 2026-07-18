@@ -516,17 +516,264 @@ fn ready_services(spec, completed) {
     return ready;
 }
 
-# ── DEFERRED (land with a TOML + JSON codec) ────────────────
-# rust-old/src/ansamblu.rs also defines, coupled to serde codecs the ported
-# base does not yet have:
-#
-#   fn parse_ansamblu(toml_str: &str) -> Result<AnsambluFile, StivaError>
-#       toml::from_str → AnsambluFile; Err → StivaError::Ansamblu. Lands with
-#       the TOML object-model parser (same deferral as build.cyr's
-#       parse_build_spec and convert.cyr's compose parsing). The parsing
-#       #[cfg(test)] cases (parse_ansamblu_* / health_check_defaults) move
-#       with it.
-#
+# ── parse_ansamblu (rust-old: toml::from_str → AnsambluFile) ─────────
+# Drives bayan's flat TOML section model. Dotted headers become section names
+# verbatim: `[services.web]` → "services.web", `[services.web.health_check]` →
+# "services.web.health_check", so services/networks/volumes are enumerated by
+# scanning for the "<kind>.<name>" prefix (a single trailing segment). env is a
+# TOML inline table (`{ K = "V", ... }`) captured raw by bayan, parsed here.
+
+# The single leaf segment after `prefix` in section-name Str `sname`, iff there
+# is exactly one more segment (no further '.'); else 0. E.g. ("services.web",
+# "services.") → "web"; ("services.web.health_check", "services.") → 0.
+#[must_use]
+fn _ans_prefixed_name(sname, prefix) {
+    var sd = str_data(sname);
+    var slen = str_len(sname);
+    var plen = strlen(prefix);
+    if (slen <= plen) { return 0; }
+    if (memeq(sd, prefix, plen) == 0) { return 0; }
+    var j = plen;
+    while (j < slen) {
+        if (load8(sd + j) == 46) { return 0; }   # '.' → not a single segment
+        j = j + 1;
+    }
+    return str_cstr(str_from_buf(sd + plen, slen - plen));
+}
+
+# Service name X iff `sname` is "services.X.health_check" (X single-segment); else 0.
+#[must_use]
+fn _ans_healthcheck_service(sname) {
+    var sd = str_data(sname);
+    var slen = str_len(sname);
+    var pre = "services.";
+    var plen = strlen(pre);
+    var suf = ".health_check";
+    var suflen = strlen(suf);
+    if (slen <= plen + suflen) { return 0; }
+    if (memeq(sd, pre, plen) == 0) { return 0; }
+    if (memeq(sd + slen - suflen, suf, suflen) == 0) { return 0; }
+    var xlen = slen - suflen - plen;
+    var j = 0;
+    while (j < xlen) {
+        if (load8(sd + plen + j) == 46) { return 0; }   # multi-segment → not a plain service
+        j = j + 1;
+    }
+    return str_cstr(str_from_buf(sd + plen, xlen));
+}
+
+# Parse a TOML inline table `{ K = "V", K2 = "V2" }` (raw cstr, as bayan
+# captures it) into a cstr→cstr map. Returns 0 for 0/no-brace input. Values may
+# be double-quoted or bare (bare trimmed of trailing whitespace).
+fn _ans_inline_table(raw) {
+    if (raw == 0) { return 0; }
+    var len = strlen(raw);
+    var i = 0;
+    while (i < len && load8(raw + i) != 123) { i = i + 1; }   # '{'
+    if (i >= len) { return 0; }
+    i = i + 1;
+    var m = map_new();
+    while (i < len) {
+        # skip whitespace and commas between entries
+        while (i < len) {
+            var c = load8(raw + i);
+            if (c == 32 || c == 9 || c == 44) { i = i + 1; } else { break; }
+        }
+        if (i >= len) { break; }
+        if (load8(raw + i) == 125) { break; }               # '}'
+        # key
+        var kstart = i;
+        while (i < len) {
+            var c = load8(raw + i);
+            if (c == 61 || c == 32 || c == 9) { break; }
+            i = i + 1;
+        }
+        var key = str_cstr(str_from_buf(raw + kstart, i - kstart));
+        while (i < len && (load8(raw + i) == 32 || load8(raw + i) == 9)) { i = i + 1; }
+        if (i >= len || load8(raw + i) != 61) { break; }     # malformed
+        i = i + 1;
+        while (i < len && (load8(raw + i) == 32 || load8(raw + i) == 9)) { i = i + 1; }
+        # value — must be a double-quoted string (env is HashMap<String,String>);
+        # a bare/numeric value is a serde type error → signal -1 to the caller.
+        if (i >= len || load8(raw + i) != 34) { return 0 - 1; }   # not '"'
+        i = i + 1;
+        var vs = i;
+        while (i < len && load8(raw + i) != 34) { i = i + 1; }
+        var val = str_cstr(str_from_buf(raw + vs, i - vs));
+        if (i < len) { i = i + 1; }
+        map_set(m, key, val);
+    }
+    return m;
+}
+
+# Concatenate two cstrs into a fresh cstr (ansamblu-local).
+#[must_use]
+fn _ans_cat(a, b) {
+    var la = strlen(a);
+    var lb = strlen(b);
+    var out = alloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    store8(out + la + lb, 0);
+    return out;
+}
+
+# Scan the RAW toml for `[prefix<name>]` single-bracket headers and return a map
+# (used as a set: name→name) of the single-segment `<name>`s. bayan drops a
+# section that has no key=values (e.g. an empty `[volumes.pgdata]`), so
+# networks/volumes must be enumerated from the raw headers to keep those.
+fn _ans_header_names(toml_str, prefix) {
+    var names = map_new();
+    var len = strlen(toml_str);
+    var plen = strlen(prefix);
+    var i = 0;
+    while (i < len) {
+        while (i < len && (load8(toml_str + i) == 32 || load8(toml_str + i) == 9)) { i = i + 1; }
+        if (i < len && load8(toml_str + i) == 91) {          # '['
+            if (i + 1 < len && load8(toml_str + i + 1) == 91) {
+                # '[[' array-of-tables — not used by ansamblu; skip.
+            } else {
+                var hstart = i + 1;
+                var j = hstart;
+                while (j < len && load8(toml_str + j) != 93 && load8(toml_str + j) != 10) { j = j + 1; }
+                var hlen = j - hstart;
+                if (hlen > plen && memeq(toml_str + hstart, prefix, plen) == 1) {
+                    var ok = 1;
+                    var k = plen;
+                    while (k < hlen) {
+                        if (load8(toml_str + hstart + k) == 46) { ok = 0; }   # '.' → multi-segment
+                        k = k + 1;
+                    }
+                    if (ok == 1) {
+                        var nm = str_cstr(str_from_buf(toml_str + hstart + plen, hlen - plen));
+                        map_set(names, nm, nm);
+                    }
+                }
+            }
+        }
+        while (i < len && load8(toml_str + i) != 10) { i = i + 1; }
+        if (i < len) { i = i + 1; }
+    }
+    return names;
+}
+
+# Pairs of the section named `full` (exact), or 0 when absent (bayan dropped it
+# because it had no key=values).
+fn _ans_section_pairs(sections, full) {
+    var secs = bayan_toml_get_sections(sections, full);
+    if (vec_len(secs) == 0) { return 0; }
+    return bayan_toml_section_pairs(vec_get(secs, 0));
+}
+
+# Parse an ansamblu TOML file into an AnsambluFile* (rust-old: parse_ansamblu).
+# Returns 0 on error (rust: Err(StivaError::Ansamblu)) — which covers malformed
+# TOML, an empty string, and a file with no `[services.*]` (serde requires the
+# `services` field; bayan is lenient, so all three reduce to "no services").
+#[must_use]
+fn parse_ansamblu(toml_str) {
+    sakshi_info("parsing ansamblu file", strlen("parsing ansamblu file"));
+    var sections = bayan_toml_parse(str_from(toml_str));
+    var nsec = vec_len(sections);
+
+    # Pass 1: [services.NAME] → ServiceDef.
+    var services = map_new();
+    var i = 0;
+    while (i < nsec) {
+        var sec = vec_get(sections, i);
+        var svc_name = _ans_prefixed_name(bayan_toml_section_name(sec), "services.");
+        if (svc_name != 0) {
+            var pairs = bayan_toml_section_pairs(sec);
+            var image = _bld_val_cstr(bayan_toml_get(pairs, "image"));
+            if (image == 0) { return 0; }                    # ServiceDef requires `image`
+            var env = _ans_inline_table(_bld_val_cstr(bayan_toml_get(pairs, "env")));
+            if (env == 0 - 1) { return 0; }                  # non-string env value (serde: HashMap<String,String>)
+            var svc = service_def_new(image, _bld_str_vec(pairs, "command"), env,
+            _bld_str_vec(pairs, "ports"), _bld_str_vec(pairs, "volumes"),
+            _bld_str_vec(pairs, "depends_on"));
+            var ss: ServiceDef = svc;
+            var rep = bayan_toml_get(pairs, "replicas");
+            if (rep != 0) { ss.replicas = atoi(str_cstr(rep)); }
+            var rp = _bld_val_cstr(bayan_toml_get(pairs, "restart"));
+            if (rp != 0) {
+                # Rust accepts only the UNIT variants as a bare string; the
+                # struct variant "on-failure" (needs a map) and any unknown value
+                # are rejected by toml::from_str → error.
+                var rpk = restart_policy_from_name(rp);
+                if (rpk == 0 - 1) { return 0; }
+                if (rpk == HEALTH_RESTART_ON_FAILURE) { return 0; }
+                ss.restart = rpk;
+            }
+            map_set(services, svc_name, svc);
+        }
+        i = i + 1;
+    }
+
+    # Pass 2: [services.NAME.health_check] → attach to the service.
+    i = 0;
+    while (i < nsec) {
+        var sec2 = vec_get(sections, i);
+        var hc_svc = _ans_healthcheck_service(bayan_toml_section_name(sec2));
+        if (hc_svc != 0) {
+            var svc2 = map_get(services, hc_svc);
+            # A health_check subtable implicitly defines its parent service; if no
+            # [services.X] with an image exists, Rust errors on the missing image.
+            if (svc2 == 0) { return 0; }
+            var hp = bayan_toml_section_pairs(sec2);
+            # HealthCheck.command has no serde default → it is required.
+            if (bayan_toml_get(hp, "command") == 0) { return 0; }
+            var hc = health_check_new(_bld_str_vec(hp, "command"));
+            var hh: HealthCheck = hc;
+            var iv = bayan_toml_get(hp, "interval_secs");
+            if (iv != 0) { hh.interval_secs = atoi(str_cstr(iv)); }
+            var tv = bayan_toml_get(hp, "timeout_secs");
+            if (tv != 0) { hh.timeout_secs = atoi(str_cstr(tv)); }
+            var rv = bayan_toml_get(hp, "retries");
+            if (rv != 0) { hh.retries = atoi(str_cstr(rv)); }
+            var svs: ServiceDef = svc2;
+            svs.health_check = hc;
+        }
+        i = i + 1;
+    }
+
+    # serde: the `services` field is required — no services means an error.
+    if (map_size(services) == 0) { return 0; }
+
+    # networks: [networks.NAME] (serde default = empty). Enumerated from the raw
+    # headers so an empty/minimal section is not lost.
+    var networks = map_new();
+    var net_names = map_keys(_ans_header_names(toml_str, "networks."));
+    i = 0;
+    while (i < vec_len(net_names)) {
+        var nname = vec_get(net_names, i);
+        var np = _ans_section_pairs(sections, _ans_cat("networks.", nname));
+        var nd = network_def_default();
+        var ndd: NetworkDef = nd;
+        if (np != 0) {
+            ndd.driver = _bld_val_cstr(bayan_toml_get(np, "driver"));
+            ndd.subnet = _bld_val_cstr(bayan_toml_get(np, "subnet"));
+        }
+        map_set(networks, nname, nd);
+        i = i + 1;
+    }
+
+    # volumes: [volumes.NAME] (serde default = empty). Same header enumeration —
+    # a bare `[volumes.pgdata]` (no fields) is a valid VolumeDef::default.
+    var volumes = map_new();
+    var vol_names = map_keys(_ans_header_names(toml_str, "volumes."));
+    i = 0;
+    while (i < vec_len(vol_names)) {
+        var vname = vec_get(vol_names, i);
+        var vp = _ans_section_pairs(sections, _ans_cat("volumes.", vname));
+        var vd = volume_def_default();
+        if (vp != 0) { store64(vd, _bld_val_cstr(bayan_toml_get(vp, "driver"))); }  # single-field
+        map_set(volumes, vname, vd);
+        i = i + 1;
+    }
+
+    return ansamblu_file_new(services, networks, volumes);
+}
+
+# ── DEFERRED (JSON codec) ────────────────
 #   serde JSON round-trip tests: ansamblu_file_serde_round_trip,
 #   ansamblu_session_serde, network_def_serde, volume_def_serde,
 #   restart_policy_serde — need a JSON serializer for these records; they land

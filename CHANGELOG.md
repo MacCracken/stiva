@@ -28,9 +28,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **`build`**: `build_cache_key` + `build_step_to_jv` — serde-exact JSON for the internally-tagged
   `BuildStep` enum (`tag="type"`, lowercase), so cache keys hash-match the Rust oracle
   (pinned by tests against a hand-built hash input).
-- **20 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
-  regression tests for a directory-copy `is_dir` bug and OCI negative-limit handling that an
-  adversarial parity-verify pass surfaced). Suite: **933 tests** green (stiva 686 · runpath 171 · mgmt 76).
+- **`ansamblu`**: `parse_ansamblu` — TOML ansamblu file → `AnsambluFile` on bayan's flat section
+  model (dotted `[services.NAME]` / `[services.NAME.health_check]` / `[networks.NAME]` /
+  `[volumes.NAME]` headers, inline-table `env`, `restart`/`replicas`/`health_check` with serde
+  defaults). Empty `[volumes.x]` sections (which bayan drops) are recovered by scanning the raw
+  headers. Plus `restart_policy_from_name` in `health`.
+- **33 new parity tests** mirroring the corresponding rust-old `#[cfg(test)]` cases (plus
+  regression tests for a directory-copy `is_dir` bug, OCI negative-limit handling, and strict
+  credential-file deserialization that adversarial parity-verify passes surfaced).
+  Suite: **983 tests** green (stiva 690 · runpath 171 · mgmt 122).
 
 ## [3.0.0] — Cyrius Port · synchronous single-node runtime
 

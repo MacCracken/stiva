@@ -248,6 +248,170 @@ fn test_ansamblu_defaults() {
     return 0;
 }
 
+# ── parse_ansamblu (rust-old ansamblu.rs #[cfg(test)]) ────────────
+fn test_parse_ansamblu_toml() {
+    test_group("parse_ansamblu_toml");
+    var toml = "[services.web]\nimage = \"nginx:latest\"\nports = [\"80:80\"]\n\n[services.api]\nimage = \"ghcr.io/maccracken/agnosticos:latest\"\nenv = { PORT = \"8090\" }\ndepends_on = [\"db\"]\n\n[services.db]\nimage = \"postgres:16\"\nvolumes = [\"pgdata:/var/lib/postgresql/data\"]\nenv = { POSTGRES_PASSWORD = \"secret\" }\n\n[volumes.pgdata]\n";
+    var spec = parse_ansamblu(toml);
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    assert_eq(map_size(af.services), 3, "3 services");
+    var api: ServiceDef = map_get(af.services, "api");
+    assert(api != 0, "api present");
+    assert_eq(vec_len(api.depends_on), 1, "api 1 dep");
+    assert_eq(streq(vec_get(api.depends_on, 0), "db"), 1, "api depends db");
+    assert_eq(map_has(af.volumes, "pgdata"), 1, "volumes has pgdata (empty section)");
+    return 0;
+}
+
+fn test_parse_ansamblu_invalid_toml() {
+    test_group("parse_ansamblu_invalid_toml");
+    assert_eq(parse_ansamblu("not a [valid toml"), 0, "invalid -> 0");
+    return 0;
+}
+
+fn test_parse_ansamblu_missing_services() {
+    test_group("parse_ansamblu_missing_services");
+    assert_eq(parse_ansamblu("[networks.default]"), 0, "no services -> 0");
+    return 0;
+}
+
+fn test_parse_ansamblu_minimal() {
+    test_group("parse_ansamblu_minimal");
+    var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    assert_eq(map_size(af.services), 1, "1 service");
+    var app: ServiceDef = map_get(af.services, "app");
+    assert_eq(vec_len(app.command), 0, "command empty");
+    assert_eq(vec_len(app.depends_on), 0, "depends_on empty");
+    assert_eq(map_size(af.networks), 0, "networks empty");
+    assert_eq(map_size(af.volumes), 0, "volumes empty");
+    return 0;
+}
+
+fn test_parse_ansamblu_with_networks() {
+    test_group("parse_ansamblu_with_networks");
+    var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\n\n[networks.frontend]\ndriver = \"bridge\"\nsubnet = \"10.0.0.0/24\"\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    assert_eq(map_size(af.networks), 1, "1 network");
+    var fe: NetworkDef = map_get(af.networks, "frontend");
+    assert_eq(streq(fe.driver, "bridge"), 1, "driver bridge");
+    assert_eq(streq(fe.subnet, "10.0.0.0/24"), 1, "subnet");
+    return 0;
+}
+
+fn test_parse_ansamblu_replicas() {
+    test_group("parse_ansamblu_replicas");
+    var spec = parse_ansamblu("[services.worker]\nimage = \"worker:latest\"\nreplicas = 3\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var w: ServiceDef = map_get(af.services, "worker");
+    assert_eq(w.replicas, 3, "replicas 3");
+    return 0;
+}
+
+fn test_parse_ansamblu_empty_string() {
+    test_group("parse_ansamblu_empty_string");
+    assert_eq(parse_ansamblu(""), 0, "empty -> 0");
+    return 0;
+}
+
+fn test_parse_ansamblu_service_with_command() {
+    test_group("parse_ansamblu_service_with_command");
+    var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\ncommand = [\"/bin/sh\", \"-c\", \"echo hello\"]\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var app: ServiceDef = map_get(af.services, "app");
+    assert_eq(vec_len(app.command), 3, "3 args");
+    assert_eq(streq(vec_get(app.command, 0), "/bin/sh"), 1, "arg0");
+    assert_eq(streq(vec_get(app.command, 2), "echo hello"), 1, "arg2");
+    return 0;
+}
+
+fn test_parse_ansamblu_dependency_chain() {
+    test_group("parse_ansamblu_dependency_chain");
+    var spec = parse_ansamblu("[services.frontend]\nimage = \"nginx\"\ndepends_on = [\"api\"]\n\n[services.api]\nimage = \"app:latest\"\ndepends_on = [\"db\", \"cache\"]\n\n[services.db]\nimage = \"postgres:16\"\n\n[services.cache]\nimage = \"redis:7\"\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    assert_eq(map_size(af.services), 4, "4 services");
+    var fe: ServiceDef = map_get(af.services, "frontend");
+    assert_eq(vec_len(fe.depends_on), 1, "frontend 1 dep");
+    assert_eq(streq(vec_get(fe.depends_on, 0), "api"), 1, "frontend depends api");
+    return 0;
+}
+
+fn test_parse_ansamblu_all_fields() {
+    test_group("parse_ansamblu_all_fields");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp:latest\"\ncommand = [\"/start.sh\"]\nenv = { PORT = \"8080\", DEBUG = \"true\" }\nports = [\"8080:80\", \"443:443\"]\nvolumes = [\"/data:/app/data:ro\"]\ndepends_on = [\"db\"]\nreplicas = 2\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var app: ServiceDef = map_get(af.services, "app");
+    assert_eq(streq(app.image, "myapp:latest"), 1, "image");
+    assert_eq(app.replicas, 2, "replicas 2");
+    assert_eq(streq(map_get(app.env, "PORT"), "8080"), 1, "env PORT");
+    assert_eq(streq(map_get(app.env, "DEBUG"), "true"), 1, "env DEBUG");
+    assert_eq(vec_len(app.ports), 2, "2 ports");
+    return 0;
+}
+
+fn test_parse_ansamblu_with_restart_policy() {
+    test_group("parse_ansamblu_with_restart_policy");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\nrestart = \"always\"\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var app: ServiceDef = map_get(af.services, "app");
+    assert_eq(app.restart, HEALTH_RESTART_ALWAYS, "restart always");
+    return 0;
+}
+
+fn test_parse_ansamblu_with_health_check() {
+    test_group("parse_ansamblu_with_health_check");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"curl\", \"-f\", \"http://localhost/health\"]\ninterval_secs = 10\ntimeout_secs = 3\nretries = 5\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var app: ServiceDef = map_get(af.services, "app");
+    assert(app.health_check != 0, "has health_check");
+    var hc: HealthCheck = app.health_check;
+    assert_eq(vec_len(hc.command), 3, "hc 3 cmd");
+    assert_eq(hc.interval_secs, 10, "interval 10");
+    assert_eq(hc.retries, 5, "retries 5");
+    return 0;
+}
+
+fn test_parse_ansamblu_health_check_defaults() {
+    test_group("parse_ansamblu_health_check_defaults");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n");
+    assert(spec != 0, "parses");
+    var af: AnsambluFile = spec;
+    var app: ServiceDef = map_get(af.services, "app");
+    var hc: HealthCheck = app.health_check;
+    assert_eq(hc.interval_secs, 30, "interval default 30");
+    assert_eq(hc.timeout_secs, 5, "timeout default 5");
+    assert_eq(hc.retries, 3, "retries default 3");
+    return 0;
+}
+
+# Strict-parse parity: malformed input that serde's toml::from_str rejects must
+# error (return 0), not be silently accepted. (Adversarial parity-verify pass.)
+fn test_parse_ansamblu_strict_errors() {
+    test_group("parse_ansamblu_strict_errors");
+    # unknown restart value → unknown enum variant → error.
+    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"sometimes\"\n"), 0, "unknown restart -> 0");
+    # bare "on-failure" → OnFailure is a struct variant (needs a map) → error.
+    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"on-failure\"\n"), 0, "bare on-failure -> 0");
+    # non-string env value → HashMap<String,String> type error → error.
+    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\nenv = { PORT = 8090 }\n"), 0, "non-string env -> 0");
+    # health_check missing the required command → error.
+    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\n\n[services.app.health_check]\ninterval_secs = 10\n"), 0, "hc missing command -> 0");
+    # orphan health_check (no [services.app] main) → implicit missing image → error.
+    assert_eq(parse_ansamblu("[services.web]\nimage = \"nginx\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n"), 0, "orphan health_check -> 0");
+    # sanity: the valid forms still parse.
+    assert(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"always\"\nenv = { A = \"1\" }\n") != 0, "valid still parses");
+    return 0;
+}
+
 fn test_agent_build_registration_from_container() {
     test_group("agent_build_registration_from_container");
     var ports = vec_new();
@@ -408,6 +572,20 @@ fn main() {
     test_ansamblu_ready_services();
     test_ansamblu_plan_rolling_update();
     test_ansamblu_defaults();
+    test_parse_ansamblu_toml();
+    test_parse_ansamblu_invalid_toml();
+    test_parse_ansamblu_missing_services();
+    test_parse_ansamblu_minimal();
+    test_parse_ansamblu_with_networks();
+    test_parse_ansamblu_replicas();
+    test_parse_ansamblu_empty_string();
+    test_parse_ansamblu_service_with_command();
+    test_parse_ansamblu_dependency_chain();
+    test_parse_ansamblu_all_fields();
+    test_parse_ansamblu_with_restart_policy();
+    test_parse_ansamblu_with_health_check();
+    test_parse_ansamblu_health_check_defaults();
+    test_parse_ansamblu_strict_errors();
     test_agent_build_registration_from_container();
     test_agent_build_registration_no_name();
     test_agent_first12_truncates();
