@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.4.66** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.1
+- **Version**: SemVer, currently 3.0.2
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -111,7 +111,7 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — 33 registered verbs, **19 live** in v3.0.0; the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
+CLI binary: `stiva` — 35 registered verbs, **21 live** (19 at v3.0.0 + `save`/`load` at v3.0.2); the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
 
 ## kavach Integration
 

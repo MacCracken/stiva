@@ -67,6 +67,8 @@ wiring over the sync core remains). The **Status** column marks each:
 | `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
 | `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image |
 | `stiva completions <SHELL>` | v3.0.x (planned) | Generate shell completions (bash, zsh, fish) |
+| `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
+| `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` tarball into the store (`docker-archive` → v3.0.3) |
 
 ## `stiva run` Flags
 

@@ -288,7 +288,7 @@ fn image_new(id, reference, size_bytes, layers, created_at) {
     ii.size_bytes = size_bytes;
     ii.layers = layers;
     ii.created_at = created_at;
-    ii.manifest_digest = 0;
+    store64(im + 40, 0);      # manifest_digest @40 — raw store (see _img_set_manifest_digest)
     return im;
 }
 
@@ -456,6 +456,41 @@ fn image_store_blob_size(store, digest) {
 fn _image_reference(image) {
     var ii: Image = image;
     return ii.reference;
+}
+
+# manifest_digest lives at offset 40 (Image's 6th field). Access it via raw
+# load64/store64 rather than the struct field: cycc miscompiles this field's
+# access in SOME function contexts (a struct-id collision — the same class as
+# the ImageStore single-field workaround above), reading/writing garbage while
+# other contexts compile it fine. The raw offset is always correct, so every
+# manifest_digest read/write routes through these two accessors.
+#[must_use]
+fn _img_manifest_digest(image) {
+    return load64(image + 40);
+}
+
+fn _img_set_manifest_digest(image, digest) {
+    store64(image + 40, digest);
+    return 0;
+}
+
+# Raw-offset accessors for Image.id (@0) and Image.layers (@24), and Layer.digest
+# (@0). Same cycc-miscompile guard as _img_manifest_digest: some function
+# contexts (e.g. image_store_save_archive) miscompile the struct-field access to
+# these fields, so callers in those contexts read them via these accessors.
+#[must_use]
+fn _img_id(image) {
+    return load64(image + 0);
+}
+
+#[must_use]
+fn _img_layers(image) {
+    return load64(image + 24);
+}
+
+#[must_use]
+fn _layer_digest(layer) {
+    return load64(layer + 0);
 }
 
 # Read the whole file at `path` into a fresh buffer (SEEK_END-sized, so no

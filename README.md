@@ -66,7 +66,7 @@ blocked on external landings (v3.1).
 
 | Category | v3.0.0 (live) | v3.0.x (planned) | v3.1 (blocked) |
 |----------|---------------|------------------|----------------|
-| **Images** | import, tag, list, rmi, gc, export; content-addressable store; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers, OCI image-layout + oci-archive save/load | — |
+| **Images** | import, tag, list, rmi, gc, export; **OCI image-layout store** (oci-layout + index.json + blobs); **save/load as oci-archive** (perms-preserving tar); blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers; `docker-archive` load | — |
 | **Containers** | run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait; state persistence | non-interactive `exec` (nsenter), `restart`, `rename`, streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring; ContainerManager + Stiva facade | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
 | **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack) | live network attach on the run path | — |
 | **Storage** | overlay FS, volume mounts, gzip layer unpack, cgroups v2 (CPU/mem/PID/IO), USTAR tar writer | perms-tar | zstd layers (needs sankoch zstd) |

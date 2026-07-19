@@ -271,7 +271,7 @@ fn _il_manifest_descriptor_jv(image, manifest_size) {
     var ii: Image = image;
     var o = json_v_obj_new();
     json_v_obj_set(o, str_from("mediaType"), json_v_str_new(str_from(media_oci_manifest())));
-    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(ii.manifest_digest)));
+    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(_img_manifest_digest(ii))));
     json_v_obj_set(o, str_from("size"), json_v_int_new(manifest_size));
     var pp: Platform = current_platform();
     var po = json_v_obj_new();
@@ -279,7 +279,8 @@ fn _il_manifest_descriptor_jv(image, manifest_size) {
     json_v_obj_set(po, str_from("os"), json_v_str_new(str_from(pp.os)));
     json_v_obj_set(o, str_from("platform"), po);
     var ann = json_v_obj_new();
-    json_v_obj_set(ann, str_from(_il_ref_name_key()), json_v_str_new(str_from(image_ref_full_ref(ii.reference))));
+    var rn = image_ref_full_ref(_image_reference(image));
+    json_v_obj_set(ann, str_from(_il_ref_name_key()), json_v_str_new(str_from(rn)));
     json_v_obj_set(o, str_from("annotations"), ann);
     return o;
 }
@@ -336,8 +337,7 @@ fn image_store_load_index(store) {
                 if (refname != 0) { reference = _il_parse_full_ref(refname); }
                 if (reference == 0) { reference = image_ref_new("local", cfg.digest, "latest", 0); }
                 var img = image_new(cfg.digest, reference, total, layers, 0);
-                var ig: Image = img;
-                ig.manifest_digest = mdigest;
+                _img_set_manifest_digest(img, mdigest);
                 vec_push(out, img);
             }
         }
@@ -355,7 +355,7 @@ fn _il_index_rewrite(store, images) {
     while (i < n) {
         var im = vec_get(images, i);
         var ii: Image = im;
-        var msize = image_store_blob_size(store, ii.manifest_digest);
+        var msize = image_store_blob_size(store, _img_manifest_digest(ii));
         if (msize < 0) { msize = 0; }
         json_v_arr_push(manifests, _il_manifest_descriptor_jv(im, msize));
         i = i + 1;
@@ -386,7 +386,7 @@ fn image_store_add_to_index(store, image) {
     }
     image_store_write_oci_layout(store);
     var ii: Image = image;
-    var new_ref = image_ref_full_ref(ii.reference);
+    var new_ref = image_ref_full_ref(_image_reference(image));
     var images = image_store_load_index(store);
     var kept = vec_new();
     var n = vec_len(images);
@@ -394,7 +394,7 @@ fn image_store_add_to_index(store, image) {
     while (i < n) {
         var ex = vec_get(images, i);
         var ee: Image = ex;
-        if (streq(image_ref_full_ref(ee.reference), new_ref) == 0) { vec_push(kept, ex); }
+        if (streq(image_ref_full_ref(_image_reference(ex)), new_ref) == 0) { vec_push(kept, ex); }
         i = i + 1;
     }
     vec_push(kept, image);
@@ -443,7 +443,8 @@ fn _il_referenced_digests(images) {
     while (ii < vec_len(images)) {
         var im: Image = vec_get(images, ii);
         vec_push(referenced, im.id);
-        if (im.manifest_digest != 0) { vec_push(referenced, im.manifest_digest); }
+        var imd = _img_manifest_digest(im);
+        if (imd != 0) { vec_push(referenced, imd); }
         var layers = im.layers;
         var lj = 0;
         while (lj < vec_len(layers)) {
@@ -551,8 +552,7 @@ fn image_import(store, tar_path, name, tag) {
     vec_push(layers, layer);
     var ref = image_ref_new("local", name, tag, 0);
     var image = image_new(config_digest, ref, gzlen, layers, 0);
-    var ig: Image = image;
-    ig.manifest_digest = manifest_digest;
+    _img_set_manifest_digest(image, manifest_digest);
 
     if (image_store_add_to_index(store, image) == 0) {
         stiva_err_print(STIVA_ERR_IO, "failed to update image index");
@@ -584,8 +584,200 @@ fn image_store_tag(store, source, new_ref) {
     if (parsed == 0) { return 0 - 2; }
     var fi: Image = found;
     var tagged = image_new(fi.id, parsed, fi.size_bytes, fi.layers, fi.created_at);
-    var tg: Image = tagged;
-    tg.manifest_digest = fi.manifest_digest;
+    _img_set_manifest_digest(tagged, _img_manifest_digest(found));
     if (image_store_add_to_index(store, tagged) == 0) { return 0 - 3; }
     return 1;
+}
+
+# ── oci-archive save / load (A4) ──
+#
+# An oci-archive is a tar of a (single-image) OCI image layout: `oci-layout`,
+# `index.json`, and `blobs/sha256/<hex>` — the machine-to-machine transfer form
+# skopeo/podman produce and consume (`oci-archive:img.tar`). No registry needed.
+
+# Build a TarEntry (regular file, mode 0644) for a store blob, named
+# `blobs/sha256/<hex>`. Returns 0 if the blob is missing/unreadable.
+#[must_use]
+fn _il_blob_tar_entry(store, digest) {
+    if (digest == 0) { return 0; }
+    var path = _img_blob_path(image_store_root(store), digest);
+    if (file_exists(path) == 0) { return 0; }
+    var len_cell = alloc(8);
+    var data = _img_read_file(path, len_cell);
+    if (data == 0) { return 0; }
+    var arcname = _img_cat2("blobs/sha256/", digest_hex(digest));
+    return _tar_entry_new(arcname, 48, 420, 0, 0, load64(len_cell), data);
+}
+
+# Save an image (by id or full_ref) as an oci-archive tarball at `out_path`. The
+# archive is a valid single-image OCI layout: oci-layout, index.json (just this
+# image's descriptor), and its manifest/config/layer blobs. Returns 1 on
+# success, 0 (image not found), -1 (a missing blob or write failure).
+fn image_store_save_archive(store, ref_or_id, out_path) {
+    var images = image_store_load_index(store);
+    var found = 0;
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        if (streq(_img_id(im), ref_or_id) == 1 || streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) {
+            found = im;
+        }
+        i = i + 1;
+    }
+    if (found == 0) { return 0; }
+
+    var entries = vec_new();
+
+    # oci-layout marker.
+    var lo = json_v_obj_new();
+    json_v_obj_set(lo, str_from("imageLayoutVersion"), json_v_str_new(str_from(oci_image_layout_version())));
+    var lo_s = json_v_build(lo);
+    vec_push(entries, _tar_entry_new("oci-layout", 48, 420, 0, 0, str_len(lo_s), str_data(lo_s)));
+
+    # index.json with only this image's descriptor.
+    var msize = image_store_blob_size(store, _img_manifest_digest(found));
+    if (msize < 0) { msize = 0; }
+    var manifests = json_v_arr_new();
+    json_v_arr_push(manifests, _il_manifest_descriptor_jv(found, msize));
+    var idx = json_v_obj_new();
+    json_v_obj_set(idx, str_from("schemaVersion"), json_v_int_new(2));
+    json_v_obj_set(idx, str_from("mediaType"), json_v_str_new(str_from(media_oci_index())));
+    json_v_obj_set(idx, str_from("manifests"), manifests);
+    var idx_s = json_v_build(idx);
+    vec_push(entries, _tar_entry_new("index.json", 48, 420, 0, 0, str_len(idx_s), str_data(idx_s)));
+
+    # blobs: manifest, config, then each layer. Image/Layer fields are read via
+    # raw-offset accessors — cycc miscompiles the struct-field access here.
+    var me = _il_blob_tar_entry(store, _img_manifest_digest(found));
+    if (me == 0) { return 0 - 1; }
+    vec_push(entries, me);
+    var ce = _il_blob_tar_entry(store, _img_id(found));
+    if (ce == 0) { return 0 - 1; }
+    vec_push(entries, ce);
+    var layers = _img_layers(found);
+    var lj = 0;
+    while (lj < vec_len(layers)) {
+        var ll = vec_get(layers, lj);
+        var le = _il_blob_tar_entry(store, _layer_digest(ll));
+        if (le == 0) { return 0 - 1; }
+        vec_push(entries, le);
+        lj = lj + 1;
+    }
+
+    if (_stor_write_tar(entries, out_path) == 0) { return 0 - 1; }
+    return 1;
+}
+
+# Copy a blob (by digest) from an OCI layout dir into the store, verifying its
+# content digest (image_store_store_blob re-hashes). Returns 1 on success, 0 if
+# the source blob is missing or fails verification. A blob already in the store
+# is a no-op success (dedup on transfer).
+fn _il_copy_blob_from(store, layout, digest) {
+    if (image_store_has_blob(store, digest) == 1) { return 1; }
+    var src = _img_cat2(_img_cat2(layout, "/blobs/sha256/"), digest_hex(digest));
+    if (file_exists(src) == 0) { return 0; }
+    var len_cell = alloc(8);
+    var data = _img_read_file(src, len_cell);
+    if (data == 0) { return 0; }
+    if (image_store_store_blob(store, digest, data, load64(len_cell)) == 0) { return 0; }
+    return 1;
+}
+
+# Merge an on-disk OCI layout dir (`layout`) into `store`: for each index.json
+# manifest descriptor, copy its manifest/config/layer blobs (verifying digests)
+# and add the reconstructed image to the store index. Returns the number of
+# images loaded, or -1 if the layout has no readable index.json.
+fn _il_load_oci_layout(store, layout) {
+    var idx_path = _img_cat2(layout, "/index.json");
+    if (file_exists(idx_path) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "archive has oci-layout but no index.json");
+        return 0 - 1;
+    }
+    var il_cell = alloc(8);
+    var ibuf = _img_read_file(idx_path, il_cell);
+    if (ibuf == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "archive index.json is unreadable");
+        return 0 - 1;
+    }
+    var manifests = _il_index_manifests(bayan_json_v_parse_str(ibuf, load64(il_cell)));
+    if (manifests == 0) { return 0; }
+
+    var loaded = 0;
+    var n = json_v_arr_len(manifests);
+    var i = 0;
+    while (i < n) {
+        var desc = json_v_arr_get(manifests, i);
+        var mdigest = _il_jv_str_field(desc, "digest");
+        if (mdigest != 0) {
+            if (_il_copy_blob_from(store, layout, mdigest) == 1) {
+                var man = _il_read_manifest(store, mdigest);
+                if (man != 0) {
+                    var mm: OciManifest = man;
+                    var cfg: Descriptor = mm.config;
+                    # Every referenced blob must copy AND verify (image_store_store_blob
+                    # re-hashes) — a missing/tampered config or layer skips the whole
+                    # image rather than indexing a broken one.
+                    var ok = _il_copy_blob_from(store, layout, cfg.digest);
+                    var layers = vec_new();
+                    var total = 0;
+                    var mlayers = mm.layers;
+                    var lj = 0;
+                    while (lj < vec_len(mlayers)) {
+                        var ld: Descriptor = vec_get(mlayers, lj);
+                        if (_il_copy_blob_from(store, layout, ld.digest) == 0) { ok = 0; }
+                        vec_push(layers, layer_new(ld.digest, ld.size, ld.media_type));
+                        total = total + ld.size;
+                        lj = lj + 1;
+                    }
+                    if (ok == 1) {
+                        var refname = _il_desc_ref_name(desc);
+                        var reference = 0;
+                        if (refname != 0) { reference = _il_parse_full_ref(refname); }
+                        if (reference == 0) { reference = image_ref_new("local", cfg.digest, "latest", 0); }
+                        var img = image_new(cfg.digest, reference, total, layers, 0);
+                        _img_set_manifest_digest(img, mdigest);
+                        if (image_store_add_to_index(store, img) == 1) { loaded = loaded + 1; }
+                    } else {
+                        stiva_err_print(STIVA_ERR_STORAGE, "archive image skipped: blob missing or unverified");
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return loaded;
+}
+
+# Load an oci-archive tarball at `path` into the store (the transfer inverse of
+# save). Extracts to a scratch dir under the store root, validates the oci-layout
+# marker, then merges the layout. Returns the number of images loaded, or -1 on
+# failure. A docker-archive (manifest.json, no oci-layout) is detected and
+# reported as unsupported (the docker→OCI read path is a v3.0.2 follow-up).
+fn image_store_load_archive(store, path) {
+    var len_cell = alloc(8);
+    var tarbuf = _img_read_file(path, len_cell);
+    if (tarbuf == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "cannot read archive");
+        return 0 - 1;
+    }
+
+    var tmp = _img_cat2(image_store_root(store), "/.load-tmp");
+    _stor_remove_dir_all(tmp);
+    sys_mkdir(tmp, 493);
+    if (_stor_extract_tar(tarbuf, load64(len_cell), tmp) != 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "malformed archive");
+        _stor_remove_dir_all(tmp);
+        return 0 - 1;
+    }
+
+    if (file_exists(_img_cat2(tmp, "/oci-layout")) == 0) {
+        _stor_remove_dir_all(tmp);
+        stiva_err_print(STIVA_ERR_STORAGE, "not an oci-archive (docker-archive load is a v3.0.2 follow-up)");
+        return 0 - 1;
+    }
+
+    var count = _il_load_oci_layout(store, tmp);
+    _stor_remove_dir_all(tmp);
+    return count;
 }

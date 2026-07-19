@@ -1178,6 +1178,50 @@ fn test_il_parse_full_ref() {
     return 0;
 }
 
+# A4: oci-archive save → load round-trip across two stores. Blobs transfer
+# byte-identically (content-verified) and the image reconstructs with the same
+# id + reference.
+fn test_oci_archive_save_load() {
+    test_group("oci_archive_save_load");
+    var ra = "/tmp/stiva_arc_a";
+    var rb = "/tmp/stiva_arc_b";
+    _stor_remove_dir_all(ra);
+    _stor_remove_dir_all(rb);
+    var sa = image_store_new(ra);
+
+    var content = "archive-roundtrip-rootfs";
+    file_write_all("/tmp/stiva_arc.tar", content, strlen(content));
+    var img = image_import(sa, "/tmp/stiva_arc.tar", "arc", "v1");
+    assert_eq(img != 0, 1, "import ok");
+    var origid = _img_id(img);
+    var origmd = _img_manifest_digest(img);
+
+    var arc = "/tmp/stiva_arc.oci.tar";
+    xunlink(arc);
+    assert_eq(image_store_save_archive(sa, "local/arc:v1", arc), 1, "save ok");
+    assert_eq(file_exists(arc), 1, "archive file written");
+
+    var sb = image_store_new(rb);
+    assert_eq(image_store_load_archive(sb, arc), 1, "loaded 1 image into B");
+    var listed = image_store_list(sb);
+    assert_eq(vec_len(listed), 1, "one image in B");
+    var got = vec_get(listed, 0);
+    assert_eq(streq(_img_id(got), origid), 1, "id preserved across transfer");
+    assert_eq(streq(_img_manifest_digest(got), origmd), 1, "manifest digest preserved");
+    var gref: ImageRef = _image_reference(got);
+    assert_eq(streq(gref.registry, "local"), 1, "ref registry preserved");
+    assert_eq(streq(gref.repository, "arc"), 1, "ref repo preserved");
+    assert_eq(streq(gref.tag, "v1"), 1, "ref tag preserved");
+    assert_eq(image_store_has_blob(sb, origid), 1, "config blob transferred");
+    assert_eq(image_store_has_blob(sb, origmd), 1, "manifest blob transferred");
+
+    # save a nonexistent image → 0; load a non-oci tar → negative.
+    assert_eq(image_store_save_archive(sa, "nope:latest", "/tmp/stiva_arc_none.tar"), 0, "save missing -> 0");
+    file_write_all("/tmp/stiva_arc_bad.tar", "not really a tar", 16);
+    assert_eq(image_store_load_archive(sb, "/tmp/stiva_arc_bad.tar") < 0, 1, "load non-archive -> negative");
+    return 0;
+}
+
 fn test_registry_credential() {
     test_group("registry_credential");
     var cred = registry_credential_new("alice", "s3cret");
@@ -1474,6 +1518,89 @@ fn test_unpack_layer_not_gzip() {
     var blob = _stor_cat2(dir, "/bad.tar.gz");
     file_write_all(blob, "this is not gzip", 16);
     assert_eq(unpack_layer(blob, dir), 0 - 1, "non-gzip = -1");
+    return 0;
+}
+
+# A3: perms-preserving tar writer + reader round-trip — real mode, a
+# subdirectory, a nested file, and a symlink (stored as a link, not
+# dereferenced). uid/gid preservation needs root, so it is not asserted here.
+fn test_tar_perms_roundtrip() {
+    test_group("tar_perms_roundtrip");
+    var src = "/tmp/stiva_tarp_src";
+    var dst = "/tmp/stiva_tarp_dst";
+    _stor_remove_dir_all(src);
+    _stor_remove_dir_all(dst);
+    sys_mkdir(src, 493);
+
+    # regular file (0644), executable (0755), subdir + nested file, symlink.
+    var f1 = _stor_cat2(src, "/hello.txt");
+    file_write_all(f1, "hi", 2);
+    sys_chmod(f1, 420);                       # 0o644
+    var f2 = _stor_cat2(src, "/run.sh");
+    file_write_all(f2, "x", 1);
+    sys_chmod(f2, 493);                       # 0o755
+    sys_mkdir(_stor_cat2(src, "/sub"), 493);
+    file_write_all(_stor_cat2(src, "/sub/nested.txt"), "deep", 4);
+    sys_symlink("hello.txt", _stor_cat2(src, "/link"));
+
+    var tar = "/tmp/stiva_tarp.tar";
+    assert_eq(create_tar(src, tar), 1, "create_tar ok");
+
+    sys_mkdir(dst, 493);
+    var len_cell = alloc(8);
+    var tarbuf = _stor_read_file(tar, len_cell);
+    assert_eq(tarbuf != 0, 1, "tar read back");
+    assert_eq(_stor_extract_tar(tarbuf, load64(len_cell), dst), 0, "extract ok");
+
+    var sb = alloc(144);
+    var g1 = _stor_cat2(dst, "/hello.txt");
+    assert_eq(file_exists(g1), 1, "hello.txt extracted");
+    assert_eq(sys_lstat(g1, sb), 0, "lstat hello.txt");
+    assert_eq(load64(sb + 24) & 4095, 420, "hello.txt mode 0644 preserved");
+    var g2 = _stor_cat2(dst, "/run.sh");
+    assert_eq(sys_lstat(g2, sb), 0, "lstat run.sh");
+    assert_eq(load64(sb + 24) & 4095, 493, "run.sh mode 0755 preserved");
+    assert_eq(file_exists(_stor_cat2(dst, "/sub")), 1, "subdirectory extracted");
+    var g3 = _stor_cat2(dst, "/sub/nested.txt");
+    assert_eq(file_exists(g3), 1, "nested file extracted");
+    var rbuf = alloc(16);
+    var rn = file_read_all(g3, rbuf, 16);
+    store8(rbuf + rn, 0);
+    assert_eq(streq(rbuf, "deep"), 1, "nested content round-trips");
+    var gl = _stor_cat2(dst, "/link");
+    assert_eq(sys_lstat(gl, sb), 0, "lstat link");
+    assert_eq((load64(sb + 24) & 61440) == 40960, 1, "link is a symlink (S_IFLNK)");
+    var tgt = alloc(64);
+    var tn = sys_readlink(gl, tgt, 63);
+    store8(tgt + tn, 0);
+    assert_eq(streq(tgt, "hello.txt"), 1, "symlink target preserved");
+    return 0;
+}
+
+# A3 security: the tar reader must reject path-traversal names/targets so an
+# untrusted archive or image layer cannot escape the destination directory.
+fn test_tar_extract_rejects_traversal() {
+    test_group("tar_extract_rejects_traversal");
+    assert_eq(_stor_name_is_safe("etc/passwd"), 1, "relative name ok");
+    assert_eq(_stor_name_is_safe("a/b/c.txt"), 1, "nested name ok");
+    assert_eq(_stor_name_is_safe("../escape"), 0, "leading .. rejected");
+    assert_eq(_stor_name_is_safe("a/../../escape"), 0, "embedded .. rejected");
+    assert_eq(_stor_name_is_safe("/etc/passwd"), 0, "absolute rejected");
+    assert_eq(_stor_name_is_safe(".."), 0, "bare .. rejected");
+    assert_eq(_stor_name_is_safe("..foo/bar"), 1, "..foo is a normal component");
+    assert_eq(_stor_target_escapes("../../etc"), 1, "relative escape target");
+    assert_eq(_stor_target_escapes("/usr/lib"), 0, "absolute target allowed");
+    assert_eq(_stor_target_escapes("usr/lib"), 0, "in-tree target ok");
+
+    # end-to-end: an entry named "../pwned" must NOT write to dest's parent.
+    var dest = "/tmp/stiva_trav_dest";
+    _stor_remove_dir_all(dest);
+    sys_mkdir(dest, 493);
+    xunlink("/tmp/pwned");                       # dest/../pwned == /tmp/pwned
+    var tar = alloc(2048);
+    var tlen = _t_build_tar(tar, "../pwned", "owned", 5);
+    assert_eq(_stor_extract_tar(tar, tlen, dest), 0, "extract returns ok (unsafe entry skipped)");
+    assert_eq(file_exists("/tmp/pwned"), 0, "traversal blocked — nothing written outside dest");
     return 0;
 }
 
@@ -2945,6 +3072,7 @@ fn main() {
     test_oci_config_build_shape();
     test_il_oci_layout_version();
     test_il_parse_full_ref();
+    test_oci_archive_save_load();
     test_registry_credential();
     test_credential_store_set_get_remove();
     test_credential_store_to_config();
@@ -2967,6 +3095,8 @@ fn main() {
     test_unpack_layer_gz_roundtrip();
     test_unpack_layer_missing_blob();
     test_unpack_layer_not_gzip();
+    test_tar_perms_roundtrip();
+    test_tar_extract_rejects_traversal();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
     test_verify_integrity_clean();

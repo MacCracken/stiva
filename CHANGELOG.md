@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Added — perms-tar + oci-archive transfer (group A, A3+A4 → v3.0.2)
+- **A3 — perms-preserving tar** (`storage.cyr`): `create_tar` now emits real `mode`/`uid`/`gid`
+  plus **directory** (`'5'`) and **symlink** (`'2'`, stored as the link — not dereferenced) entries,
+  via a `getdents64` + `lstat` walk (`_stor_tar_collect`, new `TarEntry`). The reader
+  (`_stor_extract_tar`) applies `chmod` (skipped when a header carries no mode), best-effort
+  `lchown` (needs root), and creates symlinks. `_tar_fill_header` generalized to
+  `(name, mode, uid, gid, size, typeflag, linkname)`; the tar assembly is factored into a shared
+  `_stor_write_tar`. Round-trip tested (mode 0644/0755, subdir, nested file, symlink).
+- **A4 — `stiva save`/`load` as `oci-archive`** (`imagelayout.cyr`): two **new CLI verbs**.
+  `save <image> <out.tar>` packs a single-image OCI layout (oci-layout + index.json + blobs) into a
+  skopeo/podman-compatible `oci-archive`; `load <in.tar>` extracts it, validates the layout, and
+  copies its blobs into the store **re-hashing each** (content-verified transfer), merging the index.
+  Round-trip validated across two stores (byte-identical blobs). A `docker-archive` (no `oci-layout`)
+  is detected and reported as unsupported — the docker→OCI read path is a **v3.0.3** follow-up.
+- **cycc bug found + worked around**: the OCI-archive save path surfaced a cycc **struct-field
+  miscompile** — `Image` fields read garbage in `image_store_save_archive` specifically (both 6.4.66
+  and 6.4.67), while other functions read them fine. Worked around with raw-offset accessors
+  (`_img_id`/`_img_layers`/`_img_manifest_digest`/`_layer_digest` in `image.cyr`). Minimal repro +
+  upstream report tracked separately.
+- **Hardening** (adversarial review): the tar reader now **rejects path-traversal** entry names
+  (absolute / `..`) and `..`-escaping symlink targets — restores the safety rust-old got from the
+  `tar` crate, for both `load` and layer unpack (a `../../etc/...` entry no longer escapes the
+  destination); **chown is applied before chmod** so extracted setuid/setgid rootfs binaries keep
+  their bits; `load` now **skips (with an error) any image whose config/layer blob is missing or
+  fails digest verification** rather than indexing a broken image; plus a null-digest guard and a
+  defensive routing of the load path's `Image.reference` reads through the raw-offset accessor.
+  Known follow-ups (v3.0.3): the USTAR 100-byte name limit (needs the `prefix` field / GNU longname
+  for long rootfs paths — pre-existing), base-256 numeric fields (size > 8 GiB, uid/gid > 2²¹), and
+  absolute-symlink write-through during layer unpack (needs `O_NOFOLLOW` per-component extraction).
+- **Tests**: `tar_perms_roundtrip` + `tar_extract_rejects_traversal` (A3) and `oci_archive_save_load`
+  (A4) — **1146** tests green.
+
 ### Added — OCI image-layout (group A, A1+A2 → v3.0.1)
 The local image store is now a **valid OCI image layout** (Docker/Podman/skopeo-interop),
 net-new work with the OCI **image-spec** as the oracle (rust-old had only the ad-hoc
