@@ -1666,6 +1666,27 @@ fn test_tar_hardening() {
     return 0;
 }
 
+# Security: a crafted base-256 size that decodes to a NEGATIVE i64 must be
+# rejected (it would otherwise slip past the signed torn-region check into a
+# giant sys_write / drive `pos` backward).
+fn test_tar_extract_rejects_bad_size() {
+    test_group("tar_extract_rejects_bad_size");
+    var buf = alloc(1024);
+    var i = 0;
+    while (i < 1024) { store8(buf + i, 0); i = i + 1; }
+    store8(buf, 120);            # name "x"
+    store8(buf + 156, 48);       # typeflag '0' (regular file)
+    store8(buf + 124, 128);      # size@124: base-256 marker (0x80)
+    store8(buf + 128, 128);      # p[4]=0x80 → decodes with bit 63 set → negative i64
+    assert_eq(_stor_parse_octal(buf + 124, 12) < 0, 1, "base-256 size decodes negative");
+    var dest = "/tmp/stiva_badsz";
+    _stor_remove_dir_all(dest);
+    sys_mkdir(dest, 493);
+    assert_eq(_stor_extract_tar(buf, 1024, dest), 0 - 1, "hostile size rejected (-1)");
+    assert_eq(file_exists("/tmp/stiva_badsz/x"), 0, "nothing written for hostile size");
+    return 0;
+}
+
 # v3.0.3 docker-archive read: a `docker save` layout (manifest.json + config +
 # uncompressed layer tars) is converted into a valid OCI image on load.
 fn test_docker_archive_load() {
@@ -1699,6 +1720,26 @@ fn test_docker_archive_load() {
     file_write_all(_stor_cat2(junk, "/hello.txt"), "hi", 2);
     create_tar(junk, "/tmp/stiva_dka_junk.tar");
     assert_eq(image_store_load_archive(store, "/tmp/stiva_dka_junk.tar"), 0 - 1, "non-archive rejected");
+    return 0;
+}
+
+# Security: a docker manifest.json whose Config/Layers escape the extracted temp
+# dir (absolute or "..") must NOT read arbitrary host files — the image is skipped.
+fn test_docker_archive_rejects_traversal() {
+    test_group("docker_archive_rejects_traversal");
+    var d = "/tmp/stiva_dt_src";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    file_write_all("/tmp/stiva_dt_secret", "TOPSECRET", 9);   # a file OUTSIDE the archive
+    var man = "[{\"Config\":\"../stiva_dt_secret\",\"RepoTags\":[\"evil:1\"],\"Layers\":[\"../stiva_dt_secret\"]}]";
+    file_write_all(_stor_cat2(d, "/manifest.json"), man, strlen(man));
+    create_tar(d, "/tmp/stiva_dt.tar");
+    var sr = "/tmp/stiva_dt_store";
+    _stor_remove_dir_all(sr);
+    var store = image_store_new(sr);
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dt.tar"), 0, "traversal manifest → 0 images");
+    assert_eq(vec_len(image_store_list(store)), 0, "no image ingested from host-file escape");
+    xunlink("/tmp/stiva_dt_secret");
     return 0;
 }
 
@@ -3196,7 +3237,9 @@ fn main() {
     test_tar_perms_roundtrip();
     test_tar_extract_rejects_traversal();
     test_tar_hardening();
+    test_tar_extract_rejects_bad_size();
     test_docker_archive_load();
+    test_docker_archive_rejects_traversal();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
     test_verify_integrity_clean();

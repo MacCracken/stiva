@@ -6399,6 +6399,15 @@ fn _stor_extract_tar(tar, tar_len, dest) {
                 var typeflag = load8(hdr + 156);
                 pos = pos + 512;                        # advance past header
 
+                # Validate the size against the remaining bytes BEFORE any use — a
+                # negative (crafted base-256 / >2^63 octal) or oversized value would
+                # otherwise slip past the signed torn-region check into a huge
+                # `sys_write` (heap over-read) and drive `pos` backward (OOB header
+                # reads). `pos <= tar_len` holds here (header block was in-range).
+                if (size < 0 || size > tar_len - pos) {
+                    return 0 - 1;
+                }
+
                 # Reject path-traversal names and refuse to descend through a
                 # symlinked ancestor (either would escape `dest`). Data is still
                 # stepped over below for a skipped entry.
@@ -7656,6 +7665,9 @@ fn _il_load_oci_layout(store, layout) {
 # OCI gzip layer blob, appending its descriptor + Layer to the given vecs. Returns
 # the compressed length (> 0) on success, 0 on any read/gzip/store failure.
 fn _il_docker_add_layer(store, dir, lname, layer_descs, layers) {
+    # `lname` comes from an untrusted manifest.json — reject absolute / ".." so it
+    # cannot escape `dir` to read an arbitrary host file.
+    if (_stor_name_is_safe(lname) == 0) { return 0; }
     var lpath = _img_cat2(_img_cat2(dir, "/"), lname);
     var llc = alloc(8);
     var lbuf = _img_read_file(lpath, llc);
@@ -7693,7 +7705,9 @@ fn _il_load_docker_archive(store, dir) {
     while (i < n) {
         var entry = json_v_arr_get(root, i);
         var cfg_name = _il_jv_str_field(entry, "Config");
-        if (cfg_name != 0) {
+        # Reject an absolute / ".." Config path (untrusted manifest.json) — same
+        # host-file-read escape as the layer names.
+        if (cfg_name != 0 && _stor_name_is_safe(cfg_name) == 1) {
             var cc = alloc(8);
             var cbuf = _img_read_file(_img_cat2(_img_cat2(dir, "/"), cfg_name), cc);
             if (cbuf != 0) {

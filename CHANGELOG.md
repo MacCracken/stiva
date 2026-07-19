@@ -26,8 +26,17 @@ Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
 - **External-ref round-trip**: `_il_parse_full_ref` now treats a `:` as a tag separator only when it
   follows the last `/`, so a port-registry ref.name (`localhost:5000/repo`, with or without a tag)
   reconstructs correctly (A2 review Finding 4).
+- **Security** (adversarial review of the untrusted-input paths): the tar reader now **range-checks
+  the size field** (`size < 0 || size > remaining` → reject) — a crafted base-256/overflow size no
+  longer slips past the signed torn-region check into a giant `sys_write` (heap over-read/crash) or
+  drives `pos` backward (OOB header reads); and `_il_load_docker_archive` now **validates the
+  `manifest.json` `Config`/`Layers` names** with `_stor_name_is_safe` before opening them — a `..`/
+  absolute path can no longer escape the extract dir to read an arbitrary host file (which `save`
+  could then exfiltrate). The review confirmed the path-traversal, symlink-escape, name/prefix
+  round-trip, and base-256 writer paths otherwise sound.
 - **Tests**: `tar_hardening` (long-name round-trip, base-256, symlink-ancestor block),
-  `docker_archive_load`, and port-registry cases in `il_parse_full_ref` — **1168** tests green.
+  `tar_extract_rejects_bad_size`, `docker_archive_load`, `docker_archive_rejects_traversal`, and
+  port-registry cases in `il_parse_full_ref` — **1173** tests green.
 - Still deferred: GNU longname for names > 255 B, per-image `platform` passthrough in index
   descriptors (single-node is always `amd64/linux`).
 

@@ -558,6 +558,15 @@ fn _stor_extract_tar(tar, tar_len, dest) {
                 var typeflag = load8(hdr + 156);
                 pos = pos + 512;                        # advance past header
 
+                # Validate the size against the remaining bytes BEFORE any use — a
+                # negative (crafted base-256 / >2^63 octal) or oversized value would
+                # otherwise slip past the signed torn-region check into a huge
+                # `sys_write` (heap over-read) and drive `pos` backward (OOB header
+                # reads). `pos <= tar_len` holds here (header block was in-range).
+                if (size < 0 || size > tar_len - pos) {
+                    return 0 - 1;
+                }
+
                 # Reject path-traversal names and refuse to descend through a
                 # symlinked ancestor (either would escape `dest`). Data is still
                 # stepped over below for a skipped entry.
