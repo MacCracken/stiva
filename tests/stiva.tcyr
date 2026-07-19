@@ -1185,6 +1185,34 @@ fn test_il_parse_full_ref() {
     assert_eq(streq(pn.registry, "localhost:5000"), 1, "port registry (no tag)");
     assert_eq(streq(pn.repository, "repo"), 1, "port repo (no tag)");
     assert_eq(streq(pn.tag, "latest"), 1, "default tag when only a port colon");
+    # v3.0.4: a bare name → empty registry, and full_ref has NO leading slash.
+    var br: ImageRef = _il_parse_full_ref("bareimg:v3");
+    assert_eq(streq(br.registry, ""), 1, "bare name → empty registry");
+    assert_eq(streq(br.repository, "bareimg"), 1, "bare repo");
+    assert_eq(streq(image_ref_full_ref(br), "bareimg:v3"), 1, "empty registry → no leading slash");
+    return 0;
+}
+
+# v3.0.4: index descriptors carry the image's real config platform (so a
+# foreign-arch image from a docker/oci archive keeps its arch), else host.
+fn test_platform_passthrough() {
+    test_group("platform_passthrough");
+    var root = "/tmp/stiva_plat";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:x\"]}}";
+    var cdig = sha256_digest(cfg, strlen(cfg));
+    image_store_store_blob(store, cdig, cfg, strlen(cfg));
+    var img = image_new(cdig, image_ref_new("local", "arm-app", "v1", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(img, "sha256:mani");
+    var j = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img, 100)));
+    assert_eq(strstr(j, "\"architecture\":\"arm64\"") >= 0, 1, "config arm64 carried into descriptor");
+    assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "config os carried");
+    # a missing config blob falls back to the host platform (amd64).
+    var img2 = image_new("sha256:nonexistent", image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(img2, "sha256:mani2");
+    var d2 = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img2, 100)));
+    assert_eq(strstr(d2, "\"architecture\":\"amd64\"") >= 0, 1, "missing config → host platform fallback");
     return 0;
 }
 
@@ -1684,6 +1712,56 @@ fn test_tar_extract_rejects_bad_size() {
     sys_mkdir(dest, 493);
     assert_eq(_stor_extract_tar(buf, 1024, dest), 0 - 1, "hostile size rejected (-1)");
     assert_eq(file_exists("/tmp/stiva_badsz/x"), 0, "nothing written for hostile size");
+    return 0;
+}
+
+# v3.0.4 GNU longname/longlink: a path > 255 B (beyond USTAR name+prefix) and a
+# symlink target > 100 B round-trip through 'L'/'K' pseudo-entries.
+fn test_tar_longname() {
+    test_group("tar_longname");
+    var seg = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";   # 60
+    var d = "/tmp/stiva_lng_src";
+    var dd = "/tmp/stiva_lng_dst";
+    _stor_remove_dir_all(d);
+    _stor_remove_dir_all(dd);
+    sys_mkdir(d, 493);
+    var p = d;
+    var depth = 0;
+    while (depth < 5) {                       # 5 × 60-byte dirs → rel path ~313 B
+        p = _stor_cat2(_stor_cat2(p, "/"), seg);
+        sys_mkdir(p, 493);
+        depth = depth + 1;
+    }
+    file_write_all(_stor_cat2(p, "/deep.txt"), "LONG", 4);
+    # a symlink whose target is > 100 B (forces a 'K' long-link).
+    var longtgt = _stor_cat2(_stor_cat2(_stor_cat2("/very/long/target/", seg), "/"), seg);
+    sys_symlink(longtgt, _stor_cat2(d, "/mylink"));
+
+    assert_eq(create_tar(d, "/tmp/stiva_lng.tar"), 1, "create_tar with a >255b name + >100b link");
+    sys_mkdir(dd, 493);
+    var lc = alloc(8);
+    var tb = _stor_read_file("/tmp/stiva_lng.tar", lc);
+    assert_eq(_stor_extract_tar(tb, load64(lc), dd), 0, "extract longname/longlink ok");
+    var rp = dd;
+    var dep = 0;
+    while (dep < 5) { rp = _stor_cat2(_stor_cat2(rp, "/"), seg); dep = dep + 1; }
+    rp = _stor_cat2(rp, "/deep.txt");
+    assert_eq(file_exists(rp), 1, "long-path file round-tripped via GNU 'L'");
+    var rl = alloc(512);
+    var rn = sys_readlink(_stor_cat2(dd, "/mylink"), rl, 511);
+    if (rn < 0) { rn = 0; }
+    store8(rl + rn, 0);
+    assert_eq(streq(rl, longtgt), 1, "long symlink target round-tripped via GNU 'K'");
+
+    # DoS guard: an absurd GNU long-name (> 8 KiB, but within the buffer) is
+    # rejected before the O(n) ancestor scan / lstat storm.
+    var big = alloc(16384);
+    var z = 0;
+    while (z < 16384) { store8(big + z, 0); z = z + 1; }
+    store8(big, 120);                  # name "x"
+    store8(big + 156, 76);             # 'L' long name
+    _tar_octal(big + 124, 9000, 11);   # size 9000 > 8192 cap (but <= tar_len - 512)
+    assert_eq(_stor_extract_tar(big, 16384, dd), 0 - 1, "oversized long-name rejected (DoS cap)");
     return 0;
 }
 
@@ -3211,6 +3289,7 @@ fn main() {
     test_oci_config_build_shape();
     test_il_oci_layout_version();
     test_il_parse_full_ref();
+    test_platform_passthrough();
     test_oci_archive_save_load();
     test_registry_credential();
     test_credential_store_set_get_remove();
@@ -3238,6 +3317,7 @@ fn main() {
     test_tar_extract_rejects_traversal();
     test_tar_hardening();
     test_tar_extract_rejects_bad_size();
+    test_tar_longname();
     test_docker_archive_load();
     test_docker_archive_rejects_traversal();
     test_prepare_layers_missing_blob();

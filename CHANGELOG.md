@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Added — group A tails → v3.0.4
+The remaining OCI image-layout/transfer polish; group A is now complete.
+- **GNU longname/longlink** (`storage.cyr`): the tar writer emits `'L'`/`'K'` pseudo-entries
+  (`_tar_write_long`) for names > 255 B (beyond the USTAR name+prefix split) and symlink targets
+  > 100 B, and the reader consumes them (`pending_name`/`pending_link`) — no path-length limit on
+  `export` / layer unpack. Traversal + symlink-ancestor checks still apply to the reconstructed name.
+- **Per-image platform passthrough** (`imagelayout.cyr`): `index.json` manifest descriptors now carry
+  the image's **real** `architecture`/`os` (read from its config blob), so a foreign-arch image loaded
+  from a docker/oci archive keeps its platform instead of being re-stamped `amd64/linux`; a missing
+  config falls back to the host.
+- **Empty-registry ref** (`image.cyr`): `image_ref_full_ref` no longer emits a leading `/` for a
+  registry-less ref (`bareimg:v1`, not `/bareimg:v1`) — the exact inverse of `_il_parse_full_ref`.
+- **Security** (adversarial review of the long-name reader): bound the reconstructed GNU long-name /
+  long-link to 8 KiB (< PATH_MAX·2) and rewrote `_stor_has_symlink_ancestor` to O(n) (mutable prefix +
+  temporary NUL instead of an O(n²) per-component rebuild) — a crafted multi-MB, gzip-amplified name
+  can no longer drive extraction into a byte-copy/`lstat` CPU DoS. The review confirmed the size
+  handling, pending-state clearing, round-trip, and writer size-accounting otherwise sound.
+- **Tests**: `tar_longname` (>255 B path + >100 B symlink target round-trip + the DoS-cap guard),
+  `platform_passthrough` (config arch carried + host fallback), and empty-registry cases — **1184**
+  tests green.
+- Hit the cycc struct-id-20/21 miscompile again on a `Platform` field read in the new descriptor
+  path; sidestepped with literal host values (`normalize_arch("x86_64")`/`"linux"`).
+
 ### Added — tar hardening + docker-archive (group A follow-ups → v3.0.3)
 Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
 - **USTAR long-name** (`storage.cyr`): the writer splits a path across the `name`(100) + `prefix`(155)

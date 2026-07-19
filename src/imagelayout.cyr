@@ -271,16 +271,36 @@ fn _il_parse_full_ref(s) {
 #   { mediaType, digest(manifest), size(manifest bytes), platform{arch,os},
 #     annotations{ ref.name: full_ref } }. Single-node store → current_platform.
 #[must_use]
-fn _il_manifest_descriptor_jv(image, manifest_size) {
-    var ii: Image = image;
+fn _il_manifest_descriptor_jv(store, image, manifest_size) {
     var o = json_v_obj_new();
     json_v_obj_set(o, str_from("mediaType"), json_v_str_new(str_from(media_oci_manifest())));
-    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(_img_manifest_digest(ii))));
+    json_v_obj_set(o, str_from("digest"), json_v_str_new(str_from(_img_manifest_digest(image))));
     json_v_obj_set(o, str_from("size"), json_v_int_new(manifest_size));
-    var pp: Platform = current_platform();
+    # Platform: prefer the image's real config architecture/os (so a foreign-arch
+    # image loaded from a docker/oci archive keeps its platform), else the host.
+    var arch = 0;
+    var os = 0;
+    var cfg_path = _img_blob_path(image_store_root(store), _img_id(image));
+    if (file_exists(cfg_path) == 1) {
+        var cc = alloc(8);
+        var cbuf = _img_read_file(cfg_path, cc);
+        if (cbuf != 0) {
+            var cv = bayan_json_v_parse_str(cbuf, load64(cc));
+            if (cv != 0) {
+                arch = _il_jv_str_field(cv, "architecture");
+                os = _il_jv_str_field(cv, "os");
+            }
+        }
+    }
+    if (arch == 0 || os == 0) {
+        # Host platform (current_platform's hardcoded amd64/linux) via literals —
+        # avoids a Platform struct-field read that cycc miscompiles in this fn.
+        arch = normalize_arch("x86_64");
+        os = "linux";
+    }
     var po = json_v_obj_new();
-    json_v_obj_set(po, str_from("architecture"), json_v_str_new(str_from(pp.architecture)));
-    json_v_obj_set(po, str_from("os"), json_v_str_new(str_from(pp.os)));
+    json_v_obj_set(po, str_from("architecture"), json_v_str_new(str_from(arch)));
+    json_v_obj_set(po, str_from("os"), json_v_str_new(str_from(os)));
     json_v_obj_set(o, str_from("platform"), po);
     var ann = json_v_obj_new();
     var rn = image_ref_full_ref(_image_reference(image));
@@ -361,7 +381,7 @@ fn _il_index_rewrite(store, images) {
         var ii: Image = im;
         var msize = image_store_blob_size(store, _img_manifest_digest(ii));
         if (msize < 0) { msize = 0; }
-        json_v_arr_push(manifests, _il_manifest_descriptor_jv(im, msize));
+        json_v_arr_push(manifests, _il_manifest_descriptor_jv(store, im, msize));
         i = i + 1;
     }
     var root = json_v_obj_new();
@@ -643,7 +663,7 @@ fn image_store_save_archive(store, ref_or_id, out_path) {
     var msize = image_store_blob_size(store, _img_manifest_digest(found));
     if (msize < 0) { msize = 0; }
     var manifests = json_v_arr_new();
-    json_v_arr_push(manifests, _il_manifest_descriptor_jv(found, msize));
+    json_v_arr_push(manifests, _il_manifest_descriptor_jv(store, found, msize));
     var idx = json_v_obj_new();
     json_v_obj_set(idx, str_from("schemaVersion"), json_v_int_new(2));
     json_v_obj_set(idx, str_from("mediaType"), json_v_str_new(str_from(media_oci_index())));

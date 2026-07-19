@@ -241,6 +241,11 @@ fn image_ref_parse(reference) {
 #[must_use]
 fn image_ref_full_ref(ref) {
     var rr: ImageRef = ref;
+    # An empty registry → "repository:tag" (no spurious leading '/'); this stays
+    # the exact inverse of imagelayout's _il_parse_full_ref for registry-less refs.
+    if (strlen(rr.registry) == 0) {
+        return _img_cat3(rr.repository, ":", rr.tag);
+    }
     var reg_slash = _img_cat2(rr.registry, "/");
     var reg_repo = _img_cat2(reg_slash, rr.repository);
     return _img_cat3(reg_repo, ":", rr.tag);
