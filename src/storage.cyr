@@ -375,6 +375,17 @@ fn _stor_read_file(path, out_len) {
 # NUL-padded. Leading spaces and trailing NUL/space are ignored.
 #[must_use]
 fn _stor_parse_octal(p, len) {
+    # GNU base-256 escape: first byte has 0x80 set — value is big-endian binary
+    # in the remaining bytes (used by the writer for size > ~8 GiB, uid/gid > 2^21).
+    if ((load8(p) & 128) != 0) {
+        var bv = load8(p) & 127;            # low 7 bits of the first byte
+        var bi = 1;
+        while (bi < len) {
+            bv = (bv * 256) + load8(p + bi);
+            bi = bi + 1;
+        }
+        return bv;
+    }
     var val = 0;
     var i = 0;
     while (i < len) {
@@ -469,6 +480,44 @@ fn _stor_target_escapes(target) {
     return 0;
 }
 
+# True (1) iff `path` exists and is a symlink (lstat S_IFLNK). Used to avoid
+# writing a file THROUGH an existing symlink during extraction.
+#[must_use]
+fn _stor_is_symlink(path) {
+    var sb = alloc(144);
+    if (sys_lstat(path, sb) != 0) { return 0; }
+    if ((load64(sb + 24) & 61440) == 40960) { return 1; }   # S_IFMT == S_IFLNK
+    return 0;
+}
+
+# True (1) iff any ANCESTOR directory of `dest/name` (a component of `name`, not
+# the final one) already exists as a symlink. A malicious archive can plant a
+# symlink entry (e.g. `x → /etc`) then a later `x/evil` entry that would be
+# written through the link, escaping `dest`. Refusing to descend through a
+# symlinked ancestor blocks that (the O_NOFOLLOW-per-component defense the `tar`
+# crate gives, without an openat wrapper).
+#[must_use]
+fn _stor_has_symlink_ancestor(dest, name) {
+    var sb = alloc(144);
+    var acc = _stor_dup(dest);
+    var len = strlen(name);
+    var i = 0;
+    while (i < len) {
+        var start = i;
+        while (i < len && load8(name + i) != 47) { i = i + 1; }
+        if (i < len) {                          # a '/' follows → this is an ancestor dir
+            if (i > start) {
+                acc = _stor_cat2(_stor_cat2(acc, "/"), _stor_slice(name, start, i));
+                if (sys_lstat(acc, sb) == 0) {
+                    if ((load64(sb + 24) & 61440) == 40960) { return 1; }   # S_IFLNK
+                }
+            }
+            i = i + 1;                          # skip '/'
+        }
+    }
+    return 0;
+}
+
 # Extract a decompressed USTAR archive `tar` of `tar_len` bytes into `dest`.
 # Minimal reader: 512-byte headers — name@0 (100b), mode@100, uid@108, gid@116,
 # size@124 (12b octal), typeflag@156 ('0'/'\0' = file, '5' = dir, '2' = symlink),
@@ -496,6 +545,12 @@ fn _stor_extract_tar(tar, tar_len, dest) {
                 var nlen = 0;
                 while (nlen < 100 && load8(hdr + nlen) != 0) { nlen = nlen + 1; }
                 var name = _stor_slice(hdr, 0, nlen);
+                # USTAR prefix@345(155): if present, full name = prefix + '/' + name.
+                if (load8(hdr + 345) != 0) {
+                    var plen = 0;
+                    while (plen < 155 && load8(hdr + 345 + plen) != 0) { plen = plen + 1; }
+                    name = _stor_cat2(_stor_cat2(_stor_slice(hdr, 345, 345 + plen), "/"), name);
+                }
                 var mode = _stor_parse_octal(hdr + 100, 8);   # perm bits @100
                 var uid = _stor_parse_octal(hdr + 108, 8);    # uid @108
                 var gid = _stor_parse_octal(hdr + 116, 8);    # gid @116
@@ -503,8 +558,10 @@ fn _stor_extract_tar(tar, tar_len, dest) {
                 var typeflag = load8(hdr + 156);
                 pos = pos + 512;                        # advance past header
 
-                # Skip path-traversal names (their data is still stepped over).
-                if (_stor_name_is_safe(name) == 1) {
+                # Reject path-traversal names and refuse to descend through a
+                # symlinked ancestor (either would escape `dest`). Data is still
+                # stepped over below for a skipped entry.
+                if (_stor_name_is_safe(name) == 1 && _stor_has_symlink_ancestor(dest, name) == 0) {
                     var full = _stor_join(dest, name);
                     if (typeflag == 53) {                   # '5' → directory
                         _stor_mkdir_p(full);
@@ -518,12 +575,15 @@ fn _stor_extract_tar(tar, tar_len, dest) {
                             var target = _stor_slice(hdr + 157, 0, lnlen);
                             if (_stor_target_escapes(target) == 0) {
                                 _stor_mkdir_parents(full);
+                                if (_stor_is_symlink(full) == 1) { sys_unlink(full); }
                                 sys_symlink(target, full);
                                 _stor_lchown(full, uid, gid);   # perms follow target → no chmod
                             }
                         } else {
                             if (typeflag == 48 || typeflag == 0) {   # '0' or '\0' → file
                                 _stor_mkdir_parents(full);
+                                # Never write THROUGH an existing symlink at the target.
+                                if (_stor_is_symlink(full) == 1) { sys_unlink(full); }
                                 if (pos + size > tar_len) {
                                     return 0 - 1;            # torn data region
                                 }
@@ -688,6 +748,55 @@ fn _tar_octal(dst, val, width) {
     return 0;
 }
 
+# Choose the USTAR name/prefix split point for `name` (a full path can span the
+# `name` field (100b) + `prefix` field (155b), joined by '/'). Returns:
+#   -2  → fits directly in the name field (len <= 100), no prefix
+#   >=1 → the index of the separating '/' (prefix = name[0..p], part = name[p+1..])
+#   -1  → does not fit USTAR (needs GNU longname — a v3.0.x+ item)
+# Picks the largest valid '/' so the prefix carries as much as possible: the
+# name part after it must be <=100 (and >=1) bytes and the prefix <=155.
+#[must_use]
+fn _tar_find_split(name) {
+    var ln = strlen(name);
+    if (ln <= 100) { return 0 - 2; }
+    var hi = 155;
+    if (hi > ln - 2) { hi = ln - 2; }     # name part >= 1 byte
+    var lo = ln - 101;                     # name part <= 100 → p >= ln-101
+    if (lo < 1) { lo = 1; }                # prefix >= 1 byte
+    if (lo > hi) { return 0 - 1; }
+    var p = hi;
+    while (p >= lo) {
+        if (load8(name + p) == 47) { return p; }   # '/'
+        p = p - 1;
+    }
+    return 0 - 1;
+}
+
+# Write a USTAR numeric field of `fieldwidth` bytes at `dst`. Uses octal ASCII
+# (`fieldwidth-1` digits + NUL) when the value fits; otherwise the GNU base-256
+# escape (first byte 0x80, then the value big-endian in the remaining bytes) so
+# size > ~8 GiB and uid/gid > ~2^21 no longer silently truncate. `_stor_parse_octal`
+# decodes both forms.
+fn _tar_numeric(dst, val, fieldwidth) {
+    var digits = fieldwidth - 1;
+    var limit = 1;
+    var k = 0;
+    while (k < digits) { limit = limit * 8; k = k + 1; }   # 8^digits
+    if (val >= 0 && val < limit) {
+        _tar_octal(dst, val, digits);
+    } else {
+        store8(dst, 128);                  # 0x80 base-256 marker
+        var i = fieldwidth - 1;
+        var v = val;
+        while (i >= 1) {
+            store8(dst + i, v & 255);
+            v = v / 256;
+            i = i - 1;
+        }
+    }
+    return 0;
+}
+
 # Fill a 512-byte USTAR header block at `hdr` for entry `name` (cstr, < 100
 # bytes) with real `mode`/`uid`/`gid`, `size` bytes of data, USTAR `typeflag`
 # (48 '0' regular · 53 '5' directory · 50 '2' symlink), and — for a symlink —
@@ -701,13 +810,20 @@ fn _tar_octal(dst, val, width) {
 # is written back as 6 zero-padded octal digits + NUL(0) + space(0x20) — the
 # GNU-compatible form _stor_parse_octal also reads.
 fn _tar_fill_header(hdr, name, mode, uid, gid, size, typeflag, linkname) {
-    var nlen = strlen(name);
-    memcpy(hdr, name, nlen);              # name@0 (rest stays NUL from zeroed block)
+    # name@0(100) + prefix@345(155), joined by '/' for paths up to 255 bytes
+    # (validated to fit by _stor_write_tar / _tar_find_split before we get here).
+    var sp = _tar_find_split(name);
+    if (sp == 0 - 2) {
+        memcpy(hdr, name, strlen(name));           # fits directly in name@0
+    } else {
+        memcpy(hdr, name + sp + 1, strlen(name) - sp - 1);   # name part @0
+        memcpy(hdr + 345, name, sp);                          # prefix @345
+    }
 
     _tar_octal(hdr + 100, mode, 7);       # mode @100 (perm bits, 7 octal + NUL)
-    _tar_octal(hdr + 108, uid, 7);        # uid @108
-    _tar_octal(hdr + 116, gid, 7);        # gid @116
-    _tar_octal(hdr + 124, size, 11);      # size @124 (11 octal + NUL)
+    _tar_numeric(hdr + 108, uid, 8);      # uid @108 (octal, or base-256 if large)
+    _tar_numeric(hdr + 116, gid, 8);      # gid @116
+    _tar_numeric(hdr + 124, size, 12);    # size @124
     _tar_octal(hdr + 136, 0, 11);         # mtime 0 @136
 
     store8(hdr + 156, typeflag);          # typeflag @156
@@ -854,10 +970,14 @@ fn _stor_write_tar(entries, out_path) {
     var i = 0;
     while (i < nf) {
         var e: TarEntry = vec_get(entries, i);
-        if (strlen(e.relpath) >= 100) {
-            stiva_err_print(STIVA_ERR_STORAGE, "tar entry name exceeds 100 bytes");
+        # Names up to 255 bytes fit the USTAR name(100)+prefix(155) split; only a
+        # genuinely unsplittable name (single >100-byte component, or >255) fails
+        # (GNU longname is a later item).
+        if (_tar_find_split(e.relpath) == 0 - 1) {
+            stiva_err_print(STIVA_ERR_STORAGE, "tar entry name too long for USTAR (>255b or unsplittable)");
             return 0;
         }
+        # linkname is a fixed 100-byte USTAR field (no prefix extension).
         if (e.typeflag == 50) {
             if (strlen(e.payload) >= 100) {
                 stiva_err_print(STIVA_ERR_STORAGE, "tar symlink target exceeds 100 bytes");

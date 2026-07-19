@@ -1604,6 +1604,58 @@ fn test_tar_extract_rejects_traversal() {
     return 0;
 }
 
+# v3.0.3 tar hardening: USTAR long-name (name+prefix split), base-256 numeric
+# fields, and symlink-ancestor write-through protection.
+fn test_tar_hardening() {
+    test_group("tar_hardening");
+
+    # B2 base-256: a value beyond 11 octal digits (8^11 ≈ 8.59e9) uses base-256.
+    var buf = alloc(16);
+    var z = 0;
+    while (z < 16) { store8(buf + z, 0); z = z + 1; }
+    _tar_numeric(buf, 20000000000, 12);
+    assert_eq((load8(buf) & 128) != 0, 1, "large size → base-256 marker");
+    assert_eq(_stor_parse_octal(buf, 12), 20000000000, "base-256 size round-trips");
+    _tar_numeric(buf, 420, 8);
+    assert_eq((load8(buf) & 128) == 0, 1, "small value → octal (no base-256 bit)");
+    assert_eq(_stor_parse_octal(buf, 8), 420, "octal value round-trips");
+
+    # B1 long-name: a >100-byte relative path via name(100)+prefix(155) split.
+    var d = "/tmp/stiva_ln_src";
+    var dd = "/tmp/stiva_ln_dst";
+    _stor_remove_dir_all(d);
+    _stor_remove_dir_all(dd);
+    sys_mkdir(d, 493);
+    var a60 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";   # 60
+    var b60 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";   # 60
+    var s1 = _stor_cat2(_stor_cat2(d, "/"), a60);
+    sys_mkdir(s1, 493);
+    var s2 = _stor_cat2(_stor_cat2(s1, "/"), b60);
+    sys_mkdir(s2, 493);
+    file_write_all(_stor_cat2(s2, "/f.txt"), "deep", 4);   # rel path = 60+1+60+1+5 = 127b
+    assert_eq(create_tar(d, "/tmp/stiva_ln.tar"), 1, "create_tar with a 127-byte name ok");
+    sys_mkdir(dd, 493);
+    var lc = alloc(8);
+    var tb = _stor_read_file("/tmp/stiva_ln.tar", lc);
+    assert_eq(_stor_extract_tar(tb, load64(lc), dd), 0, "extract long-name ok");
+    var deep = _stor_cat2(_stor_cat2(_stor_cat2(_stor_cat2(_stor_cat2(dd, "/"), a60), "/"), b60), "/f.txt");
+    assert_eq(file_exists(deep), 1, "long-path file reconstructed from name+prefix");
+
+    # B3 symlink-ancestor: an entry under a symlinked directory is NOT written through.
+    var sd = "/tmp/stiva_slnk_dst";
+    _stor_remove_dir_all(sd);
+    _stor_remove_dir_all("/tmp/stiva_slnk_tgt");
+    sys_mkdir(sd, 493);
+    sys_mkdir("/tmp/stiva_slnk_tgt", 493);
+    sys_symlink("/tmp/stiva_slnk_tgt", _stor_cat2(sd, "/evil"));   # planted symlink ancestor
+    xunlink("/tmp/stiva_slnk_tgt/pwn");
+    var star = alloc(2048);
+    var slen = _t_build_tar(star, "evil/pwn", "owned", 5);
+    assert_eq(_stor_extract_tar(star, slen, sd), 0, "extract ok");
+    assert_eq(file_exists("/tmp/stiva_slnk_tgt/pwn"), 0, "write through symlinked ancestor blocked");
+    return 0;
+}
+
 # prepare_layers on a store with no matching blob returns 0 (LayerUnpack).
 fn test_prepare_layers_missing_blob() {
     test_group("prepare_layers_missing_blob");
@@ -3097,6 +3149,7 @@ fn main() {
     test_unpack_layer_not_gzip();
     test_tar_perms_roundtrip();
     test_tar_extract_rejects_traversal();
+    test_tar_hardening();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
     test_verify_integrity_clean();

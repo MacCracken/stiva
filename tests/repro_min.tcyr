@@ -1,0 +1,48 @@
+# Decisive experiment: 6-module universe (real Image from image.cyr), but `images`
+# comes from a SIMPLE opaque callee defined here (not image_store_load_index).
+# If this reproduces, the trigger is the universe + real Image, not the specific
+# callee. Compares fi.<field> (struct access) vs load64 ground truth.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+
+fn my_load_index2(store) {
+    var v = vec_new();
+    var im = alloc(48);
+    store64(im + 0, 111);
+    store64(im + 24, 333);
+    store64(im + 40, 222);
+    vec_push(v, im);
+    return v;
+}
+
+fn repro3(store, out) {
+    var images = my_load_index2(store);
+    var found = vec_get(images, 0);
+    if (found == 0) { return 0; }
+    var fi: Image = found;
+    store64(out + 0, fi.manifest_digest);
+    store64(out + 8, fi.id);
+    store64(out + 16, fi.layers);
+    return 1;
+}
+
+fn main() {
+    var out = alloc(24);
+    store64(out + 0, 0); store64(out + 8, 0); store64(out + 16, 0);
+    repro3(0, out);
+    var bad = 0;
+    if (load64(out + 0) != 222) { bad = bad + 2; }
+    if (load64(out + 8) != 111) { bad = bad + 1; }
+    if (load64(out + 16) != 333) { bad = bad + 4; }
+    if (bad == 0) { sakshi_info("MATCH", strlen("MATCH")); }
+    if (bad != 0) { sakshi_info("MISMATCH", strlen("MISMATCH")); }
+    return bad;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

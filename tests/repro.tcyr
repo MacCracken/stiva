@@ -1,0 +1,65 @@
+# Behavioral oracle for the save_archive struct-field miscompile.
+# Imports an image, saves it as an oci-archive, loads it into a second store, and
+# checks the id + manifest digest survive the round-trip. With save_archive using
+# struct-field access (var fi: Image; fi.id / fi.manifest_digest), the reads
+# return garbage, so the archive names blobs by garbage digests and the round-trip
+# fails. With the raw-offset accessors, it passes.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+include "src/mcp.cyr"
+include "src/stiva_core.cyr"
+
+fn main() {
+    var ra = "/tmp/stiva_repro_a";
+    _stor_remove_dir_all(ra);
+    var sa = image_store_new(ra);
+
+    var content = "archive-roundtrip-rootfs";
+    file_write_all("/tmp/stiva_repro.tar", content, strlen(content));
+    var img = image_import(sa, "/tmp/stiva_repro.tar", "arc", "v1");
+
+    # Ground truth via load64 (never miscompiled).
+    var truth_md = load64(img + 40);
+    var truth_id = load64(img + 0);
+    var truth_ly = load64(img + 24);
+
+    var out = alloc(24);
+    store64(out + 0, 0);
+    store64(out + 8, 0);
+    store64(out + 16, 0);
+    var rc = _repro2(sa, out);
+
+    var bad = 0;
+    if (load64(out + 0) != truth_md) { bad = bad + 2; }
+    if (load64(out + 8) != truth_id) { bad = bad + 1; }
+    if (load64(out + 16) != truth_ly) { bad = bad + 4; }
+    if (bad == 0) { sakshi_info("MATCH", strlen("MATCH")); }
+    if (bad != 0) { sakshi_info("MISMATCH", strlen("MISMATCH")); }
+    return bad;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

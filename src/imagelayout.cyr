@@ -648,7 +648,7 @@ fn image_store_save_archive(store, ref_or_id, out_path) {
     vec_push(entries, _tar_entry_new("index.json", 48, 420, 0, 0, str_len(idx_s), str_data(idx_s)));
 
     # blobs: manifest, config, then each layer. Image/Layer fields are read via
-    # raw-offset accessors — cycc miscompiles the struct-field access here.
+    # raw-offset accessors — cycc miscompiles the struct-field access in this fn.
     var me = _il_blob_tar_entry(store, _img_manifest_digest(found));
     if (me == 0) { return 0 - 1; }
     vec_push(entries, me);
