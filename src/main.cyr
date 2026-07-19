@@ -57,7 +57,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.2 — OCI container runtime (Cyrius port)";
+    return "3.0.3 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).

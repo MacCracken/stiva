@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.4.66** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.2
+- **Version**: SemVer, currently 3.0.3
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)

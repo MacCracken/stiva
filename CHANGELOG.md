@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Added — tar hardening + docker-archive (group A follow-ups → v3.0.3)
+Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
+- **USTAR long-name** (`storage.cyr`): the writer splits a path across the `name`(100) + `prefix`(155)
+  fields (paths up to 255 B) and the reader reconstructs it — real rootfs `export` no longer fails on
+  the common >100-byte path. `_tar_find_split` picks the split; genuinely unsplittable names (single
+  >100-byte component, or >255 B) still error (GNU longname is a later item).
+- **Base-256 numeric fields**: `_tar_numeric` emits the GNU base-256 escape when a value overflows the
+  octal field, and `_stor_parse_octal` decodes it — `size` > ~8 GiB and `uid`/`gid` > 2²¹ no longer
+  silently truncate.
+- **Symlink write-through protection**: extraction refuses to descend through a symlinked ancestor
+  (`_stor_has_symlink_ancestor`) and unlinks an existing symlink at a file target before writing —
+  closing the absolute-symlink escape the A3 review flagged (complements the `..`/absolute-name and
+  `..`-target rejection already in place).
+- **`docker-archive` read** (`imagelayout.cyr`): `stiva load` now accepts a `docker save` tarball
+  (`manifest.json` + config + uncompressed layer tars) — stores the config blob verbatim, gzips each
+  layer into an OCI gzip blob, assembles + stores an OCI manifest, and indexes under `RepoTags[0]`.
+  Reuses the OCI store path with **no new struct types** (keeps clear of the cycc struct-id-20/21
+  collision); a config/layer failure skips the image with an error.
+- **External-ref round-trip**: `_il_parse_full_ref` now treats a `:` as a tag separator only when it
+  follows the last `/`, so a port-registry ref.name (`localhost:5000/repo`, with or without a tag)
+  reconstructs correctly (A2 review Finding 4).
+- **Tests**: `tar_hardening` (long-name round-trip, base-256, symlink-ancestor block),
+  `docker_archive_load`, and port-registry cases in `il_parse_full_ref` — **1168** tests green.
+- Still deferred: GNU longname for names > 255 B, per-image `platform` passthrough in index
+  descriptors (single-node is always `amd64/linux`).
+
 ### Added — perms-tar + oci-archive transfer (group A, A3+A4 → v3.0.2)
 - **A3 — perms-preserving tar** (`storage.cyr`): `create_tar` now emits real `mode`/`uid`/`gid`
   plus **directory** (`'5'`) and **symlink** (`'2'`, stored as the link — not dereferenced) entries,

@@ -1175,6 +1175,16 @@ fn test_il_parse_full_ref() {
     assert_eq(streq(bb.registry, "local"), 1, "inverse registry");
     assert_eq(streq(bb.repository, "app"), 1, "inverse repo");
     assert_eq(streq(bb.tag, "v2"), 1, "inverse tag");
+    # port-registry WITH a tag: the ':' after the last '/' is the tag.
+    var pr: ImageRef = _il_parse_full_ref("localhost:5000/repo:v1");
+    assert_eq(streq(pr.registry, "localhost:5000"), 1, "port registry kept");
+    assert_eq(streq(pr.repository, "repo"), 1, "port repo");
+    assert_eq(streq(pr.tag, "v1"), 1, "port tag");
+    # port-registry WITHOUT a tag: the port ':' is NOT mistaken for a tag.
+    var pn: ImageRef = _il_parse_full_ref("localhost:5000/repo");
+    assert_eq(streq(pn.registry, "localhost:5000"), 1, "port registry (no tag)");
+    assert_eq(streq(pn.repository, "repo"), 1, "port repo (no tag)");
+    assert_eq(streq(pn.tag, "latest"), 1, "default tag when only a port colon");
     return 0;
 }
 
@@ -1653,6 +1663,42 @@ fn test_tar_hardening() {
     var slen = _t_build_tar(star, "evil/pwn", "owned", 5);
     assert_eq(_stor_extract_tar(star, slen, sd), 0, "extract ok");
     assert_eq(file_exists("/tmp/stiva_slnk_tgt/pwn"), 0, "write through symlinked ancestor blocked");
+    return 0;
+}
+
+# v3.0.3 docker-archive read: a `docker save` layout (manifest.json + config +
+# uncompressed layer tars) is converted into a valid OCI image on load.
+fn test_docker_archive_load() {
+    test_group("docker_archive_load");
+    var d = "/tmp/stiva_dka_src";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\"]}}";
+    file_write_all(_stor_cat2(d, "/config.json"), cfg, strlen(cfg));
+    var lay = "fake-layer-bytes";
+    file_write_all(_stor_cat2(d, "/layer.tar"), lay, strlen(lay));
+    var man = "[{\"Config\":\"config.json\",\"RepoTags\":[\"myapp:v9\"],\"Layers\":[\"layer.tar\"]}]";
+    file_write_all(_stor_cat2(d, "/manifest.json"), man, strlen(man));
+    assert_eq(create_tar(d, "/tmp/stiva_dka.tar"), 1, "pack docker-archive");
+
+    var sr = "/tmp/stiva_dka_store";
+    _stor_remove_dir_all(sr);
+    var store = image_store_new(sr);
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dka.tar"), 1, "loaded 1 image from docker-archive");
+    var listed = image_store_list(store);
+    assert_eq(vec_len(listed), 1, "one image in store");
+    var got = vec_get(listed, 0);
+    # RepoTag "myapp:v9" → docker.io/library/myapp:v9 (Docker-hub normalization).
+    assert_eq(streq(image_ref_full_ref(_image_reference(got)), "docker.io/library/myapp:v9"), 1, "ref normalized");
+    assert_eq(vec_len(_img_layers(got)), 1, "one gzip layer");
+    assert_eq(file_exists("/tmp/stiva_dka_store/oci-layout"), 1, "oci-layout written on load");
+    # a non-archive tar (no oci-layout, no manifest.json) is rejected.
+    var junk = "/tmp/stiva_dka_junk";
+    _stor_remove_dir_all(junk);
+    sys_mkdir(junk, 493);
+    file_write_all(_stor_cat2(junk, "/hello.txt"), "hi", 2);
+    create_tar(junk, "/tmp/stiva_dka_junk.tar");
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dka_junk.tar"), 0 - 1, "non-archive rejected");
     return 0;
 }
 
@@ -3150,6 +3196,7 @@ fn main() {
     test_tar_perms_roundtrip();
     test_tar_extract_rejects_traversal();
     test_tar_hardening();
+    test_docker_archive_load();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
     test_verify_integrity_clean();
