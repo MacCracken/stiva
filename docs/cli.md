@@ -1,11 +1,11 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`), but in **v3.0.0** only the synchronous subset executes end-to-end; the rest
-print a clear "not yet wired" message (their module logic is ported — only the
-wiring over the sync core remains). The **Status** column marks each:
+`--help`); **21 of 35 execute end-to-end today**, and the rest print a clear "not yet
+wired" message (their module logic is ported — only the wiring over the sync core
+remains). The **Status** column marks each:
 
-- **Live** — works end-to-end in v3.0.0.
+- **Live** — works end-to-end today.
 - **v3.0.x (planned)** — buildable now (blocking, over the ported sync core), just not wired yet.
 - **v3.1 (blocked)** — gated on an external landing (kavach spawn/gate, cyrius coroutines, bayan YAML, sankoch zstd).
 
@@ -13,8 +13,7 @@ wiring over the sync core remains). The **Status** column marks each:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--root <PATH>` | `/var/lib/agnos/containers` | Container data directory |
-| `--images <PATH>` | `/var/lib/agnos/images` | Image storage directory |
+| `--root <PATH>` | `/var/lib/agnos/containers` | Root directory for container **and image** data (the image store — `blobs/sha256/`, `index.json`, `oci-layout` — lives under it) |
 
 ## Commands
 
@@ -22,7 +21,7 @@ wiring over the sync core remains). The **Status** column marks each:
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `stiva import <FILE> [NAME] [TAG]` | **Live** | Import tar archive as a local image (name→`imported`, tag→`latest` if omitted) |
+| `stiva import <FILE> [NAME] [TAG]` | **Live** | Import a rootfs tar as a local OCI image — config + manifest blobs + `index.json` entry (name→`imported`, tag→`latest` if omitted) |
 | `stiva images` | **Live** | List local images |
 | `stiva tag <SOURCE> <TARGET>` | **Live** | Tag a local image with a new reference |
 | `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
@@ -94,7 +93,7 @@ wiring over the sync core remains). The **Status** column marks each:
 | `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.1 (blocked) — needs a bayan YAML parser) |
 | `-o, --output <PATH>` | stdout | Output file path |
 
-> In v3.0.0, `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose`
+> `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose`
 > is v3.1 (blocked), pending a bayan YAML parser.
 
 ## `Stivafile` Format

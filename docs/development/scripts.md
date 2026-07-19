@@ -47,11 +47,11 @@ Each entry records:
 ```yaml
 ---
 timestamp: 2026-07-17T06:00:00Z
-version: 3.0.0
+version: 3.0.4
 commit: abc1234
 branch: main
 cyrius: cyrius 6.4.66
-tests: 1033
+tests: 1184
 test_ms: 150
 build_ms: 12000
 loc: 4500

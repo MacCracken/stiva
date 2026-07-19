@@ -37,11 +37,12 @@ stiva (this crate)
 
 | Module | Description |
 |--------|-------------|
-| `image` | OCI image pull, push, build, store, layer management |
+| `image` | Substrate: image ref parsing, `Image`/`Layer` structs, content-addressable blob store + digests, integrity verify |
+| `imagelayout` | OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store, `oci-archive`/`docker-archive` save/load (net-new, v3.0.1–v3.0.4) |
 | `container` | Container lifecycle, state persistence, events |
 | `runtime` | OCI spec generation, kavach integration, cgroups, CRIU |
 | `network` | Bridge networks, NAT, DNS, IP pools, port mapping |
-| `storage` | Overlay filesystem, volume mounts, layer unpacking |
+| `storage` | Overlay filesystem, volume mounts, layer unpacking, perms-preserving USTAR tar codec |
 | `registry` | OCI distribution client (pull + push), token auth |
 | `build` | TOML-based image builds (Stivafile) |
 | `ansamblu` | Multi-container orchestration, DAG ordering |

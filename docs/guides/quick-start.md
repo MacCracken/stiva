@@ -14,8 +14,9 @@ The `stiva` binary provides 19 subcommands. Run `stiva --help` for the full list
 
 ## Importing an Image
 
-Registry pull over HTTP (`stiva pull`) is a v3.0.x (planned) feature. In v3.0.0, load images
-from a local OCI archive with `import`:
+Registry pull over HTTP (`stiva pull`) is a v3.0.x (planned) feature. Today, load a local
+image from an `oci-archive` (or a `docker save` tarball) with `stiva load`, or import a
+rootfs tar as a single-layer image with `import`:
 
 ### CLI
 
@@ -50,7 +51,7 @@ Secrets are injected through kavach and never stored in the container config.
 > **Milestones** — streaming logs (`logs -f`) and the `Stiva` library facade are
 > **v3.0.x (planned)** — blocking glue over the sync core, buildable now but not yet
 > wired. Detached/background runs (`run -d`) stay **v3.1 (blocked)**, gated on kavach
-> `sandbox_spawn`. In v3.0.0 `run` executes in the foreground.
+> `sandbox_spawn`. Today `run` executes in the foreground.
 
 ## Basic Networking
 
@@ -104,7 +105,7 @@ stiva build
 stiva build -f Stivafile -c ./project
 ```
 
-> **v3.0.x (planned)** — the Stivafile parser is implemented in v3.0.0; running a layer
+> **v3.0.x (planned)** — the Stivafile parser is implemented today; running a layer
 > build (`stiva build`) is buildable now over the sync core but not yet wired.
 
 ## Cleanup

@@ -81,12 +81,13 @@ program entry (includes + CLI dispatch). `cyrius.cyml` `[lib].modules` drives
 
 | Module | Purpose |
 |--------|---------|
-| `image` | OCI image store, layers, tag/import/export, GC, blob integrity verify (registry pull/push → v3.1) |
-| `container` | Container lifecycle + state persistence; OCI bundle parse / state (the async `ContainerManager` → v3.1) |
-| `runtime` | OCI runtime spec, kavach sandbox, cgroups v2, /proc walk, host↔rootfs copy (exec/CRIU → v3.1) |
+| `image` | Substrate: image ref parsing, `Image`/`Layer` structs, content-addressable **blob store** + digests, integrity verify (the OCI-layout store + `save`/`load` moved to `imagelayout`) |
+| `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store, `oci-archive`/`docker-archive` `save`/`load` |
+| `container` | Container lifecycle + state persistence; OCI bundle parse / state (the `ContainerManager` → v3.0.x) |
+| `runtime` | OCI runtime spec, kavach sandbox, cgroups v2, /proc walk, host↔rootfs copy (exec/CRIU → v3.0.x) |
 | `network/` | Bridge, NAT, DNS, IP pools (v4+v6), port mapping, network policy |
-| `storage` | Overlay FS, volume mounts, gzip layer unpack, USTAR tar writer (zstd → v3.1) |
-| `registry` | OCI ref/manifest parsing, credential store (the async HTTP client → v3.1) |
+| `storage` | Overlay FS, volume mounts, gzip layer unpack (zstd → v3.1); **perms-preserving USTAR tar** (mode/uid/gid, dir/symlink, GNU longname, base-256; hardened) |
+| `registry` | OCI ref/manifest parsing + serde, credential store (the blocking HTTP pull/push client → v3.0.x group B) |
 | `build` | Stivafile TOML parse, build-cache key (multi-stage layer build → v3.1) |
 | `ansamblu` | TOML ansamblu parse, DAG ordering, rolling-update / scaling logic |
 | `health` | Restart policies, heartbeat health via majra |

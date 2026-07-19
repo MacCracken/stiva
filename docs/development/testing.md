@@ -13,7 +13,7 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**1033 tests** across `tests/*.tcyr`: `stiva.tcyr` (734), `runpath.tcyr` (171),
+**1184 tests** across `tests/*.tcyr`: `stiva.tcyr` (869), `runpath.tcyr` (187),
 `mgmt.tcyr` (128).
 
 ## Test Organization
@@ -51,8 +51,8 @@ The suite is split into three files to stay under the cycc identifier-dedup cap:
 
 | File | Focus |
 |------|-------|
-| `tests/stiva.tcyr` (734) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
-| `tests/runpath.tcyr` (171) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and image ref/blob/index round-trips |
+| `tests/stiva.tcyr` (869) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) **plus group A**: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), and `oci-archive`/`docker-archive` load |
+| `tests/runpath.tcyr` (187) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and the image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`) |
 | `tests/mgmt.tcyr` (128) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling, `agent` registration records, `health` policies |
 
 Run one group by grepping its `test_group("...")` label, or run everything with

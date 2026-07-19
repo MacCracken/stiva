@@ -13,23 +13,25 @@
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.0 RELEASED: Rust → Cyrius (single-node runtime; v3.0.x completes it, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.4 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
-pattern). **v3.0.0 = a working single-node OCI runtime**: all 16 Rust modules → 25
-Cyrius `src/*.cyr` domain modules + a **19-verb CLI** (run/ps/stop/rm/inspect/
-images/rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert)
-that imports, runs, and manages real containers end-to-end. **1033 tests** across the
-`.tcyr` files (run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.66**.
-Parity ≈ **67%** of the Rust surface — the port stops cleanly at the sync/async
-boundary (algorithm-dense modules 85–100%; the low-parity ones are async wrappers whose
-capability is delivered synchronously). The v3.0.x sync backlog is essentially complete:
-`oci`, `image` (verify_integrity), `runtime` (/proc walk + host↔rootfs copy), `registry`
-(credential store), `build` (build_cache_key), `ansamblu` (parse_ansamblu), `mcp` (the two
-sync tool handlers), and `intents` (variant-payload serde) are ported. The only sync
-remainder is `build`'s OCI config/manifest JSON assembly (embedded in the async build_image;
-serde HashMap ordering is nondeterministic). See `docs/development/roadmap.md` for the parity
-snapshot + v3.0.x (Wave 2) / v3.1 (blocked residue) split.
+pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
+complete**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
+rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
+**1184 tests** across the `.tcyr` files (stiva 869 · runpath 187 · mgmt 128; run via
+`cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.66**.
+
+**Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
+is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
+ad-hoc `images.json` **retired** — the store/index/import/save layer lives in
+`imagelayout.cyr`); full OCI image **config + manifest** assembly (deterministic bytes —
+the old "serde HashMap ordering" worry was Rust-only; bayan objects are insertion-ordered);
+a **perms-preserving USTAR tar** codec (mode/uid/gid + dir/symlink, GNU longname, base-256;
+traversal/symlink/DoS-hardened); and **`save`/`load` as `oci-archive`** plus a
+**`docker-archive` read** path. Each increment was adversarially reviewed. See
+`docs/development/roadmap.md` for the parity snapshot + v3.0.x / v3.1 split.
 
 The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.cyr`) is
 ready and the runtime is single-threaded run-to-completion, so most of the remaining
@@ -44,8 +46,15 @@ true multiplexed streaming (need cyrius stackless coroutines), MCP `handle_run` 
 NOT mostly Cyrius gaps — JSON/TOML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
 gzip/xz/lz4/bzip2 (`sankoch`), async (`lib/async.cyr`) all EXIST. Genuine stdlib gaps
 are narrow, and are the **v3.1 upstream residue**: **zstd** layers (sankoch) and
-`convert compose` / a **YAML** parser (bayan); the USTAR **tar writer** is now
-implemented (`storage.cyr create_tar`). `rust-old/` stays the oracle until v3.1.
+`convert compose` / a **YAML** parser (bayan). `rust-old/` stays the oracle for the
+ported modules; the group A OCI-layout/transfer surface is **net-new**, so the OCI
+**image-spec** (not rust-old) is its oracle.
+
+> ⚠️ **cycc miscompile (open, worked around):** cycc's struct-id **20/21 ↔ SIMD f64v2/f64v4
+> sentinel collision** makes `Image`/`Layer`/`Platform` field access read garbage in some
+> function contexts; it moves as code shifts. Work around with **raw-offset accessors**
+> (`_img_id`/`_img_layers`/`_img_manifest_digest`/`_layer_digest`) or literals, NOT
+> `var x: T = ptr; x.field`, in the affected hot paths. Repro scratch: `docs/development/cycc-repro/`.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.
@@ -90,15 +99,16 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 
 daimon (container management), sutra (fleet deployment)
 
-## Modules (16)
+## Modules (16 Rust modules + the net-new `imagelayout`)
 
 | Module | Purpose |
 |--------|---------|
-| `image` | OCI image pull, push, build, store, layer management, GC |
+| `image` | Substrate: image reference parsing, `Image`/`Layer`/`ImageRef` structs, content-addressable **blob store** + sha256 digests, integrity verify (the store/index/import layer moved to `imagelayout`) |
+| `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store (load/add/remove/gc/import/tag), and `oci-archive` + `docker-archive` `save`/`load` |
 | `container` | Container lifecycle, state persistence, events, restart, rename, update |
 | `runtime` | OCI spec, kavach integration, cgroups (CPU/mem/PID/IO), CRIU (checkpoint/pre-dump/lazy), exec, signals, export/import, copy |
 | `network/` | Bridge, NAT, DNS, IP pools (IPv4+IPv6), port mapping, network policy, container DNS registry (6 submodules) |
-| `storage` | Overlay FS, volume mounts, layer unpacking (gzip + zstd) |
+| `storage` | Overlay FS, volume mounts, layer unpacking (gzip; zstd → v3.1); **perms-preserving USTAR tar** codec (mode/uid/gid, dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) |
 | `registry` | OCI distribution client (pull + push + chunked upload), token auth, credential store, tag listing, catalog, referrers API |
 | `build` | TOML-based image builds (Stivafile), multi-stage builds, build cache |
 | `ansamblu` | Multi-container orchestration, DAG ordering, rolling updates, scaling, service logs |
@@ -161,7 +171,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1033 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases.
+- **Tests + benchmarks are the way.** 1184 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -196,7 +206,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1033 Cyrius tests** across `tests/*.tcyr` (stiva 734 · runpath 171 · mgmt 128), each
+**1184 Cyrius tests** across `tests/*.tcyr` (stiva 869 · runpath 187 · mgmt 128), each
 mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split across files
 because a monolith hits the cycc identifier-dedup cap.
 
