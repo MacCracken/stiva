@@ -284,7 +284,7 @@ fn is_unprivileged() {
 # Splits $PATH on ':' and tests each `dir/name` for existence.
 # Returns 1 if found, 0 otherwise (including no PATH set).
 #[must_use]
-fn which(name) {
+fn stiva_which(name) {
     var path = getenv("PATH");
     if (path == 0) { return 0; }
     var plen = strlen(path);
@@ -322,10 +322,10 @@ fn which(name) {
 #[must_use]
 fn available_backends() {
     var backends = vec_new();
-    if (which("pasta") == 1) {
+    if (stiva_which("pasta") == 1) {
         vec_push(backends, NETWORK_ROOTLESS_BACKEND_PASTA);
     }
-    if (which("slirp4netns") == 1) {
+    if (stiva_which("slirp4netns") == 1) {
         vec_push(backends, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS);
     }
     return backends;

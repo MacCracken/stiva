@@ -7,7 +7,7 @@
 #
 # i64-everywhere representation:
 #   * Every public struct (FleetDeployment, DeploymentConstraints, FleetNode,
-#     NodeCapacity, ScheduleResult) is a heap pointer to an 8-byte-per-field
+#     FleetNodeCapacity, ScheduleResult) is a heap pointer to an 8-byte-per-field
 #     record; constructors alloc and return the pointer. `alloc_init()` must
 #     have run once before use.
 #   * String fields (`id`, `image`, `address`, `node_id`) are NUL-terminated
@@ -70,9 +70,14 @@ fn fleet_node_status_name(s) {
     return "unknown";
 }
 
-# ── NodeCapacity (rust-old: struct NodeCapacity) ───────────────
+# ── FleetNodeCapacity (rust-old: struct NodeCapacity) ───────────────
+# Renamed from the oracle's bare `NodeCapacity`: samay (pulled transitively via
+# kavach ≥ 3.8.0) defines its own `NodeCapacity` — 9 fields / 72 B / 5-arg ctor
+# vs this 4 / 32 B / 4-arg one — and cycc is SILENT on duplicate structs, so the
+# clash surfaces as a bogus parse error in whichever file compiles last. Same
+# `stiva_*`-prefix idiom as stiva_audit_log_new / stiva_port_mapping_new.
 # 4 fields × 8 bytes = 32.
-struct NodeCapacity {
+struct FleetNodeCapacity {
     memory_mb;            # u64
     cpus;                 # u32
     max_containers;       # u32
@@ -80,9 +85,9 @@ struct NodeCapacity {
 }
 
 #[must_use]
-fn node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
+fn fleet_node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
     var p = alloc(32);
-    var c: NodeCapacity = p;
+    var c: FleetNodeCapacity = p;
     c.memory_mb = memory_mb;
     c.cpus = cpus;
     c.max_containers = max_containers;
@@ -92,7 +97,7 @@ fn node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
 
 # ── FleetNode (rust-old: struct FleetNode) ─────────────────
 # id : cstr, address : cstr, labels : hashmap<str,str> handle (0 = empty),
-# capacity : NodeCapacity pointer, status : NodeStatus int,
+# capacity : FleetNodeCapacity pointer, status : NodeStatus int,
 # last_seen : epoch-ns i64. 6 fields × 8 bytes = 48.
 struct FleetNode {
     id;
@@ -218,7 +223,7 @@ fn node_matches_constraints(node, constraints) {
         }
     }
 
-    var cap: NodeCapacity = n.capacity;
+    var cap: FleetNodeCapacity = n.capacity;
 
     # Memory constraint (Some(min) → node.memory_mb >= min).
     if (c.min_memory_mb != 0 - 1) {
@@ -239,7 +244,7 @@ fn node_matches_constraints(node, constraints) {
 #[inline]
 fn free_slots(node) {
     var n: FleetNode = node;
-    var cap: NodeCapacity = n.capacity;
+    var cap: FleetNodeCapacity = n.capacity;
     if (cap.max_containers < cap.running_containers) { return 0; }
     return cap.max_containers - cap.running_containers;
 }
@@ -311,14 +316,14 @@ fn _fleet_sort_by_running_asc(cands) {
     while (i < n) {
         var cur = vec_get(cands, i);
         var curn: FleetNode = cur;
-        var curcap: NodeCapacity = curn.capacity;
+        var curcap: FleetNodeCapacity = curn.capacity;
         var key = curcap.running_containers;
         var j = i - 1;
         var done = 0;
         while (j >= 0 && done == 0) {
             var pv = vec_get(cands, j);
             var pvn: FleetNode = pv;
-            var pvcap: NodeCapacity = pvn.capacity;
+            var pvcap: FleetNodeCapacity = pvn.capacity;
             if (pvcap.running_containers > key) {
                 vec_set(cands, j + 1, pv);
                 j = j - 1;
@@ -340,14 +345,14 @@ fn _fleet_sort_by_running_desc(cands) {
     while (i < n) {
         var cur = vec_get(cands, i);
         var curn: FleetNode = cur;
-        var curcap: NodeCapacity = curn.capacity;
+        var curcap: FleetNodeCapacity = curn.capacity;
         var key = curcap.running_containers;
         var j = i - 1;
         var done = 0;
         while (j >= 0 && done == 0) {
             var pv = vec_get(cands, j);
             var pvn: FleetNode = pv;
-            var pvcap: NodeCapacity = pvn.capacity;
+            var pvcap: FleetNodeCapacity = pvn.capacity;
             if (pvcap.running_containers < key) {
                 vec_set(cands, j + 1, pv);
                 j = j - 1;
@@ -564,7 +569,7 @@ fn plan_rollback(nodes, count, constraints) {
     while (i < count) {
         var node = vec_get(nodes, i);
         var fn0: FleetNode = node;
-        var cap: NodeCapacity = fn0.capacity;
+        var cap: FleetNodeCapacity = fn0.capacity;
         if (fn0.status == FLEET_NODE_NOT_READY) {
             if (cap.running_containers > 0) {
                 var k = 0;

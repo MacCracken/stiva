@@ -5,6 +5,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Fixed — dependency hygiene: three symbol collisions + an unlocked `lib/`
+kavach 3.8.0 took `[deps.samay]`, and samay declares `[deps.ai-hwaccel]`. Because cyrius
+auto-includes every **active** `[deps.*]` module into every compilation unit, both bundles
+(~279 KB) landed in stiva's `lib/` — **undeclared and unlocked** (83 lock entries against 85
+`lib/*.cyr`), pulled in by a `path = "../kavach"` override that silently beats `tag = "3.7.1"`.
+They brought three last-def-wins collisions. cycc warns on duplicate *fns* but is **silent on
+duplicate structs**, so the struct case surfaced as 8 bogus parse errors in `src/fleet.cyr`.
+
+- **`backend_name` — was live, observable corruption.** ai-hwaccel defines its own over an
+  unrelated enum, and **both start at `0`**, so `stiva info` logged
+  `computing security strength score: intel-npu` instead of `oci`. Not fixable here: kavach
+  calls it in its own error paths (`lifecycle.cyr:165`, `backend_dispatch.cyr:48`). Fixed
+  upstream in **kavach 3.8.2**, which renames its OS-backend namer to `os_backend_name` and
+  leaves the bare name to ai-hwaccel; stiva's two call sites updated
+  (`src/runtime.cyr:841,955`). Verified: `stiva info` reports `oci` again.
+- **`struct NodeCapacity` + `node_capacity_new`** → `FleetNodeCapacity` /
+  `fleet_node_capacity_new` (`src/fleet.cyr`, `tests/mgmt.tcyr`). samay's is 9 fields / 72 B /
+  5 args against stiva's 4 / 32 B / 4 args.
+- **`which`** → `stiva_which` (`src/network_rootless.cyr`). stiva's returns a boolean `1/0`,
+  ai-hwaccel's a heap cstring pointer, and both callers test `== 1` — the wrong winner makes
+  rootless pasta/slirp4netns detection silently report "no backends available".
+- `path_exists` also collides but is benign (identical `1/0` semantics).
+
+### Changed — samay + ai-hwaccel are declared, pinned, and default-off
+Root cause was upstream: kavach forced 279 KB on every consumer for a bridge it does not ship
+(`src/samay_bridge.cyr` is excluded from its `[lib].modules`; `dist/kavach.cyr` has zero samay
+references). **kavach 3.8.2** makes both deps `optional` behind a default-on `scheduler`
+feature — transitive `[features]` tables are not parsed, so consumers no longer receive them.
+stiva now declares both itself, pinned, `optional`, behind a **default-off `accel` feature**,
+to be switched on when the roadmap §H/§I work (cron scheduling; accelerator inventory +
+placement) lands. `cyrius.lock` is back to **83 entries = 83 `lib/*.cyr`**, `cyrius deps
+--verify` clean — restoring the `.gitignore` invariant that `lib/` is reproducible from the
+manifest + lockfile. `[deps.kavach]` now pins `3.8.2` and the stdlib subset was re-synced to
+the 6.4.66 pin, clearing the `sankoch 2.5.1 (pinned: 2.5.5)` shadow warning.
+
+### Added — `tests/store.tcyr` (4th test unit)
+Activating the two bundles pushes `tests/stiva.tcyr` past cycc's identifier cap — a hard
+`identifier buffer full (261893/262144)` error. The imagelayout + storage tests (39 functions,
+185 assertions) now live in `tests/store.tcyr`, which includes only the 6 `src/` modules they
+need instead of all 26. **1184 assertions still green**, now across four files:
+stiva 684 · store 185 · runpath 187 · mgmt 128. Note the peel alone did not move the cap
+(identifiers dedupe; test bodies only reference symbols the modules already define) — the
+buffer is dominated by the vendored `lib/` bundles, which is why the feature gate is the fix.
+
 ### Added — group A tails → v3.0.4
 The remaining OCI image-layout/transfer polish; group A is now complete.
 - **GNU longname/longlink** (`storage.cyr`): the tar writer emits `'L'`/`'K'` pseudo-entries

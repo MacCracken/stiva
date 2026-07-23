@@ -20,7 +20,7 @@ pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = gr
 complete**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1184 tests** across the `.tcyr` files (stiva 869 · runpath 187 · mgmt 128; run via
+**1184 tests** across the `.tcyr` files (stiva 684 · store 185 · runpath 187 · mgmt 128; run via
 `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.66**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
@@ -206,7 +206,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1184 Cyrius tests** across `tests/*.tcyr` (stiva 869 · runpath 187 · mgmt 128), each
+**1184 Cyrius tests** across `tests/*.tcyr` (stiva 684 · store 185 · runpath 187 · mgmt 128), each
 mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split across files
 because a monolith hits the cycc identifier-dedup cap.
 

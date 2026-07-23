@@ -13,15 +13,19 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**1184 tests** across `tests/*.tcyr`: `stiva.tcyr` (869), `runpath.tcyr` (187),
-`mgmt.tcyr` (128).
+**1184 tests** across `tests/*.tcyr`: `stiva.tcyr` (684), `store.tcyr` (185),
+`runpath.tcyr` (187), `mgmt.tcyr` (128).
+
+> These are **assertions**, not test functions — `lib/assert.cyr` increments a
+> global counter per `assert*()` call and `assert_summary()` prints it. The 1184
+> assertions live in 288 `fn test_*` functions.
 
 ## Test Organization
 
-Tests live in `tests/*.tcyr` as `fn test_*()` functions, grouped into three
-files (`stiva.tcyr`, `runpath.tcyr`, `mgmt.tcyr`) that mirror the `#[cfg(test)]`
-modules of the frozen `rust-old/` oracle. Each domain below maps to its test
-focus:
+Tests live in `tests/*.tcyr` as `fn test_*()` functions, grouped into four
+files (`stiva.tcyr`, `store.tcyr`, `runpath.tcyr`, `mgmt.tcyr`) that mirror the
+`#[cfg(test)]` modules of the frozen `rust-old/` oracle. Each domain below maps
+to its test focus:
 
 | Module | Test focus |
 |--------|-----------|
@@ -47,11 +51,18 @@ focus:
 
 ### Run-path + management tests (`tests/runpath.tcyr`, `tests/mgmt.tcyr`)
 
-The suite is split into three files to stay under the cycc identifier-dedup cap:
+The suite is split into four files to stay under the cycc identifier-dedup cap.
+The binding constraint is the **set of `src/` modules a file includes**, plus the
+vendored `lib/` bundles that cyrius auto-prepends to every compilation unit —
+*not* the number of tests. Peeling test bodies alone does not move the cap:
+identifiers dedupe, and a test only references symbols its modules already
+define. Split by **include set**. (Measured 2026-07-22: moving 821 lines / 39
+test functions out of `stiva.tcyr` freed 0 bytes; dropping one `include` freed 4.)
 
 | File | Focus |
 |------|-------|
-| `tests/stiva.tcyr` (869) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) **plus group A**: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), and `oci-archive`/`docker-archive` load |
+| `tests/stiva.tcyr` (684) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
+| `tests/store.tcyr` (185) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout), not all 26 |
 | `tests/runpath.tcyr` (187) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and the image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`) |
 | `tests/mgmt.tcyr` (128) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling, `agent` registration records, `health` policies |
 

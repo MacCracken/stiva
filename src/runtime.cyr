@@ -838,7 +838,7 @@ fn build_sandbox(spec) {
     } else {
         b = Backend.PROCESS;
     }
-    var lm = _rt_cat2("selected sandbox backend: ", backend_name(b));
+    var lm = _rt_cat2("selected sandbox backend: ", os_backend_name(b));
     sakshi_debug(lm, strlen(lm));
 
     var cfg = config_new();
@@ -952,7 +952,7 @@ fn write_container_log(log_path, result) {
 fn security_score() {
     var backend = Backend.PROCESS;
     if (backend_is_available(Backend.OCI) == 1) { backend = Backend.OCI; }
-    var lm = _rt_cat2("computing security strength score: ", backend_name(backend));
+    var lm = _rt_cat2("computing security strength score: ", os_backend_name(backend));
     sakshi_info(lm, strlen(lm));
     var policy = policy_basic();
     return score_backend(backend, policy);

@@ -1,0 +1,887 @@
+# stiva test suite — store / layout / archive surface
+# Split out of tests/stiva.tcyr (2026-07-22): declaring [deps.samay] +
+# [deps.ai-hwaccel] added ~279 KB of vendored symbols to every compilation
+# unit, which pushed the monolithic stiva.tcyr past cycc's identifier cap
+# (261893/262144 — a hard error, not a warning). This file carries the
+# imagelayout + storage tests and includes only the 6 src modules they need,
+# rather than all 26.
+#
+# Covers: OCI image config/manifest assembly, the oci-layout store + index.json,
+# oci-archive + docker-archive save/load, the USTAR tar codec, overlay/volume
+# mounts, and blob-store integrity.
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+
+# ── imagelayout.cyr (OCI image-layout — net-new; OCI image-spec is the oracle) ──
+fn test_oci_config_object_minimal() {
+    test_group("oci_config_object_minimal");
+    var o = oci_config_object_jv(0, 0, 0, 0, 0, 0, 0);
+    assert_eq(streq(str_cstr(json_v_build(o)), "{}"), 1, "empty config object is {}");
+    return 0;
+}
+
+fn test_oci_config_object_fields() {
+    test_group("oci_config_object_fields");
+    var env = vec_new();
+    vec_push(env, "PATH=/usr/bin");
+    vec_push(env, "HOME=/root");
+    var cmd = vec_new();
+    vec_push(cmd, "/bin/sh");
+    var ep = vec_new();
+    vec_push(ep, "/entry");
+    var ports = vec_new();
+    vec_push(ports, "8080/tcp");
+    var labels = vec_new();
+    vec_push(labels, "org.opencontainers.image.authors");
+    vec_push(labels, "stiva");
+    var o = oci_config_object_jv(env, cmd, ep, "/app", "nobody", ports, labels);
+    var j = str_cstr(json_v_build(o));
+    assert_eq(strstr(j, "\"User\":\"nobody\"") >= 0, 1, "User");
+    assert_eq(strstr(j, "\"ExposedPorts\":{\"8080/tcp\":{}}") >= 0, 1, "ExposedPorts empty-object map");
+    assert_eq(strstr(j, "\"Env\":[\"PATH=/usr/bin\",\"HOME=/root\"]") >= 0, 1, "Env array");
+    assert_eq(strstr(j, "\"Entrypoint\":[\"/entry\"]") >= 0, 1, "Entrypoint");
+    assert_eq(strstr(j, "\"Cmd\":[\"/bin/sh\"]") >= 0, 1, "Cmd");
+    assert_eq(strstr(j, "\"WorkingDir\":\"/app\"") >= 0, 1, "WorkingDir");
+    assert_eq(strstr(j, "\"Labels\":{\"org.opencontainers.image.authors\":\"stiva\"}") >= 0, 1, "Labels");
+    assert_eq(strstr(j, "\"User\"") < strstr(j, "\"Env\""), 1, "canonical order: User before Env");
+    return 0;
+}
+
+fn test_oci_config_build_shape() {
+    test_group("oci_config_build_shape");
+    var diffs = vec_new();
+    vec_push(diffs, "sha256:aaa");
+    vec_push(diffs, "sha256:bbb");
+    var v = oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0);
+    var j = str_cstr(json_v_build(v));
+    assert_eq(strstr(j, "\"architecture\":\"amd64\"") >= 0, 1, "architecture");
+    assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "os");
+    assert_eq(strstr(j, "\"config\":{}") >= 0, 1, "empty config sub-object");
+    assert_eq(strstr(j, "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\",\"sha256:bbb\"]}") >= 0, 1, "rootfs diff_ids");
+    assert_eq(strstr(j, "created") >= 0, 0, "no created when 0");
+    assert_eq(strstr(j, "history") >= 0, 0, "no history when absent");
+    var j2 = str_cstr(json_v_build(oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0)));
+    assert_eq(streq(j, j2), 1, "deterministic bytes");
+    var v3 = oci_config_build("arm64", "linux", "2024-01-01T00:00:00Z", 0, diffs, 0);
+    var j3 = str_cstr(json_v_build(v3));
+    assert_eq(strstr(j3, "\"created\":\"2024-01-01T00:00:00Z\"") >= 0, 1, "created present when provided");
+    assert_eq(strstr(j3, "{\"created\":") == 0, 1, "created is the first key");
+    return 0;
+}
+
+fn test_il_oci_layout_version() {
+    test_group("il_oci_layout_version");
+    assert_eq(streq(oci_image_layout_version(), "1.0.0"), 1, "imageLayoutVersion 1.0.0");
+    return 0;
+}
+
+fn test_il_parse_full_ref() {
+    test_group("il_parse_full_ref");
+    # "local/demo:v1" — the import reference form.
+    var rr1: ImageRef = _il_parse_full_ref("local/demo:v1");
+    assert_eq(streq(rr1.registry, "local"), 1, "local registry");
+    assert_eq(streq(rr1.repository, "demo"), 1, "demo repo");
+    assert_eq(streq(rr1.tag, "v1"), 1, "v1 tag");
+    assert_eq(rr1.digest, 0, "no digest");
+    # multi-segment repository under a real registry.
+    var rr2: ImageRef = _il_parse_full_ref("ghcr.io/maccracken/agnosticos:latest");
+    assert_eq(streq(rr2.registry, "ghcr.io"), 1, "ghcr registry");
+    assert_eq(streq(rr2.repository, "maccracken/agnosticos"), 1, "nested repo preserved");
+    assert_eq(streq(rr2.tag, "latest"), 1, "latest tag");
+    # docker.io/library/alpine:3.19
+    var rr3: ImageRef = _il_parse_full_ref("docker.io/library/alpine:3.19");
+    assert_eq(streq(rr3.registry, "docker.io"), 1, "docker.io registry");
+    assert_eq(streq(rr3.repository, "library/alpine"), 1, "library/alpine repo");
+    assert_eq(streq(rr3.tag, "3.19"), 1, "3.19 tag");
+    # exact inverse of image_ref_full_ref (the round-trip the index relies on).
+    var bb: ImageRef = _il_parse_full_ref(image_ref_full_ref(image_ref_new("local", "app", "v2", 0)));
+    assert_eq(streq(bb.registry, "local"), 1, "inverse registry");
+    assert_eq(streq(bb.repository, "app"), 1, "inverse repo");
+    assert_eq(streq(bb.tag, "v2"), 1, "inverse tag");
+    # port-registry WITH a tag: the ':' after the last '/' is the tag.
+    var pr: ImageRef = _il_parse_full_ref("localhost:5000/repo:v1");
+    assert_eq(streq(pr.registry, "localhost:5000"), 1, "port registry kept");
+    assert_eq(streq(pr.repository, "repo"), 1, "port repo");
+    assert_eq(streq(pr.tag, "v1"), 1, "port tag");
+    # port-registry WITHOUT a tag: the port ':' is NOT mistaken for a tag.
+    var pn: ImageRef = _il_parse_full_ref("localhost:5000/repo");
+    assert_eq(streq(pn.registry, "localhost:5000"), 1, "port registry (no tag)");
+    assert_eq(streq(pn.repository, "repo"), 1, "port repo (no tag)");
+    assert_eq(streq(pn.tag, "latest"), 1, "default tag when only a port colon");
+    # v3.0.4: a bare name → empty registry, and full_ref has NO leading slash.
+    var br: ImageRef = _il_parse_full_ref("bareimg:v3");
+    assert_eq(streq(br.registry, ""), 1, "bare name → empty registry");
+    assert_eq(streq(br.repository, "bareimg"), 1, "bare repo");
+    assert_eq(streq(image_ref_full_ref(br), "bareimg:v3"), 1, "empty registry → no leading slash");
+    return 0;
+}
+
+# v3.0.4: index descriptors carry the image's real config platform (so a
+# foreign-arch image from a docker/oci archive keeps its arch), else host.
+fn test_platform_passthrough() {
+    test_group("platform_passthrough");
+    var root = "/tmp/stiva_plat";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:x\"]}}";
+    var cdig = sha256_digest(cfg, strlen(cfg));
+    image_store_store_blob(store, cdig, cfg, strlen(cfg));
+    var img = image_new(cdig, image_ref_new("local", "arm-app", "v1", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(img, "sha256:mani");
+    var j = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img, 100)));
+    assert_eq(strstr(j, "\"architecture\":\"arm64\"") >= 0, 1, "config arm64 carried into descriptor");
+    assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "config os carried");
+    # a missing config blob falls back to the host platform (amd64).
+    var img2 = image_new("sha256:nonexistent", image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(img2, "sha256:mani2");
+    var d2 = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img2, 100)));
+    assert_eq(strstr(d2, "\"architecture\":\"amd64\"") >= 0, 1, "missing config → host platform fallback");
+    return 0;
+}
+
+# A4: oci-archive save → load round-trip across two stores. Blobs transfer
+# byte-identically (content-verified) and the image reconstructs with the same
+# id + reference.
+fn test_oci_archive_save_load() {
+    test_group("oci_archive_save_load");
+    var ra = "/tmp/stiva_arc_a";
+    var rb = "/tmp/stiva_arc_b";
+    _stor_remove_dir_all(ra);
+    _stor_remove_dir_all(rb);
+    var sa = image_store_new(ra);
+
+    var content = "archive-roundtrip-rootfs";
+    file_write_all("/tmp/stiva_arc.tar", content, strlen(content));
+    var img = image_import(sa, "/tmp/stiva_arc.tar", "arc", "v1");
+    assert_eq(img != 0, 1, "import ok");
+    var origid = _img_id(img);
+    var origmd = _img_manifest_digest(img);
+
+    var arc = "/tmp/stiva_arc.oci.tar";
+    xunlink(arc);
+    assert_eq(image_store_save_archive(sa, "local/arc:v1", arc), 1, "save ok");
+    assert_eq(file_exists(arc), 1, "archive file written");
+
+    var sb = image_store_new(rb);
+    assert_eq(image_store_load_archive(sb, arc), 1, "loaded 1 image into B");
+    var listed = image_store_list(sb);
+    assert_eq(vec_len(listed), 1, "one image in B");
+    var got = vec_get(listed, 0);
+    assert_eq(streq(_img_id(got), origid), 1, "id preserved across transfer");
+    assert_eq(streq(_img_manifest_digest(got), origmd), 1, "manifest digest preserved");
+    var gref: ImageRef = _image_reference(got);
+    assert_eq(streq(gref.registry, "local"), 1, "ref registry preserved");
+    assert_eq(streq(gref.repository, "arc"), 1, "ref repo preserved");
+    assert_eq(streq(gref.tag, "v1"), 1, "ref tag preserved");
+    assert_eq(image_store_has_blob(sb, origid), 1, "config blob transferred");
+    assert_eq(image_store_has_blob(sb, origmd), 1, "manifest blob transferred");
+
+    # save a nonexistent image → 0; load a non-oci tar → negative.
+    assert_eq(image_store_save_archive(sa, "nope:latest", "/tmp/stiva_arc_none.tar"), 0, "save missing -> 0");
+    file_write_all("/tmp/stiva_arc_bad.tar", "not really a tar", 16);
+    assert_eq(image_store_load_archive(sb, "/tmp/stiva_arc_bad.tar") < 0, 1, "load non-archive -> negative");
+    return 0;
+}
+
+fn test_registry_credential() {
+    test_group("registry_credential");
+    var cred = registry_credential_new("alice", "s3cret");
+    var cc: RegistryCredential = cred;
+    assert_eq(streq(cc.username, "alice"), 1, "cred username");
+    assert_eq(streq(cc.password, "s3cret"), 1, "cred password");
+    return 0;
+}
+
+# CredentialStore set/get/remove (rust-old registry.rs: CredentialStore::set/get/remove).
+fn test_credential_store_set_get_remove() {
+    test_group("credential_store_set_get_remove");
+    var store = credential_store_new();
+    assert_eq(credential_store_get(store, "docker.io"), 0, "empty -> none");
+    credential_store_set(store, "docker.io", "alice", "s3cret");
+    var cred = credential_store_get(store, "docker.io");
+    assert(cred != 0, "cred present");
+    var cc: RegistryCredential = cred;
+    assert_eq(streq(cc.username, "alice"), 1, "username");
+    assert_eq(streq(cc.password, "s3cret"), 1, "password");
+    assert_eq(credential_store_remove(store, "docker.io"), 1, "remove existing -> 1");
+    assert_eq(credential_store_remove(store, "docker.io"), 0, "remove missing -> 0");
+    assert_eq(credential_store_get(store, "docker.io"), 0, "gone");
+    return 0;
+}
+
+# CredentialStore::to_config — creds present vs default (rust-old: to_config).
+fn test_credential_store_to_config() {
+    test_group("credential_store_to_config");
+    var store = credential_store_new();
+    credential_store_set(store, "ghcr.io", "bob", "tok");
+    var cfg: RegistryConfig = credential_store_to_config(store, "ghcr.io");
+    assert_eq(streq(cfg.username, "bob"), 1, "config username");
+    assert_eq(streq(cfg.password, "tok"), 1, "config password");
+    var cfg2: RegistryConfig = credential_store_to_config(store, "quay.io");
+    assert_eq(cfg2.username, 0, "default username None");
+    assert_eq(cfg2.password, 0, "default password None");
+    return 0;
+}
+
+# CredentialStore JSON round-trip (the serde path underneath save/load).
+fn test_credential_store_json_round_trip() {
+    test_group("credential_store_json_round_trip");
+    var store = credential_store_new();
+    credential_store_set(store, "docker.io", "alice", "pw1");
+    credential_store_set(store, "ghcr.io", "bob", "pw2");
+    var json = json_v_build(credential_store_to_jv(store));
+    var back = credential_store_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var c1: RegistryCredential = credential_store_get(back, "docker.io");
+    assert(c1 != 0, "docker.io present");
+    assert_eq(streq(c1.username, "alice"), 1, "docker user");
+    var c2: RegistryCredential = credential_store_get(back, "ghcr.io");
+    assert(c2 != 0, "ghcr.io present");
+    assert_eq(streq(c2.password, "pw2"), 1, "ghcr pw");
+    return 0;
+}
+
+# CredentialStore save→load through a temp path (NOT the real ~/.stiva — uses the
+# internal path-parameterized helpers to avoid clobbering the user's file).
+fn test_credential_store_save_load() {
+    test_group("credential_store_save_load");
+    var path = "/tmp/stiva_cred_test/credentials.json";
+    xunlink(path);
+    var store = credential_store_new();
+    credential_store_set(store, "docker.io", "alice", "pw");
+    assert_eq(_credential_store_save_to(store, path), 0, "save ok");
+    var loaded = _credential_store_load_from(path);
+    assert(loaded != 0, "load ok");
+    var c: RegistryCredential = credential_store_get(loaded, "docker.io");
+    assert(c != 0, "loaded cred present");
+    assert_eq(streq(c.username, "alice"), 1, "loaded username");
+    # Missing file → empty (non-zero) store, not an error.
+    var empty = _credential_store_load_from("/tmp/stiva_cred_test/nope.json");
+    assert(empty != 0, "missing -> empty store non-zero");
+    assert_eq(credential_store_get(empty, "docker.io"), 0, "empty has nothing");
+    return 0;
+}
+
+# default_path lands under ~/.stiva (rust-old: default_path via dirs_path).
+fn test_credential_store_default_path() {
+    test_group("credential_store_default_path");
+    var p = credential_store_default_path();
+    assert_eq(strstr(p, "/.stiva/credentials.json") >= 0, 1, "path under /.stiva");
+    return 0;
+}
+
+# STRICT deserialization parity: serde rejects a malformed credentials file
+# (missing `registries`, or a cred missing a required field) — load returns an
+# error, not a lenient empty/partial store. A valid empty store is accepted.
+fn test_credential_store_load_malformed() {
+    test_group("credential_store_load_malformed");
+    var dir = "/tmp/stiva_cred_bad";
+    sys_mkdir(dir, 0x1ED);
+    var p1 = "/tmp/stiva_cred_bad/no_registries.json";
+    var j1 = "{}";
+    file_write_all(p1, j1, strlen(j1));
+    assert_eq(_credential_store_load_from(p1), 0, "{} missing registries -> 0");
+    var p2 = "/tmp/stiva_cred_bad/no_pw.json";
+    var j2 = "{\"registries\":{\"docker.io\":{\"username\":\"u\"}}}";
+    file_write_all(p2, j2, strlen(j2));
+    assert_eq(_credential_store_load_from(p2), 0, "missing password -> 0");
+    var p3 = "/tmp/stiva_cred_bad/empty.json";
+    var j3 = "{\"registries\":{}}";
+    file_write_all(p3, j3, strlen(j3));
+    var s = _credential_store_load_from(p3);
+    assert(s != 0, "empty registries -> non-zero store");
+    assert_eq(credential_store_get(s, "docker.io"), 0, "empty store has nothing");
+    return 0;
+}
+
+
+# ── storage.cyr (rust-old/src/storage.rs) ──
+fn test_parse_volume_rw() {
+    test_group("parse_volume_rw");
+    var vol = parse_volume("/data:/mnt/data");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(streq(vv.source, "/data"), 1, "source");
+    assert_eq(streq(vv.target, "/mnt/data"), 1, "target");
+    assert_eq(vv.read_only, 0, "rw");
+    return 0;
+}
+
+fn test_parse_volume_ro() {
+    test_group("parse_volume_ro");
+    var vol = parse_volume("/config:/etc/config:ro");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(vv.read_only, 1, "ro");
+    return 0;
+}
+
+fn test_parse_volume_invalid() {
+    test_group("parse_volume_invalid");
+    assert_eq(parse_volume("nocolon"), 0, "nocolon is null");
+    return 0;
+}
+
+fn test_parse_volume_too_many_parts() {
+    test_group("parse_volume_too_many_parts");
+    assert_eq(parse_volume("/a:/b:ro:extra"), 0, "4 parts is null");
+    return 0;
+}
+
+fn test_parse_volume_rw_explicit() {
+    test_group("parse_volume_rw_explicit");
+    var vol = parse_volume("/src:/dst:rw");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(vv.read_only, 0, "rw explicit is not ro");
+    return 0;
+}
+
+fn test_parse_named_volume() {
+    test_group("parse_named_volume");
+    var vol = parse_volume("pgdata:/var/lib/postgresql/data");
+    assert(vol != 0, "parses");
+    var vv: VolumeMount = vol;
+    assert_eq(streq(vv.source, "pgdata"), 1, "named source");
+    assert_eq(streq(vv.target, "/var/lib/postgresql/data"), 1, "named target");
+    assert_eq(vv.read_only, 0, "rw");
+    return 0;
+}
+
+fn test_parse_volume_empty_string() {
+    test_group("parse_volume_empty_string");
+    assert_eq(parse_volume(""), 0, "empty string is null");
+    return 0;
+}
+
+# Mirrors setup_overlay_no_layers: empty layer vec => 0 (Err(Overlay)).
+fn test_setup_overlay_no_layers() {
+    test_group("setup_overlay_no_layers");
+    var empty = vec_new();
+    assert_eq(setup_overlay(empty, "/tmp/stiva-storage-test"), 0, "no layers is null");
+    return 0;
+}
+
+# Mirrors overlay_paths_debug: fields round-trip through the struct.
+fn test_overlay_paths_fields() {
+    test_group("overlay_paths_fields");
+    var p = overlay_paths_new("/merged", "/upper", "/work", "/root");
+    var pp: OverlayPaths = p;
+    assert_eq(streq(pp.merged, "/merged"), 1, "merged");
+    assert_eq(streq(pp.upper, "/upper"), 1, "upper");
+    assert_eq(streq(pp.work, "/work"), 1, "work");
+    assert_eq(streq(pp.container_root, "/root"), 1, "container_root");
+    return 0;
+}
+
+# Mirrors mount_volumes_empty: empty specs vec => empty (non-null) result.
+fn test_mount_volumes_empty() {
+    test_group("mount_volumes_empty");
+    var specs = vec_new();
+    var mounts = mount_volumes(specs, "/tmp/stiva-storage-test");
+    assert(mounts != 0, "non-null");
+    assert_eq(vec_len(mounts), 0, "empty");
+    return 0;
+}
+
+# -- Layer unpacking (gzip-tar) tests --
+
+# Write an octal size field of `len` bytes at `p` (NUL-padded), for a USTAR
+# header. Matches _stor_parse_octal's leniency (leading/trailing NULs ok).
+fn _t_write_octal(p, len, val) {
+    var i = len - 1;
+    var v = val;
+    while (i >= 0) {
+        store8(p + i, 48 + (v & 7));   # '0' + low octal digit
+        v = v / 8;
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Build a single-file USTAR archive (name + data) into `out`, returning the
+# total byte length. Layout: 512 header (name@0, size octal @124, typeflag
+# '0' @156) + ceil(size/512) data blocks + two 512-byte zero blocks (EOF).
+fn _t_build_tar(out, name, data, dlen) {
+    var i = 0;
+    while (i < 5120) { store8(out + i, 0); i = i + 1; }   # zero the whole scratch
+
+    # name @0
+    var nl = strlen(name);
+    memcpy(out, name, nl);
+    # size @124 (12-byte octal field; write low 11 digits + trailing NUL)
+    _t_write_octal(out + 124, 11, dlen);
+    store8(out + 124 + 11, 0);
+    # typeflag @156 = '0' (regular file)
+    store8(out + 156, 48);
+
+    # data blocks
+    memcpy(out + 512, data, dlen);
+    var blocks = (dlen + 511) / 512;
+    var total = 512 + (blocks * 512);
+    # two zero blocks already zero (scratch pre-zeroed) — advance past them.
+    return total + 1024;
+}
+
+# _stor_parse_octal decodes ASCII octal, ignoring non-octal padding.
+fn test_stor_parse_octal() {
+    test_group("stor_parse_octal");
+    var buf = alloc(16);
+    var i = 0;
+    while (i < 16) { store8(buf + i, 0); i = i + 1; }
+    # "644" -> 0o644 = 420
+    store8(buf, 54); store8(buf + 1, 52); store8(buf + 2, 52);
+    assert_eq(_stor_parse_octal(buf, 12), 420, "0o644 = 420");
+    return 0;
+}
+
+# End-to-end: gzip a hand-built USTAR archive, unpack_layer it, read back.
+fn test_unpack_layer_gz_roundtrip() {
+    test_group("unpack_layer_gz_roundtrip");
+    var dir = "/tmp/stiva-unpack-test";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/layer.tar.gz");
+    var dest = _stor_cat2(dir, "/unpacked");
+    sys_mkdir(dest, 493);
+
+    # Build the tar, gzip it, write the blob.
+    var tar = alloc(5120);
+    var data = "hello from layer";
+    var tlen = _t_build_tar(tar, "etc/hello.txt", data, strlen(data));
+    var gz = alloc(8192);
+    var glen = gzip_compress(tar, tlen, gz, 8192);
+    assert(glen > 0, "gzip compressed");
+    file_write_all(blob, gz, glen);
+
+    var rc = unpack_layer(blob, dest);
+    assert_eq(rc, 0, "unpack ok");
+
+    # Read back etc/hello.txt.
+    var out = _stor_cat2(dest, "/etc/hello.txt");
+    var rbuf = alloc(64);
+    var n = file_read_all(out, rbuf, 64);
+    store8(rbuf + n, 0);
+    assert_eq(streq(rbuf, "hello from layer"), 1, "content round-trips");
+    return 0;
+}
+
+# unpack_layer on a nonexistent blob returns the -1 failure sentinel.
+fn test_unpack_layer_missing_blob() {
+    test_group("unpack_layer_missing_blob");
+    assert_eq(unpack_layer("/nonexistent/stiva/blob", "/tmp"), 0 - 1, "missing blob = -1");
+    return 0;
+}
+
+# unpack_layer on non-gzip bytes fails (-1) — the zstd fallback is deferred.
+fn test_unpack_layer_not_gzip() {
+    test_group("unpack_layer_not_gzip");
+    var dir = "/tmp/stiva-unpack-badgz";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/bad.tar.gz");
+    file_write_all(blob, "this is not gzip", 16);
+    assert_eq(unpack_layer(blob, dir), 0 - 1, "non-gzip = -1");
+    return 0;
+}
+
+# A3: perms-preserving tar writer + reader round-trip — real mode, a
+# subdirectory, a nested file, and a symlink (stored as a link, not
+# dereferenced). uid/gid preservation needs root, so it is not asserted here.
+fn test_tar_perms_roundtrip() {
+    test_group("tar_perms_roundtrip");
+    var src = "/tmp/stiva_tarp_src";
+    var dst = "/tmp/stiva_tarp_dst";
+    _stor_remove_dir_all(src);
+    _stor_remove_dir_all(dst);
+    sys_mkdir(src, 493);
+
+    # regular file (0644), executable (0755), subdir + nested file, symlink.
+    var f1 = _stor_cat2(src, "/hello.txt");
+    file_write_all(f1, "hi", 2);
+    sys_chmod(f1, 420);                       # 0o644
+    var f2 = _stor_cat2(src, "/run.sh");
+    file_write_all(f2, "x", 1);
+    sys_chmod(f2, 493);                       # 0o755
+    sys_mkdir(_stor_cat2(src, "/sub"), 493);
+    file_write_all(_stor_cat2(src, "/sub/nested.txt"), "deep", 4);
+    sys_symlink("hello.txt", _stor_cat2(src, "/link"));
+
+    var tar = "/tmp/stiva_tarp.tar";
+    assert_eq(create_tar(src, tar), 1, "create_tar ok");
+
+    sys_mkdir(dst, 493);
+    var len_cell = alloc(8);
+    var tarbuf = _stor_read_file(tar, len_cell);
+    assert_eq(tarbuf != 0, 1, "tar read back");
+    assert_eq(_stor_extract_tar(tarbuf, load64(len_cell), dst), 0, "extract ok");
+
+    var sb = alloc(144);
+    var g1 = _stor_cat2(dst, "/hello.txt");
+    assert_eq(file_exists(g1), 1, "hello.txt extracted");
+    assert_eq(sys_lstat(g1, sb), 0, "lstat hello.txt");
+    assert_eq(load64(sb + 24) & 4095, 420, "hello.txt mode 0644 preserved");
+    var g2 = _stor_cat2(dst, "/run.sh");
+    assert_eq(sys_lstat(g2, sb), 0, "lstat run.sh");
+    assert_eq(load64(sb + 24) & 4095, 493, "run.sh mode 0755 preserved");
+    assert_eq(file_exists(_stor_cat2(dst, "/sub")), 1, "subdirectory extracted");
+    var g3 = _stor_cat2(dst, "/sub/nested.txt");
+    assert_eq(file_exists(g3), 1, "nested file extracted");
+    var rbuf = alloc(16);
+    var rn = file_read_all(g3, rbuf, 16);
+    store8(rbuf + rn, 0);
+    assert_eq(streq(rbuf, "deep"), 1, "nested content round-trips");
+    var gl = _stor_cat2(dst, "/link");
+    assert_eq(sys_lstat(gl, sb), 0, "lstat link");
+    assert_eq((load64(sb + 24) & 61440) == 40960, 1, "link is a symlink (S_IFLNK)");
+    var tgt = alloc(64);
+    var tn = sys_readlink(gl, tgt, 63);
+    store8(tgt + tn, 0);
+    assert_eq(streq(tgt, "hello.txt"), 1, "symlink target preserved");
+    return 0;
+}
+
+# A3 security: the tar reader must reject path-traversal names/targets so an
+# untrusted archive or image layer cannot escape the destination directory.
+fn test_tar_extract_rejects_traversal() {
+    test_group("tar_extract_rejects_traversal");
+    assert_eq(_stor_name_is_safe("etc/passwd"), 1, "relative name ok");
+    assert_eq(_stor_name_is_safe("a/b/c.txt"), 1, "nested name ok");
+    assert_eq(_stor_name_is_safe("../escape"), 0, "leading .. rejected");
+    assert_eq(_stor_name_is_safe("a/../../escape"), 0, "embedded .. rejected");
+    assert_eq(_stor_name_is_safe("/etc/passwd"), 0, "absolute rejected");
+    assert_eq(_stor_name_is_safe(".."), 0, "bare .. rejected");
+    assert_eq(_stor_name_is_safe("..foo/bar"), 1, "..foo is a normal component");
+    assert_eq(_stor_target_escapes("../../etc"), 1, "relative escape target");
+    assert_eq(_stor_target_escapes("/usr/lib"), 0, "absolute target allowed");
+    assert_eq(_stor_target_escapes("usr/lib"), 0, "in-tree target ok");
+
+    # end-to-end: an entry named "../pwned" must NOT write to dest's parent.
+    var dest = "/tmp/stiva_trav_dest";
+    _stor_remove_dir_all(dest);
+    sys_mkdir(dest, 493);
+    xunlink("/tmp/pwned");                       # dest/../pwned == /tmp/pwned
+    var tar = alloc(2048);
+    var tlen = _t_build_tar(tar, "../pwned", "owned", 5);
+    assert_eq(_stor_extract_tar(tar, tlen, dest), 0, "extract returns ok (unsafe entry skipped)");
+    assert_eq(file_exists("/tmp/pwned"), 0, "traversal blocked — nothing written outside dest");
+    return 0;
+}
+
+# v3.0.3 tar hardening: USTAR long-name (name+prefix split), base-256 numeric
+# fields, and symlink-ancestor write-through protection.
+fn test_tar_hardening() {
+    test_group("tar_hardening");
+
+    # B2 base-256: a value beyond 11 octal digits (8^11 ≈ 8.59e9) uses base-256.
+    var buf = alloc(16);
+    var z = 0;
+    while (z < 16) { store8(buf + z, 0); z = z + 1; }
+    _tar_numeric(buf, 20000000000, 12);
+    assert_eq((load8(buf) & 128) != 0, 1, "large size → base-256 marker");
+    assert_eq(_stor_parse_octal(buf, 12), 20000000000, "base-256 size round-trips");
+    _tar_numeric(buf, 420, 8);
+    assert_eq((load8(buf) & 128) == 0, 1, "small value → octal (no base-256 bit)");
+    assert_eq(_stor_parse_octal(buf, 8), 420, "octal value round-trips");
+
+    # B1 long-name: a >100-byte relative path via name(100)+prefix(155) split.
+    var d = "/tmp/stiva_ln_src";
+    var dd = "/tmp/stiva_ln_dst";
+    _stor_remove_dir_all(d);
+    _stor_remove_dir_all(dd);
+    sys_mkdir(d, 493);
+    var a60 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";   # 60
+    var b60 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";   # 60
+    var s1 = _stor_cat2(_stor_cat2(d, "/"), a60);
+    sys_mkdir(s1, 493);
+    var s2 = _stor_cat2(_stor_cat2(s1, "/"), b60);
+    sys_mkdir(s2, 493);
+    file_write_all(_stor_cat2(s2, "/f.txt"), "deep", 4);   # rel path = 60+1+60+1+5 = 127b
+    assert_eq(create_tar(d, "/tmp/stiva_ln.tar"), 1, "create_tar with a 127-byte name ok");
+    sys_mkdir(dd, 493);
+    var lc = alloc(8);
+    var tb = _stor_read_file("/tmp/stiva_ln.tar", lc);
+    assert_eq(_stor_extract_tar(tb, load64(lc), dd), 0, "extract long-name ok");
+    var deep = _stor_cat2(_stor_cat2(_stor_cat2(_stor_cat2(_stor_cat2(dd, "/"), a60), "/"), b60), "/f.txt");
+    assert_eq(file_exists(deep), 1, "long-path file reconstructed from name+prefix");
+
+    # B3 symlink-ancestor: an entry under a symlinked directory is NOT written through.
+    var sd = "/tmp/stiva_slnk_dst";
+    _stor_remove_dir_all(sd);
+    _stor_remove_dir_all("/tmp/stiva_slnk_tgt");
+    sys_mkdir(sd, 493);
+    sys_mkdir("/tmp/stiva_slnk_tgt", 493);
+    sys_symlink("/tmp/stiva_slnk_tgt", _stor_cat2(sd, "/evil"));   # planted symlink ancestor
+    xunlink("/tmp/stiva_slnk_tgt/pwn");
+    var star = alloc(2048);
+    var slen = _t_build_tar(star, "evil/pwn", "owned", 5);
+    assert_eq(_stor_extract_tar(star, slen, sd), 0, "extract ok");
+    assert_eq(file_exists("/tmp/stiva_slnk_tgt/pwn"), 0, "write through symlinked ancestor blocked");
+    return 0;
+}
+
+# Security: a crafted base-256 size that decodes to a NEGATIVE i64 must be
+# rejected (it would otherwise slip past the signed torn-region check into a
+# giant sys_write / drive `pos` backward).
+fn test_tar_extract_rejects_bad_size() {
+    test_group("tar_extract_rejects_bad_size");
+    var buf = alloc(1024);
+    var i = 0;
+    while (i < 1024) { store8(buf + i, 0); i = i + 1; }
+    store8(buf, 120);            # name "x"
+    store8(buf + 156, 48);       # typeflag '0' (regular file)
+    store8(buf + 124, 128);      # size@124: base-256 marker (0x80)
+    store8(buf + 128, 128);      # p[4]=0x80 → decodes with bit 63 set → negative i64
+    assert_eq(_stor_parse_octal(buf + 124, 12) < 0, 1, "base-256 size decodes negative");
+    var dest = "/tmp/stiva_badsz";
+    _stor_remove_dir_all(dest);
+    sys_mkdir(dest, 493);
+    assert_eq(_stor_extract_tar(buf, 1024, dest), 0 - 1, "hostile size rejected (-1)");
+    assert_eq(file_exists("/tmp/stiva_badsz/x"), 0, "nothing written for hostile size");
+    return 0;
+}
+
+# v3.0.4 GNU longname/longlink: a path > 255 B (beyond USTAR name+prefix) and a
+# symlink target > 100 B round-trip through 'L'/'K' pseudo-entries.
+fn test_tar_longname() {
+    test_group("tar_longname");
+    var seg = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";   # 60
+    var d = "/tmp/stiva_lng_src";
+    var dd = "/tmp/stiva_lng_dst";
+    _stor_remove_dir_all(d);
+    _stor_remove_dir_all(dd);
+    sys_mkdir(d, 493);
+    var p = d;
+    var depth = 0;
+    while (depth < 5) {                       # 5 × 60-byte dirs → rel path ~313 B
+        p = _stor_cat2(_stor_cat2(p, "/"), seg);
+        sys_mkdir(p, 493);
+        depth = depth + 1;
+    }
+    file_write_all(_stor_cat2(p, "/deep.txt"), "LONG", 4);
+    # a symlink whose target is > 100 B (forces a 'K' long-link).
+    var longtgt = _stor_cat2(_stor_cat2(_stor_cat2("/very/long/target/", seg), "/"), seg);
+    sys_symlink(longtgt, _stor_cat2(d, "/mylink"));
+
+    assert_eq(create_tar(d, "/tmp/stiva_lng.tar"), 1, "create_tar with a >255b name + >100b link");
+    sys_mkdir(dd, 493);
+    var lc = alloc(8);
+    var tb = _stor_read_file("/tmp/stiva_lng.tar", lc);
+    assert_eq(_stor_extract_tar(tb, load64(lc), dd), 0, "extract longname/longlink ok");
+    var rp = dd;
+    var dep = 0;
+    while (dep < 5) { rp = _stor_cat2(_stor_cat2(rp, "/"), seg); dep = dep + 1; }
+    rp = _stor_cat2(rp, "/deep.txt");
+    assert_eq(file_exists(rp), 1, "long-path file round-tripped via GNU 'L'");
+    var rl = alloc(512);
+    var rn = sys_readlink(_stor_cat2(dd, "/mylink"), rl, 511);
+    if (rn < 0) { rn = 0; }
+    store8(rl + rn, 0);
+    assert_eq(streq(rl, longtgt), 1, "long symlink target round-tripped via GNU 'K'");
+
+    # DoS guard: an absurd GNU long-name (> 8 KiB, but within the buffer) is
+    # rejected before the O(n) ancestor scan / lstat storm.
+    var big = alloc(16384);
+    var z = 0;
+    while (z < 16384) { store8(big + z, 0); z = z + 1; }
+    store8(big, 120);                  # name "x"
+    store8(big + 156, 76);             # 'L' long name
+    _tar_octal(big + 124, 9000, 11);   # size 9000 > 8192 cap (but <= tar_len - 512)
+    assert_eq(_stor_extract_tar(big, 16384, dd), 0 - 1, "oversized long-name rejected (DoS cap)");
+    return 0;
+}
+
+# v3.0.3 docker-archive read: a `docker save` layout (manifest.json + config +
+# uncompressed layer tars) is converted into a valid OCI image on load.
+fn test_docker_archive_load() {
+    test_group("docker_archive_load");
+    var d = "/tmp/stiva_dka_src";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\"]}}";
+    file_write_all(_stor_cat2(d, "/config.json"), cfg, strlen(cfg));
+    var lay = "fake-layer-bytes";
+    file_write_all(_stor_cat2(d, "/layer.tar"), lay, strlen(lay));
+    var man = "[{\"Config\":\"config.json\",\"RepoTags\":[\"myapp:v9\"],\"Layers\":[\"layer.tar\"]}]";
+    file_write_all(_stor_cat2(d, "/manifest.json"), man, strlen(man));
+    assert_eq(create_tar(d, "/tmp/stiva_dka.tar"), 1, "pack docker-archive");
+
+    var sr = "/tmp/stiva_dka_store";
+    _stor_remove_dir_all(sr);
+    var store = image_store_new(sr);
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dka.tar"), 1, "loaded 1 image from docker-archive");
+    var listed = image_store_list(store);
+    assert_eq(vec_len(listed), 1, "one image in store");
+    var got = vec_get(listed, 0);
+    # RepoTag "myapp:v9" → docker.io/library/myapp:v9 (Docker-hub normalization).
+    assert_eq(streq(image_ref_full_ref(_image_reference(got)), "docker.io/library/myapp:v9"), 1, "ref normalized");
+    assert_eq(vec_len(_img_layers(got)), 1, "one gzip layer");
+    assert_eq(file_exists("/tmp/stiva_dka_store/oci-layout"), 1, "oci-layout written on load");
+    # a non-archive tar (no oci-layout, no manifest.json) is rejected.
+    var junk = "/tmp/stiva_dka_junk";
+    _stor_remove_dir_all(junk);
+    sys_mkdir(junk, 493);
+    file_write_all(_stor_cat2(junk, "/hello.txt"), "hi", 2);
+    create_tar(junk, "/tmp/stiva_dka_junk.tar");
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dka_junk.tar"), 0 - 1, "non-archive rejected");
+    return 0;
+}
+
+# Security: a docker manifest.json whose Config/Layers escape the extracted temp
+# dir (absolute or "..") must NOT read arbitrary host files — the image is skipped.
+fn test_docker_archive_rejects_traversal() {
+    test_group("docker_archive_rejects_traversal");
+    var d = "/tmp/stiva_dt_src";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    file_write_all("/tmp/stiva_dt_secret", "TOPSECRET", 9);   # a file OUTSIDE the archive
+    var man = "[{\"Config\":\"../stiva_dt_secret\",\"RepoTags\":[\"evil:1\"],\"Layers\":[\"../stiva_dt_secret\"]}]";
+    file_write_all(_stor_cat2(d, "/manifest.json"), man, strlen(man));
+    create_tar(d, "/tmp/stiva_dt.tar");
+    var sr = "/tmp/stiva_dt_store";
+    _stor_remove_dir_all(sr);
+    var store = image_store_new(sr);
+    assert_eq(image_store_load_archive(store, "/tmp/stiva_dt.tar"), 0, "traversal manifest → 0 images");
+    assert_eq(vec_len(image_store_list(store)), 0, "no image ingested from host-file escape");
+    xunlink("/tmp/stiva_dt_secret");
+    return 0;
+}
+
+# prepare_layers on a store with no matching blob returns 0 (LayerUnpack).
+fn test_prepare_layers_missing_blob() {
+    test_group("prepare_layers_missing_blob");
+    var root = "/tmp/stiva-prep-missing";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var layers = vec_new();
+    vec_push(layers, layer_new("sha256:doesnotexist", 0, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    assert_eq(prepare_layers(store, layers), 0, "missing blob => 0");
+    return 0;
+}
+
+# prepare_layers unpacks a real gzip'd layer, then dedups on a second call.
+fn test_prepare_layers_dedup() {
+    test_group("prepare_layers_dedup");
+    var root = "/tmp/stiva-prep-dedup";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+
+    # Build a gzip'd tar blob and store it by its true digest.
+    var tar = alloc(5120);
+    var data = "layer content";
+    var tlen = _t_build_tar(tar, "file.txt", data, strlen(data));
+    var gz = alloc(8192);
+    var glen = gzip_compress(tar, tlen, gz, 8192);
+    assert(glen > 0, "gzip ok");
+    var digest = sha256_digest(gz, glen);
+    var stored = image_store_store_blob(store, digest, gz, glen);
+    assert(stored != 0, "blob stored");
+
+    var layers = vec_new();
+    vec_push(layers, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+
+    # First prepare: unpacks.
+    var dirs = prepare_layers(store, layers);
+    assert(dirs != 0, "prepare ok");
+    assert_eq(vec_len(dirs), 1, "one dir");
+    var d0 = vec_get(dirs, 0);
+    var f0 = _stor_cat2(d0, "/file.txt");
+    assert_eq(file_exists(f0), 1, "file.txt extracted");
+    var m0 = _stor_cat2(d0, "/.unpacked");
+    assert_eq(file_exists(m0), 1, ".unpacked marker written");
+
+    # Second prepare: dedup (marker present → skip), same dir returned.
+    var layers2 = vec_new();
+    vec_push(layers2, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    var dirs2 = prepare_layers(store, layers2);
+    assert(dirs2 != 0, "prepare2 ok");
+    assert_eq(vec_len(dirs2), 1, "one dir (dedup)");
+    assert_eq(streq(vec_get(dirs2, 0), d0), 1, "same layer dir");
+    return 0;
+}
+
+# verify_integrity on an untampered store reports no corruption (rust-old:
+# verify_integrity — no #[cfg(test)] in the oracle, so this exercises the
+# happy path the Rust doc promises).
+fn test_verify_integrity_clean() {
+    test_group("verify_integrity_clean");
+    var root = "/tmp/stiva-verify-clean";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var data = "hello integrity";
+    var digest = sha256_digest(data, strlen(data));
+    assert(image_store_store_blob(store, digest, data, strlen(data)) != 0, "stored");
+    var corrupted = image_store_verify_integrity(store);
+    assert_eq(vec_len(corrupted), 0, "no corruption");
+    return 0;
+}
+
+# verify_integrity detects a blob whose on-disk contents no longer hash to its
+# content-addressed name, reporting its digest.
+fn test_verify_integrity_detects_corruption() {
+    test_group("verify_integrity_detects_corruption");
+    var root = "/tmp/stiva-verify-corrupt";
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var data = "original blob bytes";
+    var digest = sha256_digest(data, strlen(data));
+    assert(image_store_store_blob(store, digest, data, strlen(data)) != 0, "stored");
+    # Tamper: overwrite the blob file (same name) with different bytes.
+    var blob_path = _img_blob_path(image_store_root(store), digest);
+    var bad = "tampered contents!!!";
+    file_write_all(blob_path, bad, strlen(bad));
+    var corrupted = image_store_verify_integrity(store);
+    assert_eq(vec_len(corrupted), 1, "one corrupted");
+    assert_eq(streq(vec_get(corrupted, 0), digest), 1, "reports the digest");
+    return 0;
+}
+
+
+fn main() {
+    test_oci_config_object_minimal();
+    test_oci_config_object_fields();
+    test_oci_config_build_shape();
+    test_il_oci_layout_version();
+    test_il_parse_full_ref();
+    test_platform_passthrough();
+    test_oci_archive_save_load();
+    test_registry_credential();
+    test_credential_store_set_get_remove();
+    test_credential_store_to_config();
+    test_credential_store_json_round_trip();
+    test_credential_store_save_load();
+    test_credential_store_default_path();
+    test_credential_store_load_malformed();
+    test_parse_volume_rw();
+    test_parse_volume_ro();
+    test_parse_volume_invalid();
+    test_parse_volume_too_many_parts();
+    test_parse_volume_rw_explicit();
+    test_parse_named_volume();
+    test_parse_volume_empty_string();
+    test_setup_overlay_no_layers();
+    test_overlay_paths_fields();
+    test_mount_volumes_empty();
+    test_stor_parse_octal();
+    test_unpack_layer_gz_roundtrip();
+    test_unpack_layer_missing_blob();
+    test_unpack_layer_not_gzip();
+    test_tar_perms_roundtrip();
+    test_tar_extract_rejects_traversal();
+    test_tar_hardening();
+    test_tar_extract_rejects_bad_size();
+    test_tar_longname();
+    test_docker_archive_load();
+    test_docker_archive_rejects_traversal();
+    test_prepare_layers_missing_blob();
+    test_prepare_layers_dedup();
+    test_verify_integrity_clean();
+    test_verify_integrity_detects_corruption();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

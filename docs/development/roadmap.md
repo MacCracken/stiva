@@ -119,6 +119,10 @@ mid-tier module. **Wave 2 (the "Reclassified" block after it)** — the surface 
 synchronous/blocking work (OCI layout, blocking registry client, container manager + facade,
 exec/CRIU, MCP dispatch, poll-loop streaming). Together they take stiva to a full single-node
 runtime — pull/run/manage/save — with only a small externally-blocked residue left in v3.1.
+**Wave 3 (§G–§I, added 2026-07-22)** — three blockers that turned out to have landed upstream
+(`scan_output`, zstd decode, YAML/compose), plus two net-new capability groups that the
+kavach 3.8.x dependency graph put within reach: **scheduled/cron containers** (samay) and
+**accelerator-aware placement** (ai-hwaccel).
 
 - [x] `oci` — `parse_bundle` / `build_state` / `to_oci_status` + `OciState` (bayan JSON;
   landed in `container.cyr`, coupled to the container types) → oci 67% → ~100%. **2026-07-18.**
@@ -130,7 +134,8 @@ runtime — pull/run/manage/save — with only a small externally-blocked residu
   → image 72% → ~90%. **2026-07-18.**
 - [~] `build` — `build_cache_key` + `build_step_to_jv` (serde-exact tagged-enum JSON via
   bayan, hash-pinned by tests). **2026-07-18.** Remaining: OCI config/manifest JSON assembly
-  + layer tar via the tar writer (gzip only) — now Wave 2 (§F); zstd stays v3.1.
+  + layer tar via the tar writer (gzip only) — now Wave 2 (§F). *(zstd decode has since landed
+  upstream — §G; only zstd **encode** remains out of scope.)*
 - [x] `registry` — credential store (`CredentialStore` fs+JSON: default_path/load/save/set/
   get/remove/to_config) + `RegistryConfig`/`MirrorConfig`. **2026-07-18.** (the *blocking* HTTP client is now Wave 2, §B.)
 - [x] `mcp` — the two fully-synchronous tool handlers `mcp_handle_build` / `mcp_handle_ansamblu`
@@ -155,9 +160,8 @@ runtime — pull/run/manage/save — with only a small externally-blocked residu
   libro 2.7.10→2.8.2 · cmdit 1.1.0 (unchanged). Path-override resolution already consumed
   the newer bundles; the `cyrius.cyml` tag pins now match.
 - Build + **897 tests** green (stiva 650 · runpath 171 · mgmt 76), `dist/stiva.cyr` rebuilt.
-  The `fn_table` (87%) and `identifier buffer` (89%) scaling warnings persist — the
-  filed cycc identifier-dedup cap is the ceiling the remaining sync backlog must fit under
-  or force the compilation-unit split.
+  *(Count superseded — see the 2026-07-22 re-check below: the suite reports **1184
+  assertions** across **288 test functions**; `lib/assert.cyr` tallies asserts, not tests.)*
 
 ### Reclassified: the now-doable "async" surface → folded onto the v3.0.x line (2026-07-18)
 
@@ -193,12 +197,250 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
 - [ ] `handle_tool` + `handle_ps`/`stop`/`inspect`/`pull`/`push`/`exec` + `list_resources`/`read_resource` (one-shot over the facade); **`logs -f`/`events`** as foreground CLI poll-loops (file read / majra `chan_try_recv`). (`handle_run` needs detached run → v3.1; multiplexed streaming → v3.1.)
 
 **F. `build` completion**:
-- [ ] `build`'s OCI config/manifest JSON assembly + gzip layer tar (the remaining v3.0.x build item; zstd stays v3.1).
+- [ ] `build`'s OCI config/manifest JSON assembly + gzip layer tar (the remaining v3.0.x build item).
+  zstd **decode** is no longer blocked — see §G below; encode is still gzip-only.
 
 **Order:** **A** (OCI layout) first — the store-format prerequisite; **B** (pull writes into it)
 alongside **C** (the manager spine, zero deps); **D**/**E** compose on **C**; **F** folds into
 **A**/build. Almost all synchronous — the only external dependency touching this line is *filing*
 the kavach spawn issue (which unblocks the v3.1 residue, not this work).
+
+Wave 3 slots in independently: **G** is three self-contained adapters over already-vendored
+code (`scan_output` needs nothing from B–F; zstd decode lands in `storage.cyr`'s existing
+`unpack_layer` fallback; `convert compose` completes an already-live verb). **I**'s `stiva info`
+inventory is two calls and needs nothing. The **dependency-hygiene block below is a hard
+prerequisite for H and I** — both bundles must be declared and the two symbol collisions renamed
+before either library is called.
+
+### Upstream re-check (2026-07-22) — three v3.1 blockers have landed
+
+Every "blocked on upstream" claim on this page was re-verified **by execution**, not by reading
+changelogs: probes were compiled against stiva's own vendored `lib/` and run. Three of the five
+external gates are gone, and the work moves onto this line.
+
+**G. Newly unblocked — graduated from v3.1 to v3.0.x:**
+- [ ] **`scan_output`** — kavach's ExternalizationGate surface is fully present in the *current*
+  `lib/kavach.cyr`: `ext_policy_default:3139`, `gate_apply:5124`, `secrets_scan:3683`,
+  `code_scan:4596`, `data_scan:5071`, `determine_verdict:5092`, `secrets_redact:3569`. Probe:
+  an AWS key and an OpenSSH key each scored `findings=1 worst_sev=4 verdict=3` (BLOCK) and
+  redacted to `[REDACTED:cloud_credential]` / `[REDACTED:private_key]`; clean input → `verdict=0`.
+  Two integration notes: there is **no `ExternalizationGate` type** — it is the free fn
+  `gate_apply` + `ext_policy_default`; and `gate_apply` only redacts at `WARN`
+  (`lib/kavach.cyr:5153`), so call the three scanners directly for `ContainerExecResult`.
+  Oracle: `rust-old/src/runtime.rs:573-604` — a ~15-line adapter. `logs` is already live and
+  could be scanned today.
+- [ ] **zstd layer decode** — `lib/sankoch.cyr` declares `FORMAT_ZSTD = 8` (`:20`) and ships
+  `zstd_decompress:10243` + `zstd_frame_content_size:10307`; `tar_open_auto:10783` already
+  sniffs the `28 B5 2F FD` magic and routes to the decoder. Proven twice: a 148,131-byte
+  `zstd -19` frame decoded to 706,560 bytes with a **sha256-identical** round-trip (67 tar
+  entries); a second 4,556-byte layer archive enumerated all 6 entries with correct modes.
+  Shipped in **sankoch 2.5.0 on 2026-07-10 — eight days before v3.0.4**. The vendored copy is
+  decode-only, which is all `unpack_layer` needs; lights up `media_oci_layer_zstd`
+  (`src/registry.cyr:57`) on the pull path.
+- [ ] **`convert compose` / YAML** — `lib/bayan.cyr` is **1.2.0** (2026-07-16) and
+  `bayan_yaml_parse:4545` emits into the *same* `JTAG_*`-tagged `bayan_json_v_*` graph the JSON
+  parser produces — exactly the "YAML parser + JSON Value model" pair `src/convert.cyr:505-518`
+  records as missing. Probe walked the full compose surface: `services` obj_len=2,
+  `services.web.image`, `ports` arr_len=2, `networks.frontend.driver`,
+  `ipam.config[0].subnet`, `volumes.pgdata.driver`; invalid input → 0 + error string, matching
+  `rust-old/src/convert.rs:20-21`. **Scope honestly — it is a documented subset:** flow
+  *mappings* (`{replicas: 2}`), block scalars (`|`), anchors/aliases and merge keys
+  (`&base` / `<<: *base`), and multi-document (`---`) are all rejected with explicit errors.
+  Flow *sequences* work. Error clearly on the unsupported forms rather than claiming full
+  compose support. API: `bayan_yaml_parse(src)` takes a `Str`; use `bayan_yaml_parse_str(buf, len)`
+  for C-strings — passing a cstr to the former compiles with an arity warning and silently
+  yields a non-object.
+
+### Net-new capability surfaced by kavach 3.8.x — samay + ai-hwaccel (2026-07-22)
+
+kavach 3.8.0 took `[deps.samay]`, and samay in turn takes `[deps.ai-hwaccel]`, so both bundles
+now arrive in stiva's `lib/` transitively. **Neither is bloat: each covers functionality stiva
+genuinely lacks** — and `rust-old` lacks it too, so these are net-new, not port regressions.
+
+First, the negative results, so nobody re-derives them:
+- **kavach's consumable API did not change at all.** `git diff 3.7.1 3.8.1 -- dist/kavach.cyr`
+  is one line — the version header — and a sorted symbol-table diff between the tags is empty.
+  Every kavach symbol stiva calls is unchanged; there is no breaking change from kavach.
+- **The samay bridge is not reachable.** `sandbox_policy_from_samay_req` /
+  `_from_samay_task` live in `kavach/src/samay_bridge.cyr`, which is **deliberately excluded
+  from kavach's `[lib].modules`** so downstream consumers aren't forced to take samay. It is
+  referenced only by `kavach/tests/samay_integration.tcyr`. `grep samay lib/kavach.cyr` → 0 hits.
+  If stiva wants it, stiva reimplements its 13 lines.
+- **`SandboxPolicy` gained nothing.** Still 12 fields / `SANDBOX_POLICY_SIZE = 96`
+  (`kavach/src/policy.cyr:7-20`); `SandboxConfig` still 8 fields / 64
+  (`kavach/src/lifecycle.cyr:81-92`). No `device`, `devices`, `device_allow`, `accel`, `gpu`,
+  or `vfio` field exists anywhere in kavach. `cgroup_setup` (`kavach/src/cgroup.cyr:151-174`)
+  still writes only `memory.max` / `cpu.max` / `pids.max` — no devices controller, no eBPF
+  device program.
+
+**H. Scheduled / cron containers — UNBLOCKED, net-new.** stiva has no time-triggered container
+start of any kind: grepping `src/*.cyr` for `cron|schedule` matches only `fleet.cyr`, and every
+hit there is *spatial* placement, not time. `rust-old` has none either. The machinery is already
+vendored and complete in `lib/samay.cyr`:
+- [ ] `cron_expr_parse:956` / `cron_expr_matches:1049` / `cron_expr_next_after:1081` — a full
+  standard 5-field cron parser with `@shortcuts`, ranges, steps, month/DOW name lookup, and the
+  Vixie `crontab(5)` DOM-vs-DOW star rule (`:801-810`, `:936`).
+- [ ] `cron_scheduler_new` / `_add(name, expr, template, enabled, missed_policy):1165` /
+  `_check_due:1344` / `_check_due_at` / `_remove_entry` / `_list_entries` (`:1131-1344`), with
+  `struct CronEntry` / `struct CronScheduler`, a **missed-schedule policy** (`:810`) and
+  catch-up counting with a cap (`_cron_count_due:1240`, `_cron_log_catchup_cap:1273`) — the hard
+  part, already solved — plus full JSON persistence (`cron_scheduler_to_json_str` /
+  `from_json_str`, `:1882-1883`).
+- [ ] stiva-side work — two pieces samay does **not** give you:
+  - **A container side table.** `CronTaskTemplate` (`:1110-1116`) carries only
+    name/description/agent_id/priority/resource_requirements — **no image, command, env, mounts,
+    or restart policy**, and its JSON codec (`:1778-1806`) cannot carry them either. stiva owns
+    an entry-name → `ContainerConfig` table and its own persistence (alongside
+    `container_state_save`/`_load`, `src/container.cyr:599`/`:623`, atomic tmp+rename), and must
+    strip the `" (cron)"` suffix `_cron_task_name:1216` appends.
+  - **A poll site — stiva has none.** `src/main.cyr:753-793` is a one-shot cmdit dispatcher
+    ending in `syscall(SYS_EXIT, _rc)` (`:835-836`). "Single-threaded run-to-completion" is the
+    *cyrius execution model*, not a running loop, and `--detach` is refused at
+    `src/main.cyr:213-218` pending kavach `sandbox_spawn` — so an in-process cron daemon could
+    only fire containers **serially in the foreground**.
+  **v1 shape: a `stiva cron add/ls/rm/check` verb set driven by an external systemd timer**
+  (`check` fires what is due and exits). The in-process loop lands with `run -d`. Scheduled
+  short batch jobs are therefore unblocked *now*; overlapping or long-lived scheduled containers
+  share the `run -d` gate (§v3.1). **Effort: medium — the parser and catch-up semantics are free.**
+
+**I. Accelerator-aware placement + node inventory — UNBLOCKED, net-new.** `lib/ai-hwaccel.cyr`
+(2.3.15, 6339 lines, 295 fns) is a **read-only hardware inventory and workload-planning library**
+— it answers "what accelerators exist here, how big, how fast," across 19 `AcceleratorType`
+variants via 17 backends. It is *not* a device-plumbing library (see §J).
+- [ ] **Node accelerator inventory in `stiva info` / `inspect`** — `registry_detect_no_exec():3818`
+  is subprocess-free (pure sysfs/syscall reads), so it is safe in a hardened context and cannot
+  hang on a missing `nvidia-smi`; pair with `registry_to_summary_json:6199` (device_count /
+  has_accelerator / total & accelerator memory / gpu|tpu|npu counts / warnings). **Two calls** —
+  the cheapest way to turn the vendored 207 KB into shipped functionality.
+- [ ] **An accelerator dimension in `fleet`'s placement — graft, do NOT adopt samay's type.**
+  Add an `accel_profiles` vec to **stiva's own** `FleetNodeCapacity` and `accel_req` /
+  `accel_min_chips` (`REQ_*` + min chips) to `DeploymentConstraints` (`src/fleet.cyr:125-126`
+  filters on `min_memory_mb`/`min_cpus` only), then gate placement on
+  `find_satisfying_profile(req, min_chips, profiles):5370`. The `AccelRequirement` enum
+  (`REQ_NONE|GPU|TPU|GAUDI|AWS_NEURON|GPU_OR_TPU|ANY_ACCELERATOR`, `:5310`) and
+  `requirement_satisfied:5333` were written for exactly this — the header comment reads "Used
+  for scheduling integration." samay ships this precise pattern (`lib/samay.cyr:296` field,
+  `:341` `_accel_ok`, `:351` `can_fit`), so it is copyable. **Effort: small.**
+
+  > **Why graft rather than adopt.** samay's `NodeCapacity` is a superset only on the
+  > *continuous* dimensions (fractional CPU, available-vs-total, disk, accel profiles,
+  > reserve/release). It has **no `max_containers`** — which is stiva's entire fit test
+  > (`free_slots`, `src/fleet.cyr:240-245`, used at `:260, :401, :429, :467, :503`) — **no node
+  > status** (Ready/NotReady/Draining/Cordoned, `src/fleet.cyr:56`), **no label constraints**
+  > (`:205-219`), and only best-fit-by-utilization placement (`_best_fit_node:632`) against
+  > stiva's three strategies. Wholesale adoption would regress three shipped features. Two
+  > further reasons not to copy its ledger verbatim: `node_capacity_release:389` is reached only
+  > from `cancel_task:580`, so tasks reaching `TASK_COMPLETED`/`TASK_FAILED` **never release
+  > their reservation** (a monotonic capacity leak); and `task_scheduler_preempt_if_needed:709`
+  > mutates nothing, has zero callers inside samay, and never reads `TaskScheduler_nodes` — the
+  > preemption surface is advisory vocabulary, not policy. Treat the collision as a signal that
+  > stiva's capacity model is impoverished (it is) and fix that on stiva's own struct.
+  > Conversion is clean: stiva already has fractional CPU container-side — `cpu_shares` is an
+  > absolute quota (`_rt_cpu_quota` `src/runtime.cyr:653-658` → `cpu.max` `:684-688`), so
+  > 1024ths-of-a-core maps directly onto samay's f64 `cpu_cores`.
+- [ ] **Persist accel profiles** — `profile_to_json:6046` / `profile_from_json:6118` are a
+  lossless round-trip over the bayan DOM, added in 2.3.15 *specifically* to unblock samay's
+  `accel_profiles` (before it, a rebuilt TPU profile could not satisfy the `REQ_TPU{min_chips}`
+  requirement it was registered for). Nothing to write for `state.json` or for a daimon/sutra
+  node record.
+- [ ] *(optional)* **NUMA / fabric affinity** — `profile_numa_node` → cpuset cgroup is contained;
+  `sio_has_nvswitch:1212` / `_nvlink:1222` / `_ici:1234` / `sio_max_ic_bw_x1000:1244` would let
+  ansamblu express "these two containers must land on NVSwitch-connected devices." Note
+  `detect_interconnects` shells out and is masked off under `registry_detect_no_exec`.
+
+**Pre-existing `fleet.cyr` defects to fix while you are in there.** All three are faithfully
+inherited from the Rust oracle, so correcting them is a *deliberate* parity divergence and wants
+an ADR (same treatment as the `audit`/`convert` divergences recorded at v3.0.0):
+- [ ] `plan_rollback` (`src/fleet.cyr:561-587`) calls `select_migration_target` once per running
+  container (`:571-572`) with **no reservation between calls**, so all N containers on a failed
+  node plan onto the same target. `rust-old/src/fleet.rs:336-345` is identical. The
+  reserve/release pattern §I adds is the fix.
+- [ ] `DeploymentConstraints.preferred_nodes` (`src/fleet.cyr:127`, zeroed at `:139`) is never
+  read — dead in `rust-old/src/fleet.rs:43` too.
+- [ ] `FLEET_NODE_DRAINING` / `FLEET_NODE_CORDONED` (`src/fleet.cyr:59-60`) are defined but every
+  filter tests only `== FLEET_NODE_READY` (`:258`, `:501`, `:544`) — there is no drain semantic.
+
+> **Why this matters beyond stiva:** `daimon` — stiva's own container-management consumer —
+> **already declares `[deps.ai-hwaccel] 2.3.15` and `[deps.samay] 1.0.1`**
+> (`daimon/cyrius.cyml:63-76`). The layer directly above stiva already reasons about
+> accelerators while stiva itself cannot express them. That is the functional gap in one line.
+
+### Dependency hygiene — ✅ DONE 2026-07-22
+
+All four items below are complete. Summary of what landed:
+
+- **kavach 3.8.2** — renamed its OS-backend namer `backend_name` → `os_backend_name`
+  (`src/backend.cyr:26` + 3 internal callers), leaving the bare name to ai-hwaccel; and made
+  `[deps.samay]` + `[deps.ai-hwaccel]` **`optional`** behind a default-on `scheduler` feature,
+  so consumers no longer inherit 279 KB for a bridge kavach does not ship. 436 assertions green.
+- **stiva** — `FleetNodeCapacity`/`fleet_node_capacity_new`, `stiva_which`, both `backend_name`
+  call sites → `os_backend_name`; `[deps.kavach]` → `3.8.2`; samay + ai-hwaccel declared,
+  pinned, `optional`, behind a **default-off `accel` feature**; stdlib re-synced to the 6.4.66
+  pin. `cyrius.lock` 83 = 83 `lib/*.cyr`, `--verify` clean. **1184 assertions green** across a
+  new 4-file split (stiva 684 · store 185 · runpath 187 · mgmt 128).
+- **mehman** — one-line consumer fix for the kavach rename (`src/sandbox.cyr:88`).
+
+Two findings worth carrying forward:
+1. **`stiva info` was silently wrong**, logging `intel-npu` instead of `oci` — both enums start
+   at `0`. Reproduced and fixed; the corrected output is the regression check.
+2. **Test-unit splitting must be by *include set*, not by test count.** Peeling 821 lines /
+   39 test functions out of `stiva.tcyr` freed **0 bytes** of identifier space; dropping one
+   `include` freed 4. Identifiers dedupe — the buffer is dominated by the vendored `lib/`
+   bundles auto-prepended to every unit. That is why the feature gate, not the split, is the
+   fix; the split is what makes §H/§I *possible* once `accel` is switched on.
+
+Switching `accel` on (when §H/§I start) will re-cross the identifier cap — budget for further
+splitting by include set at that point.
+
+<details><summary>Original hygiene backlog (all items now closed)</summary>
+
+- [x] **Declare the two bundles, or drop them.** `cyrius.cyml` has no `[deps.samay]` and no
+  `[deps.ai-hwaccel]`, yet `lib/samay.cyr` (1.0.1) and `lib/ai-hwaccel.cyr` (2.3.15) are on disk
+  with **no `cyrius.lock` entries at all** — the lock has 83 entries against 85 `lib/*.cyr`
+  files, and the two gaps are exactly these files. Separately, `lib/kavach.cyr` is the **only
+  one of the 83 entries that fails `sha256sum -c`** (lock records `83d87bd1…`, actual is
+  `120497de…`). `.gitignore:5-8` asserts "lib/ is reproducible from the manifest + lockfile" —
+  **that invariant is currently false.** If §H/§I are adopted, add explicit blocks and bump
+  `[deps.kavach]` to `3.8.1` so the pin matches what resolution actually vendors; if not, the
+  two bundles should not be in `lib/` at all. Either way the lock must be regenerated so lock
+  and `lib/` agree.
+- [x] **`tag` does not bind while `path` is present.** `cyrius.cyml:125` pins kavach `3.7.1`;
+  the `path = "../kavach"` override silently wins and vendors whatever the sibling checkout is
+  at. This is how 3.8.1 arrived unannounced. `cyrius.lock` records only bare
+  `<sha256>  lib/<file>` lines — no dep name, version, tag, or git rev — so it is structurally
+  incapable of detecting the substitution. `git diff cyrius.lock` after `cyrius deps` is the
+  only reliable detector; worth a CI guard.
+- [x] **Three symbol collisions — two stiva-owned, one upstream.** cycc warns on duplicate *fns*
+  ("last definition wins") but is **silent on duplicate structs**, so the struct case surfaces as
+  a misleading parse error in whichever file compiles last. Use the `stiva_*` prefix idiom
+  already applied to `audit_log_new` / `port_mapping_new` (`cyrius.cyml:60-65`, `:79-82`).
+  1. `struct NodeCapacity` + `node_capacity_new` — stiva's is 4 fields / 32 B / 4 args
+     (`src/fleet.cyr:75,83`); samay's is 9 fields / 72 B / **5** args (`lib/samay.cyr:288,300`).
+     → `FleetNodeCapacity` / `fleet_node_capacity_new`; 9 refs in `src/fleet.cyr`
+     (`:75, :85, :221, :242, :314, :321, :343, :350, :567`) + `tests/mgmt.tcyr:527,530`.
+  2. **`which(name)`** — stiva's returns a **boolean 1/0** (`src/network_rootless.cyr:287-316`);
+     ai-hwaccel's returns a **heap cstring pointer** (`lib/ai-hwaccel.cyr:1698-1726`). stiva's
+     only callers test `== 1` (`src/network_rootless.cyr:325,328`), so if ai-hwaccel wins,
+     rootless pasta/slirp4netns detection silently reports "no backends available."
+     → `stiva_which`.
+  3. **`backend_name(b)` — upstream, NOT fixable in stiva, and live today.** Defined in **both**
+     `lib/kavach.cyr:2465` (sandbox backends: `Backend.PROCESS`…`NOOP`) and
+     `lib/ai-hwaccel.cyr:693` (17 *detection* backends: `BACKEND_CUDA`…`BACKEND_WINDOWS`).
+     **Both enums start at `0`**, so if ai-hwaccel's definition wins,
+     `backend_name(Backend.PROCESS)` returns `"cuda"`. stiva calls it at `src/runtime.cyr:841`
+     (sandbox-selection log) and `src/runtime.cyr:955` — the latter inside `security_score()`,
+     which **`stiva info` invokes**. Fix belongs upstream: ai-hwaccel should rename to
+     `hw_backend_name`, exactly as it already renamed `registry_new` → `hw_registry_new` for a
+     bote-core clash (`lib/ai-hwaccel.cyr:3562-3570`). File it.
+     *(`path_exists` also collides — `lib/kavach.cyr:2498` vs `lib/ai-hwaccel.cyr:1385` — but
+     with identical 1/0 semantics, so it is benign.)*
+     Note kavach's 3.8.0 changelog claim "No symbol collisions with kavach's 442-fn surface
+     (verified)" (`kavach/CHANGELOG.md:43-44`) is **false** for consumers that also pull
+     ai-hwaccel; the verification did not cover the transitive closure.
+  `struct AuditEntry` (`src/audit.cyr:112` vs `lib/kavach.cyr:5923`, different field offsets) is
+  a fourth, currently latent only because no typed local of that name is ever declared.
+
+</details>
 
 ---
 
@@ -208,21 +450,59 @@ Everything on the v3.0.x line above is doable now; this is the genuine remainder
 specific external landing (not on stiva effort). As each dependency ships they graduate
 individually — there is no monolithic "async milestone" gating them together.
 
+> **Re-checked 2026-07-22.** Three items previously listed here — `scan_output`, zstd decode,
+> and `convert compose`/YAML — have **landed upstream and moved to the v3.0.x line** (§G).
+> What remains is below. **State each gate by symbol, not by version number** — the version
+> form has already produced one false positive.
+
 - [ ] **Detached `run -d`** — `spawn_container`/`DaemonHandle`/live daemon log capture, and MCP
-  `handle_run`. **Blocked on kavach ≥ 3.8.0 `sandbox_spawn`** (policy-threaded detached spawn +
-  `spawned_wait`/`try_wait`/`kill`; drafted and on kavach's roadmap). Do **not** ship a
-  half-isolated interim over `persistent_spawn` — it threads no policy. Once kavach ships, the
-  stiva side is ~10 lines (`build_sandbox` → `sandbox_spawn` → `DaemonHandle`).
+  `handle_run`. **Blocked on kavach growing a policy-threaded detached spawn**
+  (`sandbox_spawn` + `spawned_wait`/`try_wait`/`kill`). *The old "blocked on kavach ≥ 3.8.0"
+  wording is now a false positive: kavach shipped **3.8.0 and 3.8.1** (samay integration, then a
+  dep bump) and `grep sandbox_spawn` over its `src/`, `dist/`, and `tests/` still returns
+  nothing — the version was spent on other work.* kavach's roadmap carries no new target for it
+  and mentions samay nowhere; treat the bridge as a one-shot proof of concept with nothing
+  behind it. Do **not** ship a half-isolated interim over `persistent_spawn` — it threads no
+  policy, and kavach's own roadmap says so. Once the symbol exists, the stiva side is ~10 lines.
 - [ ] **Interactive `exec -it`** (TTY) + a **true multiplexed streaming server** (`select!` over
   many streams inside one task). **Blocked on cyrius stackless coroutines** (mid-body
-  suspend/resume — the run-to-completion model can't express them). The `logs -f`/`events`
-  poll-loops on the v3.0.x line cover the common cases; this is the interactive/multiplexed tier.
-- [ ] **zstd** layer decode — **upstream `sankoch`** (decode-only; stiva builds gzip). **YAML** /
-  `convert compose` — **upstream `bayan`** (a YAML-subset value layer).
+  suspend/resume — the run-to-completion model can't express them). *Action required from
+  stiva:* cyrius parks this in `roadmap-future.md:116` as an "**Unpinned follow-on** … No live
+  consumer; pull forward on a real suspend-across-await need." **stiva is that consumer and has
+  not filed.** Filing is the unblock lever, not waiting. Nuance: non-TTY single-stream `exec -i`
+  is buildable today over kavach `persistent_send`/`persistent_read` in a blocking poll loop —
+  it is the `-t` half that has no substrate (no pty helper exists anywhere in `lib/`).
 - [ ] **True concurrent layer downloads** (`buffer_unordered`) — needs a multi-threaded async
   runtime; the v3.0.x pull uses a sequential loop (fine single-node).
-- [ ] **`scan_output`** — the kavach `ExternalizationGate` dist binding for the secret/PII scan
-  branch of `exec`/`logs`; the unscanned path ships on the v3.0.x line.
+- [ ] **J. Device / accelerator passthrough** — `--device` / `--gpus`, `/dev` node injection,
+  cgroup device rules, driver-library mounts. **Blocked on kavach, and the hole is one layer
+  further upstream than stiva.** `SandboxPolicy` has no device field and `cgroup_setup` writes
+  no devices controller (see §I's negative results), so stiva **cannot express device
+  passthrough through the 3.8.1 API under any wiring** — kavach's own samay bridge silently
+  drops `ResourceReq.accel_req` / `accel_min_chips` (`samay_bridge.cyr:24-31`) for precisely
+  this reason. Sequence: **(1)** file against kavach — a device-allow list on `SandboxPolicy`,
+  a cgroup v2 devices gate in `cgroup_setup`, and `linux.devices` emission in its `oci_spec.cyr`.
+  kavach's roadmap already wants adjacent work (`:212` USB/device selective passthrough, `:215`
+  and `:254-255` GPU passthrough / VFIO / virtio-gpu — all Medium priority, unstarted, and
+  scoped to the *Embassy* foreign-container plan rather than to ai-hwaccel). **(2)** stiva then
+  emits OCI `linux.devices[]` + `linux.resources.devices[]` next to the existing CPU/mem/PID/IO
+  cgroup writers, and uses ai-hwaccel's `REQ_*` / `profile_*` vocabulary to describe and
+  validate the request.
+  **ai-hwaccel does not supply the plumbing** — it never emits a device node path, never
+  computes major/minor, never produces a cgroup rule or a driver-mount list, and has no
+  allocation/reservation concept. It implements the **guest** half of the
+  nvidia-container-toolkit contract (it *reads* `NVIDIA_VISIBLE_DEVICES`, `/.dockerenv`,
+  `/proc/1/cgroup` to discover what some other runtime already set up); stiva would write the
+  **host** half. NVIDIA is detected purely by parsing `nvidia-smi` CSV — `/dev/nvidia*`,
+  `/dev/dri/*` and `/dev/kfd` are never scanned, so there is not even an incidental path to
+  reuse. The one usable seed is `_find_pci_addr:2954` (returns a BDF sysfs path), an
+  underscore-prefixed internal.
+- [ ] **Device allocation ledger** — "container A holds GPU 0, don't hand it to B." Neither
+  library provides it: samay's `node_capacity_reserve` decrements CPU and memory but **not**
+  `accel_profiles`, so even samay's accelerator handling is match-only, never exclusive.
+  ai-hwaccel supplies the matcher; the ledger is unwritten in both. A natural extension of
+  stiva's existing `state.json` + majra lifecycle events, but it is design work no dependency
+  hands you.
 
 ---
 

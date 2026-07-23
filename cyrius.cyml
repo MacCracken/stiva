@@ -122,8 +122,52 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.7.1"
+tag = "3.8.2"
 modules = ["dist/kavach.cyr"]
+
+# ── samay + ai-hwaccel — declared, pinned, and DEFAULT-OFF ────────
+# These arrived silently as kavach 3.8.0's transitive closure (kavach declared
+# [deps.samay]; samay declares [deps.ai-hwaccel]), landing in lib/ undeclared
+# and UNLOCKED — 83 lock entries against 85 lib/*.cyr. kavach 3.8.2 makes them
+# optional on its side, so they no longer arrive uninvited; stiva now names them
+# explicitly, on its own terms.
+#
+# They are OPTIONAL and the `accel` feature is DEFAULT-OFF, because cyrius
+# auto-includes every ACTIVE [deps.*] module into EVERY compilation unit. These
+# two are ~279 KB of source, and switching them on pushes `tests/stiva.tcyr`
+# past cycc's identifier cap — a hard `identifier buffer full (261893/262144)`
+# compile error, not a warning. Turn the feature on when the roadmap §H/§I work
+# actually lands (cron scheduling; accelerator inventory + placement), and
+# expect to split the test units at the same time.
+#
+# NOTE: `path` OVERRIDES `tag` — a local sibling checkout wins outright. That is
+# how kavach 3.8.1 arrived here while this file still said 3.7.1. `cyrius.lock`
+# records only bare `<sha256>  lib/<file>` lines (no dep name / version / rev),
+# so it cannot detect the substitution; `git diff cyrius.lock` after
+# `cyrius deps` is the only reliable check.
+[features]
+default = []
+accel = ["samay", "ai-hwaccel"]
+
+# Cron/schedule machinery + resource-aware placement (roadmap §H).
+[deps.samay]
+git = "https://github.com/MacCracken/samay.git"
+path = "../samay"
+tag = "1.0.1"
+modules = ["dist/samay.cyr"]
+optional = true
+
+# Accelerator inventory + requirement matching (roadmap §I). Owns the bare
+# `backend_name`; kavach's OS-backend namer was renamed `os_backend_name` in
+# kavach 3.8.2 to resolve the last-def-wins collision (both enums start at 0,
+# so `backend_name(Backend.OCI)` silently returned "intel-npu"). `path_exists`
+# also collides but is benign — identical 1/0 semantics.
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel.git"
+path = "../ai-hwaccel"
+tag = "2.3.15"
+modules = ["dist/ai-hwaccel.cyr"]
+optional = true
 
 # LUKS + dm-verity — encrypted.
 [deps.agnodrm]

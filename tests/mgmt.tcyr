@@ -524,10 +524,10 @@ fn test_fleet_constraints_default() {
 
 fn test_fleet_free_slots() {
     test_group("fleet_free_slots");
-    var cap = node_capacity_new(4096, 4, 10, 3);
+    var cap = fleet_node_capacity_new(4096, 4, 10, 3);
     var node = fleet_node_new("n1", "1.2.3.4", 0, cap, FLEET_NODE_READY, 0);
     assert_eq(free_slots(node), 7, "10-3=7");
-    var cap2 = node_capacity_new(4096, 4, 5, 8);
+    var cap2 = fleet_node_capacity_new(4096, 4, 5, 8);
     var node2 = fleet_node_new("n2", "1.2.3.5", 0, cap2, FLEET_NODE_READY, 0);
     assert_eq(free_slots(node2), 0, "over -> 0");
     return 0;
