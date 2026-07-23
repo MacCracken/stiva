@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — toolchain refresh + v3.0.x sync backlog
 
+### Added — zstd layer decode (roadmap §G)
+`unpack_layer` (`src/storage.cyr`) now handles `tar+zstd` layers alongside `tar+gzip`,
+dispatching on the 4-byte zstd magic (`28 B5 2F FD`) into a new `_stor_unpack_zstd_bytes`.
+This completes the compressed-layer media types the OCI image-spec defines on the unpack
+side, and lights up `media_oci_layer_zstd` (`src/registry.cyr:57`) for the pull path.
+
+Two design points worth recording:
+- **Sized from the frame header, not a grow-retry loop.** `zstd_decompress` returns `-1` for
+  *both* a short output buffer and a corrupt frame, so the two cannot be distinguished by
+  return code and the gzip path's `ERR_BUFFER_TOO_SMALL`-driven retry has no equivalent. The
+  buffer is sized from `zstd_frame_content_size`, with bounded retry only when the frame
+  omits the size.
+- **The declared size is attacker-controlled**, so it is bounded by an **8 GiB absolute** and
+  **1000:1 ratio** ceiling. Without this, a 100-byte blob declaring a 1 TiB content size is
+  an allocation-amplification DoS. The gzip path needs no such guard — its grow-loop reacts
+  to actual decoded output rather than a declared number.
+
+12 new assertions in `tests/store.tcyr` (real round-trip, corrupt-frame rejection, and both
+DoS ceilings). Suite now **1196 assertions**: stiva 684 · store 197 · runpath 187 · mgmt 128.
+
+### Changed — cyrius pin 6.4.66 → 6.4.71 (closes a heap overflow in the vendored zstd decoder)
+The zstd work surfaced a **heap buffer overflow in sankoch 2.5.5**, the version vendored by
+the cyrius 6.4.66 snapshot stiva was pinned to. Every output write in its zstd decoder stored
+to `_z_out + _z_outpos` with no per-write bound, checking `_z_outpos > _z_outcap` only *after*
+a whole block had been written — with the block size taken from the attacker-controlled frame
+header. A canary proved it: a 32-byte frame (valid magic + `0x41` filler) declaring FCS 16961
+returned `-1` **and clobbered all 4096 canary bytes** past the buffer. Reachable from
+`stiva load` and layer unpack on exactly the untrusted input a runtime must survive; it is
+also what silently corrupted unrelated tar/symlink/docker-archive tests when a
+malformed-input test was first added.
+
+sankoch had **already fixed this in 2.5.6** (`8b843d6`, 2026-07-19) — bounds checks now
+precede every write. stiva was pinned one toolchain release below the fix. Bumping to
+**6.4.71** (sankoch 2.7.5) closes it and also clears the wrapper/manifest drift warning that
+had been present all along. `[deps.kavach]` → **3.8.3** (samay/ai-hwaccel now optional
+upstream). The same canary passes clean against 2.7.5.
+
+Note for future stdlib issues: stiva consumes sankoch from `~/.cyrius/versions/<pin>/lib/`,
+**not** from the sibling repo — a stdlib security fix reaches stiva only via a pin bump, so
+check the snapshot's vendored version rather than the sibling's.
+
 ### Fixed — dependency hygiene: three symbol collisions + an unlocked `lib/`
 kavach 3.8.0 took `[deps.samay]`, and samay declares `[deps.ai-hwaccel]`. Because cyrius
 auto-includes every **active** `[deps.*]` module into every compilation unit, both bundles

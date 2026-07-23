@@ -229,14 +229,37 @@ external gates are gone, and the work moves onto this line.
   (`lib/kavach.cyr:5153`), so call the three scanners directly for `ContainerExecResult`.
   Oracle: `rust-old/src/runtime.rs:573-604` — a ~15-line adapter. `logs` is already live and
   could be scanned today.
-- [ ] **zstd layer decode** — `lib/sankoch.cyr` declares `FORMAT_ZSTD = 8` (`:20`) and ships
-  `zstd_decompress:10243` + `zstd_frame_content_size:10307`; `tar_open_auto:10783` already
-  sniffs the `28 B5 2F FD` magic and routes to the decoder. Proven twice: a 148,131-byte
-  `zstd -19` frame decoded to 706,560 bytes with a **sha256-identical** round-trip (67 tar
-  entries); a second 4,556-byte layer archive enumerated all 6 entries with correct modes.
-  Shipped in **sankoch 2.5.0 on 2026-07-10 — eight days before v3.0.4**. The vendored copy is
-  decode-only, which is all `unpack_layer` needs; lights up `media_oci_layer_zstd`
-  (`src/registry.cyr:57`) on the pull path.
+- [x] **zstd layer decode — LANDED 2026-07-22.** `unpack_layer` (`src/storage.cyr`) now
+  dispatches on the 4-byte zstd magic (`28 B5 2F FD`) into `_stor_unpack_zstd_bytes`, sized
+  from `zstd_frame_content_size` rather than a grow-retry loop — `zstd_decompress` returns
+  `-1` for *both* a short output buffer and a corrupt frame, so the two are
+  indistinguishable and a retry loop cannot be driven off it. Because the frame's declared
+  size is attacker-controlled, the buffer is bounded by an **8 GiB absolute** and **1000:1
+  ratio** ceiling (allocation-amplification guard; the gzip path needs none, since its
+  grow-loop reacts to actual decoded output). Lights up `media_oci_layer_zstd`
+  (`src/registry.cyr:57`) on the pull path. **12 new assertions** in `tests/store.tcyr`:
+  real round-trip, corrupt-frame rejection, and both DoS ceilings.
+
+  > **This work first surfaced a heap buffer overflow — in the toolchain, not in stiva.**
+  > sankoch **2.5.5**, vendored by the cyrius **6.4.66** snapshot stiva was pinned to, wrote
+  > past `dst_cap` on malformed input: every output write stored to `_z_out + _z_outpos`
+  > with no per-write bound, checking `_z_outpos > _z_outcap` only *after* a whole block had
+  > been written, with `bsize` taken from the attacker-controlled block header. Proven with
+  > a canary — a 32-byte frame (valid magic + `0x41` filler) declaring FCS 16961 returned
+  > `-1` **and clobbered all 4096 canary bytes** past the buffer. It is what silently
+  > corrupted unrelated tar/symlink/docker-archive tests when a malformed-input test was
+  > first added.
+  >
+  > **sankoch had already fixed it** in **2.5.6** (`8b843d6`, "zstd decoder hardening",
+  > 2026-07-19) — bounds checks now precede every write (`src/zstd.cyr:656, 719, 744, 863,
+  > 870`). stiva was simply pinned one toolchain release below the fix. Resolution was a
+  > **pin bump to cyrius 6.4.71** (sankoch 2.7.5), which also cleared the long-standing
+  > wrapper/manifest drift warning. The same canary passes clean against 2.7.5.
+  >
+  > Lesson worth keeping: stiva consumes sankoch from `~/.cyrius/versions/<pin>/lib/`, not
+  > from the sibling repo — so a stdlib security fix reaches stiva only via a toolchain pin
+  > bump. Check the snapshot's vendored version, not the sibling's.
+
 - [ ] **`convert compose` / YAML** — `lib/bayan.cyr` is **1.2.0** (2026-07-16) and
   `bayan_yaml_parse:4545` emits into the *same* `JTAG_*`-tagged `bayan_json_v_*` graph the JSON
   parser produces — exactly the "YAML parser + JSON Value model" pair `src/convert.cyr:505-518`

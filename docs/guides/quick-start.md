@@ -4,7 +4,7 @@ This guide covers installing stiva, importing images, running containers, basic 
 
 ## Installation
 
-Build from source with the cyrius toolchain (pin 6.4.66):
+Build from source with the cyrius toolchain (pin 6.4.71):
 
 ```bash
 cyrius build src/main.cyr build/stiva

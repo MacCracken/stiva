@@ -13,11 +13,11 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**1184 tests** across `tests/*.tcyr`: `stiva.tcyr` (684), `store.tcyr` (185),
+**1196 tests** across `tests/*.tcyr`: `stiva.tcyr` (684), `store.tcyr` (197),
 `runpath.tcyr` (187), `mgmt.tcyr` (128).
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
-> global counter per `assert*()` call and `assert_summary()` prints it. The 1184
+> global counter per `assert*()` call and `assert_summary()` prints it. The 1196
 > assertions live in 288 `fn test_*` functions.
 
 ## Test Organization
@@ -62,7 +62,7 @@ test functions out of `stiva.tcyr` freed 0 bytes; dropping one `include` freed 4
 | File | Focus |
 |------|-------|
 | `tests/stiva.tcyr` (684) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
-| `tests/store.tcyr` (185) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout), not all 26 |
+| `tests/store.tcyr` (197) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout), not all 26 |
 | `tests/runpath.tcyr` (187) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and the image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`) |
 | `tests/mgmt.tcyr` (128) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling, `agent` registration records, `health` policies |
 

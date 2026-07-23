@@ -477,7 +477,7 @@ fn test_unpack_layer_missing_blob() {
     return 0;
 }
 
-# unpack_layer on non-gzip bytes fails (-1) — the zstd fallback is deferred.
+# unpack_layer on bytes that are neither gzip nor zstd fails (-1).
 fn test_unpack_layer_not_gzip() {
     test_group("unpack_layer_not_gzip");
     var dir = "/tmp/stiva-unpack-badgz";
@@ -485,6 +485,92 @@ fn test_unpack_layer_not_gzip() {
     var blob = _stor_cat2(dir, "/bad.tar.gz");
     file_write_all(blob, "this is not gzip", 16);
     assert_eq(unpack_layer(blob, dir), 0 - 1, "non-gzip = -1");
+    return 0;
+}
+
+# End-to-end: zstd a hand-built USTAR archive, unpack_layer it, read back.
+# Mirrors the gzip round-trip — unpack_layer dispatches on the 4-byte zstd
+# magic (28 B5 2F FD). sankoch shipped zstd decode in 2.5.0.
+fn test_unpack_layer_zstd_roundtrip() {
+    test_group("unpack_layer_zstd_roundtrip");
+    var dir = "/tmp/stiva-unpack-zstd";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/layer.tar.zst");
+    var dest = _stor_cat2(dir, "/unpacked");
+    sys_mkdir(dest, 493);
+
+    var tar = alloc(5120);
+    var data = "hello from a zstd layer";
+    var tlen = _t_build_tar(tar, "etc/zhello.txt", data, strlen(data));
+    var zb = alloc(16384);
+    var zlen = zstd_compress(tar, tlen, zb, 16384);
+    assert(zlen > 0, "zstd compressed");
+    # The dispatch in unpack_layer keys off exactly these 4 bytes.
+    assert_eq(load8(zb) & 0xFF, 0x28, "zstd magic 0");
+    assert_eq(load8(zb + 1) & 0xFF, 0xB5, "zstd magic 1");
+    assert_eq(load8(zb + 2) & 0xFF, 0x2F, "zstd magic 2");
+    assert_eq(load8(zb + 3) & 0xFF, 0xFD, "zstd magic 3");
+    file_write_all(blob, zb, zlen);
+
+    var rc = unpack_layer(blob, dest);
+    assert_eq(rc, 0, "unpack ok");
+
+    var out = _stor_cat2(dest, "/etc/zhello.txt");
+    var rbuf = alloc(64);
+    var n = file_read_all(out, rbuf, 64);
+    store8(rbuf + n, 0);
+    assert_eq(streq(rbuf, "hello from a zstd layer"), 1, "content round-trips");
+    return 0;
+}
+
+# A blob with valid zstd magic but a truncated/corrupt body must fail (-1),
+# not hang in the grow-retry loop or extract garbage.
+fn test_unpack_layer_zstd_corrupt() {
+    test_group("unpack_layer_zstd_corrupt");
+    var dir = "/tmp/stiva-unpack-zstd-bad";
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/corrupt.tar.zst");
+    var buf = alloc(32);
+    store8(buf, 0x28); store8(buf + 1, 0xB5); store8(buf + 2, 0x2F); store8(buf + 3, 0xFD);
+    var i = 4;
+    while (i < 32) { store8(buf + i, 0x41); i = i + 1; }   # 'A' filler, not a valid frame
+    file_write_all(blob, buf, 32);
+    assert_eq(unpack_layer(blob, dir), 0 - 1, "corrupt zstd = -1");
+    return 0;
+}
+
+# DoS guard: a tiny blob whose frame header DECLARES an enormous
+# Frame_Content_Size must be rejected before the allocation, not honoured.
+# zstd's FCS is attacker-controlled, so this is allocation amplification.
+# Frame header: magic + FHD 0xE0 (fcs_flag=3 → 8-byte FCS, single_segment=1,
+# did_flag=0) + the 8-byte little-endian size.
+fn test_unpack_layer_zstd_fcs_bomb() {
+    test_group("unpack_layer_zstd_fcs_bomb");
+    var dir = "/tmp/stiva-unpack-zstd-bomb";
+    sys_mkdir(dir, 493);
+
+    # 2^40 (1 TiB) — far above the 8 GiB absolute ceiling.
+    var buf = alloc(13);
+    store8(buf, 0x28); store8(buf + 1, 0xB5); store8(buf + 2, 0x2F); store8(buf + 3, 0xFD);
+    store8(buf + 4, 0xE0);
+    store8(buf + 5, 0); store8(buf + 6, 0); store8(buf + 7, 0); store8(buf + 8, 0);
+    store8(buf + 9, 0); store8(buf + 10, 1); store8(buf + 11, 0); store8(buf + 12, 0);
+    assert_eq(zstd_frame_content_size(buf, 13), 1099511627776, "header declares 1 TiB");
+    var blob = _stor_cat2(dir, "/bomb.tar.zst");
+    file_write_all(blob, buf, 13);
+    assert_eq(unpack_layer(blob, dir), 0 - 1, "1 TiB FCS rejected");
+
+    # 1 MiB declared from a 13-byte blob — under the absolute ceiling but a
+    # ~80000:1 ratio, so the ratio guard is what rejects this one.
+    var buf2 = alloc(13);
+    store8(buf2, 0x28); store8(buf2 + 1, 0xB5); store8(buf2 + 2, 0x2F); store8(buf2 + 3, 0xFD);
+    store8(buf2 + 4, 0xE0);
+    store8(buf2 + 5, 0); store8(buf2 + 6, 0); store8(buf2 + 7, 16); store8(buf2 + 8, 0);
+    store8(buf2 + 9, 0); store8(buf2 + 10, 0); store8(buf2 + 11, 0); store8(buf2 + 12, 0);
+    assert_eq(zstd_frame_content_size(buf2, 13), 1048576, "header declares 1 MiB");
+    var blob2 = _stor_cat2(dir, "/ratio.tar.zst");
+    file_write_all(blob2, buf2, 13);
+    assert_eq(unpack_layer(blob2, dir), 0 - 1, "1000:1 ratio exceeded -> rejected");
     return 0;
 }
 
@@ -869,6 +955,9 @@ fn main() {
     test_unpack_layer_gz_roundtrip();
     test_unpack_layer_missing_blob();
     test_unpack_layer_not_gzip();
+    test_unpack_layer_zstd_roundtrip();
+    test_unpack_layer_zstd_corrupt();
+    test_unpack_layer_zstd_fcs_bomb();
     test_tar_perms_roundtrip();
     test_tar_extract_rejects_traversal();
     test_tar_hardening();

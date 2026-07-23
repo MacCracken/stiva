@@ -6,7 +6,7 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.4.66** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Toolchain**: Cyrius, pin **6.4.71** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
 - **Version**: SemVer, currently 3.0.4
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
@@ -20,8 +20,8 @@ pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = gr
 complete**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1184 tests** across the `.tcyr` files (stiva 684 · store 185 · runpath 187 · mgmt 128; run via
-`cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.66**.
+**1196 tests** across the `.tcyr` files (stiva 684 · store 197 · runpath 187 · mgmt 128; run via
+`cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.71**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -171,7 +171,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1184 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1196 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -206,7 +206,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1184 Cyrius tests** across `tests/*.tcyr` (stiva 684 · store 185 · runpath 187 · mgmt 128), each
+**1196 Cyrius tests** across `tests/*.tcyr` (stiva 684 · store 197 · runpath 187 · mgmt 128), each
 mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split across files
 because a monolith hits the cycc identifier-dedup cap.
 

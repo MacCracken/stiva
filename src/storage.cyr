@@ -7,13 +7,15 @@
 #     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
 #   mount_volumes                          (parse_volume + bind mount syscall)
 #
-# Layer unpacking (unpack_layer / prepare_layers) is now implemented on the
-# Cyrius stdlib `sankoch` gzip_decompress + a hand-rolled USTAR tar reader.
+# Layer unpacking (unpack_layer / prepare_layers) is implemented on the Cyrius
+# stdlib `sankoch` gzip_decompress + zstd_decompress and a hand-rolled USTAR
+# tar reader. Both compressed layer media types the OCI image-spec defines are
+# therefore supported on the unpack side.
 #
-# What remains DEFERRED (see the block at the bottom):
-#   the zstd fallback (rust-old unpack_tar_zstd + unpack_layer's second
-#   attempt) — zstd is genuinely absent from sankoch (it ships gzip/xz/lz4/
-#   bzip2, not zstd), so that path lands with a zstd codec.
+# zstd DECODE landed in sankoch 2.5.0 (2026-07-10); the "zstd is absent from
+# sankoch" note this header used to carry was stale. zstd *encode*
+# (`zstd_compress`) exists too but stiva still builds gzip layers — switching
+# the writer is a separate decision, not a codec gap.
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here. parse_volume returns 0 (null) on an
@@ -330,11 +332,10 @@ fn mount_volumes(volume_specs, merged_rootfs) {
     return mounts;
 }
 
-# ── Layer unpacking (gzip-tar) ─────────────────────
-# rust-old drives flate2 (gzip) + tar stream decoders; here we use the
-# Cyrius stdlib `sankoch` gzip_decompress and a hand-rolled USTAR reader.
-# The zstd fallback (rust-old unpack_tar_zstd) stays DEFERRED — zstd is
-# absent from sankoch (it ships gzip/xz/lz4/bzip2, not zstd).
+# ── Layer unpacking (gzip-tar + zstd-tar) ──────────
+# rust-old drives flate2 (gzip) / zstd::stream::Decoder + tar stream decoders;
+# here we use the Cyrius stdlib `sankoch` gzip_decompress / zstd_decompress and
+# a hand-rolled USTAR reader.
 
 # Read an entire file into a fresh heap buffer. Returns the buffer pointer;
 # writes its length to the 8-byte cell at `out_len`. Returns 0 on open
@@ -672,9 +673,64 @@ fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
     return _stor_extract_tar(out, dlen, dest);
 }
 
+# Ceilings for the zstd output buffer. zstd's Frame_Content_Size is read
+# straight out of the attacker-supplied frame header, so honouring it blindly
+# is an allocation-amplification DoS — a 100-byte blob can declare a 1 TiB
+# content size. The gzip path is NOT exposed this way: its grow-loop reacts to
+# actual decoded output rather than a declared number, so the guard is
+# zstd-only. 8 GiB absolute (large ML base layers run to single-digit GiB) and
+# a 1000:1 ratio, both of which real layers clear by orders of magnitude.
+var _STOR_ZSTD_MAX_OUT = 8589934592;
+var _STOR_ZSTD_MAX_RATIO = 1000;
+
+# Decompress a zstd'd tar `blob` and extract it into `dest` (rust-old:
+# unpack_tar_zstd — zstd::stream::Decoder + tar::Archive). Returns 0 on
+# success, negative on failure.
+#
+# Unlike gzip, `zstd_decompress` (lib/sankoch.cyr:10401) returns -1 for BOTH a
+# too-small output buffer (`:10458`) and a corrupt frame — the two are
+# indistinguishable by return code — so a grow-retry loop cannot be driven off
+# it the way _stor_unpack_gz_bytes drives off ERR_BUFFER_TOO_SMALL. We size the
+# buffer from the frame header instead (`zstd_frame_content_size`, `:10465`),
+# and only fall back to bounded grow-retry when the header omits the size
+# (fcs_flag 0 on a multi-frame input), where a corrupt blob simply costs a few
+# wasted attempts before failing.
+fn _stor_unpack_zstd_bytes(blob, blob_len, dest) {
+    var cap = zstd_frame_content_size(blob, blob_len);
+    if (cap > 0) {
+        if (cap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
+        if (cap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
+        var out1 = alloc(cap);
+        var dlen1 = zstd_decompress(blob, blob_len, out1, cap);
+        if (dlen1 < 0) { return dlen1; }
+        return _stor_extract_tar(out1, dlen1, dest);
+    }
+
+    # Frame declares no content size — grow-retry, bounded by the same ceilings.
+    var gcap = blob_len * 32;
+    if (gcap < 1048576) { gcap = 1048576; }     # >= 1 MiB
+    var tries = 0;
+    while (tries < 12) {
+        if (gcap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
+        if (gcap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
+        var out = alloc(gcap);
+        var dlen = zstd_decompress(blob, blob_len, out, gcap);
+        if (dlen >= 0) { return _stor_extract_tar(out, dlen, dest); }
+        gcap = gcap * 2;
+        tries = tries + 1;
+    }
+    return 0 - 1;
+}
+
 # Unpack a single layer blob to a directory (rust-old: unpack_layer).
-# Supports gzip-tar; the zstd fallback is DEFERRED (see the block below).
-# `blob_path` and `dest` are cstrs.
+# Supports gzip-tar and zstd-tar. `blob_path` and `dest` are cstrs.
+#
+# rust-old attempts gzip and falls back to zstd on failure. We sniff the 4-byte
+# zstd magic (28 B5 2F FD) and dispatch instead: observably identical for every
+# real input, but it avoids allocating the gzip path's 32x output buffer only to
+# have `gzip_decompress` reject the magic immediately. Anything that is not a
+# zstd frame still goes down the gzip path, which fast-fails on bad magic — so
+# the "try both" behaviour is preserved where it matters.
 #
 # Returns 0 on success, -1 on failure (rust-old maps every failure — open,
 # decode, tar — to Err(StivaError::LayerUnpack)). The caller reports the -1
@@ -687,10 +743,21 @@ fn unpack_layer(blob_path, dest) {
     if (blob == 0) { return 0 - 1; }        # cannot open blob
     var blob_len = load64(len_cell);
 
-    var rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    var is_zstd = 0;
+    if (blob_len >= 4) {
+        if ((load8(blob) & 0xFF) == 0x28 && (load8(blob + 1) & 0xFF) == 0xB5
+        && (load8(blob + 2) & 0xFF) == 0x2F && (load8(blob + 3) & 0xFF) == 0xFD) {
+            is_zstd = 1;
+        }
+    }
+
+    var rc = 0 - 1;
+    if (is_zstd == 1) {
+        rc = _stor_unpack_zstd_bytes(blob, blob_len, dest);
+    } else {
+        rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    }
     if (rc == 0) { return 0; }
-    # rust-old falls back to zstd here; that path is deferred (no zstd codec),
-    # so a non-gzip blob is an unpack failure.
     return 0 - 1;
 }
 
@@ -1098,14 +1165,14 @@ fn export_rootfs(rootfs, output) {
     return create_tar(rootfs, output);
 }
 
-# ── DEFERRED (needs a zstd codec) ────────────────────
-# rust-old/src/storage.rs also defines unpack_tar_zstd:
+# ── DEFERRED ─────────────────────────────────────────
+# Nothing from rust-old/src/storage.rs is deferred any more. `unpack_tar_zstd`
+# (rust-old: zstd::stream::Decoder + tar::Archive) landed as
+# `_stor_unpack_zstd_bytes` once sankoch 2.5.0 shipped zstd decode; the
+# unpack_tar_gz / unpack_layer / prepare_layers / create_tar / export_rootfs
+# surface was already implemented above.
 #
-#   fn unpack_tar_zstd(file, dest) -> Result<(), Box<dyn Error>>
-#     (zstd::stream::Decoder + tar::Archive, overwrite + preserve perms)
-#
-# and unpack_layer's zstd fallback (retry the blob through zstd-tar when the
-# gzip attempt fails). zstd is genuinely absent from the Cyrius stdlib —
-# sankoch ships gzip/xz/lz4/bzip2, not zstd — so the zstd path lands when a
-# zstd codec does. Tracked in the roadmap. (gzip unpack_layer / unpack_tar_gz
-# / prepare_layers are now implemented above.)
+# Remaining (a deliberate choice, NOT a codec gap): stiva still WRITES gzip
+# layers. `zstd_compress` is available in sankoch, so emitting
+# `application/vnd.oci.image.layer.v1.tar+zstd` is a build-side decision to
+# make when there is a reason to, not a blocked item.

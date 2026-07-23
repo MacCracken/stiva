@@ -3523,7 +3523,7 @@ fn is_unprivileged() {
 # Splits $PATH on ':' and tests each `dir/name` for existence.
 # Returns 1 if found, 0 otherwise (including no PATH set).
 #[must_use]
-fn which(name) {
+fn stiva_which(name) {
     var path = getenv("PATH");
     if (path == 0) { return 0; }
     var plen = strlen(path);
@@ -3561,10 +3561,10 @@ fn which(name) {
 #[must_use]
 fn available_backends() {
     var backends = vec_new();
-    if (which("pasta") == 1) {
+    if (stiva_which("pasta") == 1) {
         vec_push(backends, NETWORK_ROOTLESS_BACKEND_PASTA);
     }
-    if (which("slirp4netns") == 1) {
+    if (stiva_which("slirp4netns") == 1) {
         vec_push(backends, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS);
     }
     return backends;
@@ -5853,13 +5853,15 @@ fn credential_store_to_config(store, registry) {
 #     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
 #   mount_volumes                          (parse_volume + bind mount syscall)
 #
-# Layer unpacking (unpack_layer / prepare_layers) is now implemented on the
-# Cyrius stdlib `sankoch` gzip_decompress + a hand-rolled USTAR tar reader.
+# Layer unpacking (unpack_layer / prepare_layers) is implemented on the Cyrius
+# stdlib `sankoch` gzip_decompress + zstd_decompress and a hand-rolled USTAR
+# tar reader. Both compressed layer media types the OCI image-spec defines are
+# therefore supported on the unpack side.
 #
-# What remains DEFERRED (see the block at the bottom):
-#   the zstd fallback (rust-old unpack_tar_zstd + unpack_layer's second
-#   attempt) — zstd is genuinely absent from sankoch (it ships gzip/xz/lz4/
-#   bzip2, not zstd), so that path lands with a zstd codec.
+# zstd DECODE landed in sankoch 2.5.0 (2026-07-10); the "zstd is absent from
+# sankoch" note this header used to carry was stale. zstd *encode*
+# (`zstd_compress`) exists too but stiva still builds gzip layers — switching
+# the writer is a separate decision, not a codec gap.
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here. parse_volume returns 0 (null) on an
@@ -6176,11 +6178,10 @@ fn mount_volumes(volume_specs, merged_rootfs) {
     return mounts;
 }
 
-# ── Layer unpacking (gzip-tar) ─────────────────────
-# rust-old drives flate2 (gzip) + tar stream decoders; here we use the
-# Cyrius stdlib `sankoch` gzip_decompress and a hand-rolled USTAR reader.
-# The zstd fallback (rust-old unpack_tar_zstd) stays DEFERRED — zstd is
-# absent from sankoch (it ships gzip/xz/lz4/bzip2, not zstd).
+# ── Layer unpacking (gzip-tar + zstd-tar) ──────────
+# rust-old drives flate2 (gzip) / zstd::stream::Decoder + tar stream decoders;
+# here we use the Cyrius stdlib `sankoch` gzip_decompress / zstd_decompress and
+# a hand-rolled USTAR reader.
 
 # Read an entire file into a fresh heap buffer. Returns the buffer pointer;
 # writes its length to the 8-byte cell at `out_len`. Returns 0 on open
@@ -6518,9 +6519,64 @@ fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
     return _stor_extract_tar(out, dlen, dest);
 }
 
+# Ceilings for the zstd output buffer. zstd's Frame_Content_Size is read
+# straight out of the attacker-supplied frame header, so honouring it blindly
+# is an allocation-amplification DoS — a 100-byte blob can declare a 1 TiB
+# content size. The gzip path is NOT exposed this way: its grow-loop reacts to
+# actual decoded output rather than a declared number, so the guard is
+# zstd-only. 8 GiB absolute (large ML base layers run to single-digit GiB) and
+# a 1000:1 ratio, both of which real layers clear by orders of magnitude.
+var _STOR_ZSTD_MAX_OUT = 8589934592;
+var _STOR_ZSTD_MAX_RATIO = 1000;
+
+# Decompress a zstd'd tar `blob` and extract it into `dest` (rust-old:
+# unpack_tar_zstd — zstd::stream::Decoder + tar::Archive). Returns 0 on
+# success, negative on failure.
+#
+# Unlike gzip, `zstd_decompress` (lib/sankoch.cyr:10401) returns -1 for BOTH a
+# too-small output buffer (`:10458`) and a corrupt frame — the two are
+# indistinguishable by return code — so a grow-retry loop cannot be driven off
+# it the way _stor_unpack_gz_bytes drives off ERR_BUFFER_TOO_SMALL. We size the
+# buffer from the frame header instead (`zstd_frame_content_size`, `:10465`),
+# and only fall back to bounded grow-retry when the header omits the size
+# (fcs_flag 0 on a multi-frame input), where a corrupt blob simply costs a few
+# wasted attempts before failing.
+fn _stor_unpack_zstd_bytes(blob, blob_len, dest) {
+    var cap = zstd_frame_content_size(blob, blob_len);
+    if (cap > 0) {
+        if (cap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
+        if (cap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
+        var out1 = alloc(cap);
+        var dlen1 = zstd_decompress(blob, blob_len, out1, cap);
+        if (dlen1 < 0) { return dlen1; }
+        return _stor_extract_tar(out1, dlen1, dest);
+    }
+
+    # Frame declares no content size — grow-retry, bounded by the same ceilings.
+    var gcap = blob_len * 32;
+    if (gcap < 1048576) { gcap = 1048576; }     # >= 1 MiB
+    var tries = 0;
+    while (tries < 12) {
+        if (gcap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
+        if (gcap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
+        var out = alloc(gcap);
+        var dlen = zstd_decompress(blob, blob_len, out, gcap);
+        if (dlen >= 0) { return _stor_extract_tar(out, dlen, dest); }
+        gcap = gcap * 2;
+        tries = tries + 1;
+    }
+    return 0 - 1;
+}
+
 # Unpack a single layer blob to a directory (rust-old: unpack_layer).
-# Supports gzip-tar; the zstd fallback is DEFERRED (see the block below).
-# `blob_path` and `dest` are cstrs.
+# Supports gzip-tar and zstd-tar. `blob_path` and `dest` are cstrs.
+#
+# rust-old attempts gzip and falls back to zstd on failure. We sniff the 4-byte
+# zstd magic (28 B5 2F FD) and dispatch instead: observably identical for every
+# real input, but it avoids allocating the gzip path's 32x output buffer only to
+# have `gzip_decompress` reject the magic immediately. Anything that is not a
+# zstd frame still goes down the gzip path, which fast-fails on bad magic — so
+# the "try both" behaviour is preserved where it matters.
 #
 # Returns 0 on success, -1 on failure (rust-old maps every failure — open,
 # decode, tar — to Err(StivaError::LayerUnpack)). The caller reports the -1
@@ -6533,10 +6589,21 @@ fn unpack_layer(blob_path, dest) {
     if (blob == 0) { return 0 - 1; }        # cannot open blob
     var blob_len = load64(len_cell);
 
-    var rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    var is_zstd = 0;
+    if (blob_len >= 4) {
+        if ((load8(blob) & 0xFF) == 0x28 && (load8(blob + 1) & 0xFF) == 0xB5
+        && (load8(blob + 2) & 0xFF) == 0x2F && (load8(blob + 3) & 0xFF) == 0xFD) {
+            is_zstd = 1;
+        }
+    }
+
+    var rc = 0 - 1;
+    if (is_zstd == 1) {
+        rc = _stor_unpack_zstd_bytes(blob, blob_len, dest);
+    } else {
+        rc = _stor_unpack_gz_bytes(blob, blob_len, dest);
+    }
     if (rc == 0) { return 0; }
-    # rust-old falls back to zstd here; that path is deferred (no zstd codec),
-    # so a non-gzip blob is an unpack failure.
     return 0 - 1;
 }
 
@@ -6944,17 +7011,17 @@ fn export_rootfs(rootfs, output) {
     return create_tar(rootfs, output);
 }
 
-# ── DEFERRED (needs a zstd codec) ────────────────────
-# rust-old/src/storage.rs also defines unpack_tar_zstd:
+# ── DEFERRED ─────────────────────────────────────────
+# Nothing from rust-old/src/storage.rs is deferred any more. `unpack_tar_zstd`
+# (rust-old: zstd::stream::Decoder + tar::Archive) landed as
+# `_stor_unpack_zstd_bytes` once sankoch 2.5.0 shipped zstd decode; the
+# unpack_tar_gz / unpack_layer / prepare_layers / create_tar / export_rootfs
+# surface was already implemented above.
 #
-#   fn unpack_tar_zstd(file, dest) -> Result<(), Box<dyn Error>>
-#     (zstd::stream::Decoder + tar::Archive, overwrite + preserve perms)
-#
-# and unpack_layer's zstd fallback (retry the blob through zstd-tar when the
-# gzip attempt fails). zstd is genuinely absent from the Cyrius stdlib —
-# sankoch ships gzip/xz/lz4/bzip2, not zstd — so the zstd path lands when a
-# zstd codec does. Tracked in the roadmap. (gzip unpack_layer / unpack_tar_gz
-# / prepare_layers are now implemented above.)
+# Remaining (a deliberate choice, NOT a codec gap): stiva still WRITES gzip
+# layers. `zstd_compress` is available in sankoch, so emitting
+# `application/vnd.oci.image.layer.v1.tar+zstd` is a build-side decision to
+# make when there is a reason to, not a blocked item.
 
 # --- imagelayout.cyr ---
 
@@ -9578,7 +9645,7 @@ fn build_sandbox(spec) {
     } else {
         b = Backend.PROCESS;
     }
-    var lm = _rt_cat2("selected sandbox backend: ", backend_name(b));
+    var lm = _rt_cat2("selected sandbox backend: ", os_backend_name(b));
     sakshi_debug(lm, strlen(lm));
 
     var cfg = config_new();
@@ -9692,7 +9759,7 @@ fn write_container_log(log_path, result) {
 fn security_score() {
     var backend = Backend.PROCESS;
     if (backend_is_available(Backend.OCI) == 1) { backend = Backend.OCI; }
-    var lm = _rt_cat2("computing security strength score: ", backend_name(backend));
+    var lm = _rt_cat2("computing security strength score: ", os_backend_name(backend));
     sakshi_info(lm, strlen(lm));
     var policy = policy_basic();
     return score_backend(backend, policy);
@@ -12142,7 +12209,7 @@ fn _agent_first12(id) {
 #
 # i64-everywhere representation:
 #   * Every public struct (FleetDeployment, DeploymentConstraints, FleetNode,
-#     NodeCapacity, ScheduleResult) is a heap pointer to an 8-byte-per-field
+#     FleetNodeCapacity, ScheduleResult) is a heap pointer to an 8-byte-per-field
 #     record; constructors alloc and return the pointer. `alloc_init()` must
 #     have run once before use.
 #   * String fields (`id`, `image`, `address`, `node_id`) are NUL-terminated
@@ -12205,9 +12272,14 @@ fn fleet_node_status_name(s) {
     return "unknown";
 }
 
-# ── NodeCapacity (rust-old: struct NodeCapacity) ───────────────
+# ── FleetNodeCapacity (rust-old: struct NodeCapacity) ───────────────
+# Renamed from the oracle's bare `NodeCapacity`: samay (pulled transitively via
+# kavach ≥ 3.8.0) defines its own `NodeCapacity` — 9 fields / 72 B / 5-arg ctor
+# vs this 4 / 32 B / 4-arg one — and cycc is SILENT on duplicate structs, so the
+# clash surfaces as a bogus parse error in whichever file compiles last. Same
+# `stiva_*`-prefix idiom as stiva_audit_log_new / stiva_port_mapping_new.
 # 4 fields × 8 bytes = 32.
-struct NodeCapacity {
+struct FleetNodeCapacity {
     memory_mb;            # u64
     cpus;                 # u32
     max_containers;       # u32
@@ -12215,9 +12287,9 @@ struct NodeCapacity {
 }
 
 #[must_use]
-fn node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
+fn fleet_node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
     var p = alloc(32);
-    var c: NodeCapacity = p;
+    var c: FleetNodeCapacity = p;
     c.memory_mb = memory_mb;
     c.cpus = cpus;
     c.max_containers = max_containers;
@@ -12227,7 +12299,7 @@ fn node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
 
 # ── FleetNode (rust-old: struct FleetNode) ─────────────────
 # id : cstr, address : cstr, labels : hashmap<str,str> handle (0 = empty),
-# capacity : NodeCapacity pointer, status : NodeStatus int,
+# capacity : FleetNodeCapacity pointer, status : NodeStatus int,
 # last_seen : epoch-ns i64. 6 fields × 8 bytes = 48.
 struct FleetNode {
     id;
@@ -12353,7 +12425,7 @@ fn node_matches_constraints(node, constraints) {
         }
     }
 
-    var cap: NodeCapacity = n.capacity;
+    var cap: FleetNodeCapacity = n.capacity;
 
     # Memory constraint (Some(min) → node.memory_mb >= min).
     if (c.min_memory_mb != 0 - 1) {
@@ -12374,7 +12446,7 @@ fn node_matches_constraints(node, constraints) {
 #[inline]
 fn free_slots(node) {
     var n: FleetNode = node;
-    var cap: NodeCapacity = n.capacity;
+    var cap: FleetNodeCapacity = n.capacity;
     if (cap.max_containers < cap.running_containers) { return 0; }
     return cap.max_containers - cap.running_containers;
 }
@@ -12446,14 +12518,14 @@ fn _fleet_sort_by_running_asc(cands) {
     while (i < n) {
         var cur = vec_get(cands, i);
         var curn: FleetNode = cur;
-        var curcap: NodeCapacity = curn.capacity;
+        var curcap: FleetNodeCapacity = curn.capacity;
         var key = curcap.running_containers;
         var j = i - 1;
         var done = 0;
         while (j >= 0 && done == 0) {
             var pv = vec_get(cands, j);
             var pvn: FleetNode = pv;
-            var pvcap: NodeCapacity = pvn.capacity;
+            var pvcap: FleetNodeCapacity = pvn.capacity;
             if (pvcap.running_containers > key) {
                 vec_set(cands, j + 1, pv);
                 j = j - 1;
@@ -12475,14 +12547,14 @@ fn _fleet_sort_by_running_desc(cands) {
     while (i < n) {
         var cur = vec_get(cands, i);
         var curn: FleetNode = cur;
-        var curcap: NodeCapacity = curn.capacity;
+        var curcap: FleetNodeCapacity = curn.capacity;
         var key = curcap.running_containers;
         var j = i - 1;
         var done = 0;
         while (j >= 0 && done == 0) {
             var pv = vec_get(cands, j);
             var pvn: FleetNode = pv;
-            var pvcap: NodeCapacity = pvn.capacity;
+            var pvcap: FleetNodeCapacity = pvn.capacity;
             if (pvcap.running_containers < key) {
                 vec_set(cands, j + 1, pv);
                 j = j - 1;
@@ -12699,7 +12771,7 @@ fn plan_rollback(nodes, count, constraints) {
     while (i < count) {
         var node = vec_get(nodes, i);
         var fn0: FleetNode = node;
-        var cap: NodeCapacity = fn0.capacity;
+        var cap: FleetNodeCapacity = fn0.capacity;
         if (fn0.status == FLEET_NODE_NOT_READY) {
             if (cap.running_containers > 0) {
                 var k = 0;
