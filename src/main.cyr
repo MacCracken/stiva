@@ -55,9 +55,15 @@ enum StivaVerb {
 
 fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 
+# NOTE: this literal does NOT track the VERSION file — cyrius.cyml reads
+# `version = "${file:VERSION}"`, but nothing interpolates it into the compiled
+# binary, so `stiva --version` is only correct if this string is bumped by hand.
+# It was missed for 3.0.5 and reported 3.0.4 from a tree already bumped.
+# scripts/version-bump.sh now rewrites it; keep the `X.Y.Z — ` prefix shape it
+# greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.4 — OCI container runtime (Cyrius port)";
+    return "3.0.5 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).

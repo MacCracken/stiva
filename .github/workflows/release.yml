@@ -71,7 +71,14 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           NAME="${{ github.event.repository.name }}"
           git archive --format=tar.gz --prefix="$NAME-$TAG/" -o "$NAME-$TAG.tar.gz" HEAD
-          sha256sum "$NAME-$TAG.tar.gz" build/"$NAME" > SHA256SUMS 2>/dev/null \
+          # Also publish the binary under the ecosystem asset convention
+          # `<name>-<tag>-x86_64-linux` (as kavach/bote/nein do), because the
+          # zugot marketplace recipe resolves the package by that glob —
+          # `marketplace/stiva.cyml` `release_asset`. Without the rename the
+          # only binary asset is named plain `stiva` and the recipe matches
+          # nothing, so the package cannot install.
+          cp build/"$NAME" "$NAME-$TAG-x86_64-linux"
+          sha256sum "$NAME-$TAG.tar.gz" "$NAME-$TAG-x86_64-linux" > SHA256SUMS 2>/dev/null \
             || sha256sum "$NAME-$TAG.tar.gz" > SHA256SUMS
 
       - name: Create release
@@ -81,5 +88,6 @@ jobs:
           body_path: /tmp/release-body.md
           files: |
             ${{ github.event.repository.name }}-${{ github.ref_name }}.tar.gz
+            ${{ github.event.repository.name }}-${{ github.ref_name }}-x86_64-linux
             SHA256SUMS
             build/${{ github.event.repository.name }}

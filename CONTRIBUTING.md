@@ -16,7 +16,7 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.4.66** (see `cyrius.cyml`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.4.71** (see `cyrius.cyml`).
 - Local sibling AGNOS repos next to this one, consumed as Cyrius `dist/*.cyr`
   bundles via `[deps.*]` path overrides in `cyrius.cyml`:
   `kavach`, `majra`, `nein`, `bote`, `agnodrm` (+ transitive `sakshi`, `libro`, `cmdit`).

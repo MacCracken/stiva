@@ -3,7 +3,9 @@
 All notable changes to stiva are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — toolchain refresh + v3.0.x sync backlog
+## [Unreleased]
+
+## [3.0.5] — 2026-07-23 — zstd layer decode · dependency hygiene · toolchain 6.4.71
 
 ### Added — zstd layer decode (roadmap §G)
 `unpack_layer` (`src/storage.cyr`) now handles `tar+zstd` layers alongside `tar+gzip`,
@@ -46,6 +48,16 @@ Note for future stdlib issues: stiva consumes sankoch from `~/.cyrius/versions/<
 **not** from the sibling repo — a stdlib security fix reaches stiva only via a pin bump, so
 check the snapshot's vendored version rather than the sibling's.
 
+### Fixed — `stiva --version` did not track the `VERSION` file
+`cyrius.cyml` reads `version = "${file:VERSION}"`, but nothing interpolates that into the
+compiled binary: `src/main.cyr`'s `_stiva_version_str()` is a hand-written literal. Caught
+while cutting this release — a tree already bumped to 3.0.5 still built a binary reporting
+`stiva 3.0.4`, meaning every prior release's `--version` was only right by hand. Fixed, and
+made unrepeatable: `scripts/version-bump.sh` now rewrites VERSION, the `src/main.cyr`
+literal, **and** re-runs `cyrius distlib` to restamp the `dist/stiva.cyr` bundle header, then
+prints the remaining manual steps (CHANGELOG, README/CLAUDE.md, the zugot recipe). It
+validates semver and is idempotent.
+
 ### Fixed — dependency hygiene: three symbol collisions + an unlocked `lib/`
 kavach 3.8.0 took `[deps.samay]`, and samay declares `[deps.ai-hwaccel]`. Because cyrius
 auto-includes every **active** `[deps.*]` module into every compilation unit, both bundles
@@ -78,19 +90,22 @@ stiva now declares both itself, pinned, `optional`, behind a **default-off `acce
 to be switched on when the roadmap §H/§I work (cron scheduling; accelerator inventory +
 placement) lands. `cyrius.lock` is back to **83 entries = 83 `lib/*.cyr`**, `cyrius deps
 --verify` clean — restoring the `.gitignore` invariant that `lib/` is reproducible from the
-manifest + lockfile. `[deps.kavach]` now pins `3.8.2` and the stdlib subset was re-synced to
-the 6.4.66 pin, clearing the `sankoch 2.5.1 (pinned: 2.5.5)` shadow warning.
+manifest + lockfile. `[deps.kavach]` now pins **3.8.3** (which adds the `optional` gating
+itself), and the stdlib subset was re-synced, clearing the `sankoch … shadow` warning.
 
 ### Added — `tests/store.tcyr` (4th test unit)
 Activating the two bundles pushes `tests/stiva.tcyr` past cycc's identifier cap — a hard
 `identifier buffer full (261893/262144)` error. The imagelayout + storage tests (39 functions,
 185 assertions) now live in `tests/store.tcyr`, which includes only the 6 `src/` modules they
-need instead of all 26. **1184 assertions still green**, now across four files:
-stiva 684 · store 185 · runpath 187 · mgmt 128. Note the peel alone did not move the cap
+need instead of all 26. No assertions were lost in the split; with the zstd tests above the
+suite now stands at **1196** across four files: stiva 684 · store 197 · runpath 187 · mgmt 128.
+Note the peel alone did not move the cap
 (identifiers dedupe; test bodies only reference symbols the modules already define) — the
 buffer is dominated by the vendored `lib/` bundles, which is why the feature gate is the fix.
 
-### Added — group A tails → v3.0.4
+## [3.0.4] — 2026-07-18 — group A complete
+
+### Added — group A tails
 The remaining OCI image-layout/transfer polish; group A is now complete.
 - **GNU longname/longlink** (`storage.cyr`): the tar writer emits `'L'`/`'K'` pseudo-entries
   (`_tar_write_long`) for names > 255 B (beyond the USTAR name+prefix split) and symlink targets
@@ -113,7 +128,9 @@ The remaining OCI image-layout/transfer polish; group A is now complete.
 - Hit the cycc struct-id-20/21 miscompile again on a `Platform` field read in the new descriptor
   path; sidestepped with literal host values (`normalize_arch("x86_64")`/`"linux"`).
 
-### Added — tar hardening + docker-archive (group A follow-ups → v3.0.3)
+## [3.0.3] — 2026-07-18 — docker-archive read · tar hardening
+
+### Added — tar hardening + docker-archive (group A follow-ups)
 Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
 - **USTAR long-name** (`storage.cyr`): the writer splits a path across the `name`(100) + `prefix`(155)
   fields (paths up to 255 B) and the reader reconstructs it — real rootfs `export` no longer fails on
@@ -148,7 +165,9 @@ Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
 - Still deferred: GNU longname for names > 255 B, per-image `platform` passthrough in index
   descriptors (single-node is always `amd64/linux`).
 
-### Added — perms-tar + oci-archive transfer (group A, A3+A4 → v3.0.2)
+## [3.0.2] — 2026-07-18 — oci-archive save/load · perms-preserving tar
+
+### Added — perms-tar + oci-archive transfer (group A, A3+A4)
 - **A3 — perms-preserving tar** (`storage.cyr`): `create_tar` now emits real `mode`/`uid`/`gid`
   plus **directory** (`'5'`) and **symlink** (`'2'`, stored as the link — not dereferenced) entries,
   via a `getdents64` + `lstat` walk (`_stor_tar_collect`, new `TarEntry`). The reader
@@ -180,7 +199,9 @@ Completes the A3/A4 review follow-ups. Hardening-first, then the new read path.
 - **Tests**: `tar_perms_roundtrip` + `tar_extract_rejects_traversal` (A3) and `oci_archive_save_load`
   (A4) — **1146** tests green.
 
-### Added — OCI image-layout (group A, A1+A2 → v3.0.1)
+## [3.0.1] — 2026-07-18 — OCI image-layout store · sync backlog · toolchain 6.4.66
+
+### Added — OCI image-layout (group A, A1+A2)
 The local image store is now a **valid OCI image layout** (Docker/Podman/skopeo-interop),
 net-new work with the OCI **image-spec** as the oracle (rust-old had only the ad-hoc
 `images.json`). New module **`src/imagelayout.cyr`**.
@@ -464,7 +485,11 @@ roadmap's deferred-surface accounting.
 - Accepted divergences (audit eager-vs-lazy file open; convert ENTRYPOINT JSON
   escapes) are tracked in the roadmap for ADRs at parity-validation.
 
-## [Unreleased]
+## [2.1.0] — Rust era · completed, never tagged
+
+> Finished on the Rust crate (now the frozen `rust-old/` oracle) but never cut as its
+> own release — this work was carried into the Cyrius port and shipped as part of
+> **3.0.0**. Kept verbatim for provenance; the file paths below are `rust-old/` paths.
 
 ### Added
 - **OCI runtime CLI conformance** — `src/oci.rs` module with `create`/`start`/`state`/`kill`/`delete` interface for containerd/CRI drop-in; `OciState` JSON output per OCI runtime-spec v1.2.0; `parse_bundle()` reads OCI bundle `config.json`; `parse_signal()` accepts names ("SIGTERM") and numbers ("15")

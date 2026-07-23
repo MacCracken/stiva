@@ -7,13 +7,13 @@ remains). The **Status** column marks each:
 
 - **Live** — works end-to-end today.
 - **v3.0.x (planned)** — buildable now (blocking, over the ported sync core), just not wired yet.
-- **v3.1 (blocked)** — gated on an external landing (kavach spawn/gate, cyrius coroutines, bayan YAML, sankoch zstd).
+- **v3.1 (blocked)** — gated on an external landing (kavach `sandbox_spawn`, cyrius stackless coroutines).
 
 ## Global Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--root <PATH>` | `/var/lib/agnos/containers` | Root directory for container **and image** data (the image store — `blobs/sha256/`, `index.json`, `oci-layout` — lives under it) |
+| `--root <PATH>` | `/var/lib/stiva` | Root directory for container **and image** data (the image store — `blobs/sha256/`, `index.json`, `oci-layout` — lives under it). Resolution order: `--root` > `$STIVA_ROOT` > the default |
 
 ## Commands
 
@@ -33,7 +33,7 @@ remains). The **Status** column marks each:
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `stiva run <IMAGE> [-p PORT] [-e ENV] [-s SECRET] [CMD...]` | **Live** | Run a container (synchronous, one-shot) |
+| `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot) |
 | `stiva ps` | **Live** | List containers |
 | `stiva stop <ID>` | **Live** | Stop a container (SIGTERM → SIGKILL) |
 | `stiva rm <ID>` | **Live** | Remove a stopped container |
@@ -42,7 +42,7 @@ remains). The **Status** column marks each:
 | `stiva inspect <ID>` | **Live** | Inspect container or image (JSON output) |
 | `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
 | `stiva logs <ID> [-n LINES]` | **Live** / v3.0.x (planned) | Show last N lines (snapshot live; `-f` poll-loop is v3.0.x) |
-| `stiva export <ID> -o FILE` | **Live** | Export container rootfs as tar archive |
+| `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
 | `stiva run <IMAGE> -d ...` | v3.1 (blocked) | Detached `run -d` (needs kavach sandbox_spawn) |
 | `stiva exec <ID> <CMD...>` | v3.0.x (planned) / v3.1 (blocked) | Execute command in a running container (nsenter; non-interactive is v3.0.x, `-it` needs cyrius stackless coroutines) |
@@ -60,7 +60,7 @@ remains). The **Status** column marks each:
 | `stiva gc` | **Live** | Garbage-collect unreferenced image blobs |
 | `stiva info` | **Live** | Show system information and security score |
 | `stiva convert <FILE> -f dockerfile [-o OUT]` | **Live** | Convert a Dockerfile to a `Stivafile` |
-| `stiva convert <FILE> -f compose ...` | v3.1 (blocked) | Convert compose YAML (needs a bayan YAML parser) |
+| `stiva convert <FILE> -f compose ...` | v3.0.x (planned) | Convert compose YAML (bayan ships a YAML subset; the walk is not wired yet) |
 | `stiva checkpoint <ID> [--leave-running]` | v3.0.x (planned) | CRIU checkpoint a running container |
 | `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
 | `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
@@ -73,11 +73,14 @@ remains). The **Status** column marks each:
 
 | Flag | Description |
 |------|-------------|
-| `-d, --detach` | Run as daemon (return immediately) |
-| `-p, --port <HOST:CONTAINER>` | Port mapping (repeatable) |
-| `-e, --env <KEY=VALUE>` | Environment variable (repeatable) |
-| `-s, --secret <KEY=VALUE>` | Secret injection via kavach (repeatable, not stored in config) |
 | `--name <NAME>` | Container name |
+| `--backend <NAME>` | Sandbox backend override (`process`, `oci`, `noop`, …) |
+| `-w, --workdir <DIR>` | Working directory inside the container |
+| `-d, --detach` | Registered, but refused — detached run is v3.1 (needs kavach `sandbox_spawn`) |
+
+> These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
+> (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired yet — passing them is a
+> usage error. They arrive with the `ContainerManager` work on the v3.0.x line.
 
 ## `stiva build` Flags
 
@@ -90,11 +93,14 @@ remains). The **Status** column marks each:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.1 (blocked) — needs a bayan YAML parser) |
+| `-f, --format <FORMAT>` | `compose` | Input format: `dockerfile` (live) or `compose` (v3.0.x (planned)) |
 | `-o, --output <PATH>` | stdout | Output file path |
 
-> `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose`
-> is v3.1 (blocked), pending a bayan YAML parser.
+> `--format dockerfile` is live (`dockerfile_to_toml`); `--format compose` is
+> **v3.0.x (planned)** — no longer externally blocked. `bayan` 1.2.0 ships
+> `bayan_yaml_parse` over the same tagged value graph the JSON parser uses; what
+> remains is stiva-side mapping. Note it is a documented *subset*: anchors/aliases,
+> merge keys (`<<:`), block scalars and multi-document input are rejected.
 
 ## `Stivafile` Format
 
@@ -144,16 +150,14 @@ user = "nobody"
 ## Examples
 
 ```bash
-# Pull and run a daemon
-stiva pull nginx:latest
-stiva run -d -p 8080:80 nginx:latest
+# Run a container (foreground, one-shot)
+stiva run --name web nginx:latest
 
-# Run with secrets (injected via kavach, not stored in config)
-stiva run -d -s DB_PASSWORD=secret123 -e DB_HOST=localhost myapp:latest
+# Pick the sandbox backend explicitly and set a working directory
+stiva run --backend oci -w /srv myapp:latest /bin/sh -c 'echo hi'
 
 # Check status
 stiva ps
-stiva top <id>
 stiva stats <id>
 
 # Execute inside running container
@@ -173,7 +177,7 @@ stiva build -f Stivafile -c ./project
 stiva push myapp:latest registry.example.com/myapp:latest
 
 # Export/import
-stiva export <id> -o rootfs.tar
+stiva export <id> rootfs.tar
 stiva import rootfs.tar imported v1
 
 # Copy files in/out
@@ -193,7 +197,10 @@ stiva info
 
 | Variable | Description |
 |----------|-------------|
-| `RUST_LOG` | Tracing filter (e.g., `stiva=debug`, `warn`) |
+| `STIVA_ROOT` | Root directory for container + image data (overridden by `--root`) |
+
+Log level is currently fixed at `INFO` (`sakshi_set_level`); there is no log-filter env
+var. `RUST_LOG` was a Rust-era leftover and is not read.
 
 ## Exit Codes
 
