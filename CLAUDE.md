@@ -52,11 +52,24 @@ have all landed (v3.0.5–v3.0.6), closing roadmap §G. `rust-old/` stays the or
 ported modules; the group A OCI-layout/transfer surface is **net-new**, so the OCI
 **image-spec** (not rust-old) is its oracle.
 
-> ⚠️ **cycc miscompile (open, worked around):** cycc's struct-id **20/21 ↔ SIMD f64v2/f64v4
-> sentinel collision** makes `Image`/`Layer`/`Platform` field access read garbage in some
-> function contexts; it moves as code shifts. Work around with **raw-offset accessors**
-> (`_img_id`/`_img_layers`/`_img_manifest_digest`/`_layer_digest`) or literals, NOT
-> `var x: T = ptr; x.field`, in the affected hot paths. Repro scratch: `docs/development/cycc-repro/`.
+> ⚠️ **cycc miscompile (STILL OPEN at 6.4.76 — NOT fully fixed; worked around):** cycc's
+> struct-id **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes `Image`/`Layer`/`Platform`
+> field access read garbage (or **segfault** — a scalar field compiled as a vector load reads
+> out of bounds) in some function contexts; it **moves with the compilation unit's struct-id
+> assignment**, so it is present in some units and absent in others.
+>
+> **6.4.76 partially fixed it and that is a trap.** Verified 2026-07-24: the 6-module
+> `docs/development/cycc-repro/repro_min.tcyr` prints `MATCH` and a probe added to the
+> 26-module `tests/runpath.tcyr` unit passes — but the **6-module `tests/store.tcyr` unit
+> still SIGSEGVs** on `var im: Image = p; im.id`. So a green repro in one unit shape proves
+> nothing about another. An attempt to retire the raw-offset accessors under 6.4.76 was made,
+> passed the 26-module probe, then crashed `store.tcyr`'s `oci_archive_save_load`, and was
+> reverted. **Do not retire the workarounds** until a probe in *every* unit shape that
+> includes the struct (esp. the 6-module store unit) is green.
+>
+> Work around with **raw-offset accessors** (`_img_id`/`_img_layers`/`_img_manifest_digest`/
+> `_layer_digest`) or literals, NOT `var x: T = ptr; x.field`, in the affected hot paths.
+> Repro scratch: `docs/development/cycc-repro/`.
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.

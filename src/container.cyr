@@ -837,50 +837,285 @@ fn parse_bundle(bundle_path) {
     return config;
 }
 
-# ── DEFERRED (needs async runtime + pub/sub + shared locks) ──────
-# rust-old/src/container.rs also defines the stateful manager, whose every
-# method is `async` and depends on tokio::sync::RwLock, majra PubSub, the
-# NetworkManager, and runtime's async exec/spawn/kill/checkpoint fns — infra
-# the ported base does not yet provide (same rationale as storage/registry
-# async deferrals). These land when the async/pubsub substrate is ported:
+# ══ ContainerManager (rust-old/src/container.rs) ═════════════════
+# The stateful lifecycle manager. The oracle's every method is `async` over
+# tokio::sync::RwLock; here the single-node run-to-completion model collapses
+# `Arc<RwLock<HashMap>>` to a plain heap vec + map and blocking calls, so this
+# is a synchronous port, not an async one (§C). Only the genuinely external-
+# or coroutine-blocked methods stay deferred (see the note at the bottom).
+
+# ── ContainerInternals (rust-old: struct ContainerInternals) ──────
+# Runtime-only side data for a container, keyed by id in the manager's
+# `internals` map. Never persisted (state.json holds only Container records).
+struct ContainerInternals {
+    overlay;      # OverlayPaths* | 0
+    spec;         # RuntimeSpec*  | 0
+    exec_result;  # ContainerExecResult* | 0 (one-shot result, cached for wait)
+    log_path;     # cstr — {root}/containers/{id}/container.log
+    spawned;      # DaemonHandle* | 0 — ALWAYS 0 here (detached spawn is v3.1)
+}
+
+fn container_internals_new(overlay, spec, exec_result, log_path, spawned) {
+    var ci = alloc(40);
+    var c: ContainerInternals = ci;
+    c.overlay = overlay;
+    c.spec = spec;
+    c.exec_result = exec_result;
+    c.log_path = log_path;
+    c.spawned = spawned;
+    return ci;
+}
+
+# ── ContainerManager (rust-old: struct ContainerManager) ──────────
+# `containers` is deliberately a VEC (not a map): it mirrors the state.json
+# array, so container_state_save/load round-trip its order byte-for-byte and
+# are reused unchanged. `internals` is a cstr-keyed map (id → ContainerInternals*)
+# for the runtime side table. `network_manager` is built lazily on first
+# connect and stays 0 on the one-shot path.
+struct ContainerManager {
+    root;             # cstr
+    containers;       # vec<Container*>
+    internals;        # map(id -> ContainerInternals*)
+    image_store;      # ImageStore* (borrowed; the facade also holds it — not freed here)
+    publisher;        # PubSub* (owned; pubsub_new)
+    network_manager;  # NetworkManager* | 0
+}
+
+# Open a manager rooted at `root` over `image_store` (rust-old: new). Loads any
+# persisted state (with the restart fixup applied by container_state_load) and
+# stands up an empty internals table + a fresh lifecycle-event bus. Returns a
+# ContainerManager*, or 0 on alloc failure.
+fn container_manager_new(root, image_store) {
+    var m = alloc(48);
+    if (m == 0) { return 0; }
+    var mm: ContainerManager = m;
+    mm.root = root;
+    mm.containers = container_state_load(root);
+    mm.internals = map_new();
+    mm.image_store = image_store;
+    mm.publisher = pubsub_new();
+    mm.network_manager = 0;
+    return m;
+}
+
+# Persist the current container set to {root}/state.json (rust-old: persist_state).
+# Returns 1/0 (best-effort, matching container_state_save).
+fn _cm_persist(mgr) {
+    var mm: ContainerManager = mgr;
+    return container_state_save(mm.root, mm.containers);
+}
+
+# List all containers (rust-old: list). Returns the live vec<Container*> — the
+# manager owns it, callers must not free.
+#[must_use]
+fn container_manager_list(mgr) {
+    var mm: ContainerManager = mgr;
+    return mm.containers;
+}
+
+# Find a container by id OR name (rust-old: the HashMap get in each method).
+# Returns the Container*, or 0 if absent.
+#[must_use]
+fn container_manager_get(mgr, id) {
+    var mm: ContainerManager = mgr;
+    return container_state_find(mm.containers, id);
+}
+
+# The map-lookup + ContainerNotFound wrapper around the pure container_require_pid
+# decision (rust-old: require_pid). Returns the pid when the container exists and
+# is in one of the `allowed` states, else -1 (the detail is printed here).
+fn container_manager_require_pid(mgr, id, allowed, n) {
+    var c = container_manager_get(mgr, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return 0 - 1;
+    }
+    var cc: Container = c;
+    return container_require_pid(cc.state, cc.pid, allowed, n);
+}
+
+# ── lifecycle events (rust-old: publish_event / event_bus) ────────
+# The manager owns one majra PubSub hub and publishes a JSON event on each
+# lifecycle transition to the "container.lifecycle" topic. Payloads are
+# non-zero JSON cstr pointers (the chan_try_recv 0-sentinel is ambiguous).
+
+# {"event":<event>,"container_id":<id>,<key2>:<val2>} as a fresh cstr.
+#[must_use]
+fn _cm_event_json(event, id, key2, val2) {
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("event"), json_v_str_new(str_from(event)));
+    json_v_obj_set(o, str_from("container_id"), json_v_str_new(str_from(id)));
+    json_v_obj_set(o, str_from(key2), json_v_str_new(str_from(val2)));
+    return str_cstr(json_v_build(o));
+}
+
+# Publish a pre-built event JSON to the lifecycle topic (rust-old: publish_event,
+# container.rs:1341). Topic is the exact string "container.lifecycle".
+fn container_manager_publish_event(mgr, event_json) {
+    var mm: ContainerManager = mgr;
+    pubsub_publish(mm.publisher, "container.lifecycle", event_json);
+    return 0;
+}
+
+# The lifecycle event bus (rust-old: event_bus, container.rs:1346). A consumer
+# (e.g. `stiva events`) subscribes via pubsub_subscribe(bus, "container.lifecycle").
+#[must_use]
+fn container_manager_event_bus(mgr) {
+    var mm: ContainerManager = mgr;
+    return mm.publisher;
+}
+
+# ── create + start (one-shot) ─────────────────────
+# rust-old create() (container.rs:325) + the one-shot branch of start() (:416).
+
+# 32-char lowercase-hex container id (rust-old: uuid::Uuid::new_v4 rendered
+# simple). 16 random bytes → hex.
+#[must_use]
+fn _cm_gen_id() {
+    var buf = alloc(16);
+    random_bytes(buf, 16);
+    return hex_encode(buf, 16);
+}
+
+# First 12 bytes of `s` into a fresh cstr — the oracle's `id[..12]` default name.
+#[must_use]
+fn _cm_id12(s) {
+    var n = strlen(s);
+    if (n > 12) { n = 12; }
+    var out = alloc(n + 1);
+    memcpy(out, s, n);
+    store8(out + n, 0);
+    return out;
+}
+
+# {root}/containers/{id}
+#[must_use]
+fn _cm_container_dir(root, id) {
+    return _container_cat2(_container_cat2(root, "/containers/"), id);
+}
+
+# Create a container record + its rootfs from `image` under `config`
+# (rust-old: create, container.rs:325). Unpacks layers, sets up the overlay
+# (falling back to {croot}/rootfs when the mount is unavailable, matching the
+# oracle's overlay match arm), generates the runtime spec, records the runtime-
+# only internals, appends the CREATED record, and persists. Returns the
+# Container*, or 0 on failure (detail already printed).
 #
-#   struct ContainerInternals { overlay, spec, exec_result, log_path, spawned }
-#   struct ContainerManager {
-#       root, containers: RwLock<HashMap<String,Container>>,
-#       internals: RwLock<HashMap<String,ContainerInternals>>,
-#       image_store: Arc<ImageStore>, publisher: PubSub,
-#       network_manager: RwLock<Option<NetworkManager>>,
-#   }
-#   fn ContainerManager::new(root, image_store) -> Result<Self, StivaError>
-#   fn require_pid(&self, id, allowed_states, op) -> Result<u32, StivaError>
-#         (pure decision ported above as container_require_pid; the map
-#          lookup + ContainerNotFound branch land here)
-#   fn load_persisted_state(root) -> HashMap<String,Container>
-#         (per-record fixup ported above as container_fixup_after_restart)
-#   async fn persist_state(&self)
-#   async fn create(&self, image: &Image, config) -> Result<Container>
-#   async fn start(&self, id) -> Result<()>
-#   async fn wait(&self, id) -> Result<ContainerExecResult>
-#   async fn try_wait(&self, id) -> Result<Option<i32>>
-#   async fn stop(&self, id) -> Result<()>
-#   async fn write_log(&self, id, exec_result)
-#         (rotation decision + rotate_logs ported above)
-#   async fn signal(&self, id, signal) -> Result<()>
-#   async fn pause / unpause / stats(&self, id)
-#   async fn exec(&self, id, command) -> Result<ContainerExecResult>
-#   async fn remove / restart(&self, id) -> Result<()>
-#   async fn get_rootfs(&self, id) -> Result<PathBuf>
-#   async fn list(&self) -> Result<Vec<Container>>
-#   async fn rename / update(&self, ...) -> Result<()>
-#   async fn checkpoint / restore(&self, id, ...) -> Result<...>
-#   async fn prepare_migration / apply_migration(&self, ...) -> Result<...>
-#   async fn logs / log_tail(&self, id, ...) -> Result<String>
-#         (tail line math ported above as container_tail_start)
-#   async fn connect_network / disconnect_network(&self, id, ...)
-#   fn publish_event(&self, event_json)
-#   fn event_bus(&self) -> &PubSub
+# `image` is in the cycc struct-id 20/21 class, so its fields are read through
+# the raw-offset accessors (_img_layers/_img_id/_image_reference), never
+# `img.field` — a struct-field read miscompiles (segfaults) in some units.
+fn container_manager_create(mgr, image, config) {
+    var mm: ContainerManager = mgr;
+    var cfg: ContainerConfig = config;
+    var id = _cm_gen_id();
+    var name = cfg.name;
+    if (name == 0) { name = _cm_id12(id); }
+
+    sys_mkdir(_container_cat2(mm.root, "/containers"), 493);
+    var croot = _cm_container_dir(mm.root, id);
+    sys_mkdir(croot, 493);
+
+    var layer_dirs = prepare_layers(mm.image_store, _img_layers(image));
+    if (layer_dirs == 0) {
+        stiva_err_print(STIVA_ERR_LAYER_UNPACK, _img_id(image));
+        return 0;
+    }
+    var overlay = setup_overlay(layer_dirs, croot);
+    var rootfs = 0;
+    if (overlay != 0) {
+        rootfs = load64(overlay + 0);   # OverlayPaths.merged
+    } else {
+        rootfs = _container_cat2(croot, "/rootfs");
+        sys_mkdir(rootfs, 493);
+    }
+
+    var full_ref = image_ref_full_ref(_image_reference(image));
+    var rec = container_new(id, name, _img_id(image), full_ref,
+    CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, config, 0 - 1);
+    var spec = generate_spec(rec, rootfs);
+    if (spec == 0) { return 0; }        # detail printed by generate_spec
+
+    var logp = _container_cat2(croot, "/container.log");
+    map_set(mm.internals, id, container_internals_new(overlay, spec, 0, logp, 0));
+    vec_push(mm.containers, rec);
+    container_manager_publish_event(mgr, _cm_event_json("created", id, "image", full_ref));
+    _cm_persist(mgr);
+    return rec;
+}
+
+# Write a container's one-shot output to its log file (rust-old: write_log,
+# container.rs:684). Uses the cached internals log_path, or reconstructs it
+# when internals is empty (a fresh process — cross-invocation).
+fn _cm_write_log(mgr, id, exec_result) {
+    var mm: ContainerManager = mgr;
+    var ci = map_get(mm.internals, id);
+    var logp = 0;
+    if (ci != 0) {
+        var cint: ContainerInternals = ci;
+        logp = cint.log_path;
+    } else {
+        logp = _container_cat2(_cm_container_dir(mm.root, id), "/container.log");
+    }
+    write_container_log(logp, exec_result);
+    return 0;
+}
+
+# Start a created container to completion (rust-old: start one-shot branch,
+# container.rs:416-540). Flips CREATED→RUNNING, runs the command blocking via
+# exec_container, records the exit code + STOPPED, writes the log, and
+# persists. Detached (daemon) start is v3.1. Returns STIVA_ERR_OK, or a
+# STIVA_ERR_* sentinel (detail printed).
 #
-# These reference runtime's RuntimeSpec / ContainerExecResult / DaemonHandle /
-# ContainerStats (sibling, ported), image's Image / ImageStore (ported),
-# storage's OverlayPaths (ported), the network manager (ported), majra PubSub,
-# and the tokio async runtime. Tracked in the roadmap.
+# The ContainerExecResult is in the cycc 20/21 class, so its fields are read by
+# RAW OFFSET (exit_code@0 stdout@8 stderr@16), not a typed view — the manager
+# lands in three unit shapes and a struct-field read segfaults in some.
+fn container_manager_start(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    var cc: Container = c;
+    var ci = map_get(mm.internals, id);
+    if (ci == 0) {
+        # No runtime spec (a fresh process): one-shot start can only run a
+        # container created in this same process. Daemon re-attach is v3.1.
+        stiva_err_print(STIVA_ERR_RUNTIME, "start: no runtime spec (created in another process?)");
+        return STIVA_ERR_RUNTIME;
+    }
+    var cint: ContainerInternals = ci;
+    var spec = cint.spec;
+
+    cc.state = CONTAINER_STATE_RUNNING;
+    cc.started_at = clock_now_ms();
+
+    var res = exec_container(spec);
+    if (res == 0) {
+        cc.state = CONTAINER_STATE_STOPPED;
+        cc.pid = 0 - 1;
+        container_manager_publish_event(mgr, _cm_event_json("start_failed", id, "error", "exec failed"));
+        _cm_persist(mgr);
+        return STIVA_ERR_SANDBOX;
+    }
+
+    cc.exit_status = load64(res);        # ContainerExecResult.exit_code @0
+    cc.state = CONTAINER_STATE_STOPPED;
+    cc.pid = 0 - 1;
+    cint.exec_result = res;
+    _cm_write_log(mgr, id, res);
+    container_manager_publish_event(mgr, _cm_event_json("started", id, "detach", "false"));
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# ── DEFERRED to v3.1 (external- or coroutine-blocked) ────────────
+# The remaining ContainerManager surface is gated on landings outside stiva:
+#   start(daemon branch)/wait/try_wait(daemon)  — runtime::spawn_container +
+#       DaemonHandle (kavach sandbox_spawn); the one-shot branches ship in §C.
+#   exec(&self, id, command)                    — runtime::exec_in_container
+#       (kavach sandbox_exec, non-interactive); interactive exec -it needs
+#       cyrius stackless coroutines.
+#   checkpoint/restore/prepare_migration/apply_migration — CRIU
+#       checkpoint_container/restore_container.
+# Tracked in docs/development/roadmap.md (v3.1).

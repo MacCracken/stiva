@@ -188,7 +188,26 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
 - [ ] `acquire_token`/`authenticated_request` bearer state machine → `fetch_manifest`/`fetch_blob` → the `image_store_pull` driver = live **`stiva pull`**; then `blob_exists`/`push_blob`/`push_manifest` = **`stiva push`**; `list_tags`/`catalog`/`referrers`. Token cache = plain map. Writes into the **A** layout. (Sequential layer download; true parallelism → v3.1.)
 
 **C. `ContainerManager` + `Stiva` facade** — glue over the ported run path (plain maps + majra PubSub):
-- [ ] `container_manager_new` + create/start(one-shot)/stop/wait/list/remove/rename/signal/pause/unpause/stats/logs(snapshot)/connect_network + lifecycle events; the `Stiva` facade (~40 methods); **route `main.cyr` verbs through the manager** (retiring the per-verb load/save). *(internal prereq: port `audit_log_new`.)* Detached `run -d` is the exception → v3.1.
+- [~] **In progress (2026-07-24).** The manager fills the DEFERRED block in `src/container.cyr`
+  (no new module — the file was already in `[lib].modules`); `Arc<RwLock<HashMap>>` collapses to
+  a plain `vec<Container*>` + a cstr-keyed `internals` map, so `container_state_save`/`_load` are
+  reused verbatim and `state.json` round-trips byte-for-byte. **Landed + green (suite 1307 → 1337):**
+  - **Inc-1 (read-only core)** — `struct ContainerManager`/`ContainerInternals`,
+    `container_manager_new`/`_list`/`_get`/`_cm_persist`/`container_manager_require_pid`. Tests in
+    `tests/mgmt.tcyr` (+15).
+  - **Inc-2 (create + start one-shot)** — `container_manager_create` (unpack → overlay → spec →
+    record → persist) + `container_manager_start` (CREATED→RUNNING→exec_container→STOPPED + exit
+    code + log). `Image`/`ContainerExecResult` read by **raw offset** (`_img_layers`/`_img_id`/
+    `_image_reference`; `load64(res+0)`), respecting the still-open cycc 20/21 bug. Tests in
+    `tests/runpath.tcyr` (+15) — the full run path through the manager, verified end-to-end.
+  - **Inc-4 (lifecycle events)** — `_cm_event_json` + `container_manager_publish_event`/`_event_bus`
+    over majra `pubsub_*` (stiva's first pub/sub consumer), topic `"container.lifecycle"`; create/
+    start publish `created`/`started`, asserted via `pubsub_subscribe` + `chan_try_recv`.
+  - **Remaining:** Inc-3 (stop/pause/unpause/signal/remove/rename/update/restart/stats/logs/wait/
+    try_wait), Inc-5 (connect/disconnect_network best-effort), Inc-6 (the `Stiva` facade in
+    `stiva_core.cyr` + audit via the already-ported `stiva_audit_log_new`), Inc-7 (route the 12
+    live container verbs in `main.cyr` through the manager — the one behavior-changing step; the 9
+    image/convert verbs stay untouched). Detached `run -d` and daemon `wait`/`exec`/CRIU stay v3.1.
 
 **D. `exec` (nsenter) + CRIU** — fork+exec host tools:
 - [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
@@ -327,6 +346,31 @@ external gates are gone, and the work moves onto this line.
 > a structure-forgery hole on a path whose whole job is ingesting third-party files. Parity
 > with a frozen oracle is the bar for *behavior*, not for *complexity class or security
 > posture*; both were fixed as deliberate, documented divergences.
+
+### Toolchain 6.4.72 → 6.4.76, and the cycc struct-id fix that isn't (2026-07-24)
+
+Pin bumped to **6.4.76**. It repaired two long-standing annoyances:
+- **`cyrius audit`'s tests stage** now compiles and runs all five test units (it had reported
+  bogus "compile error" for every one). Its **fmt stage still false-positives** — every file
+  passes `cyrius fmt <f> --check` and `cyrius fmt -w` rewrites zero bytes, so the per-file
+  `--check` is the reliable gate, not `audit`.
+- **The compiler caps jumped**: `fn_table` 8192 → **32768** (23% used) and the identifier
+  buffer 262144 → **524288** (46% used). The 90%/92% pressure that this page warned would
+  block turning on the `accel` feature for §H/§I is gone — budget for the split is no longer a
+  §H/§I prerequisite.
+
+But the headline — **the cycc struct-id 20/21 ↔ SIMD-sentinel miscompile is NOT fully fixed**,
+despite the "RESOLVED in 6.4.14" note far above (that fix regressed as the code grew; the whole
+group-A layer carries raw-offset workarounds because of it). Re-verified 2026-07-24 by
+*attempting the cleanup*: a probe in the 26-module `runpath.tcyr` unit passed and the 6-module
+`repro_min.tcyr` printed `MATCH`, so the accessors were retired — and the suite then **SIGSEGV'd**
+(exit 139) in `image_store_save_archive` under the **6-module `store.tcyr` unit**, where a bare
+`var im: Image = p; im.id` crashes (scalar field compiled as a vector load, OOB read). All
+conversions were reverted; the suite is back to 1307. **The bug is compilation-unit-shape-dependent:
+a green probe in one unit proves nothing about another.** The raw-offset accessors stay until a
+probe is green in *every* unit that includes the struct — the 6-module store unit especially.
+This is the same "verified by execution, not by reading" lesson as the compose review, applied to
+the toolchain: a passing repro in the wrong unit shape is reading, not verifying.
 
 ### Net-new capability surfaced by kavach 3.8.x — samay + ai-hwaccel (2026-07-22)
 

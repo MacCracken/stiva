@@ -27,6 +27,89 @@ include "src/fleet.cyr"
 include "src/mcp.cyr"
 include "src/stiva_core.cyr"
 
+# ══ §C ContainerManager (rust-old/src/container.rs) ══════════════
+# Inc-1: read-only core — new/list/get/persist/require_pid over the reused
+# state.json save/load. Container/ContainerConfig are NOT in the cycc struct-id
+# 20/21 class (this file's typed views are safe; see container.cyr).
+
+fn _cm_test_root() {
+    var root = _rt_cat2("/tmp/stiva-cm-", _rt_int_to_cstr(getpid()));
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    return root;
+}
+
+fn _cm_mk_record(id, name, state, pid) {
+    return container_new(id, name, "img-id", "local/app:v1", state, pid,
+    1700000000000, 0 - 1, container_config_default(), 0 - 1);
+}
+
+fn test_cm_new_empty_and_list() {
+    test_group("cm_new_empty_and_list");
+    var root = _cm_test_root();
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    assert_neq(mgr, 0, "manager built");
+    assert_eq(vec_len(container_manager_list(mgr)), 0, "empty on fresh root");
+    assert_eq(container_manager_get(mgr, "nope"), 0, "get on empty -> 0");
+    return 0;
+}
+
+fn test_cm_persist_reload_roundtrip() {
+    test_group("cm_persist_reload_roundtrip");
+    var root = _cm_test_root();
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    # push two records and persist through the manager.
+    vec_push(container_manager_list(mgr), _cm_mk_record("abc123", "web", CONTAINER_STATE_RUNNING, 4242));
+    vec_push(container_manager_list(mgr), _cm_mk_record("def456", 0, CONTAINER_STATE_STOPPED, 0 - 1));
+    assert_eq(_cm_persist(mgr), 1, "persist ok");
+    assert_eq(file_exists(_rt_cat2(root, "/state.json")), 1, "state.json written");
+
+    # a fresh manager over the same root reloads them, in array order.
+    var mgr2 = container_manager_new(root, store);
+    var listed = container_manager_list(mgr2);
+    assert_eq(vec_len(listed), 2, "two records reloaded");
+    var c0: Container = vec_get(listed, 0);
+    assert_eq(streq(c0.id, "abc123"), 1, "order preserved: abc123 first");
+    # the Running record was demoted to Stopped + pid cleared by the restart fixup.
+    assert_eq(c0.state, CONTAINER_STATE_STOPPED, "running -> stopped on reload");
+    assert_eq(c0.pid, 0 - 1, "pid cleared on reload");
+    return 0;
+}
+
+fn test_cm_get_by_id_or_name() {
+    test_group("cm_get_by_id_or_name");
+    var root = _cm_test_root();
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    vec_push(container_manager_list(mgr), _cm_mk_record("id-xyz", "myname", CONTAINER_STATE_RUNNING, 99));
+    var by_id: Container = container_manager_get(mgr, "id-xyz");
+    assert_neq(by_id, 0, "found by id");
+    var by_name: Container = container_manager_get(mgr, "myname");
+    assert_neq(by_name, 0, "found by name");
+    assert_eq(streq(by_id.id, by_name.id), 1, "id and name resolve to same record");
+    return 0;
+}
+
+fn test_cm_require_pid() {
+    test_group("cm_require_pid");
+    var root = _cm_test_root();
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    vec_push(container_manager_list(mgr), _cm_mk_record("running1", 0, CONTAINER_STATE_RUNNING, 5150));
+    vec_push(container_manager_list(mgr), _cm_mk_record("stopped1", 0, CONTAINER_STATE_STOPPED, 0 - 1));
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    # a Running container yields its pid.
+    assert_eq(container_manager_require_pid(mgr, "running1", allowed, 1), 5150, "running -> pid");
+    # a Stopped container is not in the allowed set -> -1.
+    assert_eq(container_manager_require_pid(mgr, "stopped1", allowed, 1), 0 - 1, "stopped -> -1");
+    # an absent container -> -1 (ContainerNotFound).
+    assert_eq(container_manager_require_pid(mgr, "ghost", allowed, 1), 0 - 1, "absent -> -1");
+    return 0;
+}
+
 fn test_ansamblu_action_serde() {
     test_group("intents::ansamblu_action_serde");
     assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_UP), "Up") == 1, "ok");
@@ -563,6 +646,10 @@ fn _agent_caps_contains(v, needle) {
 
 fn main() {
     alloc_init();
+    test_cm_new_empty_and_list();
+    test_cm_persist_reload_roundtrip();
+    test_cm_get_by_id_or_name();
+    test_cm_require_pid();
     test_ansamblu_action_serde();
     test_ansamblu_replica_count();
     test_ansamblu_service_to_config();

@@ -382,6 +382,66 @@ fn _test_import(store, tmpfile, name, tag, content, clen) {
     return image_import(store, tmpfile, name, tag);
 }
 
+# ══ §C ContainerManager create + start (one-shot) ════════════════
+# Full run path through the manager: import an image, create a container
+# (CREATED), start it to completion (RUNNING→STOPPED), and check the exit code,
+# the persisted record, the container.log, and a lifecycle event on the bus.
+# This unit includes all 26 modules — the cycc-sensitive shape for Image /
+# ContainerExecResult field access on the create/start path.
+fn test_cm_create_start_oneshot() {
+    test_group("cm_create_start_oneshot");
+    kavach_init();
+    var root = _rt_cat2("/tmp/stiva-cm-run-", _rt_int_to_cstr(getpid()));
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = _test_import(store, "/tmp/stiva-cm-run.tar", "app", "v1",
+    "cm-rootfs", strlen("cm-rootfs"));
+    assert_neq(img, 0, "image imported");
+
+    var mgr = container_manager_new(root, store);
+    # subscribe BEFORE create so the created/started events are captured.
+    var ch = pubsub_subscribe(container_manager_event_bus(mgr), "container.lifecycle");
+
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var cmd = vec_new();
+    vec_push(cmd, "echo");
+    vec_push(cmd, "hi");
+    cfg.command = cmd;
+
+    var rec = container_manager_create(mgr, img, cfg);
+    assert_neq(rec, 0, "container created");
+    var rc: Container = rec;
+    assert_eq(rc.state, CONTAINER_STATE_CREATED, "state CREATED after create");
+    assert_eq(vec_len(container_manager_list(mgr)), 1, "one container tracked");
+
+    assert_eq(container_manager_start(mgr, rc.id), STIVA_ERR_OK, "start ok");
+    # the SAME record object was mutated in place.
+    assert_eq(rc.state, CONTAINER_STATE_STOPPED, "state STOPPED after one-shot");
+    assert_eq(rc.exit_status, 0, "noop echo exit 0");
+    assert_eq(rc.pid, 0 - 1, "pid cleared");
+
+    # a container.log was written under {root}/containers/{id}/.
+    var logp = _rt_cat3(root, "/containers/", _rt_cat2(rc.id, "/container.log"));
+    assert_eq(file_exists(logp), 1, "container.log written");
+
+    # persisted: a fresh manager reloads the STOPPED record.
+    var mgr2 = container_manager_new(root, store);
+    var got: Container = container_manager_get(mgr2, rc.id);
+    assert_neq(got, 0, "record persisted");
+    assert_eq(got.state, CONTAINER_STATE_STOPPED, "reloaded STOPPED");
+
+    # two lifecycle events (created, started) were published, non-zero payloads.
+    var e1 = chan_try_recv(ch);
+    var e2 = chan_try_recv(ch);
+    assert_neq(e1, 0, "created event published");
+    assert_neq(e2, 0, "started event published");
+    assert_eq(strstr(e1, "\"event\":\"created\"") >= 0, 1, "first event is created");
+    assert_eq(strstr(e2, "\"event\":\"started\"") >= 0, 1, "second event is started");
+    return 0;
+}
+
 # ── moved from stiva.tcyr (image ref/digest/blob/index) — cycc identifier cap ──
 fn test_image_ref_parse() {
     test_group("image_ref_parse");
@@ -795,6 +855,7 @@ fn main() {
     test_scan_output_blocks_oversized();
     test_scan_output_null_guards();
     test_scan_output_scans_stderr();
+    test_cm_create_start_oneshot();
     test_security_score();
     test_security_score_for();
     test_runpath_logging_emits();
