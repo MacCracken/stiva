@@ -64,7 +64,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.6 — OCI container runtime (Cyrius port)";
+    return "3.0.7 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -257,32 +257,8 @@ fn _cli_run(h, root) {
         stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, image_ref);
         return CMDIT_EXIT_RUN;
     }
-    var ii: Image = img;
 
-    var layer_dirs = prepare_layers(store, ii.layers);
-    if (layer_dirs == 0) {
-        stiva_err_print(STIVA_ERR_LAYER_UNPACK, image_ref);
-        return CMDIT_EXIT_RUN;
-    }
-
-    var nm = cmdit_get_str(vh, f_name);
-    var cid = nm;
-    if (cid == 0) { cid = _rt_cat2("run-", _rt_int_to_cstr(getpid())); }
-    sys_mkdir(_rt_cat2(root, "/containers"), 493);
-    var croot = _rt_cat3(root, "/containers/", cid);
-    sys_mkdir(croot, 493);
-
-    # setup_overlay needs mount privileges; on failure fall back to
-    # container_root/rootfs (rust-old create() overlay match arm).
-    var overlay = setup_overlay(layer_dirs, croot);
-    var rootfs = 0;
-    if (overlay != 0) {
-        rootfs = load64(overlay + 0);   # OverlayPaths.merged
-    } else {
-        rootfs = _rt_cat2(croot, "/rootfs");
-        sys_mkdir(rootfs, 493);
-    }
-
+    # Build the container config from the flags + positional command.
     var cfg = container_config_default();
     var cc: ContainerConfig = cfg;
     var cmdv = vec_new();
@@ -294,28 +270,27 @@ fn _cli_run(h, root) {
     if (bk != 0) { cc.backend = bk; }
     var wd = cmdit_get_str(vh, f_workdir);
     if (wd != 0) { cc.workdir = wd; }
+    var nm = cmdit_get_str(vh, f_name);
     if (nm != 0) { cc.name = nm; }
 
-    var ctr = container_new(cid, nm, ii.id, image_ref_full_ref(ii.reference),
-    CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
-    var spec = generate_spec(ctr, rootfs);
-    if (spec == 0) { return CMDIT_EXIT_RUN; }        # detail printed by generate_spec
-    var res = exec_container(spec);
-    if (res == 0) { return CMDIT_EXIT_RUN; }          # detail printed by exec_container
+    # Through the manager (rust-old: Stiva::run → create + start one-shot):
+    # unpack → overlay → spec → CREATED record → exec_container → STOPPED, with
+    # lifecycle events published. Then print the cached one-shot output and
+    # return the exit code, preserving the foreground-run UX.
+    var mgr = container_manager_new(root, store);
+    var rec = container_manager_create(mgr, img, cfg);
+    if (rec == 0) { return CMDIT_EXIT_RUN; }          # detail printed by create
+    var rc: Container = rec;
+    if (container_manager_start(mgr, rc.id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
 
-    var rr: ContainerExecResult = res;
-    if (rr.stdout != 0 && strlen(rr.stdout) > 0) { _cli_puts(rr.stdout); }
-    if (rr.stderr != 0 && strlen(rr.stderr) > 0) { sys_write(2, rr.stderr, strlen(rr.stderr)); }
-    write_container_log(_rt_cat2(croot, "/container.log"), res);   # for `stiva logs`
-
-    # Persist the container record (a foreground run ALWAYS ends Stopped) so
-    # `ps`/`inspect`/`rm` can see it (rust-old: start() one-shot → Stopped).
-    var rec = container_new(cid, nm, ii.id, image_ref_full_ref(ii.reference),
-    CONTAINER_STATE_STOPPED, 0 - 1, 0, 0 - 1, cfg, rr.exit_code);
-    var cs = container_state_load(root);
-    vec_push(cs, rec);
-    container_state_save(root, cs);
-    return rr.exit_code;
+    var res = container_manager_wait(mgr, rc.id);      # cached ContainerExecResult*
+    if (res != 0) {
+        var so = load64(res + 8);                      # ExecResult.stdout @8 (raw — cycc 20/21)
+        var se = load64(res + 16);                     # ExecResult.stderr @16
+        if (so != 0 && strlen(so) > 0) { _cli_puts(so); }
+        if (se != 0 && strlen(se) > 0) { sys_write(2, se, strlen(se)); }
+    }
+    return rc.exit_status;
 }
 
 # `images` — list locally stored images (rust-old: Commands::Images → the
@@ -388,7 +363,8 @@ fn _cli_ps(h, root) {
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     var all = cmdit_get_bool(vh, f_all);
     _cli_puts("CONTAINER ID\tIMAGE\tSTATE\tNAME\n");
-    var cs = container_state_load(root);
+    # Through the manager (rust-old: Stiva::ps → ContainerManager::list).
+    var cs = container_manager_list(container_manager_new(root, image_store_new(root)));
     var n = vec_len(cs);
     var i = 0;
     while (i < n) {
@@ -414,19 +390,12 @@ fn _cli_stop(h, root) {
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva stop: missing <container>\n"); return CMDIT_EXIT_USAGE; }
     var id = cmdit_positional(vh, 0);
-    var cs = container_state_load(root);
-    var c = container_state_find(cs, id);
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    if (cc.state != CONTAINER_STATE_RUNNING) {
-        stiva_err_print(STIVA_ERR_INVALID_STATE, id);
-        return CMDIT_EXIT_RUN;
-    }
-    if (cc.pid > 0) { send_signal(cc.pid, 15); }   # SIGTERM
-    cc.state = CONTAINER_STATE_STOPPED;
-    cc.pid = 0 - 1;
-    container_state_save(root, cs);
-    _cli_puts(cc.id); _cli_puts("\n");
+    # Through the manager (rust-old: Stiva::stop). One-shot containers are
+    # already Stopped, so this is idempotent rather than an error — the manager
+    # handles the daemon SIGTERM/grace path (v3.1) when a handle exists.
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_stop(mgr, id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    _cli_puts(id); _cli_puts("\n");
     return CMDIT_EXIT_OK;
 }
 
@@ -439,24 +408,11 @@ fn _cli_rm(h, root) {
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva rm: missing <container>\n"); return CMDIT_EXIT_USAGE; }
     var id = cmdit_positional(vh, 0);
-    var cs = container_state_load(root);
-    var c = container_state_find(cs, id);
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    if (cc.state == CONTAINER_STATE_RUNNING) {
-        stiva_err_print(STIVA_ERR_INVALID_STATE, "cannot remove running container — stop it first");
-        return CMDIT_EXIT_RUN;
-    }
-    var kept = vec_new();
-    var n = vec_len(cs);
-    var i = 0;
-    while (i < n) {
-        var k: Container = vec_get(cs, i);
-        if (streq(k.id, cc.id) == 0) { vec_push(kept, vec_get(cs, i)); }
-        i = i + 1;
-    }
-    container_state_save(root, kept);
-    _cli_puts(cc.id); _cli_puts("\n");
+    # Through the manager (rust-old: Stiva::rm → remove): refuses Running,
+    # tears down the overlay, drops the record + directory, emits `removed`.
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_remove(mgr, id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    _cli_puts(id); _cli_puts("\n");
     return CMDIT_EXIT_OK;
 }
 
@@ -469,7 +425,8 @@ fn _cli_inspect(h, root) {
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva inspect: missing <container>\n"); return CMDIT_EXIT_USAGE; }
     var id = cmdit_positional(vh, 0);
-    var c = container_state_find(container_state_load(root), id);
+    var mgr = container_manager_new(root, image_store_new(root));
+    var c = container_manager_get(mgr, id);
     if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
     var s = json_v_build_pretty(container_to_jv(c), 2);
     sys_write(1, str_data(s), str_len(s));
@@ -527,13 +484,6 @@ fn _cli_import(h, root) {
     return CMDIT_EXIT_OK;
 }
 
-# Find a container by id/name in state.json, or print not-found + return 0.
-fn _cli_find_container(root, id) {
-    var c = container_state_find(container_state_load(root), id);
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); }
-    return c;
-}
-
 # `logs <container> [-n N] [--scan]` — show a container's captured output
 # (rust-old: Commands::Logs → log_tail). N = last N lines (0 = all).
 #
@@ -554,11 +504,15 @@ fn _cli_logs(h, root) {
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva logs: missing <container>\n"); return CMDIT_EXIT_USAGE; }
-    var c = _cli_find_container(root, cmdit_positional(vh, 0));
-    if (c == 0) { return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    var logpath = _rt_cat3(root, "/containers/", _rt_cat2(cc.id, "/container.log"));
-    var out = container_log_tail(logpath, cmdit_get_int(vh, f_tail));
+    var id = cmdit_positional(vh, 0);
+    # Through the manager (rust-old: Stiva::log_tail). Resolves the log path
+    # from the record's container dir (internals is empty in a fresh process).
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_get(mgr, id) == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return CMDIT_EXIT_RUN;
+    }
+    var out = container_manager_log_tail(mgr, id, cmdit_get_int(vh, f_tail));
     if (out == 0) { return CMDIT_EXIT_OK; }
     if (cmdit_get_bool(vh, f_scan) == 1) {
         # Synthesize the ContainerExecResult the gate expects — the oracle
@@ -582,9 +536,15 @@ fn _cli_wait(h, root) {
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva wait: missing <container>\n"); return CMDIT_EXIT_USAGE; }
-    var c = _cli_find_container(root, cmdit_positional(vh, 0));
-    if (c == 0) { return CMDIT_EXIT_RUN; }
-    var ec = load64(c + 72);   # Container.exit_status @ offset 72 (cycc field-collision workaround)
+    var id = cmdit_positional(vh, 0);
+    # Through the manager (rust-old: Stiva::wait → try_wait). Reads the
+    # persisted exit code off the record (works across processes). Absent → -1.
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_get(mgr, id) == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return CMDIT_EXIT_RUN;
+    }
+    var ec = container_manager_try_wait(mgr, id);
     if (ec == 0 - 1) { ec = 0; }
     _cli_puts(_rt_int_to_cstr(ec)); _cli_puts("\n");
     return ec;
@@ -598,15 +558,14 @@ fn _cli_stats(h, root) {
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva stats: missing <container>\n"); return CMDIT_EXIT_USAGE; }
-    var c = _cli_find_container(root, cmdit_positional(vh, 0));
-    if (c == 0) { return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    if (cc.pid <= 0) {
-        stiva_err_print(STIVA_ERR_INVALID_STATE, "container has no running process");
+    # Through the manager (rust-old: Stiva::stats). require_pid gates on
+    # Running/Paused; a stopped one-shot container has no live cgroup → 0.
+    var mgr = container_manager_new(root, image_store_new(root));
+    var st = container_manager_stats(mgr, cmdit_positional(vh, 0));
+    if (st == 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME, "no stats (not running, or cgroup unavailable)");
         return CMDIT_EXIT_RUN;
     }
-    var st = container_stats(cc.pid);
-    if (st == 0) { stiva_err_print(STIVA_ERR_RUNTIME, "cannot read cgroup stats"); return CMDIT_EXIT_RUN; }
     # ContainerStats fields via raw offsets (memory_limit_bytes collides by NAME
     # with RuntimeSpec's field — cycc field-offset collision; read by offset).
     _cli_puts("Memory:       "); _cli_puts(_rt_int_to_cstr(load64(st + 0))); _cli_puts(" bytes\n");
@@ -628,18 +587,10 @@ fn _cli_pause(h, root) {
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva pause: missing <container>\n"); return CMDIT_EXIT_USAGE; }
-    var cs = container_state_load(root);
-    var c = container_state_find(cs, cmdit_positional(vh, 0));
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    if (cc.state != CONTAINER_STATE_RUNNING || cc.pid <= 0) {
-        stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not running");
-        return CMDIT_EXIT_RUN;
-    }
-    if (pause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
-    cc.state = CONTAINER_STATE_PAUSED;
-    container_state_save(root, cs);
-    _cli_puts(cc.id); _cli_puts("\n");
+    var id = cmdit_positional(vh, 0);
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_pause(mgr, id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    _cli_puts(id); _cli_puts("\n");
     return CMDIT_EXIT_OK;
 }
 
@@ -650,18 +601,10 @@ fn _cli_unpause(h, root) {
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
     if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
     if (cmdit_positional_count(vh) < 1) { _cli_puts("stiva unpause: missing <container>\n"); return CMDIT_EXIT_USAGE; }
-    var cs = container_state_load(root);
-    var c = container_state_find(cs, cmdit_positional(vh, 0));
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, cmdit_positional(vh, 0)); return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    if (cc.state != CONTAINER_STATE_PAUSED || cc.pid <= 0) {
-        stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not paused");
-        return CMDIT_EXIT_RUN;
-    }
-    if (unpause_container(cc.pid) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
-    cc.state = CONTAINER_STATE_RUNNING;
-    container_state_save(root, cs);
-    _cli_puts(cc.id); _cli_puts("\n");
+    var id = cmdit_positional(vh, 0);
+    var mgr = container_manager_new(root, image_store_new(root));
+    if (container_manager_unpause(mgr, id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+    _cli_puts(id); _cli_puts("\n");
     return CMDIT_EXIT_OK;
 }
 
@@ -680,10 +623,11 @@ fn _cli_export(h, root) {
     }
     var id = cmdit_positional(vh, 0);
     var output = cmdit_positional(vh, 1);
-    var c = container_state_find(container_state_load(root), id);
-    if (c == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
-    var cc: Container = c;
-    var rootfs = _rt_cat3(root, "/containers/", _rt_cat2(cc.id, "/rootfs"));
+    # Through the manager (rust-old: Stiva::get_rootfs + export). Resolves the
+    # rootfs (overlay merged, or the reconstructed dir) for the id-or-name.
+    var mgr = container_manager_new(root, image_store_new(root));
+    var rootfs = container_manager_get_rootfs(mgr, id);
+    if (rootfs == 0) { stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id); return CMDIT_EXIT_RUN; }
     if (export_rootfs(rootfs, output) == 0) { return CMDIT_EXIT_RUN; }
     _cli_puts(output); _cli_puts("\n");
     return CMDIT_EXIT_OK;

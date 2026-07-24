@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.6: single-node OCI runtime (group A complete)
+## Status — v3.0.7: single-node OCI runtime (group A complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -20,15 +20,19 @@ valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the a
 `images.json` retired), with a perms-preserving tar codec and `save`/`load` as
 `oci-archive` (plus `docker-archive` read) — Docker/Podman/skopeo-interop. **v3.0.5 added
 zstd layer decode**, closing the compressed-layer media types the OCI image-spec defines,
-and **v3.0.6 completes roadmap §G**: container-output scanning through kavach's
+and **v3.0.6 completed roadmap §G**: container-output scanning through kavach's
 externalization gate (`stiva logs --scan`) and `stiva convert --format compose`, which
-turns a docker-compose file into stiva TOML over a documented YAML subset. It imports,
+turns a docker-compose file into stiva TOML over a documented YAML subset. **v3.0.7
+completes roadmap §C**: the stateful `ContainerManager` + top-level `Stiva` facade, with
+the 12 live container CLI verbs (`run`/`ps`/`stop`/`rm`/`inspect`/`pause`/`unpause`/`stats`/
+`logs`/`wait`/`export`) routed through the manager — `run` now has a real
+CREATED→RUNNING→STOPPED lifecycle publishing events over majra pub/sub. It imports,
 runs, and manages real containers end-to-end via a CLI, with the algorithm-dense
 subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
-sync core — the **v3.0.x line** (buildable now, just not wired yet, e.g. the registry
-`pull`/`push` client), with a small externally-blocked residue in **v3.1**
-(see [below](#whats-next)). **1307 tests** across `tests/*.tcyr`.
+sync core — the **v3.0.x line** (buildable now, e.g. the registry `pull`/`push` client),
+with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
+**1374 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -74,10 +78,10 @@ for the v3.0.x line (blocking glue over the sync core: `pull`/`push`, `build`, `
 
 ## Capabilities
 
-| Category | Live (v3.0.6) | v3.0.x (planned) | v3.1 (blocked) |
+| Category | Live (v3.0.7) | v3.0.x (planned) | v3.1 (blocked) |
 |----------|---------------|------------------|----------------|
 | **Images** | import, tag, list, rmi, gc, export; **OCI image-layout store** (oci-layout + index.json + blobs); **`save`/`load` as oci-archive** + **`docker-archive` read**; per-image platform passthrough; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers | — |
-| **Containers** | run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait; state persistence | non-interactive `exec` (nsenter), `restart`, `rename`, streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring; ContainerManager + Stiva facade | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
+| **Containers** | **`ContainerManager` + `Stiva` facade**; run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait, rename, restart, update — all **routed through the manager**, with **lifecycle events over majra pub/sub**; state persistence | non-interactive `exec` (nsenter), streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
 | **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack) | live network attach on the run path | — |
 | **Storage** | overlay FS, volume mounts, **gzip + zstd layer unpack**, cgroups v2 (CPU/mem/PID/IO); **perms-preserving tar** (mode/uid/gid + dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) | — | — |
 | **Orchestration** | TOML ansamblu parse, DAG ordering, health-check / restart-policy / rolling-update / scaling logic | live deploy/scale driving the Stiva facade | — |
@@ -113,7 +117,7 @@ See [docs/development/roadmap.md](docs/development/roadmap.md) for the full pari
 ## <a name="language"></a>Language
 
 Stiva is written in **Cyrius**, the AGNOS systems language, and built with the `cyrius`
-toolchain (toolchain pin **6.4.72**). It consumes its AGNOS dependencies as Cyrius
+toolchain (toolchain pin **6.4.76**). It consumes its AGNOS dependencies as Cyrius
 single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 [`cyrius.cyml`](cyrius.cyml). Stiva is itself consumable as a single-file bundle,
 `dist/stiva.cyr` (built by `cyrius distlib`).

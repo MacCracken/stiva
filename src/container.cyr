@@ -1109,6 +1109,282 @@ fn container_manager_start(mgr, id) {
     return STIVA_ERR_OK;
 }
 
+# {"event":<event>,"container_id":<id>,<key>:<intval>} — int-valued variant
+# for the `stopped` event's numeric exit_code.
+#[must_use]
+fn _cm_event_json_int(event, id, key, intval) {
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("event"), json_v_str_new(str_from(event)));
+    json_v_obj_set(o, str_from("container_id"), json_v_str_new(str_from(id)));
+    json_v_obj_set(o, str_from(key), json_v_int_new(intval));
+    return str_cstr(json_v_build(o));
+}
+
+# {root}/containers/{real_id}/container.log — from cached internals, or rebuilt
+# when internals is empty (a fresh CLI process; the record is on disk but the
+# runtime side table is not). `real_id` MUST be the container's actual id (the
+# directory + internals key are named by id, never by a name alias), so callers
+# resolve the record first via container_state_find and pass cc.id.
+#[must_use]
+fn _cm_log_path(mgr, real_id) {
+    var mm: ContainerManager = mgr;
+    var ci = map_get(mm.internals, real_id);
+    if (ci != 0) {
+        var cint: ContainerInternals = ci;
+        return cint.log_path;
+    }
+    return _container_cat2(_cm_container_dir(mm.root, real_id), "/container.log");
+}
+
+# ── network (best-effort; rust-old connect/disconnect_network) ────
+# In v3.0.x only the deferred daemon-start path would connect, so the live
+# one-shot path never builds a NetworkManager and disconnect is a no-op. Ported
+# for parity + the future daemon path; connect stays effectively unreachable.
+fn _cm_disconnect_network(mgr, id) {
+    var mm: ContainerManager = mgr;
+    if (mm.network_manager == 0) { return 0; }
+    # A real NetworkManager would detach the container here; the one-shot path
+    # never constructs one, so this only runs on the (v3.1) daemon path.
+    return 0;
+}
+
+# ── mutating + read ops (rust-old/src/container.rs) ───────────────
+
+# Stop a container (rust-old: stop, container.rs:625). One-shot containers have
+# already completed, so this flips to Stopped, clears pid, disconnects the
+# network, emits `stopped`, and persists. (The daemon SIGTERM/grace/SIGKILL
+# branch needs DaemonHandle → v3.1.)
+fn container_manager_stop(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    var cc: Container = c;
+    cc.state = CONTAINER_STATE_STOPPED;
+    cc.pid = 0 - 1;
+    _cm_disconnect_network(mgr, id);
+    container_manager_publish_event(mgr, _cm_event_json_int("stopped", id, "exit_code", cc.exit_status));
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# Send a signal to a running container (rust-old: signal, container.rs:724).
+fn container_manager_signal(mgr, id, signal) {
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    var pid = container_manager_require_pid(mgr, id, allowed, 1);
+    if (pid < 0) { return STIVA_ERR_RUNTIME; }   # detail printed by require_pid
+    return send_signal(pid, signal);
+}
+
+# Pause a running container via the cgroup freezer (rust-old: pause, :732).
+fn container_manager_pause(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    var pid = container_manager_require_pid(mgr, id, allowed, 1);
+    if (pid < 0) { return STIVA_ERR_RUNTIME; }
+    var r = pause_container(pid);
+    if (r != STIVA_ERR_OK) { return r; }
+    var cc: Container = container_state_find(mm.containers, id);
+    cc.state = CONTAINER_STATE_PAUSED;
+    container_manager_publish_event(mgr, _cm_event_json("paused", id, "state", "paused"));
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# Unpause a paused container (rust-old: unpause, :753).
+fn container_manager_unpause(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_PAUSED);
+    var pid = container_manager_require_pid(mgr, id, allowed, 1);
+    if (pid < 0) { return STIVA_ERR_RUNTIME; }
+    var r = unpause_container(pid);
+    if (r != STIVA_ERR_OK) { return r; }
+    var cc: Container = container_state_find(mm.containers, id);
+    cc.state = CONTAINER_STATE_RUNNING;
+    container_manager_publish_event(mgr, _cm_event_json("unpaused", id, "state", "running"));
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# Runtime stats for a running/paused container (rust-old: stats, :774). Returns
+# a ContainerStats*, or 0 (not running/paused, or cgroup unavailable).
+#[must_use]
+fn container_manager_stats(mgr, id) {
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    vec_push(allowed, CONTAINER_STATE_PAUSED);
+    var pid = container_manager_require_pid(mgr, id, allowed, 2);
+    if (pid < 0) { return 0; }
+    return container_stats(pid);
+}
+
+# Remove a stopped container (rust-old: remove, container.rs:832). Refuses a
+# Running container, tears down its overlay, removes its directory + internals,
+# drops the record, emits `removed`, and persists. Returns STIVA_ERR_OK or a
+# sentinel (detail printed).
+fn container_manager_remove(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    var cc: Container = c;
+    if (cc.state == CONTAINER_STATE_RUNNING) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+        _container_cat2("cannot remove running container — stop it first: ", id));
+        return STIVA_ERR_INVALID_STATE;
+    }
+    # Tear down the overlay if we still hold its internals.
+    var ci = map_get(mm.internals, id);
+    if (ci != 0) {
+        var cint: ContainerInternals = ci;
+        if (cint.overlay != 0) { teardown_overlay(cint.overlay); }
+    }
+    # Remove the container directory tree.
+    _stor_remove_dir_all(_cm_container_dir(mm.root, id));
+
+    # Drop the record (filter the vec by id, since removal is by id-or-name).
+    var kept = vec_new();
+    var n = vec_len(mm.containers);
+    var i = 0;
+    while (i < n) {
+        var rc: Container = vec_get(mm.containers, i);
+        if (streq(rc.id, cc.id) == 0) { vec_push(kept, vec_get(mm.containers, i)); }
+        i = i + 1;
+    }
+    mm.containers = kept;
+    container_manager_publish_event(mgr, _cm_event_json("removed", id, "state", "removed"));
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# Rename a container (rust-old: rename, container.rs:924). No lifecycle event.
+fn container_manager_rename(mgr, id, new_name) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    var cc: Container = c;
+    cc.name = new_name;
+    _cm_persist(mgr);
+    return STIVA_ERR_OK;
+}
+
+# Update resource limits on a running container (rust-old: update, :941). Builds
+# a minimal RuntimeSpec carrying only the non-zero limits and applies the cgroup
+# writes (best-effort). Returns STIVA_ERR_OK or a sentinel.
+fn container_manager_update(mgr, id, memory_limit, cpu_shares, max_pids) {
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    var pid = container_manager_require_pid(mgr, id, allowed, 1);
+    if (pid < 0) { return STIVA_ERR_RUNTIME; }
+    var spec = runtime_spec_new();
+    var ss: RuntimeSpec = spec;
+    if (memory_limit > 0) { ss.memory_limit_bytes = memory_limit; }
+    if (cpu_shares > 0) { ss.cpu_shares = cpu_shares; }
+    if (max_pids > 0) { ss.max_pids = max_pids; }
+    apply_cgroup_limits(pid, spec);
+    return STIVA_ERR_OK;
+}
+
+# Restart a stopped container (rust-old: restart, container.rs:876). Requires
+# Stopped, resets to Created (clearing the exit code) and re-runs start. The
+# one-shot re-run needs the cached spec in internals (same process); a
+# cross-process restart has no spec and start reports it.
+fn container_manager_restart(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    var cc: Container = c;
+    if (cc.state != CONTAINER_STATE_STOPPED) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+        _container_cat2("cannot restart: container is not stopped: ", id));
+        return STIVA_ERR_INVALID_STATE;
+    }
+    cc.state = CONTAINER_STATE_CREATED;
+    cc.exit_status = 0 - 1;
+    return container_manager_start(mgr, id);
+}
+
+# Rootfs path for a container (rust-old: get_rootfs, :906). The overlay merged
+# dir from internals, or the reconstructed {root}/containers/{id}/rootfs
+# fallback when internals is empty (cross-process) — matching today's _cli_export.
+#[must_use]
+fn container_manager_get_rootfs(mgr, id) {
+    var mm: ContainerManager = mgr;
+    # Resolve id-or-name → the real id (the dir + internals key use the id).
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    var ci = map_get(mm.internals, cc.id);
+    if (ci != 0) {
+        var cint: ContainerInternals = ci;
+        if (cint.overlay != 0) { return load64(cint.overlay + 0); }   # OverlayPaths.merged
+    }
+    return _container_cat2(_cm_container_dir(mm.root, cc.id), "/rootfs");
+}
+
+# Whole-file logs (rust-old: logs, container.rs:1191). scan_policy is not yet
+# persisted (loads as 0), so this returns the content unscanned — `stiva logs
+# --scan` drives scan_output explicitly. Returns the content cstr, or 0 if the
+# log file does not exist.
+#[must_use]
+fn container_manager_logs(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    var logp = _cm_log_path(mgr, cc.id);
+    if (file_exists(logp) == 0) { return 0; }
+    return container_log_tail(logp, 0);   # n=0 → whole file
+}
+
+# Last-N-lines logs (rust-old: log_tail, :1230). Reuses container_log_tail.
+#[must_use]
+fn container_manager_log_tail(mgr, id, n) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    var logp = _cm_log_path(mgr, cc.id);
+    if (file_exists(logp) == 0) { return 0; }
+    return container_log_tail(logp, n);
+}
+
+# Wait for a container's exit result (rust-old: wait, :549). One-shot containers
+# already have a cached result in internals; returns that ContainerExecResult*,
+# or 0 when the container was not started in this process.
+#[must_use]
+fn container_manager_wait(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var ci = map_get(mm.internals, id);
+    if (ci == 0) { return 0; }
+    var cint: ContainerInternals = ci;
+    return cint.exec_result;
+}
+
+# Non-blocking exit-code check (rust-old: try_wait, :589). For one-shot
+# containers this reads the persisted exit_status off the record, so it works
+# across processes (what `stiva wait` needs). Returns the exit code, or -1.
+#[must_use]
+fn container_manager_try_wait(mgr, id) {
+    var c = container_manager_get(mgr, id);
+    if (c == 0) { return 0 - 1; }
+    var cc: Container = c;
+    return cc.exit_status;
+}
+
 # ── DEFERRED to v3.1 (external- or coroutine-blocked) ────────────
 # The remaining ContainerManager surface is gated on landings outside stiva:
 #   start(daemon branch)/wait/try_wait(daemon)  — runtime::spawn_container +

@@ -5,6 +5,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.7] — 2026-07-24 — §C: ContainerManager + Stiva facade · toolchain 6.4.76
+
+Completes roadmap **§C** — the stateful container manager and the top-level facade, with the
+live CLI routed through the manager — on top of a toolchain bump to cyrius 6.4.76.
+
+### Added — roadmap §C: ContainerManager + Stiva facade
+The stateful lifecycle manager and the top-level `Stiva` facade land in the DEFERRED blocks of
+`src/container.cyr` and `src/stiva_core.cyr` (no new module). Single-node run-to-completion, so
+the oracle's `Arc<RwLock<HashMap>>` collapses to a plain `vec<Container*>` + a cstr-keyed
+`internals` map — `container_state_save`/`_load` are reused verbatim and `state.json` round-trips
+byte-for-byte.
+
+- **ContainerManager** — `container_manager_new` + create/start(one-shot)/stop/wait/try_wait/
+  list/get/remove/rename/signal/pause/unpause/stats/logs/log_tail/get_rootfs/restart/update, plus
+  lifecycle events over majra `pubsub_*` (stiva's first pub/sub consumer, topic
+  `"container.lifecycle"`). `Image`/`ContainerExecResult` are read by **raw offset**, respecting
+  the still-open cycc struct-id 20/21 miscompile.
+- **Stiva facade** — `stiva_new`/`with_registry` wire the image store, manager, and (when
+  configured) the audit log via the already-ported `stiva_audit_log_new`; the lifecycle verbs
+  delegate to the manager, auditing stop/rm/signal exactly as the oracle does (run/ps/etc. are not
+  audited). **Divergence:** facade `run` resolves the image from the LOCAL store — the oracle
+  pulls from a registry first, but the blocking client is roadmap §B.
+- **CLI routed through the manager** — the 12 live container verbs (run/ps/stop/rm/inspect/pause/
+  unpause/stats/logs/wait/export) now go through the ContainerManager, retiring the per-verb
+  `container_state_load`/`save` (and the now-dead `_cli_find_container`). `run` gains a real
+  CREATED→RUNNING→STOPPED transition with lifecycle events and a UUID id (`ps`/`stop`/`rm` still
+  resolve by name). `stop` is now idempotent on an already-stopped one-shot container instead of
+  erroring. The 9 image/convert verbs are untouched; `prune` keeps its image-reference-aware GC.
+
+Detached `run -d`, daemon `wait`/`exec`, and CRIU `checkpoint`/`restore` stay v3.1 (each gated on
+kavach `sandbox_spawn` / `sandbox_exec` / CRIU). **67 new assertions** (mgmt 128→180, runpath
+187→217); `tests/stiva.tcyr` + `tests/mgmt.tcyr` gained `imagelayout.cyr` (now 26-module units)
+so the facade's image resolution links. Suite **1374**.
+
+### Changed — cyrius pin 6.4.72 → 6.4.76
+The bump fixes `cyrius audit`'s tests stage (it had reported bogus compile errors for all five
+units) and — more importantly — **raises the compiler caps**: `fn_table` 8192 → 32768 (now ~23%
+used) and the identifier buffer 262144 → 524288 (now ~46%). The 90%/92% pressure that would have
+blocked the `accel` feature for §H/§I is gone. `audit`'s **fmt** stage still false-positives
+(per-file `cyrius fmt --check` is clean and `fmt -w` rewrites nothing), so per-file `--check`
+remains the gate.
+
+### Note — the cycc struct-id 20/21 miscompile is NOT fully fixed by 6.4.76
+An attempt to retire the raw-offset workarounds (they were reported fixed) was reverted. A probe
+in the 26-module `runpath.tcyr` unit passed and the minimal repro printed `MATCH`, so the
+accessors were converted to `x.field` — and the suite then **SIGSEGV'd** in
+`image_store_save_archive` under the **6-module `store.tcyr` unit**, where a bare
+`var im: Image = p; im.id` crashes (a scalar field compiled as a vector load, out-of-bounds). The
+bug is **compilation-unit-shape-dependent**: a green probe in one unit proves nothing about
+another. All conversions were reverted; the workarounds stay until a probe is green in *every*
+unit shape that includes the struct — the 6-module store unit especially. `CLAUDE.md`'s warning
+was rewritten to record this.
+
 ## [3.0.6] — 2026-07-23 — §G complete: output scanning · compose YAML · working benchmarks
 
 Closes roadmap **§G** — the three items the 2026-07-22 upstream re-check graduated out of

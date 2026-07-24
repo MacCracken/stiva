@@ -53,21 +53,218 @@ fn stiva_config_default() {
     );
 }
 
-# ── DEFERRED (land with the async runtime / orchestration layer) ──
-# rust-old/src/lib.rs also defines the top-level runtime facade, which is
-# stateful orchestration over surfaces that are themselves DEFERRED in their
-# home modules (ContainerManager → container.cyr, RegistryClient →
-# registry.cyr, AuditLog::new → audit.cyr, ImageStore async pull/push/list/
-# remove/gc → image.cyr). It needs an async runtime, shared Arc/locks, and
-# majra pub/sub, none of which the ported base provides yet. Faithful port
-# lands alongside those async layers.
+# ══ Stiva runtime facade (rust-old/src/lib.rs) ═══════════════════
+# The top-level entry point: wires the ImageStore, ContainerManager, audit
+# log, and config, and delegates the lifecycle verbs to the manager while
+# emitting audit around the mutating ones (stop/rm/signal — exactly the set
+# the oracle audits; run/ps/etc. are not audited). Single-node, synchronous:
+# the oracle's Arc/async collapses to plain pointers.
 #
-#   struct Stiva { image_store, registry_client, containers, audit, config }
-#   async fn Stiva::new(config) / with_registry(config, RegistryConfig)
-#   async fn pull/run/ps/stop/rm/restart/signal/pause/unpause/stats/build/push
-#   async fn images/inspect/prune/top/export/wait/exec/logs/log_tail
-#   fn rmi/tag/inspect_image/import/security_score/gc/audit/emit_audit/event_bus
-#   async fn cp_into/cp_from/checkpoint/restore/prepare_migration/apply_migration
-#   async fn rename/update/get_rootfs
-#   async fn ansamblu_up/ansamblu_down/ansamblu_scale/service_logs  [feature=ansamblu]
-#   async fn container_security_score
+# Registry-dependent methods (pull/push/build) stay stubbed — the blocking
+# registry client is roadmap §B. So facade `run` resolves the image from the
+# LOCAL store (not a registry pull), a documented divergence from the oracle's
+# `run` = pull-then-create-then-start; every other verb is faithful.
+
+struct Stiva {
+    image_store;      # ImageStore*
+    registry_client;  # RegistryClient* | 0 (registry is §B — stays 0)
+    containers;       # ContainerManager*
+    audit;            # AuditLog* | 0 (stiva_audit_log_new when config.audit_log set)
+    config;           # StivaConfig*
+}
+
+# Create a stiva runtime from a config (rust-old: Stiva::new, lib.rs:125).
+# Stands up the image store over config.image_path, the container manager over
+# config.root_path, and (when config.audit_log is set) the audit log. Returns
+# a Stiva*, or 0 on failure.
+fn stiva_new(config) {
+    var cfg: StivaConfig = config;
+    sakshi_info("initializing stiva runtime", strlen("initializing stiva runtime"));
+    sys_mkdir(cfg.root_path, 493);
+    var image_store = image_store_new(cfg.image_path);
+    if (image_store == 0) { stiva_err_print(STIVA_ERR_IO, cfg.image_path); return 0; }
+    var containers = container_manager_new(cfg.root_path, image_store);
+    if (containers == 0) { return 0; }
+    var audit = 0;
+    if (cfg.audit_log != 0) { audit = stiva_audit_log_new(cfg.audit_log); }
+
+    var s = alloc(40);
+    var ss: Stiva = s;
+    ss.image_store = image_store;
+    ss.registry_client = 0;
+    ss.containers = containers;
+    ss.audit = audit;
+    ss.config = config;
+    return s;
+}
+
+# As stiva_new, but records an explicit registry config (rust-old:
+# with_registry, lib.rs:154). The blocking registry client is §B, so the
+# config is accepted and parked; registry_client stays 0.
+fn stiva_with_registry(config, registry_config) {
+    return stiva_new(config);
+}
+
+# The audit log handle, or 0 (rust-old: audit()).
+#[must_use]
+fn stiva_audit(s) {
+    var ss: Stiva = s;
+    return ss.audit;
+}
+
+# The lifecycle event bus (rust-old: event_bus()). Forwards to the manager's.
+#[must_use]
+fn stiva_event_bus(s) {
+    var ss: Stiva = s;
+    return container_manager_event_bus(ss.containers);
+}
+
+# Write an audit entry, warning (not failing) on write error and no-op when no
+# audit log is configured (rust-old: emit_audit, lib.rs:766).
+fn _stiva_emit_audit(s, entry) {
+    var ss: Stiva = s;
+    if (ss.audit == 0) { return 0; }
+    if (audit_log_log(ss.audit, entry) != STIVA_ERR_OK) {
+        sakshi_warn("failed to write audit entry", strlen("failed to write audit entry"));
+    }
+    return 0;
+}
+
+# AUDIT_RESULT_SUCCESS / _FAILED from a STIVA_ERR_* code (0 == OK).
+#[must_use]
+fn _stiva_audit_result(code) {
+    if (code == STIVA_ERR_OK) { return AUDIT_RESULT_SUCCESS; }
+    return AUDIT_RESULT_FAILED;
+}
+
+# Resolve an image ref (full "registry/repo:tag" OR id) in a loaded index.
+# Image fields are read via the raw-offset accessors — Image is in the cycc
+# struct-id 20/21 class (a struct-field read segfaults in some units).
+#[must_use]
+fn _stiva_find_image(images, ref) {
+    if (images == 0) { return 0; }
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        if (streq(image_ref_full_ref(_image_reference(im)), ref) == 1) { return im; }
+        if (streq(_img_id(im), ref) == 1) { return im; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Create and start a container from a local image (rust-old: run, lib.rs:198).
+# DIVERGENCE: the oracle pulls from a registry first; the blocking client is §B,
+# so this resolves the image from the local store instead. Returns the
+# post-start Container* (Stopped for one-shot), or 0 (detail printed).
+fn stiva_run(s, image_ref, config) {
+    var ss: Stiva = s;
+    var img = _stiva_find_image(image_store_load_index(ss.image_store), image_ref);
+    if (img == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, image_ref);
+        return 0;
+    }
+    var rec = container_manager_create(ss.containers, img, config);
+    if (rec == 0) { return 0; }
+    var rc: Container = rec;
+    if (container_manager_start(ss.containers, rc.id) != STIVA_ERR_OK) { return 0; }
+    return rec;
+}
+
+# List containers (rust-old: ps, lib.rs). Not audited.
+#[must_use]
+fn stiva_ps(s) {
+    var ss: Stiva = s;
+    return container_manager_list(ss.containers);
+}
+
+# Inspect one container by id-or-name (rust-old: inspect). Not audited.
+#[must_use]
+fn stiva_inspect(s, id) {
+    var ss: Stiva = s;
+    return container_manager_get(ss.containers, id);
+}
+
+# Stop a container + audit (rust-old: stop, lib.rs:221).
+fn stiva_stop(s, id) {
+    var ss: Stiva = s;
+    var r = container_manager_stop(ss.containers, id);
+    _stiva_emit_audit(s, audit_entry_container(AUDIT_OP_STOP, id, _stiva_audit_result(r), 0));
+    return r;
+}
+
+# Remove a container + audit (rust-old: rm, lib.rs:236).
+fn stiva_rm(s, id) {
+    var ss: Stiva = s;
+    var r = container_manager_remove(ss.containers, id);
+    _stiva_emit_audit(s, audit_entry_container(AUDIT_OP_REMOVE, id, _stiva_audit_result(r), 0));
+    return r;
+}
+
+# Signal a container + audit (with the signal number as metadata; rust-old:
+# signal, lib.rs:255 → AuditOperation::Kill).
+fn stiva_signal(s, id, signal) {
+    var ss: Stiva = s;
+    var r = container_manager_signal(ss.containers, id, signal);
+    var e = audit_entry_container(AUDIT_OP_KILL, id, _stiva_audit_result(r), 0);
+    var md = json_v_obj_new();
+    json_v_obj_set(md, str_from("signal"), json_v_int_new(signal));
+    audit_entry_with_metadata(e, str_cstr(json_v_build(md)));
+    _stiva_emit_audit(s, e);
+    return r;
+}
+
+# The remaining lifecycle verbs are pure delegation (not audited by the
+# oracle): restart/pause/unpause/rename/update, and the read ops
+# stats/wait/logs/log_tail/get_rootfs.
+fn stiva_restart(s, id) { var ss: Stiva = s; return container_manager_restart(ss.containers, id); }
+fn stiva_pause(s, id) { var ss: Stiva = s; return container_manager_pause(ss.containers, id); }
+fn stiva_unpause(s, id) { var ss: Stiva = s; return container_manager_unpause(ss.containers, id); }
+fn stiva_rename(s, id, new_name) { var ss: Stiva = s; return container_manager_rename(ss.containers, id, new_name); }
+fn stiva_update(s, id, mem, cpu, pids) {
+    var ss: Stiva = s;
+    return container_manager_update(ss.containers, id, mem, cpu, pids);
+}
+
+#[must_use]
+fn stiva_stats(s, id) { var ss: Stiva = s; return container_manager_stats(ss.containers, id); }
+#[must_use]
+fn stiva_wait(s, id) { var ss: Stiva = s; return container_manager_try_wait(ss.containers, id); }
+#[must_use]
+fn stiva_logs(s, id) { var ss: Stiva = s; return container_manager_logs(ss.containers, id); }
+#[must_use]
+fn stiva_log_tail(s, id, n) { var ss: Stiva = s; return container_manager_log_tail(ss.containers, id, n); }
+#[must_use]
+fn stiva_get_rootfs(s, id) { var ss: Stiva = s; return container_manager_get_rootfs(ss.containers, id); }
+
+# Remove all stopped containers, then GC dangling image blobs (rust-old:
+# prune, lib.rs:407). Returns the number of containers removed (the image GC
+# runs for its side effect). Collect ids first — removal mutates the vec.
+fn stiva_prune(s) {
+    var ss: Stiva = s;
+    var ids = vec_new();
+    var list = container_manager_list(ss.containers);
+    var i = 0;
+    while (i < vec_len(list)) {
+        var rc: Container = vec_get(list, i);
+        if (rc.state == CONTAINER_STATE_STOPPED) { vec_push(ids, rc.id); }
+        i = i + 1;
+    }
+    var removed = 0;
+    var j = 0;
+    while (j < vec_len(ids)) {
+        if (container_manager_remove(ss.containers, vec_get(ids, j)) == STIVA_ERR_OK) {
+            removed = removed + 1;
+        }
+        j = j + 1;
+    }
+    image_store_gc(ss.image_store);
+    return removed;
+}
+
+# Security strength score for the current backend (rust-old: security_score).
+#[must_use]
+fn stiva_security_score(s) {
+    return security_score();
+}

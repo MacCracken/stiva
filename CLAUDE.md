@@ -6,24 +6,26 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.4.72** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.6
+- **Toolchain**: Cyrius, pin **6.4.76** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.0.7
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.6 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.7 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
 complete**; **v3.0.5 = zstd layer decode + dependency hygiene**; **v3.0.6 = roadmap §G
 complete — output scanning (`stiva logs --scan`) + `convert --format compose` + working
-benchmark scripts + toolchain 6.4.72**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+benchmark scripts**; **v3.0.7 = roadmap §C complete — the `ContainerManager` + `Stiva`
+facade, with the 12 live container CLI verbs routed through the manager (lifecycle events over
+majra pub/sub) + toolchain 6.4.76**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1307 tests** across the `.tcyr` files (stiva 664 · runpath 202 · store 197 · mgmt 128 ·
-convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.72**.
+**1374 tests** across the `.tcyr` files (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
+convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.76**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -38,9 +40,10 @@ traversal/symlink/DoS-hardened); and **`save`/`load` as `oci-archive`** plus a
 The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.cyr`) is
 ready and the runtime is single-threaded run-to-completion, so most of the remaining
 container-orchestration surface is **blocking** work now folded onto the **v3.0.x line
-(Wave 2)** — buildable now over the ported sync core: the `ContainerManager` + `Stiva`
-facade, the blocking registry client (pull/push), non-interactive `exec`, CRIU
-checkpoint/restore, and MCP dispatch (ps/stop/inspect/pull/push/exec). Only a small
+(Wave 2)** — buildable now over the ported sync core. The `ContainerManager` + `Stiva`
+facade landed at **v3.0.7 (§C)**; still buildable: the blocking registry client (pull/push),
+non-interactive `exec`, CRIU checkpoint/restore, and MCP dispatch (ps/stop/inspect/pull/push/exec).
+Only a small
 **externally-blocked residue** is **v3.1 (blocked)** — genuinely gated on an external
 landing: detached `run -d` (needs kavach `sandbox_spawn`), interactive `exec -it` and
 true multiplexed streaming (need cyrius stackless coroutines), MCP `handle_run` (needs
@@ -186,7 +189,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1307 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1374 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -221,7 +224,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1307 Cyrius tests** across `tests/*.tcyr` (stiva 664 · runpath 202 · store 197 · mgmt 128 ·
+**1374 Cyrius tests** across `tests/*.tcyr` (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
 convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
 across files because a monolith hits the cycc identifier-dedup cap — split by **include
 set**, not by test count.

@@ -16,6 +16,7 @@ include "src/network_manager.cyr"
 include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
+include "src/imagelayout.cyr"
 include "src/build.cyr"
 include "src/encrypted.cyr"
 include "src/runtime.cyr"
@@ -107,6 +108,176 @@ fn test_cm_require_pid() {
     assert_eq(container_manager_require_pid(mgr, "stopped1", allowed, 1), 0 - 1, "stopped -> -1");
     # an absent container -> -1 (ContainerNotFound).
     assert_eq(container_manager_require_pid(mgr, "ghost", allowed, 1), 0 - 1, "absent -> -1");
+    return 0;
+}
+
+# Inc-3: mutating/read ops — state-transition guards. These don't run a real
+# container (no image), so they exercise the guard logic + persistence, not the
+# cgroup/signal syscalls (which require a live pid and are covered on the run path).
+fn _cm_seed(root, id, name, state, pid) {
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    vec_push(container_manager_list(mgr), _cm_mk_record(id, name, state, pid));
+    return mgr;
+}
+
+fn test_cm_stop_and_try_wait() {
+    test_group("cm_stop_and_try_wait");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "c1", 0, CONTAINER_STATE_STOPPED, 0 - 1);
+    # a stopped container's exit code (seeded -1) is readable across a reload.
+    var cc: Container = container_manager_get(mgr, "c1");
+    cc.exit_status = 7;
+    assert_eq(container_manager_stop(mgr, "c1"), STIVA_ERR_OK, "stop ok (idempotent on stopped)");
+    assert_eq(container_manager_try_wait(mgr, "c1"), 7, "try_wait reads persisted exit code");
+    assert_eq(container_manager_try_wait(mgr, "ghost"), 0 - 1, "try_wait absent -> -1");
+    # try_wait works across processes (reads the record, not internals).
+    var store = image_store_new(root);
+    var mgr2 = container_manager_new(root, store);
+    assert_eq(container_manager_try_wait(mgr2, "c1"), 7, "try_wait survives reload");
+    return 0;
+}
+
+fn test_cm_remove_guards() {
+    test_group("cm_remove_guards");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "run1", 0, CONTAINER_STATE_RUNNING, 4242);
+    # a Running container cannot be removed.
+    assert_eq(container_manager_remove(mgr, "run1"), STIVA_ERR_INVALID_STATE, "remove running refused");
+    assert_eq(vec_len(container_manager_list(mgr)), 1, "still present after refusal");
+    # stop it, then remove succeeds and the record is gone.
+    container_manager_stop(mgr, "run1");
+    assert_eq(container_manager_remove(mgr, "run1"), STIVA_ERR_OK, "remove after stop ok");
+    assert_eq(vec_len(container_manager_list(mgr)), 0, "record dropped");
+    assert_eq(container_manager_get(mgr, "run1"), 0, "get after remove -> 0");
+    # absent id -> not found.
+    assert_eq(container_manager_remove(mgr, "ghost"), STIVA_ERR_CONTAINER_NOT_FOUND, "remove absent -> not found");
+    return 0;
+}
+
+fn test_cm_pause_unpause_guards() {
+    test_group("cm_pause_unpause_guards");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "s1", 0, CONTAINER_STATE_STOPPED, 0 - 1);
+    # pause requires Running; a Stopped container is rejected by require_pid (-1).
+    assert_eq(container_manager_pause(mgr, "s1"), STIVA_ERR_RUNTIME, "pause non-running refused");
+    # unpause requires Paused.
+    assert_eq(container_manager_unpause(mgr, "s1"), STIVA_ERR_RUNTIME, "unpause non-paused refused");
+    # signal requires Running.
+    assert_eq(container_manager_signal(mgr, "s1", 15), STIVA_ERR_RUNTIME, "signal non-running refused");
+    return 0;
+}
+
+fn test_cm_rename() {
+    test_group("cm_rename");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "id1", "old", CONTAINER_STATE_STOPPED, 0 - 1);
+    assert_eq(container_manager_rename(mgr, "id1", "newname"), STIVA_ERR_OK, "rename ok");
+    var by_new: Container = container_manager_get(mgr, "newname");
+    assert_neq(by_new, 0, "resolvable by new name");
+    assert_eq(streq(by_new.name, "newname"), 1, "name updated");
+    # persisted across reload.
+    var store = image_store_new(root);
+    var mgr2 = container_manager_new(root, store);
+    assert_neq(container_manager_get(mgr2, "newname"), 0, "rename persisted");
+    return 0;
+}
+
+fn test_cm_restart_guard() {
+    test_group("cm_restart_guard");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "r1", 0, CONTAINER_STATE_RUNNING, 99);
+    # restart requires Stopped.
+    assert_eq(container_manager_restart(mgr, "r1"), STIVA_ERR_INVALID_STATE, "restart non-stopped refused");
+    return 0;
+}
+
+fn test_cm_logs_absent() {
+    test_group("cm_logs_absent");
+    var root = _cm_test_root();
+    var mgr = _cm_seed(root, "nolog", 0, CONTAINER_STATE_STOPPED, 0 - 1);
+    # no container.log written → 0.
+    assert_eq(container_manager_logs(mgr, "nolog"), 0, "no log file -> 0");
+    assert_eq(container_manager_log_tail(mgr, "nolog", 10), 0, "no log file (tail) -> 0");
+    # get_rootfs falls back to the reconstructed path (non-zero cstr) when no internals.
+    assert_neq(container_manager_get_rootfs(mgr, "nolog"), 0, "rootfs fallback path");
+    return 0;
+}
+
+# ══ §C Stiva facade (rust-old/src/lib.rs) — Inc-6 ════════════════
+
+fn _test_import(store, tmpfile, name, tag, content, clen) {
+    file_write_all(tmpfile, content, clen);
+    return image_import(store, tmpfile, name, tag);
+}
+
+fn _stiva_test_config(root) {
+    var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    # root_path == image_path here so image_import + run share one tree.
+    return stiva_config_new(root, root, net, 64, 0);
+}
+
+fn test_stiva_new_creates_dirs() {
+    test_group("stiva_new_creates_dirs");
+    var root = _cm_test_root();
+    var s = stiva_new(_stiva_test_config(root));
+    assert_neq(s, 0, "facade built");
+    # the image store's blobs dir exists (image_store_new made it).
+    assert_eq(file_exists(_rt_cat2(root, "/blobs/sha256")), 1, "image store dirs created");
+    assert_eq(stiva_audit(s), 0, "no audit log by default");
+    assert_neq(stiva_event_bus(s), 0, "event bus available");
+    return 0;
+}
+
+fn test_stiva_run_ps_stop_rm() {
+    test_group("stiva_run_ps_stop_rm");
+    kavach_init();
+    var root = _cm_test_root();
+    var s = stiva_new(_stiva_test_config(root));
+    var img = _test_import(image_store_new(root), "/tmp/stiva-fac.tar", "app", "v1",
+    "fac-rootfs", strlen("fac-rootfs"));
+    assert_neq(img, 0, "image imported");
+
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var cmd = vec_new();
+    vec_push(cmd, "echo");
+    vec_push(cmd, "ok");
+    cfg.command = cmd;
+
+    # run resolves the image locally (pull is §B), creates + starts one-shot.
+    var rec = stiva_run(s, "local/app:v1", cfg);
+    assert_neq(rec, 0, "run returned a container");
+    var rc: Container = rec;
+    assert_eq(rc.state, CONTAINER_STATE_STOPPED, "one-shot ends STOPPED");
+    assert_eq(vec_len(stiva_ps(s)), 1, "ps shows one container");
+    assert_eq(stiva_wait(s, rc.id), 0, "wait -> exit 0");
+
+    # unknown image ref -> 0.
+    assert_eq(stiva_run(s, "nope/missing:v9", cfg), 0, "unknown image -> 0");
+
+    # stop (idempotent) then rm.
+    assert_eq(stiva_stop(s, rc.id), STIVA_ERR_OK, "stop ok");
+    assert_eq(stiva_rm(s, rc.id), STIVA_ERR_OK, "rm ok");
+    assert_eq(vec_len(stiva_ps(s)), 0, "ps empty after rm");
+    return 0;
+}
+
+fn test_stiva_audit_emitted() {
+    test_group("stiva_audit_emitted");
+    var root = _cm_test_root();
+    var auditp = _rt_cat2(root, "/audit.log");
+    var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
+    var s = stiva_new(stiva_config_new(root, root, net, 64, auditp));
+    assert_neq(stiva_audit(s), 0, "audit log configured");
+    # a stop on an absent container still audits the (failed) op.
+    stiva_stop(s, "ghost");
+    assert_eq(file_exists(auditp), 1, "audit log file written");
+    # the entry names the stop operation.
+    var buf = alloc(4096);
+    var n = file_read_all(auditp, buf, 4095);
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "\"operation\":\"Stop\"") >= 0, 1, "audit entry records the Stop op");
     return 0;
 }
 
@@ -650,6 +821,15 @@ fn main() {
     test_cm_persist_reload_roundtrip();
     test_cm_get_by_id_or_name();
     test_cm_require_pid();
+    test_cm_stop_and_try_wait();
+    test_cm_remove_guards();
+    test_cm_pause_unpause_guards();
+    test_cm_rename();
+    test_cm_restart_guard();
+    test_cm_logs_absent();
+    test_stiva_new_creates_dirs();
+    test_stiva_run_ps_stop_rm();
+    test_stiva_audit_emitted();
     test_ansamblu_action_serde();
     test_ansamblu_replica_count();
     test_ansamblu_service_to_config();

@@ -188,26 +188,37 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
 - [ ] `acquire_token`/`authenticated_request` bearer state machine → `fetch_manifest`/`fetch_blob` → the `image_store_pull` driver = live **`stiva pull`**; then `blob_exists`/`push_blob`/`push_manifest` = **`stiva push`**; `list_tags`/`catalog`/`referrers`. Token cache = plain map. Writes into the **A** layout. (Sequential layer download; true parallelism → v3.1.)
 
 **C. `ContainerManager` + `Stiva` facade** — glue over the ported run path (plain maps + majra PubSub):
-- [~] **In progress (2026-07-24).** The manager fills the DEFERRED block in `src/container.cyr`
-  (no new module — the file was already in `[lib].modules`); `Arc<RwLock<HashMap>>` collapses to
-  a plain `vec<Container*>` + a cstr-keyed `internals` map, so `container_state_save`/`_load` are
-  reused verbatim and `state.json` round-trips byte-for-byte. **Landed + green (suite 1307 → 1337):**
-  - **Inc-1 (read-only core)** — `struct ContainerManager`/`ContainerInternals`,
-    `container_manager_new`/`_list`/`_get`/`_cm_persist`/`container_manager_require_pid`. Tests in
-    `tests/mgmt.tcyr` (+15).
-  - **Inc-2 (create + start one-shot)** — `container_manager_create` (unpack → overlay → spec →
-    record → persist) + `container_manager_start` (CREATED→RUNNING→exec_container→STOPPED + exit
-    code + log). `Image`/`ContainerExecResult` read by **raw offset** (`_img_layers`/`_img_id`/
-    `_image_reference`; `load64(res+0)`), respecting the still-open cycc 20/21 bug. Tests in
-    `tests/runpath.tcyr` (+15) — the full run path through the manager, verified end-to-end.
-  - **Inc-4 (lifecycle events)** — `_cm_event_json` + `container_manager_publish_event`/`_event_bus`
-    over majra `pubsub_*` (stiva's first pub/sub consumer), topic `"container.lifecycle"`; create/
-    start publish `created`/`started`, asserted via `pubsub_subscribe` + `chan_try_recv`.
-  - **Remaining:** Inc-3 (stop/pause/unpause/signal/remove/rename/update/restart/stats/logs/wait/
-    try_wait), Inc-5 (connect/disconnect_network best-effort), Inc-6 (the `Stiva` facade in
-    `stiva_core.cyr` + audit via the already-ported `stiva_audit_log_new`), Inc-7 (route the 12
-    live container verbs in `main.cyr` through the manager — the one behavior-changing step; the 9
-    image/convert verbs stay untouched). Detached `run -d` and daemon `wait`/`exec`/CRIU stay v3.1.
+- [x] **COMPLETE (2026-07-24).** The manager fills the DEFERRED block in `src/container.cyr` and the
+  facade fills the one in `src/stiva_core.cyr` (no new module — both files were already in
+  `[lib].modules`); `Arc<RwLock<HashMap>>` collapses to a plain `vec<Container*>` + a cstr-keyed
+  `internals` map, so `container_state_save`/`_load` are reused verbatim and `state.json`
+  round-trips byte-for-byte. Suite **1307 → 1374** (mgmt 128→180 · runpath 187→217).
+  - **Inc-1** read-only core: `container_manager_new`/`_list`/`_get`/`_cm_persist`/`_require_pid`.
+  - **Inc-2** create + start one-shot: `container_manager_create` (unpack → overlay → spec → record
+    → persist) + `container_manager_start` (CREATED→RUNNING→exec_container→STOPPED + exit code +
+    log). `Image`/`ContainerExecResult` read by **raw offset** (`_img_layers`/`_img_id`/
+    `_image_reference`; `load64(res+0/8/16)`), respecting the still-open cycc 20/21 bug.
+  - **Inc-3** mutating/read ops: stop/pause/unpause/signal/remove/rename/update/restart/stats/
+    logs/log_tail/wait/try_wait/get_rootfs, with the require_pid state guards. `logs`/`log_tail`/
+    `get_rootfs` resolve the id-or-name to the real id before rebuilding the container-dir path
+    (a name alias is never the directory name).
+  - **Inc-4** lifecycle events over majra `pubsub_*` (stiva's first pub/sub consumer), topic
+    `"container.lifecycle"`; created/started/stopped/paused/unpaused/removed published.
+  - **Inc-5** connect/disconnect_network best-effort (no-op on the one-shot path; a real
+    NetworkManager is only built on the deferred daemon path).
+  - **Inc-6** the `Stiva` facade in `stiva_core.cyr` (`stiva_new`/`with_registry`/run/ps/inspect/
+    stop/rm/signal/restart/pause/unpause/rename/update/stats/wait/logs/log_tail/get_rootfs/prune/
+    security_score), auditing stop/rm/signal via the already-ported `stiva_audit_log_new`
+    (`emit_audit` semantics). **Divergence:** facade `run` resolves the image from the LOCAL store
+    (the oracle pulls from a registry first; the blocking client is §B). Required adding
+    `imagelayout.cyr` to `tests/stiva.tcyr` + `tests/mgmt.tcyr` (both now 26-module, still green).
+  - **Inc-7** routed the 12 live container verbs in `main.cyr` (run/ps/stop/rm/inspect/pause/
+    unpause/stats/logs/wait/export) through the manager — the per-verb `container_state_load/save`
+    is retired (dead `_cli_find_container` removed); the 9 image/convert verbs are untouched.
+    `prune` keeps its direct path (its image-reference-aware GC is richer than the facade's).
+    Smoke-verified on the binary: run→ps→inspect→wait→logs(by name)→logs --scan→stop→rm→export.
+  - **Deferred to v3.1:** detached `run -d` (kavach `sandbox_spawn`); daemon `wait`/`exec`/CRIU
+    (`checkpoint`/`restore`); the blocking registry client behind facade `pull`/`push`/`build` (§B).
 
 **D. `exec` (nsenter) + CRIU** — fork+exec host tools:
 - [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
