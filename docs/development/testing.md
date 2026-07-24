@@ -13,17 +13,17 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**1196 tests** across `tests/*.tcyr`: `stiva.tcyr` (684), `store.tcyr` (197),
-`runpath.tcyr` (187), `mgmt.tcyr` (128).
+**1307 tests** across `tests/*.tcyr`: `stiva.tcyr` (664), `runpath.tcyr` (202),
+`store.tcyr` (197), `mgmt.tcyr` (128), `convert.tcyr` (116).
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
-> global counter per `assert*()` call and `assert_summary()` prints it. The 1196
-> assertions live in 288 `fn test_*` functions.
+> global counter per `assert*()` call and `assert_summary()` prints it.
 
 ## Test Organization
 
-Tests live in `tests/*.tcyr` as `fn test_*()` functions, grouped into four
-files (`stiva.tcyr`, `store.tcyr`, `runpath.tcyr`, `mgmt.tcyr`) that mirror the
+Tests live in `tests/*.tcyr` as `fn test_*()` functions, grouped into five
+files (`stiva.tcyr`, `store.tcyr`, `runpath.tcyr`, `mgmt.tcyr`, `convert.tcyr`)
+that mirror the
 `#[cfg(test)]` modules of the frozen `rust-old/` oracle. Each domain below maps
 to its test focus:
 
@@ -51,20 +51,25 @@ to its test focus:
 
 ### Run-path + management tests (`tests/runpath.tcyr`, `tests/mgmt.tcyr`)
 
-The suite is split into four files to stay under the cycc identifier-dedup cap.
+The suite is split into five files to stay under the cycc identifier-dedup cap.
 The binding constraint is the **set of `src/` modules a file includes**, plus the
 vendored `lib/` bundles that cyrius auto-prepends to every compilation unit —
 *not* the number of tests. Peeling test bodies alone does not move the cap:
 identifiers dedupe, and a test only references symbols its modules already
 define. Split by **include set**. (Measured 2026-07-22: moving 821 lines / 39
-test functions out of `stiva.tcyr` freed 0 bytes; dropping one `include` freed 4.)
+test functions out of `stiva.tcyr` freed 0 bytes; dropping one `include` freed 4.
+Refined 2026-07-23: test bodies are cheap but not *free* — `stiva.tcyr` and
+`mgmt.tcyr` share an include set yet differ by ~32 identifier bytes and ~1
+`fn_table` slot per test function, and `fn_table` is the tighter cap when adding
+many small tests.)
 
 | File | Focus |
 |------|-------|
-| `tests/stiva.tcyr` (684) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
+| `tests/stiva.tcyr` (664) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
 | `tests/store.tcyr` (197) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout), not all 26 |
-| `tests/runpath.tcyr` (187) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and the image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`) |
+| `tests/runpath.tcyr` (202) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, and the image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`); plus `scan_output` over kavach's externalization gate |
 | `tests/mgmt.tcyr` (128) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling, `agent` registration records, `health` policies |
+| `tests/convert.tcyr` (116) | `dockerfile_to_toml` (all instruction arms) and `compose_yaml_to_toml`: the four oracle fixtures, BTreeMap-order parity at all five sorted sites, every per-field arm, the `Ok("")` cases, one test per construct bayan rejects, and one per finding from the v3.0.6 adversarial review. Includes only 2 `src/` modules (error, convert) — the cheapest unit here (~86% of the cap) |
 
 Run one group by grepping its `test_group("...")` label, or run everything with
 `cyrius tests tests/`.

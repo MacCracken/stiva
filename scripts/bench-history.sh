@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run criterion benchmarks, append results to CSV history, and generate benchmarks.md
-# with a 3-point trend table (baseline → previous → current).
+# Run the Cyrius benchmarks, append results to CSV history, and generate
+# benchmarks.md with a 3-point trend table (baseline → previous → current).
 #
 # Usage:
 #   ./scripts/bench-history.sh              # defaults to bench-history.csv
 #   ./scripts/bench-history.sh results.csv  # custom output file
+#
+# Reads `cyrius bench` output, whose per-benchmark line looks like:
+#     oci_config_build+serialize: 7.233us avg (min=7.233us max=7.233us) [100000 iters]
+# (The pre-port version of this script parsed criterion's `time: [lo mid hi]`
+# format and ran `cargo bench`, so it silently recorded nothing.)
 
 HISTORY_FILE="${1:-bench-history.csv}"
 BENCHMARKS_MD="benchmarks.md"
+BENCH_FILE="tests/stiva.bcyr"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
@@ -22,53 +28,48 @@ fi
 echo "╔══════════════════════════════════════════╗"
 echo "║         stiva benchmark suite            ║"
 echo "╠══════════════════════════════════════════╣"
-echo "║  commit: $COMMIT                          ║"
-echo "║  branch: $BRANCH                            ║"
-echo "║  date:   $TIMESTAMP   ║"
+printf "║  commit: %-31s ║\n" "$COMMIT"
+printf "║  branch: %-31s ║\n" "$BRANCH"
+printf "║  date:   %-31s ║\n" "$TIMESTAMP"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# Run benchmarks and capture output, stripping ANSI escape codes
-BENCH_OUTPUT=$(cargo bench --bench benchmarks 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+# Run benchmarks and capture output, stripping ANSI escape codes.
+BENCH_OUTPUT=$(cyrius bench "$BENCH_FILE" 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
 
-# Show full output
-echo "$BENCH_OUTPUT"
+# Show the benchmark lines (compiler warnings are noise here).
+echo "$BENCH_OUTPUT" | grep -E '^[[:space:]]+[^[:space:]]+: [0-9.]+(ns|us|µs|ms|s) avg' || true
 echo ""
 
-# Collect results for CSV
-declare -a BENCH_NAMES=()
-declare -a BENCH_NS=()
-
-PREV_LINE=""
+# Collect results for CSV.
+COUNT=0
 while IFS= read -r line; do
-    if [[ "$line" == *"time:"*"["* ]]; then
-        BENCH_NAME=$(echo "$line" | sed -E 's/[[:space:]]*time:.*//' | xargs)
-        if [ -z "$BENCH_NAME" ]; then
-            BENCH_NAME=$(echo "$PREV_LINE" | xargs)
-        fi
+    # Match: "  <name>: <value><unit> avg (min=... max=...) [N iters]"
+    if [[ "$line" =~ ^[[:space:]]+([^[:space:]:]+):[[:space:]]+([0-9.]+)(ns|us|µs|ms|s)[[:space:]]+avg ]]; then
+        BENCH_NAME="${BASH_REMATCH[1]}"
+        VALUE="${BASH_REMATCH[2]}"
+        UNIT="${BASH_REMATCH[3]}"
 
-        VALS=$(echo "$line" | sed -E 's/.*\[(.+)\]/\1/')
-        MEDIAN=$(echo "$VALS" | awk '{print $3}')
-        UNIT=$(echo "$VALS" | awk '{print $4}')
-
-        # Normalize to nanoseconds
+        # Normalize to nanoseconds.
         case "$UNIT" in
-            ps)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 / 1000}') ;;
-            ns)  NS="$MEDIAN" ;;
-            µs|us)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000}') ;;
-            ms)  NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000000}') ;;
-            s)   NS=$(echo "$MEDIAN" | awk '{printf "%.4f", $1 * 1000000000}') ;;
-            *)   NS="$MEDIAN" ;;
+            ns)     NS=$(awk -v v="$VALUE" 'BEGIN{printf "%.4f", v}') ;;
+            µs|us)  NS=$(awk -v v="$VALUE" 'BEGIN{printf "%.4f", v * 1000}') ;;
+            ms)     NS=$(awk -v v="$VALUE" 'BEGIN{printf "%.4f", v * 1000000}') ;;
+            s)      NS=$(awk -v v="$VALUE" 'BEGIN{printf "%.4f", v * 1000000000}') ;;
+            *)      NS="$VALUE" ;;
         esac
 
         echo "${TIMESTAMP},${COMMIT},${BRANCH},${BENCH_NAME},${NS}" >> "$HISTORY_FILE"
-        BENCH_NAMES+=("$BENCH_NAME")
-        BENCH_NS+=("$NS")
+        COUNT=$((COUNT + 1))
     fi
-    PREV_LINE="$line"
 done <<< "$BENCH_OUTPUT"
 
-COUNT=${#BENCH_NAMES[@]}
+if [ "$COUNT" -eq 0 ]; then
+    echo "ERROR: no benchmark results parsed from '$BENCH_FILE'." >&2
+    echo "       Full output follows:" >&2
+    echo "$BENCH_OUTPUT" >&2
+    exit 1
+fi
 
 # Generate benchmarks.md with 3-point trend using python
 python3 - "$HISTORY_FILE" "$BENCHMARKS_MD" <<'PYEOF'
@@ -117,8 +118,14 @@ for i, ts in enumerate(pick):
         labels.append(f"Mid (`{commits[ts]}`)")
 
 def fmt_ns(ns):
-    if ns >= 1_000_000:
-        return f"{ns/1000:.1f} µs"
+    # Unit ladder. The pre-port version only stepped up at 1e6 ns and called it
+    # µs, so a 7 µs result rendered as "7203.0 ns" and a 1 ms one as "1000 µs".
+    if ns >= 1_000_000_000:
+        return f"{ns/1_000_000_000:.3f} s"
+    elif ns >= 1_000_000:
+        return f"{ns/1_000_000:.3f} ms"
+    elif ns >= 1_000:
+        return f"{ns/1_000:.3f} µs"
     elif ns >= 100:
         return f"{ns:.1f} ns"
     else:
@@ -139,12 +146,12 @@ with open(md_file, "w") as f:
     ts_last = pick[-1]
     f.write(f"Latest: **{ts_last}** — commit `{commits[ts_last]}`\n\n")
     if len(pick) >= 3:
-        f.write(f"Tracking: `{commits[pick[0]]}` (baseline) → `{commits[pick[1]]}` (optimized) → `{commits[pick[-1]]}` (current)\n\n")
+        f.write(f"Tracking: `{commits[pick[0]]}` (baseline) → `{commits[pick[1]]}` (mid) → `{commits[pick[-1]]}` (current)\n\n")
 
     # Group by prefix
     groups = OrderedDict()
     for bench in data:
-        group = bench.split("/")[0]
+        group = bench.split("/")[0] if "/" in bench else "stiva"
         groups.setdefault(group, []).append(bench)
 
     for group, benches in groups.items():
@@ -172,7 +179,7 @@ with open(md_file, "w") as f:
         f.write("\n")
 
     f.write("---\n\n")
-    f.write("Generated by `./scripts/bench-history.sh`. History in `bench-history.csv`.\n")
+    f.write("Generated by `./scripts/bench-history.sh` (`cyrius bench tests/stiva.bcyr`). History in `bench-history.csv`.\n")
 
 print(f"  Generated {md_file} with {len(pick)}-point trend across {len(data)} benchmarks")
 PYEOF

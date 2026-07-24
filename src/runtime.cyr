@@ -946,6 +946,90 @@ fn write_container_log(log_path, result) {
     return 0;
 }
 
+# Verdict + finding count from the most recent scan_output call. The oracle
+# collapses QUARANTINE and BLOCK into one Err, and so does scan_output's 0;
+# these let a caller or a test tell them apart without a second sentinel.
+# Mirrors kavach's own sandbox_exec_last_scan_result idiom (kavach.cyr:8986).
+var _rt_last_scan_verdict = 0;
+var _rt_last_scan_findings = 0;
+
+#[must_use]
+fn scan_output_last_verdict() { return _rt_last_scan_verdict; }
+
+#[must_use]
+fn scan_output_last_findings() { return _rt_last_scan_findings; }
+
+# ── Output scanning (rust-old: scan_output, runtime.rs:565-604) ───
+# Run kavach's externalization gate over a ContainerExecResult before the
+# bytes leave the runtime. Returns a NEW ContainerExecResult* (secrets
+# redacted when the gate verdict was WARN and the policy opts in) on
+# PASS/WARN, or 0 on QUARANTINE/BLOCK — mirroring the oracle's
+# `Err(StivaError::Sandbox(format!("output scan: {e}")))`.
+#
+# Two shape divergences forced by the ported kavach, both benign:
+#
+#  1. There is no `ExternalizationGate` TYPE in lib/kavach.cyr — the Rust
+#     `ExternalizationGate::new()` + `gate.apply(res, policy) -> Result<..>`
+#     is the free function `gate_apply(exec_result, policy) -> ScanResult*`
+#     (lib/kavach.cyr:5131). The old "[ExternalizationGate handle unported]"
+#     note below was wrong: the surface has always been free functions.
+#  2. `gate_apply` never returns a null sentinel; it reports through
+#     `ScanResult_verdict` and REWRITES the ExecResult's stdout/stderr in
+#     place when redacting. So we marshal in, apply, branch on the verdict,
+#     and read the (possibly rewritten) strings back off the struct we
+#     handed it.
+#
+# Error code is STIVA_ERR_SANDBOX, not STIVA_ERR_SCAN_BLOCKED: the oracle
+# uses `StivaError::Sandbox` at runtime.rs:590 even though `ScanBlocked`
+# exists at error.rs:63. Parity wins; 19 stays unused.
+#
+# NOT for `exec_container` — `sandbox_exec` already gate-applies one layer
+# down (lib/kavach.cyr:9026) and returns 0 on BLOCK/QUARANTINE, so scanning
+# its result would scan twice. This is for output that did NOT come through
+# sandbox_exec: `logs`, and `exec_in_container` once that lands.
+#[must_use]
+fn scan_output(result, policy) {
+    sakshi_info("scanning container output via externalization gate",
+    strlen("scanning container output via externalization gate"));
+
+    if (result == 0) { return 0; }
+    if (policy == 0) {
+        stiva_err_print(STIVA_ERR_SANDBOX, "output scan: null externalization policy");
+        return 0;
+    }
+
+    # ContainerExecResult -> kavach ExecResult. Read by RAW OFFSET
+    # (exit_code@0 stdout@8 stderr@16 duration_ms@24 timed_out@32), not
+    # `var rr: ContainerExecResult = result`, per the cycc struct-id 20/21
+    # SIMD-sentinel workaround documented in CLAUDE.md.
+    var er = exec_result_new();
+    ExecResult_set_exit_code(er, load64(result));
+    ExecResult_set_stdout(er, load64(result + 8));
+    ExecResult_set_stderr(er, load64(result + 16));
+    ExecResult_set_duration_ms(er, load64(result + 24));
+    ExecResult_set_timed_out(er, load64(result + 32));
+
+    var sr = gate_apply(er, policy);
+    var verdict = ScanResult_verdict(sr);
+    _rt_last_scan_verdict = verdict;
+    _rt_last_scan_findings = vec_len(ScanResult_findings(sr));
+
+    if (verdict == ScanVerdict.BLOCK || verdict == ScanVerdict.QUARANTINE) {
+        var dm = _rt_cat2("output scan: ", verdict_name(verdict));
+        sakshi_error(dm, strlen(dm));
+        stiva_err_print(STIVA_ERR_SANDBOX, dm);
+        return 0;
+    }
+
+    sakshi_info("output scan passed", strlen("output scan passed"));
+    return container_exec_result_new(
+    ExecResult_exit_code(er),
+    ExecResult_stdout(er),
+    ExecResult_stderr(er),
+    ExecResult_duration_ms(er),
+    ExecResult_timed_out(er));
+}
+
 # ── Security scoring (rust-old: security_score / security_score_for) ──
 # kavach score_backend returns the isolation strength as an i64 (0..100); the
 # Rust StrengthScore wrapper collapses to that integer in the dist. No async.
@@ -1243,7 +1327,6 @@ fn copy_from_container(rootfs, container_src, host_dst) {
 #     .pid() / .wait() / .kill(grace_ms) / .try_wait()     [async, kavach]
 # exec_in_container(pid, command, env, workdir) -> ContainerExecResult
 #     [async, nsenter subprocess + pre_exec fd-close CVE-2024-21626 mitigation]
-# scan_output(result, policy) -> ContainerExecResult   [kavach ExternalizationGate handle unported]
 # export_rootfs(rootfs, output)                        [async, tar builder]
 # import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
 #     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]

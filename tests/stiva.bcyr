@@ -66,6 +66,42 @@ fn main(): i64 {
     }
     bench_batch_stop(bm, 100000);
     bench_report(bm);
+
+    # §G2: compose YAML -> TOML, whole pipeline (parse + validate + sort +
+    # emit) on a realistic 3-service document.
+    var csb = str_builder_new();
+    str_builder_add_cstr(csb, "services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"\n");
+    str_builder_add_cstr(csb, "    depends_on:\n      - db\n  db:\n    image: postgres:16\n");
+    str_builder_add_cstr(csb, "    environment:\n      POSTGRES_PASSWORD: secret\n      POSTGRES_DB: app\n");
+    str_builder_add_cstr(csb, "    volumes:\n      - pgdata:/var/lib/postgresql/data\n  cache:\n    image: redis\n");
+    str_builder_add_cstr(csb, "networks:\n  frontend:\n    driver: bridge\nvolumes:\n  pgdata:\n");
+    var compose_src = str_cstr(str_builder_build(csb));
+    var bcv = bench_new("compose_yaml_to_toml");
+    bench_batch_start(bcv);
+    var c = 0;
+    while (c < 20000) { compose_yaml_to_toml(compose_src); c = c + 1; }
+    bench_batch_stop(bcv, 20000);
+    bench_report(bcv);
+
+    # §G2: the sort alone, on REVERSE-sorted keys — the adversarial shape
+    # that made the original insertion sort O(n^2) (1 MiB of reversed keys
+    # took 236 s). Guards against a regression back to a quadratic sort.
+    var rsb = str_builder_new();
+    str_builder_add_cstr(rsb, "services:\n");
+    var s = 400;
+    while (s > 0) {
+        str_builder_add_cstr(rsb, "  s");
+        str_builder_add_int(rsb, 1000 + s);
+        str_builder_add_cstr(rsb, ":\n    image: x\n");
+        s = s - 1;
+    }
+    var rev_src = str_cstr(str_builder_build(rsb));
+    var brv = bench_new("compose_400_reverse_sorted_keys");
+    bench_batch_start(brv);
+    var rc2 = 0;
+    while (rc2 < 200) { compose_yaml_to_toml(rev_src); rc2 = rc2 + 1; }
+    bench_batch_stop(brv, 200);
+    bench_report(brv);
     return 0;
 }
 

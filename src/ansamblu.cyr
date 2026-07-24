@@ -26,7 +26,8 @@
 #     model (`toml_parse`/`toml_get`), exactly like build.cyr's now-ported
 #     parse_build_spec — it just isn't wired yet (NOT a Cyrius gap).
 #   * the serde JSON round-trip tests likewise use bayan's JSON codec — not
-#     yet ported. (Only compose-YAML is a real stdlib gap: no YAML parser.)
+#     yet ported. (compose-YAML is no longer a stdlib gap either: bayan 1.2.0
+#     ships a YAML parser, wired in src/convert.cyr at v3.0.6.)
 #
 # RestartPolicy is `pub use crate::health::RestartPolicy` in the oracle; it is
 # defined once in the sibling health.cyr (RESTART_POLICY_*), referenced here —

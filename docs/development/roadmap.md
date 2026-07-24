@@ -32,7 +32,7 @@ Module-by-module port (bottom-up dependency order; `rust-old/src/<m>.rs` = oracl
 - [x] `oci` — leaf surface (OciStatus, OCI_VERSION, parse_signal); OciState/to_oci_status/build_state/parse_bundle DEFERRED with `container`
 - [x] `intents` — IntentKind/AnsambluAction enums + serde-tag names + not-implemented `parse_intent` sentinel; variant payloads DEFERRED with a real agnoshi NL parser
 - [x] `audit` — full AuditOperation/AuditResult/AuditEntry/AuditLog: JSON serialize + escape + line parse, flock append, reverse-read-with-limit, current_user
-- [x] `convert` — `dockerfile_to_toml` (FROM/RUN/COPY/ENV/WORKDIR/LABEL/EXPOSE/ENTRYPOINT/USER); `compose_yaml_to_toml` DEFERRED (needs a Cyrius YAML+Value layer)
+- [x] `convert` — `dockerfile_to_toml` (FROM/RUN/COPY/ENV/WORKDIR/LABEL/EXPOSE/ENTRYPOINT/USER); `compose_yaml_to_toml` landed later at v3.0.6 once bayan 1.2.0 shipped the YAML+Value layer (§G)
 - [x] `network_mod` — shared types: NetworkMode(+payload)/NetworkDriver/Network/ContainerNetwork/NetworkPolicy(+nft rules)/DnsRegistry (full parity, runtime-verified)
 - [x] `network_bridge` — bridge/veth setup via `ip`/sysctl; Ipv4Addr-typed + varargs-nsenter internals DEFERRED
 - [x] `network_dns` — container DNS registry: register/resolve/hosts-entries/inject-into-rootfs (full parity)
@@ -219,16 +219,26 @@ changelogs: probes were compiled against stiva's own vendored `lib/` and run. Th
 external gates are gone, and the work moves onto this line.
 
 **G. Newly unblocked — graduated from v3.1 to v3.0.x:**
-- [ ] **`scan_output`** — kavach's ExternalizationGate surface is fully present in the *current*
-  `lib/kavach.cyr`: `ext_policy_default:3139`, `gate_apply:5124`, `secrets_scan:3683`,
-  `code_scan:4596`, `data_scan:5071`, `determine_verdict:5092`, `secrets_redact:3569`. Probe:
-  an AWS key and an OpenSSH key each scored `findings=1 worst_sev=4 verdict=3` (BLOCK) and
-  redacted to `[REDACTED:cloud_credential]` / `[REDACTED:private_key]`; clean input → `verdict=0`.
-  Two integration notes: there is **no `ExternalizationGate` type** — it is the free fn
-  `gate_apply` + `ext_policy_default`; and `gate_apply` only redacts at `WARN`
-  (`lib/kavach.cyr:5153`), so call the three scanners directly for `ContainerExecResult`.
-  Oracle: `rust-old/src/runtime.rs:573-604` — a ~15-line adapter. `logs` is already live and
-  could be scanned today.
+- [x] **`scan_output` — LANDED 2026-07-23 (v3.0.6).** `src/runtime.cyr` `scan_output(result,
+  policy)` marshals a `ContainerExecResult` into a kavach `ExecResult` (raw offsets, per the
+  struct-id 20/21 workaround), calls `gate_apply`, and maps the verdict: PASS/WARN → a new
+  result carrying the possibly-redacted strings; QUARANTINE/BLOCK → `0` +
+  `STIVA_ERR_SANDBOX`, matching the oracle's single `Err(StivaError::Sandbox)`.
+  `scan_output_last_verdict()`/`_last_findings()` expose what the oracle's collapsed `Err` hid.
+  Wired as **`stiva logs --scan`** (opt-in: the oracle's per-container `scan_policy` is not yet
+  round-tripped through `state.json`). **15 new assertions** in `tests/runpath.tcyr`.
+
+  > **Two of this entry's own prescriptions were wrong**, both found by reading the code:
+  >
+  > 1. *"call the three scanners directly, since `gate_apply` only redacts at WARN."* Moot —
+  >    BLOCK and QUARANTINE become errors anyway (oracle parity), so redaction at those levels
+  >    never mattered. `gate_apply` is the correct primitive and is closer to the oracle.
+  > 2. *"`logs` is already live and could be scanned today"* is right, but the more important
+  >    fact was missed: **`sandbox_exec` already gate-applies internally**
+  >    (`lib/kavach.cyr:9026`) and returns `0` on BLOCK/QUARANTINE. So `exec_container`'s
+  >    output is *already* gated, and adding `scan_output` there would scan twice. Verified on
+  >    the binary: a container echoing an AWS key never completes —
+  >    `kavach: externalization blocked: blocked by gate`. `logs` is the only correct site.
 - [x] **zstd layer decode — LANDED 2026-07-22.** `unpack_layer` (`src/storage.cyr`) now
   dispatches on the 4-byte zstd magic (`28 B5 2F FD`) into `_stor_unpack_zstd_bytes`, sized
   from `zstd_frame_content_size` rather than a grow-retry loop — `zstd_decompress` returns
@@ -260,7 +270,25 @@ external gates are gone, and the work moves onto this line.
   > from the sibling repo — so a stdlib security fix reaches stiva only via a toolchain pin
   > bump. Check the snapshot's vendored version, not the sibling's.
 
-- [ ] **`convert compose` / YAML** — `lib/bayan.cyr` is **1.2.0** (2026-07-16) and
+- [x] **`convert compose` / YAML — LANDED 2026-07-23 (v3.0.6).** `src/convert.cyr`
+  `compose_yaml_to_toml` + `compose_last_error()` over `bayan_yaml_parse_str`, wired into the
+  `convert` verb (which already defaulted to `-f compose`). All four oracle fixtures match
+  byte-for-byte. **The single systematic porting hazard was ordering**: `serde_json::Map` is a
+  `BTreeMap`, so the oracle emits services, networks, volumes, env-maps and depends_on-objects
+  **sorted**; bayan objects are insertion-ordered. `_cv_sorted_idx` (byte-wise `_cv_key_lt`,
+  matching Rust's `String` Ord) is applied at all five sites, and the document-ordered forms
+  (the command/ports/volumes/depends_on **arrays** and the env **list**) deliberately are not.
+  Merge keys get an explicit stiva-side reject since bayan has no `<<` handling at all — the
+  `<<: *base` form dies incidentally on the alias check, but a literal `<<: x` would silently
+  become a key. **69 new assertions**, in a **new 5th test unit `tests/convert.tcyr`** (the six
+  dockerfile tests moved there too: `stiva.tcyr` was at 94% of cycc's identifier cap, and a
+  unit including only `error` + `convert` sits at 86%). Also fixed while here: the `convert`
+  read path silently truncated at 1 MiB, which on the compose path surfaces as a baffling YAML
+  parse error pointing at a line the user can see is fine — it now refuses.
+
+  <details><summary>Original entry (the analysis that unblocked it)</summary>
+
+  `lib/bayan.cyr` is **1.2.0** (2026-07-16) and
   `bayan_yaml_parse:4545` emits into the *same* `JTAG_*`-tagged `bayan_json_v_*` graph the JSON
   parser produces — exactly the "YAML parser + JSON Value model" pair `src/convert.cyr:505-518`
   records as missing. Probe walked the full compose surface: `services` obj_len=2,
@@ -273,6 +301,32 @@ external gates are gone, and the work moves onto this line.
   compose support. API: `bayan_yaml_parse(src)` takes a `Str`; use `bayan_yaml_parse_str(buf, len)`
   for C-strings — passing a cstr to the former compiles with an arity warning and silently
   yields a non-object.
+
+  </details>
+
+> **§G is now complete.** All three items that the 2026-07-22 upstream re-check graduated from
+> v3.1 have landed: zstd decode (v3.0.5), `scan_output` and `convert compose` (v3.0.6).
+>
+> **What the v3.0.6 adversarial review changed about how to read this page.** The compose
+> converter was reviewed across four dimensions with three-lens adversarial verification (103
+> agents); 16 findings survived. The decisive ones came from a reviewer who **compiled the
+> frozen Rust oracle and diffed its output against the binary's**, rather than reasoning about
+> what the oracle would do. That caught two parity breaks on entirely ordinary compose files,
+> one of which this page had explicitly (and wrongly) certified as parity:
+>
+> > *"YAML 1.1 booleans: bayan treats `true`/`false` only; `yes`/`no`/`on`/`off` stay strings
+> > (verified). serde-saphyr agrees (YAML 1.2 core), so this is **parity**, not divergence."*
+>
+> serde-saphyr resolves the YAML 1.1 token family. `restart: no` — compose's documented
+> default — emits nothing in the oracle and `restart = "no"` in a naive port. The claim came
+> from reading bayan and *assuming* the oracle matched. **When this page says "verified",
+> check whether the oracle was executed or only read.** Probing one side is half a probe.
+>
+> The other lasting lesson: the review also found the sort was O(n²) on reverse-ordered keys
+> (236 s per MiB), and that the port inherited the oracle's complete lack of output escaping —
+> a structure-forgery hole on a path whose whole job is ingesting third-party files. Parity
+> with a frozen oracle is the bar for *behavior*, not for *complexity class or security
+> posture*; both were fixed as deliberate, documented divergences.
 
 ### Net-new capability surfaced by kavach 3.8.x — samay + ai-hwaccel (2026-07-22)
 

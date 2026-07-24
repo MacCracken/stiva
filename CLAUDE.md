@@ -6,22 +6,24 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.4.71** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.5
+- **Toolchain**: Cyrius, pin **6.4.72** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.0.6
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.5 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.6 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
-complete**; **v3.0.5 = zstd layer decode + dependency hygiene + toolchain 6.4.71**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+complete**; **v3.0.5 = zstd layer decode + dependency hygiene**; **v3.0.6 = roadmap §G
+complete — output scanning (`stiva logs --scan`) + `convert --format compose` + working
+benchmark scripts + toolchain 6.4.72**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1196 tests** across the `.tcyr` files (stiva 684 · store 197 · runpath 187 · mgmt 128; run via
-`cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.71**.
+**1307 tests** across the `.tcyr` files (stiva 664 · runpath 202 · store 197 · mgmt 128 ·
+convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.72**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -42,11 +44,11 @@ checkpoint/restore, and MCP dispatch (ps/stop/inspect/pull/push/exec). Only a sm
 **externally-blocked residue** is **v3.1 (blocked)** — genuinely gated on an external
 landing: detached `run -d` (needs kavach `sandbox_spawn`), interactive `exec -it` and
 true multiplexed streaming (need cyrius stackless coroutines), MCP `handle_run` (needs
-`run -d`), and `scan_output` (needs kavach ExternalizationGate).
-NOT mostly Cyrius gaps — JSON/TOML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
-gzip/xz/lz4/bzip2 (`sankoch`), async (`lib/async.cyr`) all EXIST. Genuine stdlib gaps
-are narrow, and are the **v3.1 upstream residue**: **zstd** layers (sankoch) and
-`convert compose` / a **YAML** parser (bayan). `rust-old/` stays the oracle for the
+`run -d`).
+NOT mostly Cyrius gaps — JSON/TOML/YAML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
+gzip/zstd/xz/lz4/bzip2 (`sankoch`), async (`lib/async.cyr`) all EXIST. The three stdlib
+gaps that used to gate this line — zstd layers, `scan_output`, and `convert compose` —
+have all landed (v3.0.5–v3.0.6), closing roadmap §G. `rust-old/` stays the oracle for the
 ported modules; the group A OCI-layout/transfer surface is **net-new**, so the OCI
 **image-spec** (not rust-old) is its oracle.
 
@@ -108,7 +110,7 @@ daimon (container management), sutra (fleet deployment)
 | `container` | Container lifecycle, state persistence, events, restart, rename, update |
 | `runtime` | OCI spec, kavach integration, cgroups (CPU/mem/PID/IO), CRIU (checkpoint/pre-dump/lazy), exec, signals, export/import, copy |
 | `network/` | Bridge, NAT, DNS, IP pools (IPv4+IPv6), port mapping, network policy, container DNS registry (6 submodules) |
-| `storage` | Overlay FS, volume mounts, layer unpacking (gzip; zstd → v3.1); **perms-preserving USTAR tar** codec (mode/uid/gid, dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) |
+| `storage` | Overlay FS, volume mounts, layer unpacking (gzip + zstd); **perms-preserving USTAR tar** codec (mode/uid/gid, dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) |
 | `registry` | OCI distribution client (pull + push + chunked upload), token auth, credential store, tag listing, catalog, referrers API |
 | `build` | TOML-based image builds (Stivafile), multi-stage builds, build cache |
 | `ansamblu` | Multi-container orchestration, DAG ordering, rolling updates, scaling, service logs |
@@ -116,12 +118,12 @@ daimon (container management), sutra (fleet deployment)
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned), health monitoring, rollback planning |
 | `agent` | Daimon agent registration |
 | `mcp` | 9 MCP tools with structured output, live dispatch, resource exposure |
-| `convert` | Docker Compose YAML and Dockerfile to Stivafile TOML conversion |
+| `convert` | Dockerfile **and** docker-compose YAML → Stivafile TOML (compose over a documented bayan-YAML subset; output is escaped, unlike the oracle) |
 | `encrypted` | LUKS + dm-verity (feature-gated) |
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — 35 registered verbs, **21 live** (19 at v3.0.0 + `save`/`load` at v3.0.2); the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
+CLI binary: `stiva` — 35 registered verbs, **21 live** (19 at v3.0.0 + `save`/`load` at v3.0.2; `convert` gained its compose format at v3.0.6, and `logs` a `--scan` flag); the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
 
 ## kavach Integration
 
@@ -171,7 +173,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1196 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1307 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -206,9 +208,10 @@ docs/ (when earned):
 
 ## Testing
 
-**1196 Cyrius tests** across `tests/*.tcyr` (stiva 684 · store 197 · runpath 187 · mgmt 128), each
-mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split across files
-because a monolith hits the cycc identifier-dedup cap.
+**1307 Cyrius tests** across `tests/*.tcyr` (stiva 664 · runpath 202 · store 197 · mgmt 128 ·
+convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
+across files because a monolith hits the cycc identifier-dedup cap — split by **include
+set**, not by test count.
 
 ```bash
 cyrius tests tests/            # run every tests/*.tcyr (the full suite)

@@ -71,21 +71,42 @@ Key properties:
 
 ## Output Scanning (ExternalizationGate)
 
-kavach's `ExternalizationGate` scans container output for leaked secrets, PII, and sensitive data. This runs on the output of `stiva logs` (and non-interactive `stiva exec`, which arrives in v3.0.x).
+kavach's externalization gate scans container output for leaked secrets, PII, and
+sensitive data. It applies in two places, and the distinction matters:
 
-```rust
-// v3.1 (blocked) — gated on kavach ExternalizationGate
-use stiva::runtime::scan_output;
+**Automatically, on every container exec.** kavach's `sandbox_exec` runs the gate
+itself, so a container whose output trips a `BLOCK` verdict never completes — the
+exec fails with `externalization blocked` and no output is persisted. This has always
+been on; it needs no flag and cannot be turned off from stiva.
 
-let findings = scan_output(&output)?;
-// findings contains any detected secrets, code, or data leaks
+**On demand, when reading back a log.** `stiva logs --scan` routes the stored log
+body through the gate before printing it:
+
+```bash
+stiva logs <ID> --scan
 ```
+
+A `PASS` prints normally. A `WARN` prints with secrets replaced by
+`[REDACTED:<category>]`. A `QUARANTINE` or `BLOCK` prints nothing and exits non-zero
+with `stiva: sandbox error: output scan: block`.
+
+It is **opt-in** because scanning changes what `logs` prints, which should never
+happen behind an operator's back. The Rust original instead gated this on a
+per-container persisted `scan_policy`; that field is not yet round-tripped through
+`state.json` in the Cyrius port, so the flag stands in for it.
+
+The library entry point is `scan_output(result, policy)` in `src/runtime.cyr`, with
+`scan_output_last_verdict()` / `scan_output_last_findings()` for the verdict and
+finding count of the most recent call.
 
 The gate runs three scanner categories:
 
 1. **Secrets** -- API keys, tokens, passwords
 2. **Code** -- source code patterns that should not appear in output
 3. **Data** -- PII patterns (emails, phone numbers, etc.)
+
+Severity maps to verdict through the policy's thresholds: `CRITICAL` → `BLOCK`,
+`HIGH` → `QUARANTINE`, anything above `INFO` → `WARN`.
 
 ## Security Scoring
 

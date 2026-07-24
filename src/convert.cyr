@@ -1,15 +1,16 @@
 # stiva — Dockerfile / docker-compose → Stivafile (TOML) migration.
 # Ported from rust-old/src/convert.rs.
 #
-# Two public conversions in the oracle:
-#   compose_yaml_to_toml(yaml) -> Result<String, StivaError>   (DEFERRED)
+# Two public conversions, both ported:
+#   compose_yaml_to_toml(yaml) -> Result<String, StivaError>
 #   dockerfile_to_toml(dockerfile) -> Result<String, StivaError>
 #
-# `dockerfile_to_toml` is pure string processing and ports faithfully
-# here. `compose_yaml_to_toml` is built entirely on a full YAML parser
-# (serde_saphyr) plus the serde_json `Value` object model — neither of
-# which exists in the ported base — so it lands in the DEFERRED block at
-# the bottom rather than being reinvented (same pattern as src/oci.cyr).
+# `dockerfile_to_toml` is pure string processing and ports faithfully.
+# `compose_yaml_to_toml` needed a YAML parser plus a JSON-Value object
+# model; bayan 1.2.0 ships both (its YAML parser emits into the same
+# JTAG_*-tagged graph as its JSON parser), so it is implemented here over
+# a documented subset — see the section header above it for what bayan
+# rejects and how that differs from serde-saphyr.
 #
 # Error mapping (mirrors error.cyr): the Rust `Err(StivaError::InvalidState
 # (...))` on a Dockerfile with no FROM maps to the integer sentinel `0`
@@ -502,19 +503,726 @@ fn _cv_wrap_quote(s) {
     return out;
 }
 
-# ── DEFERRED (needs a YAML parser + JSON Value model) ────────────
-# rust-old/src/convert.rs also defines:
-#   #[must_use]
-#   fn compose_yaml_to_toml(yaml: &str) -> Result<String, StivaError>
+# ══ docker-compose YAML → stiva compose TOML ═════════════════════
+# Oracle: rust-old/src/convert.rs:11-175. Built on bayan's YAML parser
+# (lib/bayan.cyr:4275-5150), which emits into the SAME JTAG_*-tagged
+# value graph as its JSON parser — exactly the "YAML parser + Value
+# model" pair this conversion waited on until bayan 1.2.0 landed it
+# (roadmap §G; CHANGELOG 3.0.6).
 #
-# It parses the docker-compose YAML into a serde_json `Value` (via
-# serde_saphyr), then walks `services` (image/command/environment/ports/
-# volumes/depends_on/restart), top-level `networks` (driver, ipam →
-# subnet), and top-level `volumes` (driver), emitting stiva compose TOML.
-# Invalid YAML ⇒ Err(StivaError::InvalidState("invalid YAML: ...")).
+# ── Two structural facts drive the whole port ──
 #
-# This is built entirely on a full YAML deserializer and the serde_json
-# object model — neither exists in the ported base — so it is deferred
-# until a Cyrius YAML/Value layer lands. The rendering logic (the
-# `writeln!` shape) ports mechanically once a parsed document tree is
-# available. Tracked in the roadmap.
+# 1. ORDERING. serde_json's Map (no `preserve_order` feature in
+#    rust-old/Cargo.toml) is a BTreeMap, so the oracle emits services,
+#    networks, volumes, env-maps and depends_on-objects in SORTED key
+#    order. bayan objects are insertion-ordered pair vectors. Every
+#    `for (name, x) in obj` in the oracle therefore becomes
+#    `_cv_sorted_idx(obj)` here. Miss one and every multi-service file
+#    diverges. Document-ordered by contrast (oracle uses Vec): the
+#    command/ports/volumes/depends_on ARRAY forms and the env LIST form.
+#
+# 2. BORROWED STRINGS. bayan's JTAG_STR values and object keys are
+#    Str{ptr,len} headers pointing INTO the source buffer (bayan.cyr:
+#    4331-4332) — not copies, and NOT NUL-terminated. So: the caller's
+#    yaml buffer must outlive the returned TOML, and `strlen(str_data(s))`
+#    reads past the end. Always go through str_builder_add(sb, s).
+#
+# ── The subset is honest, not total ──
+# bayan rejects, with a verbatim message surfaced via compose_last_error():
+# flow mappings (`{k: v}`), block scalars (`|`, `>`), anchors/aliases
+# (`&x`/`*x`), tags (`!!str`), multi-document (`---` twice), tab indent,
+# complex keys (`? `), and escaped quotes inside quoted scalars. Merge keys
+# (`<<`) have no bayan support at all — `<<: *base` dies incidentally on the
+# alias check, but a literal `<<: x` would silently become a key, so
+# _cv_validate_doc rejects it explicitly, everywhere in the document.
+#
+# ── Divergences from the oracle, all deliberate and all tested ──
+#  · anchors/merge keys — serde-saphyr RESOLVES them before the walk, so a
+#    service inheriting via `<<: *base` got its parent's fields. We reject.
+#    This is the biggest real-world subset loss.
+#  · escaped quotes (`"a\"b"`) — the oracle accepted them and then emitted
+#    invalid TOML (it did no escaping either); bayan errors. Stricter.
+#  · OUTPUT IS ESCAPED. The oracle emitted every value and section name
+#    through a bare `format!`. Since this converter exists to ingest
+#    THIRD-PARTY files, that let a hostile compose file close its own string
+#    and open a fabricated table, so the document a human reviewed and the
+#    one parse_ansamblu later loaded could differ. See _cv_emit_toml_str.
+#  · YAML 1.1 bool/null tokens are resolved HERE rather than in the parser,
+#    because bayan is YAML 1.2 core and the oracle's parser was not. Without
+#    it `restart: no` — compose's documented default — diverges on ordinary
+#    files. See _cv_yaml11_token.
+#  · duplicate mapping keys are REJECTED, matching the oracle. bayan accepts
+#    them, and since the emitter ITERATES these maps both pairs would
+#    survive into unloadable TOML. See _cv_validate_doc.
+#
+# Two gaps left in bayan's scalar resolver, documented rather than worked
+# around here: an integer above i64::MAX wraps negative (serde_json holds a
+# u64 and round-trips it), and non-decimal / underscored / leading-zero
+# spellings (0x1f, 1_000, 007) stay strings — which also un-drops array
+# elements the oracle's filter_map(as_str) discards.
+
+# Detail cstr for the last compose_yaml_to_toml failure, or 0. The
+# pointer-return convention (see the header) has no room for a payload,
+# so this mirrors bayan's own bayan_yaml_last_error() idiom.
+var _cv_compose_err = 0;
+
+#[must_use]
+fn compose_last_error() {
+    if (_cv_compose_err == 0) { return "invalid YAML"; }
+    return _cv_compose_err;
+}
+
+# Rust String Ord: unsigned byte-wise lexicographic, shorter prefix
+# first. load8 zero-extends, so no masking is needed. Args are bayan Str
+# pointers (borrowed, not NUL-terminated) — never strlen them.
+#[must_use]
+fn _cv_key_lt(a, b) {
+    var la = str_len(a);
+    var lb = str_len(b);
+    var n = la;
+    if (lb < n) { n = lb; }
+    var i = 0;
+    while (i < n) {
+        var ca = load8(str_data(a) + i);
+        var cb = load8(str_data(b) + i);
+        if (ca < cb) { return 1; }
+        if (ca > cb) { return 0; }
+        i = i + 1;
+    }
+    if (la < lb) { return 1; }
+    return 0;
+}
+
+# Indices 0..obj_len-1 of `obj` sorted by key — the BTreeMap order the
+# oracle gets for free.
+#
+# Bottom-up merge sort, NOT the insertion sort this started as. `convert`
+# exists to ingest third-party compose files, and an insertion sort is
+# O(n^2) on adversarial (reverse-sorted) key order: a 1 MiB file of ~95k
+# reverse-ordered service keys took **236 s of pinned CPU**, against 0.09 s
+# for the identical bytes in ascending order — a ~2000x amplification on
+# attacker-chosen input, with no output until it finishes. Merge sort is
+# O(n log n) regardless of input order, so the amplification disappears
+# rather than being papered over with a size cap. Stable, which does not
+# matter once duplicate keys are rejected but costs nothing.
+# (There is no vec_sort in lib/vec.cyr.)
+#[must_use]
+fn _cv_sorted_idx(obj) {
+    var n = bayan_json_v_obj_len(obj);
+    var idx = vec_new();
+    var i = 0;
+    while (i < n) { vec_push(idx, i); i = i + 1; }
+    if (n < 2) { return idx; }
+
+    var buf = vec_new();
+    i = 0;
+    while (i < n) { vec_push(buf, 0); i = i + 1; }
+
+    var width = 1;
+    while (width < n) {
+        var lo = 0;
+        while (lo < n) {
+            var mid = lo + width;
+            if (mid > n) { mid = n; }
+            var hi = lo + width + width;
+            if (hi > n) { hi = n; }
+            # Merge idx[lo, mid) and idx[mid, hi) into buf[lo, hi).
+            var a = lo;
+            var b = mid;
+            var o = lo;
+            while (o < hi) {
+                var take_a = 0;
+                if (a < mid) {
+                    if (b >= hi) { take_a = 1; }
+                    else {
+                        # Strict `<` on the right operand keeps the merge
+                        # stable: ties take from the left run.
+                        if (_cv_key_lt(bayan_json_v_obj_key(obj, vec_get(idx, b)),
+                        bayan_json_v_obj_key(obj, vec_get(idx, a))) == 0) { take_a = 1; }
+                    }
+                }
+                if (take_a == 1) { vec_set(buf, o, vec_get(idx, a)); a = a + 1; }
+                else { vec_set(buf, o, vec_get(idx, b)); b = b + 1; }
+                o = o + 1;
+            }
+            lo = lo + width + width;
+        }
+        i = 0;
+        while (i < n) { vec_set(idx, i, vec_get(buf, i)); i = i + 1; }
+        width = width + width;
+    }
+    return idx;
+}
+
+# ── document validation (recursive, before any emission) ──
+# Two constructs must be refused for the conversion to be honest, and both
+# have to be checked over the WHOLE document, not just the maps the emitter
+# happens to walk:
+#
+#  * **merge keys.** bayan has no `<<` handling at all. The common
+#    `<<: *base` form dies incidentally on the alias check, but a literal
+#    `<<: x` would silently become a TOML key named `<<`.
+#  * **duplicate mapping keys.** serde-saphyr (the oracle's parser) rejects
+#    the document outright. bayan keeps both pairs and `obj_get` returns the
+#    first — which sounds like a harmless superset until you notice the
+#    emitter ITERATES these maps, so both survive and the output carries two
+#    `[services.a]` tables, or `env = { A = "1", A = "2" }`. That is not
+#    merely divergent, it is TOML no parser will load, handed back with exit
+#    code 0. Rejecting matches the oracle and is the only safe answer.
+#
+# Sets _cv_compose_err and returns 1 on a violation, else 0.
+fn _cv_validate_doc(v) {
+    if (bayan_json_v_is_arr(v) == 1) {
+        var an = bayan_json_v_arr_len(v);
+        var ai = 0;
+        while (ai < an) {
+            if (_cv_validate_doc(bayan_json_v_arr_get(v, ai)) == 1) { return 1; }
+            ai = ai + 1;
+        }
+        return 0;
+    }
+    if (bayan_json_v_is_obj(v) == 0) { return 0; }
+
+    var n = bayan_json_v_obj_len(v);
+    var i = 0;
+    while (i < n) {
+        if (str_eq_cstr(bayan_json_v_obj_key(v, i), "<<") == 1) {
+            _cv_compose_err = "invalid YAML: merge keys ('<<') not supported";
+            return 1;
+        }
+        i = i + 1;
+    }
+
+    # Adjacent-equal check over the sorted order — O(n log n) total, versus
+    # O(n^2) for a naive pairwise scan on the same attacker-supplied input.
+    if (n > 1) {
+        var order = _cv_sorted_idx(v);
+        i = 1;
+        while (i < n) {
+            var prev = bayan_json_v_obj_key(v, vec_get(order, i - 1));
+            var cur = bayan_json_v_obj_key(v, vec_get(order, i));
+            if (_cv_key_lt(prev, cur) == 0) {
+                var esb = str_builder_new();
+                str_builder_add_cstr(esb, "invalid YAML: duplicate mapping key: ");
+                str_builder_add(esb, cur);
+                _cv_compose_err = str_cstr(str_builder_build(esb));
+                return 1;
+            }
+            i = i + 1;
+        }
+    }
+
+    i = 0;
+    while (i < n) {
+        if (_cv_validate_doc(bayan_json_v_obj_val(v, i)) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ── YAML 1.1 bool/null tokens ─────────────────────
+# bayan resolves the YAML 1.2 core schema: only `true`/`false`/`null` become
+# tagged scalars. serde-saphyr — the oracle's parser — resolves the wider
+# YAML 1.1 token family, so in the oracle `restart: no` is `Value::Bool(false)`,
+# `.as_str()` returns None, and `convert.rs:133-135` emits **nothing**. A naive
+# port emits `restart = "no"`.
+#
+# That is not a curiosity: `no` is docker-compose's documented default for
+# `restart`, and the same flip hits `image`, `driver`, `subnet`, and the
+# ports/volumes/depends_on/command array arms — where the oracle's
+# `filter_map(as_str)` DROPS a bool element and a naive port keeps it as a
+# quoted string. So the tokens are resolved here instead, at the guards.
+#
+# Returns the canonical `Value::to_string()` rendering — "true"/"false"/"null"
+# — for a token, or 0 for an ordinary string. The token set is the one
+# measured against the compiled oracle, not guessed.
+#[must_use]
+fn _cv_yaml11_token(s) {
+    if (s == 0) { return 0; }
+    var n = str_len(s);
+    if (n < 1) { return 0; }
+    if (n > 5) { return 0; }
+    var t = alloc(n + 1);
+    memcpy(t, str_data(s), n);
+    store8(t + n, 0);
+
+    if (streq(t, "y") == 1) { return "true"; }
+    if (streq(t, "Y") == 1) { return "true"; }
+    if (streq(t, "yes") == 1) { return "true"; }
+    if (streq(t, "Yes") == 1) { return "true"; }
+    if (streq(t, "YES") == 1) { return "true"; }
+    if (streq(t, "on") == 1) { return "true"; }
+    if (streq(t, "On") == 1) { return "true"; }
+    if (streq(t, "ON") == 1) { return "true"; }
+    if (streq(t, "True") == 1) { return "true"; }
+    if (streq(t, "TRUE") == 1) { return "true"; }
+
+    if (streq(t, "n") == 1) { return "false"; }
+    if (streq(t, "N") == 1) { return "false"; }
+    if (streq(t, "no") == 1) { return "false"; }
+    if (streq(t, "No") == 1) { return "false"; }
+    if (streq(t, "NO") == 1) { return "false"; }
+    if (streq(t, "off") == 1) { return "false"; }
+    if (streq(t, "Off") == 1) { return "false"; }
+    if (streq(t, "OFF") == 1) { return "false"; }
+    if (streq(t, "False") == 1) { return "false"; }
+    if (streq(t, "FALSE") == 1) { return "false"; }
+
+    if (streq(t, "Null") == 1) { return "null"; }
+    if (streq(t, "NULL") == 1) { return "null"; }
+    return 0;
+}
+
+# True (1) iff `v` is a JTAG_STR the oracle's parser would NOT have left as a
+# string — i.e. every `.as_str()` guard in the oracle sees None. Use this
+# wherever the oracle calls as_str() on a value that came from YAML.
+#[must_use]
+fn _cv_is_yaml_str(v) {
+    if (bayan_json_v_is_str(v) == 0) { return 0; }
+    if (_cv_yaml11_token(bayan_json_v_str(v)) != 0) { return 0; }
+    return 1;
+}
+
+# ── TOML output escaping ──────────────────────────
+# **A deliberate divergence from the oracle**, recorded in the CHANGELOG.
+# rust-old emits every value through a bare `format!("\"{v}\"")` and every
+# section name through `format!("[services.{name}]")` — no escaping anywhere.
+# Since `convert` exists to ingest THIRD-PARTY compose files, that is a
+# structure-forgery hole, not a formatting quirk: a hostile file can close
+# the string it is written into and open a new table, so what a human reads
+# in the compose source and what stiva's own parse_ansamblu later loads are
+# different documents. Inheriting the oracle's behavior here would inherit a
+# vulnerability, so this port escapes.
+#
+# TOML basic-string escapes (v1.0.0 §String): backslash, quote, and the
+# control range must be escaped; the rest passes through as UTF-8 bytes.
+fn _cv_emit_toml_str(sb, s) {
+    str_builder_putc(sb, 34);
+    var p = str_data(s);
+    var n = str_len(s);
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i);
+        if (c == 92) { str_builder_add_cstr(sb, "\\\\"); }
+        elif (c == 34) { str_builder_add_cstr(sb, "\\\""); }
+        elif (c == 8) { str_builder_add_cstr(sb, "\\b"); }
+        elif (c == 9) { str_builder_add_cstr(sb, "\\t"); }
+        elif (c == 10) { str_builder_add_cstr(sb, "\\n"); }
+        elif (c == 12) { str_builder_add_cstr(sb, "\\f"); }
+        elif (c == 13) { str_builder_add_cstr(sb, "\\r"); }
+        elif (c < 32 || c == 127) {
+            # A 4-hex-digit \u escape is the only form TOML accepts for the
+            # rest of C0.
+            str_builder_add_cstr(sb, "\\u00");
+            var hi = c / 16;
+            var lo = c - hi * 16;
+            if (hi < 10) { str_builder_putc(sb, 48 + hi); } else { str_builder_putc(sb, 87 + hi); }
+            if (lo < 10) { str_builder_putc(sb, 48 + lo); } else { str_builder_putc(sb, 87 + lo); }
+        }
+        else { str_builder_putc(sb, c); }
+        i = i + 1;
+    }
+    str_builder_putc(sb, 34);
+    return 0;
+}
+
+# Emit `s` as a TOML key: bare when it is a non-empty run of [A-Za-z0-9_-],
+# quoted otherwise. Used for service/network/volume names (inside the
+# `[services.<name>]` dotted path, where a quoted segment is legal) and for
+# inline-table keys in `env = { ... }`.
+fn _cv_emit_toml_key(sb, s) {
+    var p = str_data(s);
+    var n = str_len(s);
+    var bare = 1;
+    if (n == 0) { bare = 0; }
+    var i = 0;
+    while (i < n && bare == 1) {
+        var c = load8(p + i);
+        var ok = 0;
+        if (c >= 65 && c <= 90) { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c >= 48 && c <= 57) { ok = 1; }
+        if (c == 95 || c == 45) { ok = 1; }
+        if (ok == 0) { bare = 0; }
+        i = i + 1;
+    }
+    if (bare == 1) { str_builder_add(sb, s); return 0; }
+    _cv_emit_toml_str(sb, s);
+    return 0;
+}
+
+# ── Value::to_string() analogue ───────────────────
+# The oracle's env fallback for a non-string value is serde_json's
+# `Value::to_string()` (convert.rs:59). `bayan_json_v_build` matches it
+# byte-for-byte on scalars and arrays — but NOT on objects: serde_json's Map
+# is a BTreeMap at EVERY depth, so it serializes nested keys sorted, while
+# `_jb_walk` walks bayan's insertion-ordered pair vector. A compose
+# `environment:` whose value is itself a mapping therefore renders with a
+# different key order. This walks the graph with the same sort applied
+# recursively.
+#
+# Returns a Str. Known remaining gap, at bayan's scalar resolver rather than
+# here: an integer above i64::MAX is a u64 in serde_json and round-trips
+# exactly, but wraps negative through bayan's JTAG_INT.
+#[must_use]
+fn _cv_value_to_string(v) {
+    var sb = str_builder_new();
+    _cv_v_to_str_into(sb, v);
+    return str_builder_build(sb);
+}
+
+fn _cv_v_to_str_into(sb, v) {
+    if (bayan_json_v_is_obj(v) == 1) {
+        var n = bayan_json_v_obj_len(v);
+        str_builder_putc(sb, 123);
+        if (n > 0) {
+            var order = _cv_sorted_idx(v);
+            var i = 0;
+            while (i < n) {
+                if (i > 0) { str_builder_putc(sb, 44); }
+                var idx = vec_get(order, i);
+                # serde_json always writes object keys as JSON strings.
+                str_builder_add(sb, bayan_json_v_build(
+                bayan_json_v_str_new(bayan_json_v_obj_key(v, idx))));
+                str_builder_putc(sb, 58);
+                _cv_v_to_str_into(sb, bayan_json_v_obj_val(v, idx));
+                i = i + 1;
+            }
+        }
+        str_builder_putc(sb, 125);
+        return 0;
+    }
+    if (bayan_json_v_is_arr(v) == 1) {
+        var m = bayan_json_v_arr_len(v);
+        str_builder_putc(sb, 91);
+        var j = 0;
+        while (j < m) {
+            if (j > 0) { str_builder_putc(sb, 44); }
+            _cv_v_to_str_into(sb, bayan_json_v_arr_get(v, j));
+            j = j + 1;
+        }
+        str_builder_putc(sb, 93);
+        return 0;
+    }
+    # A JTAG_STR the oracle's parser would have RESOLVED renders as the
+    # resolved value, not as a quoted string: `A: yes` is Bool(true) there,
+    # so to_string() gives `true`, never `"yes"`.
+    if (bayan_json_v_is_str(v) == 1) {
+        var tok = _cv_yaml11_token(bayan_json_v_str(v));
+        if (tok != 0) { str_builder_add_cstr(sb, tok); return 0; }
+    }
+    # Scalars: bayan's own serializer is byte-exact against serde_json here
+    # (true/false/null, 8080, 1.5, 1.0, 1e10 -> 10000000000.0, -0.25).
+    str_builder_add(sb, bayan_json_v_build(v));
+    return 0;
+}
+
+# `<key> = ["a", "b"]\n` from a JTAG_ARR, keeping only JTAG_STR elements
+# in DOCUMENT order (oracle: filter_map over a Vec). Emits nothing and
+# returns 0 when nothing survives — the oracle's `if !items.is_empty()`.
+# drop_empty=1 also drops zero-length strings (the ports arm,
+# rust-old/src/convert.rs:92-93, where a bare integer maps to "").
+fn _cv_emit_str_arr(sb, key, arr, drop_empty) {
+    var n = bayan_json_v_arr_len(arr);
+    var tmp = str_builder_new();
+    var cnt = 0;
+    var i = 0;
+    while (i < n) {
+        var v = bayan_json_v_arr_get(arr, i);
+        if (_cv_is_yaml_str(v) == 1) {
+            var s = bayan_json_v_str(v);
+            var keep = 1;
+            if (drop_empty == 1) { if (str_len(s) == 0) { keep = 0; } }
+            if (keep == 1) {
+                if (cnt > 0) { str_builder_add_cstr(tmp, ", "); }
+                _cv_emit_toml_str(tmp, s);
+                cnt = cnt + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if (cnt == 0) { return 0; }
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, " = [");
+    str_builder_add(sb, str_builder_build(tmp));
+    str_builder_add_cstr(sb, "]\n");
+    return 1;
+}
+
+# `command = [...]` — string form splits on whitespace, array form keeps
+# JTAG_STR elements. Unlike ports/volumes this ALWAYS emits once a branch
+# matches, so `command: ""` renders `command = []` (oracle: the writeln!
+# sits outside the is_empty guard).
+fn _cv_emit_compose_command(sb, cmd) {
+    if (_cv_is_yaml_str(cmd) == 1) {
+        str_builder_add_cstr(sb, "command = [");
+        var s = bayan_json_v_str(cmd);
+        var p = str_data(s);
+        var n = str_len(s);
+        var i = 0;
+        var cnt = 0;
+        while (i < n) {
+            while (i < n && _cv_is_ws(load8(p + i)) == 1) { i = i + 1; }
+            if (i < n) {
+                var st = i;
+                while (i < n && _cv_is_ws(load8(p + i)) == 0) { i = i + 1; }
+                if (cnt > 0) { str_builder_add_cstr(sb, ", "); }
+                _cv_emit_toml_str(sb, str_new(p + st, i - st));
+                cnt = cnt + 1;
+            }
+        }
+        str_builder_add_cstr(sb, "]\n");
+        return 1;
+    }
+    if (bayan_json_v_is_arr(cmd) == 1) {
+        var m = bayan_json_v_arr_len(cmd);
+        str_builder_add_cstr(sb, "command = [");
+        var j = 0;
+        var c2 = 0;
+        while (j < m) {
+            var v = bayan_json_v_arr_get(cmd, j);
+            if (_cv_is_yaml_str(v) == 1) {
+                if (c2 > 0) { str_builder_add_cstr(sb, ", "); }
+                _cv_emit_toml_str(sb, bayan_json_v_str(v));
+                c2 = c2 + 1;
+            }
+            j = j + 1;
+        }
+        str_builder_add_cstr(sb, "]\n");
+        return 1;
+    }
+    return 0;
+}
+
+# `env = { K = "v", ... }`. Map form is SORTED (BTreeMap) and renders a
+# non-string value via bayan_json_v_build — the exact analogue of the
+# oracle's `v.to_string()` (verified: true→true, 8080→8080, 1.5→1.5,
+# null→null, [1,2]→[1,2]). List form is DOCUMENT-ordered, keeps only
+# JTAG_STR items containing '=', and splits at the FIRST '=' with no
+# trimming; items without '=' are silently dropped (so bare `- FOO`
+# host-inheritance is lost — oracle behavior). Both suppress an empty
+# result. Named _compose_ because _cv_emit_env is the Dockerfile ENV step.
+fn _cv_emit_compose_env(sb, env) {
+    if (bayan_json_v_is_obj(env) == 1) {
+        var n = bayan_json_v_obj_len(env);
+        if (n == 0) { return 0; }
+        var order = _cv_sorted_idx(env);
+        str_builder_add_cstr(sb, "env = { ");
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ", "); }
+            var k = bayan_json_v_obj_key(env, vec_get(order, i));
+            var v = bayan_json_v_obj_val(env, vec_get(order, i));
+            _cv_emit_toml_key(sb, k);
+            str_builder_add_cstr(sb, " = ");
+            if (_cv_is_yaml_str(v) == 1) { _cv_emit_toml_str(sb, bayan_json_v_str(v)); }
+            else { _cv_emit_toml_str(sb, _cv_value_to_string(v)); }
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, " }\n");
+        return 1;
+    }
+    if (bayan_json_v_is_arr(env) == 1) {
+        var m = bayan_json_v_arr_len(env);
+        var tmp = str_builder_new();
+        var cnt = 0;
+        var j = 0;
+        while (j < m) {
+            var item = bayan_json_v_arr_get(env, j);
+            if (_cv_is_yaml_str(item) == 1) {
+                var s = bayan_json_v_str(item);
+                var p = str_data(s);
+                var slen = str_len(s);
+                var eq = 0 - 1;
+                var q = 0;
+                while (q < slen && eq < 0) {
+                    if (load8(p + q) == 61) { eq = q; }
+                    q = q + 1;
+                }
+                if (eq >= 0) {
+                    if (cnt > 0) { str_builder_add_cstr(tmp, ", "); }
+                    _cv_emit_toml_key(tmp, str_new(p, eq));
+                    str_builder_add_cstr(tmp, " = ");
+                    _cv_emit_toml_str(tmp, str_new(p + eq + 1, slen - eq - 1));
+                    cnt = cnt + 1;
+                }
+            }
+            j = j + 1;
+        }
+        if (cnt == 0) { return 0; }
+        str_builder_add_cstr(sb, "env = { ");
+        str_builder_add(sb, str_builder_build(tmp));
+        str_builder_add_cstr(sb, " }\n");
+        return 1;
+    }
+    return 0;
+}
+
+# `depends_on = [...]` — array form keeps JTAG_STR elements in document
+# order; object form (the `condition:` long syntax) takes the SORTED keys
+# and discards the conditions.
+fn _cv_emit_compose_depends(sb, deps) {
+    if (bayan_json_v_is_arr(deps) == 1) {
+        return _cv_emit_str_arr(sb, "depends_on", deps, 0);
+    }
+    if (bayan_json_v_is_obj(deps) == 1) {
+        var n = bayan_json_v_obj_len(deps);
+        if (n == 0) { return 0; }
+        var order = _cv_sorted_idx(deps);
+        str_builder_add_cstr(sb, "depends_on = [");
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { str_builder_add_cstr(sb, ", "); }
+            _cv_emit_toml_str(sb, bayan_json_v_obj_key(deps, vec_get(order, i)));
+            i = i + 1;
+        }
+        str_builder_add_cstr(sb, "]\n");
+        return 1;
+    }
+    return 0;
+}
+
+# `<key> = "<str>"\n` if `v` holds a JTAG_STR under `field`, else nothing.
+# Mirrors the oracle's `.get(f).and_then(|v| v.as_str())` chains.
+fn _cv_emit_compose_str_field(sb, v, field, key) {
+    var f = bayan_json_v_obj_get(v, field);
+    if (_cv_is_yaml_str(f) == 0) { return 0; }
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, " = ");
+    _cv_emit_toml_str(sb, bayan_json_v_str(f));
+    str_builder_add_cstr(sb, "\n");
+    return 1;
+}
+
+# Convert a docker-compose YAML cstr to stiva compose TOML.
+#
+# Returns a heap cstr on success — possibly "" (empty input, a bare
+# scalar, a top-level sequence, or a document carrying none of the three
+# sections all yield Ok("") in the oracle) — or 0 on failure, with the
+# detail available from compose_last_error(). Same contract as
+# dockerfile_to_toml: 0 is the unambiguous error sentinel, because an
+# empty builder still returns a non-zero pointer to "".
+#[must_use]
+fn compose_yaml_to_toml(yaml) {
+    sakshi_info("converting docker-compose YAML to stiva TOML",
+    strlen("converting docker-compose YAML to stiva TOML"));
+
+    _cv_compose_err = 0;
+
+    # bayan_yaml_parse_str, NOT bayan_yaml_parse — the latter takes a
+    # 16-byte Str, and handing it a cstr compiles with only an arity
+    # warning before silently yielding a non-object.
+    var doc = bayan_yaml_parse_str(yaml, strlen(yaml));
+    if (doc == 0) {
+        var esb = str_builder_new();
+        str_builder_add_cstr(esb, "invalid YAML: ");
+        str_builder_add_cstr(esb, bayan_yaml_last_error());
+        str_builder_add_cstr(esb, " (byte ");
+        str_builder_add_int(esb, bayan_yaml_last_error_pos());
+        str_builder_add_cstr(esb, ")");
+        _cv_compose_err = str_cstr(str_builder_build(esb));
+        return 0;
+    }
+    # One recursive pass over the WHOLE document rejects merge keys and
+    # duplicate mapping keys before anything is emitted. Doing it here rather
+    # than per-section is what makes the guard consistent with itself: the
+    # same construct used to error at the root and pass silently inside an
+    # `environment:` map.
+    if (_cv_validate_doc(doc) == 1) { return 0; }
+
+    var out = str_builder_new();
+
+    # ── services ──
+    var services = bayan_json_v_obj_get(doc, "services");
+    if (bayan_json_v_is_obj(services) == 1) {
+        var sn = bayan_json_v_obj_len(services);
+        var sorder = _cv_sorted_idx(services);
+        var si = 0;
+        while (si < sn) {
+            var sidx = vec_get(sorder, si);
+            var svc = bayan_json_v_obj_val(services, sidx);
+            # The header is written before any body type check, so a null
+            # or scalar service body still yields a header + blank line.
+            str_builder_add_cstr(out, "[services.");
+            _cv_emit_toml_key(out, bayan_json_v_obj_key(services, sidx));
+            str_builder_add_cstr(out, "]\n");
+
+            _cv_emit_compose_str_field(out, svc, "image", "image");
+
+            var cmd = bayan_json_v_obj_get(svc, "command");
+            if (cmd != 0) { _cv_emit_compose_command(out, cmd); }
+
+            var env = bayan_json_v_obj_get(svc, "environment");
+            if (env != 0) { _cv_emit_compose_env(out, env); }
+
+            var ports = bayan_json_v_obj_get(svc, "ports");
+            if (bayan_json_v_is_arr(ports) == 1) {
+                _cv_emit_str_arr(out, "ports", ports, 1);
+            }
+
+            var vols = bayan_json_v_obj_get(svc, "volumes");
+            if (bayan_json_v_is_arr(vols) == 1) {
+                _cv_emit_str_arr(out, "volumes", vols, 0);
+            }
+
+            var deps = bayan_json_v_obj_get(svc, "depends_on");
+            if (deps != 0) { _cv_emit_compose_depends(out, deps); }
+
+            _cv_emit_compose_str_field(out, svc, "restart", "restart");
+
+            str_builder_add_cstr(out, "\n");
+            si = si + 1;
+        }
+    }
+
+    # ── top-level networks ──
+    var networks = bayan_json_v_obj_get(doc, "networks");
+    if (bayan_json_v_is_obj(networks) == 1) {
+        var nn = bayan_json_v_obj_len(networks);
+        var norder = _cv_sorted_idx(networks);
+        var ni = 0;
+        while (ni < nn) {
+            var nidx = vec_get(norder, ni);
+            var net = bayan_json_v_obj_val(networks, nidx);
+            str_builder_add_cstr(out, "[networks.");
+            _cv_emit_toml_key(out, bayan_json_v_obj_key(networks, nidx));
+            str_builder_add_cstr(out, "]\n");
+
+            _cv_emit_compose_str_field(out, net, "driver", "driver");
+
+            # .ipam.config[0].subnet — index 0 only (Rust `.first()`).
+            # Every bayan accessor is null- and tag-safe, so the chain
+            # needs no guards beyond the two the oracle itself performs.
+            var cfg = bayan_json_v_obj_get(bayan_json_v_obj_get(net, "ipam"), "config");
+            if (bayan_json_v_is_arr(cfg) == 1) {
+                if (bayan_json_v_arr_len(cfg) > 0) {
+                    _cv_emit_compose_str_field(out,
+                    bayan_json_v_arr_get(cfg, 0), "subnet", "subnet");
+                }
+            }
+            str_builder_add_cstr(out, "\n");
+            ni = ni + 1;
+        }
+    }
+
+    # ── top-level volumes ──
+    var volumes = bayan_json_v_obj_get(doc, "volumes");
+    if (bayan_json_v_is_obj(volumes) == 1) {
+        var vn = bayan_json_v_obj_len(volumes);
+        var vorder = _cv_sorted_idx(volumes);
+        var vi = 0;
+        while (vi < vn) {
+            var vidx = vec_get(vorder, vi);
+            str_builder_add_cstr(out, "[volumes.");
+            _cv_emit_toml_key(out, bayan_json_v_obj_key(volumes, vidx));
+            str_builder_add_cstr(out, "]\n");
+            _cv_emit_compose_str_field(out,
+            bayan_json_v_obj_val(volumes, vidx), "driver", "driver");
+            str_builder_add_cstr(out, "\n");
+            vi = vi + 1;
+        }
+    }
+
+    var built = str_builder_build(out);
+    return str_cstr(built);
+}

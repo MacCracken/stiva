@@ -227,6 +227,83 @@ fn test_exec_container_bad_backend() {
     return 0;
 }
 
+# ── scan_output (rust-old runtime.rs:565-604) — externalization gate ──
+# The four oracle cases (runtime.rs:2067-2127) plus what Cyrius exposes that
+# Rust hid: the verdict accessor, and QUARANTINE-vs-BLOCK. ContainerExecResult
+# fields are read by raw offset (exit_code@0 stdout@8 stderr@16 duration@24
+# timed_out@32) per the cycc struct-id 20/21 workaround.
+fn test_scan_output_clean_passes() {
+    test_group("scan_output_clean_passes");
+    kavach_init();
+    var r = container_exec_result_new(0, "hello world", "", 10, 0);
+    var s = scan_output(r, ext_policy_default());
+    assert(s != 0, "non-null");
+    assert_eq(streq(load64(s + 8), "hello world"), 1, "stdout preserved");
+    assert_eq(load64(s), 0, "exit_code carried");
+    assert_eq(load64(s + 24), 10, "duration_ms carried");
+    assert_eq(scan_output_last_verdict(), ScanVerdict.PASS, "verdict PASS");
+    return 0;
+}
+
+fn test_scan_output_blocks_private_key() {
+    test_group("scan_output_blocks_private_key");
+    kavach_init();
+    var r = container_exec_result_new(0,
+    "-----BEGIN RSA PRIVATE KEY-----\nMIIEp...", "", 10, 0);
+    assert_eq(scan_output(r, ext_policy_default()), 0, "private key blocked");
+    assert_eq(scan_output_last_verdict(), ScanVerdict.BLOCK, "verdict BLOCK");
+    assert(scan_output_last_findings() > 0, "at least one finding");
+    return 0;
+}
+
+fn test_scan_output_disabled_passes_everything() {
+    test_group("scan_output_disabled_passes_everything");
+    kavach_init();
+    var p = ext_policy_default();
+    ExternalizationPolicy_set_enabled(p, 0);
+    var r = container_exec_result_new(0, "-----BEGIN RSA PRIVATE KEY-----", "", 10, 0);
+    var s = scan_output(r, p);
+    assert(s != 0, "non-null");
+    assert_eq(strstr(load64(s + 8), "BEGIN RSA PRIVATE KEY") >= 0, 1, "passed verbatim");
+    return 0;
+}
+
+fn test_scan_output_blocks_oversized() {
+    test_group("scan_output_blocks_oversized");
+    kavach_init();
+    var p = ext_policy_default();
+    ExternalizationPolicy_set_max_artifact_size_bytes(p, 10);
+    var big = alloc(101);
+    var i = 0;
+    while (i < 100) { store8(big + i, 120); i = i + 1; }
+    store8(big + 100, 0);
+    var r = container_exec_result_new(0, big, "", 10, 0);
+    assert_eq(scan_output(r, p), 0, "oversized blocked");
+    assert_eq(scan_output_last_verdict(), ScanVerdict.BLOCK, "size limit -> BLOCK");
+    return 0;
+}
+
+# Beyond the oracle: the null guards Rust's borrow checker made unreachable.
+fn test_scan_output_null_guards() {
+    test_group("scan_output_null_guards");
+    kavach_init();
+    var r = container_exec_result_new(0, "clean", "", 0, 0);
+    assert_eq(scan_output(r, 0), 0, "null policy -> 0");
+    assert_eq(scan_output(0, ext_policy_default()), 0, "null result -> 0");
+    return 0;
+}
+
+# stderr is scanned too — gate_apply concatenates stdout + "\n" + stderr
+# (kavach.cyr:5148), so a secret on stderr alone must still block.
+fn test_scan_output_scans_stderr() {
+    test_group("scan_output_scans_stderr");
+    kavach_init();
+    var r = container_exec_result_new(1, "",
+    "-----BEGIN OPENSSH PRIVATE KEY-----", 5, 0);
+    assert_eq(scan_output(r, ext_policy_default()), 0, "stderr secret blocked");
+    return 0;
+}
+
 # ── security_score (rust-old runtime.rs:615) — score_backend passthrough ──
 fn test_security_score() {
     test_group("security_score");
@@ -712,6 +789,12 @@ fn main() {
     test_build_sandbox_min_score_none();
     test_exec_container_noop();
     test_exec_container_bad_backend();
+    test_scan_output_clean_passes();
+    test_scan_output_blocks_private_key();
+    test_scan_output_disabled_passes_everything();
+    test_scan_output_blocks_oversized();
+    test_scan_output_null_guards();
+    test_scan_output_scans_stderr();
     test_security_score();
     test_security_score_for();
     test_runpath_logging_emits();

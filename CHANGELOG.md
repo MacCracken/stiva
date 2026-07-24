@@ -5,6 +5,191 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.6] — 2026-07-23 — §G complete: output scanning · compose YAML · working benchmarks
+
+Closes roadmap **§G** — the three items the 2026-07-22 upstream re-check graduated out of
+v3.1. zstd decode landed in 3.0.5; `scan_output` and `convert compose` land here.
+
+### Added — `scan_output` + `stiva logs --scan` (roadmap §G)
+`src/runtime.cyr` grows `scan_output(result, policy)`: it marshals a `ContainerExecResult`
+into a kavach `ExecResult`, applies the externalization gate, and maps the verdict —
+PASS/WARN return a new result carrying the possibly-redacted strings, QUARANTINE/BLOCK
+return `0` with `STIVA_ERR_SANDBOX`. That collapse matches the oracle
+(`rust-old/src/runtime.rs:565-604`), whose `gate.apply(...)?` yields a single
+`Err(StivaError::Sandbox)` either way; `scan_output_last_verdict()` /
+`scan_output_last_findings()` expose what the collapse hides.
+
+Wired as **`stiva logs <ID> --scan`**. Opt-in, not default: scanning changes what `logs`
+prints, and that should not happen behind an operator's back. The oracle instead gated it
+on a per-container persisted `scan_policy`, which this port does not yet round-trip through
+`state.json`, so the flag stands in for it.
+
+Two things the roadmap had wrong, both corrected by reading the code:
+
+- It advised **calling the three scanners directly** rather than `gate_apply`, because
+  `gate_apply` only redacts at WARN. Moot: BLOCK and QUARANTINE become errors regardless, so
+  redaction at those levels never mattered. `gate_apply` is the closer analogue of the oracle.
+- More importantly, **kavach's `sandbox_exec` already applies the gate itself**
+  (`lib/kavach.cyr:9026`) and returns `0` on BLOCK/QUARANTINE. Container exec output has
+  therefore always been scanned; adding `scan_output` to `exec_container` would scan twice
+  and diverge from the oracle. Confirmed on the binary — a container echoing an AWS key
+  never completes: `kavach: externalization blocked: blocked by gate`. `logs`, which reads
+  bytes back off disk, is the one correct site. There is also no `ExternalizationGate`
+  *type* in kavach's Cyrius surface, only free functions; the deferred-note claiming an
+  "unported handle" was wrong and is removed.
+
+15 new assertions in `tests/runpath.tcyr` (the oracle's four cases plus null guards, the
+verdict accessor, and stderr-only secrets — `gate_apply` scans `stdout + "\n" + stderr`).
+
+### Added — `convert --format compose` (roadmap §G)
+`compose_yaml_to_toml` + `compose_last_error()` in `src/convert.cyr`, over
+`bayan_yaml_parse_str`. All four oracle fixtures (`rust-old/src/convert.rs:312-375`)
+reproduce byte-for-byte. The `convert` verb already defaulted to `-f compose`, so the
+default path stops printing "not yet implemented" and converts.
+
+**Ordering was the one systematic hazard.** `serde_json::Map` is a `BTreeMap` (rust-old
+takes no `preserve_order` feature), so the oracle emits services, networks, volumes,
+env-maps and depends_on-objects **sorted**; bayan objects are insertion-ordered pair
+vectors. `_cv_sorted_idx`, keyed on a byte-wise `_cv_key_lt` matching Rust's `String` Ord,
+is applied at all five sites — and deliberately *not* at the document-ordered ones (the
+command/ports/volumes/depends_on **array** forms and the env **list** form, all `Vec` in the
+oracle). Miss one and every multi-service file diverges; the test file pins both orders.
+
+**The subset is documented, not implied.** bayan rejects flow mappings, block scalars,
+anchors/aliases, tags, multi-document input, tab indentation, complex keys, and escaped
+quotes inside quoted scalars — each with a verbatim message surfaced through
+`compose_last_error()`, plus a byte offset. Merge keys needed a stiva-side guard: bayan has
+no `<<` handling at all, so `<<: *base` dies incidentally on the alias check but a literal
+`<<: x` would silently become a key named `<<`. Three divergences from the oracle are worth
+naming: serde-saphyr *resolved* anchors and merge keys before conversion (the real-world
+loss — flatten such files first); it *errored* on duplicate mapping keys where bayan keeps
+the first; and it *accepted* escaped quotes and then emitted invalid TOML, so rejecting them
+is stricter and more correct. Neither version escapes output.
+
+Assertions cover the oracle cases, both orderings, every per-field arm, the `Ok("")` cases,
+one test per rejected construct, and one per review finding (see below).
+
+### Added — `tests/convert.tcyr`, a 5th test unit
+`tests/stiva.tcyr` was the most identifier-pressured unit in the repo (94% of cycc's cap); a
+unit including only `error.cyr` + `convert.cyr` sits at 86%. The six `dockerfile_to_toml`
+tests moved there alongside the new compose ones — assertions unchanged, though the fixtures
+are now built a line at a time via a `_cv_yl` helper, since whitespace-significant YAML
+embedded in a single `"a\n  b\n"` literal is unreadable.
+
+Suite: **1307 assertions** across five files — stiva 664 · runpath 202 · store 197 ·
+mgmt 128 · convert 116.
+
+### Fixed — the benchmark scripts never ran, so no history was ever recorded
+`scripts/bench-history.sh` ran `cargo bench --bench benchmarks` and `scripts/bench.sh` ran
+`rustc`/`cargo test`/`cargo build` — both pre-port leftovers. `cargo` is not in this
+toolchain, so the commands produced nothing, the criterion-format parser (`time: [lo mid hi]`)
+matched nothing, and `bench-history.csv` had been header-only since the port. This sat under
+CLAUDE.md's "Never skip benchmarks. The CSV history is the proof."
+
+Both are ported to `cyrius bench` / `cyrius tests` / `cyrius build`, with a parser for the
+actual output shape (`name: 7.203us avg (min=… max=…) [N iters]`). `bench.sh` now records
+assertion and failure counts, binary size, and Cyrius LoC in place of the Rust metrics. Also
+fixed a display bug carried in the Python trend generator: `fmt_ns` only stepped up at 1e6 ns
+and labelled that µs, so 7 µs rendered as `7203.0 ns` and 1 ms would have read `1000 µs` —
+it is a proper ns→µs→ms→s ladder now.
+
+First recorded run (`3808225`): `noop` 2.00 ns · `oci_config_build+serialize` 7.203 µs ·
+`oci_manifest_to_jv+serialize` 15.825 µs; suite 22.4 s, clean build 5.7 s → 16,304,096 B,
+14,061 LoC.
+
+### Fixed — `stiva convert` silently truncated input at 1 MiB
+`_cli_convert` reads into a fixed `alloc(1048576)` and did not check for saturation, so a
+larger file was quietly cut short. On the Dockerfile path that yields a plausible-but-wrong
+Stivafile; on the new compose path it surfaces as a YAML parse error pointing at a line the
+user can see is fine. It now refuses with `input exceeds the 1 MiB convert limit`.
+
+### Fixed — the compose converter, after an adversarial review
+The first cut of `compose_yaml_to_toml` was reviewed by a 4-dimension finder pass with
+3-lens adversarial verification; 16 findings survived, several of them serious. One reviewer
+compiled the frozen Rust oracle and diffed its output against the binary's, which is what
+caught the parity breaks. Everything below is fixed and has a regression test.
+
+- **YAML 1.1 boolean tokens broke parity on ordinary files.** `serde-saphyr`, the oracle's
+  parser, *resolves* `yes/no/on/off/y/n/True/TRUE/False/FALSE/Null/NULL`; bayan implements
+  the YAML 1.2 core schema and leaves them as strings. So every `.as_str()` guard flipped:
+  `restart: no` — docker-compose's own documented default, routinely written unquoted —
+  emitted `restart = "no"` where the oracle emits **nothing**, and `ports: [yes, "80:80"]`
+  kept an element the oracle's `filter_map(as_str)` drops. The tokens are now resolved at the
+  guards (`_cv_yaml11_token` / `_cv_is_yaml_str`), and render as the canonical `true`/`false`/
+  `null` in the env `to_string()` fallback. **The roadmap asserted this was parity** ("bayan
+  treats `true`/`false` only; `yes`/`no`/`on`/`off` stay strings — serde-saphyr agrees, YAML
+  1.2 core"). It was not; the claim came from reading bayan without running the oracle.
+- **Duplicate mapping keys produced TOML no parser will load.** `serde-saphyr` rejects the
+  document. bayan keeps both pairs and `obj_get` returns the first — which reads like a
+  harmless superset until you notice the emitter *iterates* these maps, so both survive:
+  two `[services.a]` tables, or `env = { A = "1", A = "2" }`, handed back with exit 0.
+  `_cv_validate_doc` now walks the whole document once and rejects duplicates the way the
+  oracle does. The same pass subsumes the merge-key guard, which previously ran only at the
+  root and on service bodies — so `<<:` errored in one place and became a literal `<<` key
+  one level down.
+- **The key sort was quadratic on attacker-chosen input.** `_cv_sorted_idx` was an insertion
+  sort: 1 MiB of reverse-ordered service keys took **236 s of pinned CPU** against 0.09 s for
+  the identical bytes ascending — a ~2000x amplification on a path that exists to ingest
+  third-party files, with no output until it finished. It is a bottom-up merge sort now.
+  Measured after: 43k reversed keys and 43k ascending keys both convert in 0.17 s.
+- **Output is now escaped — a deliberate divergence from the oracle.** rust-old emits every
+  value and section name through a bare `format!`, so a hostile compose file could close the
+  string it was written into and open a new table: what a human reads in the compose source
+  and what stiva's own `parse_ansamblu` later loads were different documents. Demonstrated
+  end-to-end by the review. Values now go through TOML basic-string escaping and keys are
+  quoted unless they are bare-safe. Inheriting the oracle here would have meant inheriting a
+  structure-forgery hole, so parity loses to correctness on this one and it is recorded as an
+  accepted divergence.
+- **Nested object values in `environment` rendered in the wrong order.** serde_json's `Map`
+  is a `BTreeMap` at *every* depth, so `v.to_string()` sorts recursively;
+  `bayan_json_v_build` walks insertion order. The fallback goes through a new
+  `_cv_value_to_string` that applies the same sort recursively. (The earlier claim that
+  `bayan_json_v_build` is "the byte-exact analogue of `Value::to_string()`" holds for scalars
+  and arrays only.)
+- **An ordering test could false-pass.** `assert(strstr(h, a) < strstr(h, b))` goes green
+  when `a` is *absent*, because this `strstr` returns −1 and −1 beats any real index — so a
+  regression that dropped the earlier key entirely would not have been caught. All seven
+  ordering assertions now go through `_cv_before`, which requires both substrings present.
+
+Two bayan-level gaps remain, documented rather than worked around: an integer above
+`i64::MAX` is a `u64` in serde_json and round-trips exactly but wraps negative through
+bayan's `JTAG_INT`; and non-decimal / underscored / leading-zero numeric spellings (`0x1f`,
+`1_000`, `007`) stay strings, which additionally *un-drops* array elements the oracle
+discards. Both belong in bayan's scalar resolver.
+
+### Fixed — `stiva convert` input handling
+- **A directory succeeded with empty output.** A directory opens and reads 0 bytes, so
+  `file_read_all` returned 0 rather than an error and `convert <dir> -o out.toml` wrote an
+  empty file and exited 0. The oracle's `fs::read_to_string` surfaces `EISDIR`. Note
+  `is_dir` takes a `Str`, not a cstr — passing the bare cstr compiles and silently never
+  matches, which is how the first attempt at this fix did nothing.
+- **The 1 MiB guard rejected a complete 1048575-byte file.** Reading exactly `limit` bytes
+  cannot distinguish "fit exactly" from "there was more", so the read now goes one byte past
+  the limit and rejects only on `n > limit`.
+
+### Fixed — `scripts/bench.sh` recorded a broken tree as a clean run
+A test unit that fails to *compile* emits no `N passed` line, so the sum silently shrank
+while the failure count stayed 0 — a broken tree would be logged as a clean run with fewer
+tests, corrupting the one number the file exists to track. It now refuses to record unless
+every `tests/*.tcyr` reported a result, and fails on a non-zero build exit instead of
+timing it.
+
+### Added — benchmarks for the new paths
+`compose_yaml_to_toml` **28.944 µs** on a realistic 3-service document, and
+`compose_400_reverse_sorted_keys` **1.383 ms** — the second exists specifically to catch a
+regression back to a quadratic sort. Suite now **1307 assertions** (convert 116 · stiva 664 ·
+runpath 202 · store 197 · mgmt 128).
+
+### Changed — cyrius pin 6.4.71 → 6.4.72
+Every build was warning `cyrius.cyml pins 6.4.71 but cycc is 6.4.72`. The delta is two
+vendored stdlib files (`syscalls_x86_64_agnos.cyr`, `fs.cyr`); `cyrius.lock` stays at 83
+entries = 83 `lib/*.cyr` and `cyrius deps --verify` is clean.
+
+Worth recording: `cyrius lib sync` alone is **not** sufficient after a pin bump. It copied 69
+files against a `lib/` of 83 and left the lockfile at 56 entries with `--verify` failing on
+46 of them. `cyrius deps` is the authority that restores the invariant — the same
+"`lib/` is reproducible from the manifest + lockfile" property the 3.0.5 hygiene pass fixed.
+
 ## [3.0.5] — 2026-07-23 — zstd layer decode · dependency hygiene · toolchain 6.4.71
 
 ### Added — zstd layer decode (roadmap §G)

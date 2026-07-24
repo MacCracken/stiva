@@ -1,0 +1,747 @@
+# stiva test suite — Dockerfile / docker-compose → Stivafile conversion
+# Split out of tests/stiva.tcyr (2026-07-23) when compose_yaml_to_toml landed.
+# Two reasons for its own unit: stiva.tcyr was the most identifier-pressured
+# file in the repo (94.3% of cycc's cap), and this file needs only 2 of the 26
+# src modules, making it the cheapest unit here (~86%).
+#
+# Covers: dockerfile_to_toml (all instruction arms) and compose_yaml_to_toml
+# (the bayan-YAML subset — walk, BTreeMap-order parity, and every construct
+# bayan rejects).
+#
+# Oracle: rust-old/src/convert.rs. Its own #[cfg(test)] cases (:312-439) are
+# ported below; assertions beyond them pin behavior Rust got for free from
+# serde_json (key ordering) or that only Cyrius can observe (the reject set).
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/error.cyr"
+include "src/convert.cyr"
+
+# Local: substring-present test. This stdlib strstr returns a 0-based INDEX
+# (>= 0 found, -1 absent), so `>= 0` is the correct "contains" test.
+fn _cv_contains(hay, needle) {
+    if (strstr(hay, needle) >= 0) { return 1; }
+    return 0;
+}
+
+# Append one fixture line plus its newline. YAML is whitespace-significant,
+# so fixtures are built a line at a time rather than as one "a\n  b\n" literal
+# — indentation you can actually see is worth the extra lines here.
+fn _cv_yl(sb, line) {
+    str_builder_add_cstr(sb, line);
+    str_builder_putc(sb, 10);
+    return 0;
+}
+
+# Assert `first` occurs before `second` in `hay` — AND that both are present.
+#
+# The presence check is the point. A bare
+# `assert(strstr(h, a) < strstr(h, b))` FALSE-PASSES when `a` is absent,
+# because this strstr returns -1 and -1 beats any real index. An ordering
+# regression that dropped the earlier key entirely would have gone green.
+fn _cv_before(hay, first, second) {
+    var a = strstr(hay, first);
+    var b = strstr(hay, second);
+    if (a < 0) { return 0; }
+    if (b < 0) { return 0; }
+    if (a < b) { return 1; }
+    return 0;
+}
+
+# ══ dockerfile_to_toml (rust-old/src/convert.rs:182-303) ══════════
+
+fn test_convert_dockerfile_basic() {
+    test_group("convert_dockerfile_basic");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "FROM alpine:3.19");
+    _cv_yl(_sb, "RUN apk add --no-cache curl");
+    _cv_yl(_sb, "COPY ./app /app");
+    _cv_yl(_sb, "ENV PORT=8080");
+    _cv_yl(_sb, "WORKDIR /app");
+    _cv_yl(_sb, "EXPOSE 8080");
+    _cv_yl(_sb, "ENTRYPOINT [\"/app/start.sh\"]");
+    _cv_yl(_sb, "USER nobody");
+    var df = str_cstr(str_builder_build(_sb));
+    var toml = dockerfile_to_toml(df);
+    assert_neq(toml, 0, "non-null");
+    assert_eq(_cv_contains(toml, "base = \"alpine:3.19\""), 1, "base");
+    assert_eq(_cv_contains(toml, "type = \"run\""), 1, "run type");
+    assert_eq(_cv_contains(toml, "apk add --no-cache curl"), 1, "run cmd");
+    assert_eq(_cv_contains(toml, "type = \"copy\""), 1, "copy type");
+    assert_eq(_cv_contains(toml, "source = \"./app\""), 1, "copy source");
+    assert_eq(_cv_contains(toml, "type = \"env\""), 1, "env type");
+    assert_eq(_cv_contains(toml, "key = \"PORT\""), 1, "env key");
+    assert_eq(_cv_contains(toml, "type = \"workdir\""), 1, "workdir type");
+    assert_eq(_cv_contains(toml, "expose = [8080]"), 1, "expose");
+    assert_eq(_cv_contains(toml, "entrypoint = [\"/app/start.sh\"]"), 1, "entrypoint");
+    assert_eq(_cv_contains(toml, "user = \"nobody\""), 1, "user");
+    return 0;
+}
+
+fn test_convert_dockerfile_no_from() {
+    test_group("convert_dockerfile_no_from");
+    assert_eq(dockerfile_to_toml("RUN echo hello"), 0, "no from -> null");
+    return 0;
+}
+
+fn test_convert_dockerfile_comments_and_blanks() {
+    test_group("convert_dockerfile_comments_and_blanks");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "# Comment");
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "FROM alpine");
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "# Another comment");
+    _cv_yl(_sb, "RUN echo hi");
+    var df = str_cstr(str_builder_build(_sb));
+    var toml = dockerfile_to_toml(df);
+    assert_eq(_cv_contains(toml, "base = \"alpine\""), 1, "base");
+    assert_eq(_cv_contains(toml, "type = \"run\""), 1, "run type");
+    return 0;
+}
+
+fn test_convert_dockerfile_env_space_format() {
+    test_group("convert_dockerfile_env_space_format");
+    var toml = dockerfile_to_toml("FROM alpine\nENV APP_HOME /opt/app");
+    assert_eq(_cv_contains(toml, "key = \"APP_HOME\""), 1, "key");
+    assert_eq(_cv_contains(toml, "value = \"/opt/app\""), 1, "value");
+    return 0;
+}
+
+fn test_convert_dockerfile_expose_multiple() {
+    test_group("convert_dockerfile_expose_multiple");
+    var toml = dockerfile_to_toml("FROM alpine\nEXPOSE 80 443/tcp 8080");
+    assert_eq(_cv_contains(toml, "expose = [80, 443, 8080]"), 1, "expose multi");
+    return 0;
+}
+
+fn test_convert_dockerfile_label() {
+    test_group("convert_dockerfile_label");
+    var toml = dockerfile_to_toml("FROM alpine\nLABEL maintainer=\"test@example.com\"");
+    assert_eq(_cv_contains(toml, "type = \"label\""), 1, "label type");
+    assert_eq(_cv_contains(toml, "key = \"maintainer\""), 1, "label key");
+    return 0;
+}
+
+# ══ compose_yaml_to_toml (rust-old/src/convert.rs:17-175) ═════════
+
+# ── the four oracle cases (rust-old/src/convert.rs:312-375) ──
+
+fn test_compose_basic() {
+    test_group("compose_basic");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  web:");
+    _cv_yl(_sb, "    image: nginx:latest");
+    _cv_yl(_sb, "    ports:");
+    _cv_yl(_sb, "      - \"8080:80\"");
+    _cv_yl(_sb, "  db:");
+    _cv_yl(_sb, "    image: postgres:16");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      POSTGRES_PASSWORD: secret");
+    _cv_yl(_sb, "    volumes:");
+    _cv_yl(_sb, "      - pgdata:/var/lib/postgresql/data");
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "volumes:");
+    _cv_yl(_sb, "  pgdata:");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_neq(toml, 0, "non-null");
+    assert_eq(_cv_contains(toml, "[services.web]"), 1, "web section");
+    assert_eq(_cv_contains(toml, "image = \"nginx:latest\""), 1, "web image");
+    assert_eq(_cv_contains(toml, "\"8080:80\""), 1, "port mapping");
+    assert_eq(_cv_contains(toml, "[services.db]"), 1, "db section");
+    assert_eq(_cv_contains(toml, "POSTGRES_PASSWORD"), 1, "env key");
+    assert_eq(_cv_contains(toml, "[volumes.pgdata]"), 1, "top-level volume");
+    # Beyond the oracle's contains-asserts: the exact rendered forms.
+    assert_eq(_cv_contains(toml, "env = { POSTGRES_PASSWORD = \"secret\" }"), 1, "env braces + spacing");
+    assert_eq(_cv_contains(toml, "volumes = [\"pgdata:/var/lib/postgresql/data\"]"), 1, "service volumes");
+    # serde_json's Map is a BTreeMap, so db sorts before web despite the
+    # document declaring web first. This is the single systematic way a
+    # naive port of an insertion-ordered DOM diverges.
+    assert_eq(_cv_before(toml, "[services.db]", "[services.web]"), 1, "services sorted, not document order");
+    return 0;
+}
+
+fn test_compose_depends_on() {
+    test_group("compose_depends_on");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  api:");
+    _cv_yl(_sb, "    image: app:latest");
+    _cv_yl(_sb, "    depends_on:");
+    _cv_yl(_sb, "      - db");
+    _cv_yl(_sb, "      - cache");
+    _cv_yl(_sb, "  db:");
+    _cv_yl(_sb, "    image: postgres");
+    _cv_yl(_sb, "  cache:");
+    _cv_yl(_sb, "    image: redis");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_contains(toml, "depends_on = [\"db\", \"cache\"]"), 1, "array form keeps document order");
+    # ...while the services themselves are sorted: api, cache, db.
+    assert_eq(_cv_before(toml, "[services.api]", "[services.cache]"), 1, "api before cache");
+    assert_eq(_cv_before(toml, "[services.cache]", "[services.db]"), 1, "cache before db");
+    return 0;
+}
+
+fn test_compose_env_array() {
+    test_group("compose_env_array");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  app:");
+    _cv_yl(_sb, "    image: myapp");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      - PORT=8080");
+    _cv_yl(_sb, "      - DEBUG=true");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_contains(toml, "PORT = \"8080\""), 1, "PORT");
+    assert_eq(_cv_contains(toml, "DEBUG = \"true\""), 1, "DEBUG");
+    # The list form is a Vec in the oracle, so it is NOT sorted.
+    assert_eq(_cv_contains(toml, "env = { PORT = \"8080\", DEBUG = \"true\" }"), 1, "list form is document-ordered");
+    return 0;
+}
+
+fn test_compose_invalid_yaml() {
+    test_group("compose_invalid_yaml");
+    assert_eq(compose_yaml_to_toml("not: [valid: yaml"), 0, "invalid -> null");
+    assert_eq(_cv_contains(compose_last_error(), "invalid YAML"), 1, "error prefix matches oracle");
+    return 0;
+}
+
+# ── ordering parity (what serde_json's BTreeMap gave the oracle free) ──
+
+fn test_compose_service_key_sort_is_bytewise() {
+    test_group("compose_service_key_sort_is_bytewise");
+    # Rust String Ord is unsigned byte-wise, so uppercase (0x4D) sorts
+    # before lowercase (0x61, 0x7A) — NOT case-insensitively.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  zzz:");
+    _cv_yl(_sb, "    image: a");
+    _cv_yl(_sb, "  Mmm:");
+    _cv_yl(_sb, "    image: b");
+    _cv_yl(_sb, "  aaa:");
+    _cv_yl(_sb, "    image: c");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_before(toml, "[services.Mmm]", "[services.aaa]"), 1, "uppercase first");
+    assert_eq(_cv_before(toml, "[services.aaa]", "[services.zzz]"), 1, "aaa before zzz");
+    return 0;
+}
+
+fn test_compose_env_map_is_sorted() {
+    test_group("compose_env_map_is_sorted");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      TZ: UTC");
+    _cv_yl(_sb, "      PORT: 8080");
+    _cv_yl(_sb, "      DEBUG: true");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_contains(toml, "env = { DEBUG = \"true\", PORT = \"8080\", TZ = \"UTC\" }"), 1, "map form sorted");
+    return 0;
+}
+
+fn test_compose_depends_on_object_form() {
+    test_group("compose_depends_on_object_form");
+    # The long `condition:` syntax — the oracle takes obj.keys() off a
+    # BTreeMap, so keys are sorted and the conditions are discarded.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    depends_on:");
+    _cv_yl(_sb, "      redis:");
+    _cv_yl(_sb, "        condition: service_started");
+    _cv_yl(_sb, "      db:");
+    _cv_yl(_sb, "        condition: service_healthy");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_contains(toml, "depends_on = [\"db\", \"redis\"]"), 1, "object form sorted, conditions dropped");
+    assert_eq(_cv_contains(toml, "service_healthy"), 0, "condition value discarded");
+    return 0;
+}
+
+fn test_compose_networks_and_volumes_sorted() {
+    test_group("compose_networks_and_volumes_sorted");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "networks:");
+    _cv_yl(_sb, "  frontend:");
+    _cv_yl(_sb, "    driver: bridge");
+    _cv_yl(_sb, "    ipam:");
+    _cv_yl(_sb, "      config:");
+    _cv_yl(_sb, "        - subnet: 172.28.0.0/16");
+    _cv_yl(_sb, "  backend:");
+    _cv_yl(_sb, "    driver: overlay");
+    _cv_yl(_sb, "volumes:");
+    _cv_yl(_sb, "  cache:");
+    _cv_yl(_sb, "  data:");
+    _cv_yl(_sb, "    driver: local");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_before(toml, "[networks.backend]", "[networks.frontend]"), 1, "networks sorted");
+    assert_eq(_cv_contains(toml, "driver = \"overlay\""), 1, "backend driver");
+    assert_eq(_cv_contains(toml, "subnet = \"172.28.0.0/16\""), 1, "ipam.config[0].subnet");
+    assert_eq(_cv_before(toml, "[volumes.cache]", "[volumes.data]"), 1, "volumes sorted");
+    assert_eq(_cv_contains(toml, "[volumes.cache]\n\n"), 1, "keyless volume is header + blank line");
+    return 0;
+}
+
+fn test_compose_ipam_first_config_only() {
+    test_group("compose_ipam_first_config_only");
+    # Rust `.first()` — index 0 only; a second config entry is ignored.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "networks:");
+    _cv_yl(_sb, "  n:");
+    _cv_yl(_sb, "    ipam:");
+    _cv_yl(_sb, "      config:");
+    _cv_yl(_sb, "        - subnet: 10.0.0.0/8");
+    _cv_yl(_sb, "        - subnet: 192.168.0.0/16");
+    var y = str_cstr(str_builder_build(_sb));
+    var toml = compose_yaml_to_toml(y);
+    assert_eq(_cv_contains(toml, "subnet = \"10.0.0.0/8\""), 1, "first config used");
+    assert_eq(_cv_contains(toml, "192.168.0.0/16"), 0, "second config ignored");
+    return 0;
+}
+
+# ── per-field arms ──
+
+fn test_compose_command_string_and_array() {
+    test_group("compose_command_string_and_array");
+    var s = compose_yaml_to_toml("services:\n  a:\n    command: \"nginx -g daemon\"\n");
+    assert_eq(_cv_contains(s, "command = [\"nginx\", \"-g\", \"daemon\"]"), 1, "string splits on whitespace");
+    var a = compose_yaml_to_toml("services:\n  a:\n    command: [\"sh\", \"-c\", \"echo hi\"]\n");
+    assert_eq(_cv_contains(a, "command = [\"sh\", \"-c\", \"echo hi\"]"), 1, "array form kept verbatim");
+    # `command` always emits once a branch matches — the oracle's writeln!
+    # sits OUTSIDE the is_empty guard, unlike ports/volumes/depends_on.
+    var e = compose_yaml_to_toml("services:\n  a:\n    command: \"\"\n");
+    assert_eq(_cv_contains(e, "command = []"), 1, "empty string still emits command = []");
+    return 0;
+}
+
+fn test_compose_ports_drops_non_strings() {
+    test_group("compose_ports_drops_non_strings");
+    # Oracle: `.filter_map(as_str or as_i64 -> "")` then `.filter(!is_empty)`,
+    # so a bare integer port is silently dropped.
+    var t = compose_yaml_to_toml("services:\n  a:\n    ports: [8080, \"9090:90\"]\n");
+    assert_eq(_cv_contains(t, "ports = [\"9090:90\"]"), 1, "integer port dropped");
+    return 0;
+}
+
+fn test_compose_empty_arrays_suppressed() {
+    test_group("compose_empty_arrays_suppressed");
+    var t = compose_yaml_to_toml("services:\n  a:\n    image: x\n    ports: []\n    volumes: []\n    depends_on: []\n");
+    assert_eq(_cv_contains(t, "ports"), 0, "empty ports emits nothing");
+    assert_eq(_cv_contains(t, "volumes"), 0, "empty volumes emits nothing");
+    assert_eq(_cv_contains(t, "depends_on"), 0, "empty depends_on emits nothing");
+    assert_eq(_cv_contains(t, "image = \"x\""), 1, "image still emitted");
+    return 0;
+}
+
+fn test_compose_env_non_string_values() {
+    test_group("compose_env_non_string_values");
+    # Oracle: `match v.as_str() { Some(s) => s, None => v.to_string() }`.
+    # bayan_json_v_build is the byte-exact analogue of Value::to_string().
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      B: true");
+    _cv_yl(_sb, "      I: 8080");
+    _cv_yl(_sb, "      F: 1.5");
+    _cv_yl(_sb, "      N:");
+    _cv_yl(_sb, "      L: [1, 2]");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_eq(_cv_contains(t, "B = \"true\""), 1, "bool");
+    assert_eq(_cv_contains(t, "I = \"8080\""), 1, "int");
+    assert_eq(_cv_contains(t, "F = \"1.5\""), 1, "float");
+    assert_eq(_cv_contains(t, "N = \"null\""), 1, "null");
+    assert_eq(_cv_contains(t, "L = \"[1,2]\""), 1, "array");
+    return 0;
+}
+
+fn test_compose_env_list_needs_equals() {
+    test_group("compose_env_list_needs_equals");
+    # `split_once('=')` — items without '=' are silently dropped (so bare
+    # `- FOO` host-inheritance is lost), and the split is at the FIRST '='.
+    var t = compose_yaml_to_toml("services:\n  a:\n    environment:\n      - FOO\n      - K=a=b\n");
+    assert_eq(_cv_contains(t, "env = { K = \"a=b\" }"), 1, "split at first '=', bare item dropped");
+    var all_dropped = compose_yaml_to_toml("services:\n  a:\n    environment:\n      - FOO\n      - BAR\n");
+    assert_eq(_cv_contains(all_dropped, "env"), 0, "nothing survives -> no env line");
+    return 0;
+}
+
+fn test_compose_service_body_null_still_gets_header() {
+    test_group("compose_service_body_null_still_gets_header");
+    # The oracle writes the header before any body type check.
+    var t = compose_yaml_to_toml("services:\n  bare:\n");
+    assert_eq(_cv_contains(t, "[services.bare]\n\n"), 1, "header + blank line");
+    return 0;
+}
+
+# ── the Ok("") cases: valid input carrying nothing to convert ──
+
+fn test_compose_empty_ok_cases() {
+    test_group("compose_empty_ok_cases");
+    # Each is Ok("") in the oracle — a NON-null pointer to an empty string,
+    # which is why 0 stays unambiguous as the error sentinel.
+    var a = compose_yaml_to_toml("");
+    assert_neq(a, 0, "empty input non-null");
+    assert_eq(strlen(a), 0, "empty input -> \"\"");
+    var b = compose_yaml_to_toml("version: \"3.8\"\n");
+    assert_neq(b, 0, "no known sections non-null");
+    assert_eq(strlen(b), 0, "no known sections -> \"\"");
+    var c = compose_yaml_to_toml("services:\n");
+    assert_neq(c, 0, "null services non-null");
+    assert_eq(strlen(c), 0, "null services -> \"\"");
+    return 0;
+}
+
+# ── the honest subset: constructs bayan rejects ──
+# Each returns 0 with a verbatim bayan message. These pin the documented
+# subset — if bayan later grows support, these tests are the tripwire.
+
+fn test_compose_rejects_flow_mapping() {
+    test_group("compose_rejects_flow_mapping");
+    assert_eq(compose_yaml_to_toml("services:\n  a: {image: x}\n"), 0, "flow mapping -> null");
+    assert_eq(_cv_contains(compose_last_error(), "flow mappings"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_rejects_block_scalar() {
+    test_group("compose_rejects_block_scalar");
+    assert_eq(compose_yaml_to_toml("services:\n  a:\n    command: |\n      echo hi\n"), 0, "block scalar -> null");
+    assert_eq(_cv_contains(compose_last_error(), "block scalars"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_rejects_anchor_alias() {
+    test_group("compose_rejects_anchor_alias");
+    assert_eq(compose_yaml_to_toml("base: &b\n  image: x\nservices:\n  a: *b\n"), 0, "anchor -> null");
+    assert_eq(_cv_contains(compose_last_error(), "anchors"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_rejects_merge_key() {
+    test_group("compose_rejects_merge_key");
+    # bayan has no '<<' handling at all: `<<: *base` dies on the alias
+    # check, but a literal `<<: x` would silently become a key named "<<".
+    # convert.cyr rejects it explicitly so the subset stays honest.
+    assert_eq(compose_yaml_to_toml("services:\n  a:\n    <<: x\n    image: y\n"), 0, "literal merge key -> null");
+    assert_eq(_cv_contains(compose_last_error(), "merge keys"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_rejects_multi_document() {
+    test_group("compose_rejects_multi_document");
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "---");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: x");
+    _cv_yl(_sb, "---");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  b:");
+    _cv_yl(_sb, "    image: y");
+    assert_eq(compose_yaml_to_toml(str_cstr(str_builder_build(_sb))), 0, "second doc -> null");
+    assert_eq(_cv_contains(compose_last_error(), "multi-document"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_rejects_tab_indent() {
+    test_group("compose_rejects_tab_indent");
+    assert_eq(compose_yaml_to_toml("services:\n\ta:\n\t\timage: x\n"), 0, "tab indent -> null");
+    assert_eq(_cv_contains(compose_last_error(), "tab"), 1, "message names the construct");
+    return 0;
+}
+
+fn test_compose_error_carries_byte_offset() {
+    test_group("compose_error_carries_byte_offset");
+    # A deliberate improvement over the oracle, whose rustc-style caret
+    # snippet is not reproducible here.
+    assert_eq(compose_yaml_to_toml("services:\n  a: {x: 1}\n"), 0, "invalid -> null");
+    assert_eq(_cv_contains(compose_last_error(), "(byte "), 1, "offset present");
+    return 0;
+}
+
+# ── in-subset constructs that must keep working ──
+
+fn test_compose_accepts_flow_sequences_and_comments() {
+    test_group("compose_accepts_flow_sequences_and_comments");
+    # Flow SEQUENCES are supported (only flow MAPPINGS are not), as are
+    # quote-aware '#' comments and an unquoted `host:port` scalar (bayan
+    # only splits on ':' followed by space/tab/EOL).
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "# leading comment");
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: nginx:latest  # trailing");
+    _cv_yl(_sb, "    ports: [\"80:80\", \"443:443\"]");
+    var y = str_cstr(str_builder_build(_sb));
+    var t = compose_yaml_to_toml(y);
+    assert_neq(t, 0, "parses");
+    assert_eq(_cv_contains(t, "image = \"nginx:latest\""), 1, "unquoted host:port scalar");
+    assert_eq(_cv_contains(t, "ports = [\"80:80\", \"443:443\"]"), 1, "flow sequence");
+    return 0;
+}
+
+# ══ regressions from the 2026-07-23 adversarial review ═══════════
+# Each of these was a confirmed defect in the first cut of the converter,
+# most of them found by diffing against a compiled build of the Rust oracle.
+
+fn test_compose_yaml11_bool_tokens_are_not_strings() {
+    test_group("compose_yaml11_bool_tokens_are_not_strings");
+    # serde-saphyr resolves the YAML 1.1 token family, so the oracle's
+    # `.as_str()` sees None and emits NOTHING for `restart: no` — while a
+    # naive port over bayan (YAML 1.2 core) emits `restart = "no"`. `no` is
+    # docker-compose's documented default for restart, so this fired on
+    # ordinary files, not exotic ones.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: x");
+    _cv_yl(_sb, "    restart: no");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_neq(t, 0, "converts");
+    assert_eq(_cv_contains(t, "image = \"x\""), 1, "real string still emitted");
+    assert_eq(_cv_contains(t, "restart"), 0, "restart: no emits nothing");
+    return 0;
+}
+
+fn test_compose_yaml11_tokens_dropped_from_arrays() {
+    test_group("compose_yaml11_tokens_dropped_from_arrays");
+    # The oracle's filter_map(as_str) DROPS a resolved bool element.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    ports:");
+    _cv_yl(_sb, "      - yes");
+    _cv_yl(_sb, "      - \"80:80\"");
+    _cv_yl(_sb, "    volumes:");
+    _cv_yl(_sb, "      - off");
+    _cv_yl(_sb, "      - /x:/y");
+    _cv_yl(_sb, "    depends_on:");
+    _cv_yl(_sb, "      - Null");
+    _cv_yl(_sb, "      - real");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_eq(_cv_contains(t, "ports = [\"80:80\"]"), 1, "yes dropped from ports");
+    assert_eq(_cv_contains(t, "volumes = [\"/x:/y\"]"), 1, "off dropped from volumes");
+    assert_eq(_cv_contains(t, "depends_on = [\"real\"]"), 1, "Null dropped from depends_on");
+    return 0;
+}
+
+fn test_compose_yaml11_tokens_canonical_in_env() {
+    test_group("compose_yaml11_tokens_canonical_in_env");
+    # In the env map the oracle falls back to `v.to_string()`, which renders
+    # the RESOLVED value — so `yes` becomes "true", not "yes".
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      A: yes");
+    _cv_yl(_sb, "      B: OFF");
+    _cv_yl(_sb, "      C: NULL");
+    _cv_yl(_sb, "      D: yesterday");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_eq(_cv_contains(t, "A = \"true\""), 1, "yes -> true");
+    assert_eq(_cv_contains(t, "B = \"false\""), 1, "OFF -> false");
+    assert_eq(_cv_contains(t, "C = \"null\""), 1, "NULL -> null");
+    assert_eq(_cv_contains(t, "D = \"yesterday\""), 1, "non-token left alone");
+    return 0;
+}
+
+fn test_compose_rejects_duplicate_keys() {
+    test_group("compose_rejects_duplicate_keys");
+    # serde-saphyr rejects the document. bayan keeps both pairs, and since
+    # the emitter ITERATES these maps both survived — producing two
+    # [services.a] tables, i.e. TOML no parser will load, with exit 0.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: first");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: second");
+    assert_eq(compose_yaml_to_toml(str_cstr(str_builder_build(_sb))), 0, "duplicate service -> null");
+    assert_eq(_cv_contains(compose_last_error(), "duplicate mapping key: a"), 1, "names the key");
+    return 0;
+}
+
+fn test_compose_rejects_duplicate_keys_nested() {
+    test_group("compose_rejects_duplicate_keys_nested");
+    # The check is recursive, so a duplicate inside a service body — which
+    # the oracle also rejects at parse time — is caught too.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: one");
+    _cv_yl(_sb, "    image: two");
+    assert_eq(compose_yaml_to_toml(str_cstr(str_builder_build(_sb))), 0, "duplicate field -> null");
+    assert_eq(_cv_contains(compose_last_error(), "duplicate mapping key: image"), 1, "names the field");
+    return 0;
+}
+
+fn test_compose_merge_key_guard_is_recursive() {
+    test_group("compose_merge_key_guard_is_recursive");
+    # The guard used to run only at the document root and on service bodies,
+    # so the same construct errored in one place and became a literal `<<`
+    # key in another.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      <<: x");
+    assert_eq(compose_yaml_to_toml(str_cstr(str_builder_build(_sb))), 0, "nested merge key -> null");
+    assert_eq(_cv_contains(compose_last_error(), "merge keys"), 1, "names the construct");
+    return 0;
+}
+
+fn test_compose_escapes_toml_output() {
+    test_group("compose_escapes_toml_output");
+    # DELIBERATE DIVERGENCE from the oracle, which emits every value through
+    # a bare format! and so lets a hostile compose file close the string it
+    # is written into and forge a new table. `convert` exists to ingest
+    # third-party files, so inheriting that would inherit a vulnerability.
+    # A PLAIN (unquoted) YAML scalar may carry a `"` after its first byte,
+    # so this is reachable without the escaped-quote form bayan rejects.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    image: x\"]");
+    _cv_yl(_sb, "    restart: back\\slash");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_neq(t, 0, "converts");
+    # The quote is escaped, so nothing can terminate the string early and
+    # open a forged table.
+    assert_eq(_cv_contains(t, "image = \"x\\\"]\""), 1, "quote escaped in value");
+    assert_eq(_cv_contains(t, "restart = \"back\\\\slash\""), 1, "backslash escaped");
+    assert_eq(_cv_contains(t, "\n[services."), 0, "no forged section beyond the first");
+    return 0;
+}
+
+fn test_compose_quotes_non_bare_section_names() {
+    test_group("compose_quotes_non_bare_section_names");
+    # A TOML bare key is [A-Za-z0-9_-]+; anything else must be quoted, or a
+    # service named `a.b` silently becomes a nested table.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  \"my app\":");
+    _cv_yl(_sb, "    image: x");
+    _cv_yl(_sb, "  plain-1:");
+    _cv_yl(_sb, "    image: y");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_eq(_cv_contains(t, "[services.\"my app\"]"), 1, "spaced name quoted");
+    assert_eq(_cv_contains(t, "[services.plain-1]"), 1, "bare-safe name left bare");
+    return 0;
+}
+
+fn test_compose_nested_env_object_keys_sorted() {
+    test_group("compose_nested_env_object_keys_sorted");
+    # serde_json's Map is a BTreeMap at EVERY depth, so `v.to_string()`
+    # sorts nested keys too. bayan_json_v_build walks insertion order, which
+    # is why the env fallback goes through _cv_value_to_string instead.
+    var _sb = str_builder_new();
+    _cv_yl(_sb, "services:");
+    _cv_yl(_sb, "  a:");
+    _cv_yl(_sb, "    environment:");
+    _cv_yl(_sb, "      FOO:");
+    _cv_yl(_sb, "        zeta: 1");
+    _cv_yl(_sb, "        alpha: 2");
+    var t = compose_yaml_to_toml(str_cstr(str_builder_build(_sb)));
+    assert_eq(_cv_contains(t, "{\\\"alpha\\\":2,\\\"zeta\\\":1}"), 1, "nested keys sorted");
+    return 0;
+}
+
+fn test_compose_sort_is_order_insensitive() {
+    test_group("compose_sort_is_order_insensitive");
+    # _cv_sorted_idx was an insertion sort — O(n^2) on reverse-sorted keys,
+    # which is attacker-chosen input on this path (1 MiB of reversed keys
+    # took 236 s against 0.09 s for the same bytes ascending). It is a merge
+    # sort now; this pins that both orders produce the identical document.
+    var asc = str_builder_new();
+    var desc = str_builder_new();
+    _cv_yl(asc, "services:");
+    _cv_yl(desc, "services:");
+    _cv_yl(asc, "  a:");
+    _cv_yl(asc, "    image: ia");
+    _cv_yl(asc, "  b:");
+    _cv_yl(asc, "    image: ib");
+    _cv_yl(asc, "  c:");
+    _cv_yl(asc, "    image: ic");
+    _cv_yl(asc, "  d:");
+    _cv_yl(asc, "    image: id");
+    _cv_yl(desc, "  d:");
+    _cv_yl(desc, "    image: id");
+    _cv_yl(desc, "  c:");
+    _cv_yl(desc, "    image: ic");
+    _cv_yl(desc, "  b:");
+    _cv_yl(desc, "    image: ib");
+    _cv_yl(desc, "  a:");
+    _cv_yl(desc, "    image: ia");
+    var ta = compose_yaml_to_toml(str_cstr(str_builder_build(asc)));
+    var td = compose_yaml_to_toml(str_cstr(str_builder_build(desc)));
+    assert_neq(ta, 0, "ascending converts");
+    assert_neq(td, 0, "descending converts");
+    assert_eq(streq(ta, td), 1, "document order does not affect output");
+    assert_eq(_cv_before(ta, "[services.a]", "[services.d]"), 1, "sorted a..d");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    # dockerfile
+    test_convert_dockerfile_basic();
+    test_convert_dockerfile_no_from();
+    test_convert_dockerfile_comments_and_blanks();
+    test_convert_dockerfile_env_space_format();
+    test_convert_dockerfile_expose_multiple();
+    test_convert_dockerfile_label();
+    # compose — oracle parity
+    test_compose_basic();
+    test_compose_depends_on();
+    test_compose_env_array();
+    test_compose_invalid_yaml();
+    # compose — ordering
+    test_compose_service_key_sort_is_bytewise();
+    test_compose_env_map_is_sorted();
+    test_compose_depends_on_object_form();
+    test_compose_networks_and_volumes_sorted();
+    test_compose_ipam_first_config_only();
+    # compose — per-field arms
+    test_compose_command_string_and_array();
+    test_compose_ports_drops_non_strings();
+    test_compose_empty_arrays_suppressed();
+    test_compose_env_non_string_values();
+    test_compose_env_list_needs_equals();
+    test_compose_service_body_null_still_gets_header();
+    test_compose_empty_ok_cases();
+    # compose — the honest subset
+    test_compose_rejects_flow_mapping();
+    test_compose_rejects_block_scalar();
+    test_compose_rejects_anchor_alias();
+    test_compose_rejects_merge_key();
+    test_compose_rejects_multi_document();
+    test_compose_rejects_tab_indent();
+    test_compose_error_carries_byte_offset();
+    test_compose_accepts_flow_sequences_and_comments();
+    # regressions from the 2026-07-23 adversarial review
+    test_compose_yaml11_bool_tokens_are_not_strings();
+    test_compose_yaml11_tokens_dropped_from_arrays();
+    test_compose_yaml11_tokens_canonical_in_env();
+    test_compose_rejects_duplicate_keys();
+    test_compose_rejects_duplicate_keys_nested();
+    test_compose_merge_key_guard_is_recursive();
+    test_compose_escapes_toml_output();
+    test_compose_quotes_non_bare_section_names();
+    test_compose_nested_env_object_keys_sorted();
+    test_compose_sort_is_order_insensitive();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

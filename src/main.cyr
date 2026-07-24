@@ -36,10 +36,11 @@ include "src/stiva_core.cyr"
 # ── CLI (cmdit verb dispatch) ──
 # stiva's 33 subcommands (rust-old/src/main.rs) via the cmdit library
 # (dist/cmdit.cyr) — registered as verbs, not hand-rolled argv parsing.
-# `convert` has ported backing (dockerfile_to_toml); the container-lifecycle +
-# registry verbs are the v3.0.x runtime-completion work (blocking, over the
-# ported sync core — the substrate is ready), except detached `run -d` and
-# `convert compose`, which are the v3.1 externally-blocked residue.
+# `convert` has ported backing for BOTH formats (dockerfile_to_toml +
+# compose_yaml_to_toml); the container-lifecycle + registry verbs are the
+# v3.0.x runtime-completion work (blocking, over the ported sync core — the
+# substrate is ready), except detached `run -d`, the v3.1 externally-blocked
+# residue.
 
 # Verb ids — cmdit_verb returns these in registration order.
 enum StivaVerb {
@@ -63,7 +64,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.5 — OCI container runtime (Cyrius port)";
+    return "3.0.6 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -106,8 +107,9 @@ fn _cli_register_verbs(h) {
     return 0;
 }
 
-# `convert <input> [-o output] [-f compose|dockerfile]` — the one command with
-# fully-ported backing (dockerfile_to_toml; compose_yaml_to_toml is deferred).
+# `convert <input> [-o output] [-f compose|dockerfile]` — both formats are
+# fully ported (dockerfile_to_toml + compose_yaml_to_toml). Compose covers a
+# documented YAML subset; see the section header in src/convert.cyr.
 fn _cli_convert(h) {
     var vh = cmdit_new("stiva convert");
     var f_out = cmdit_str(vh, 111, "output", 0, "Output TOML file path (default: stdout)");
@@ -121,9 +123,31 @@ fn _cli_convert(h) {
         return CMDIT_EXIT_USAGE;
     }
     var input = cmdit_positional(vh, 0);
-    var buf = alloc(1048576);
-    var n = file_read_all(input, buf, 1048575);
+    # A directory opens fine and read()s 0 bytes, so file_read_all returns 0
+    # rather than an error and the conversion would "succeed" with empty
+    # output and exit 0. The oracle's fs::read_to_string surfaces EISDIR
+    # (rust-old/src/main.rs:509) and exits before convert is reached.
+    # NOTE: is_dir takes a `Str`, not a cstr (lib/fs.cyr:229 calls str_data on
+    # it). Passing the bare cstr compiles and silently never matches.
+    if (is_dir(str_new(input, strlen(input))) == 1) {
+        stiva_err_print(STIVA_ERR_IO, _rt_cat2("not a regular file: ", input));
+        return CMDIT_EXIT_RUN;
+    }
+    # Read one byte PAST the limit so saturation is unambiguous: n > the
+    # limit means there was more file, n == the limit means it fit exactly.
+    # (Reading exactly `limit` bytes cannot distinguish the two, which is why
+    # the first cut of this guard rejected a complete 1048575-byte input.)
+    var buf = alloc(1048578);
+    var n = file_read_all(input, buf, 1048577);
     if (n < 0) { stiva_err_print(STIVA_ERR_IO, input); return CMDIT_EXIT_RUN; }
+    # Truncating silently produces a plausible-but-wrong Stivafile — or, on
+    # the compose path, a baffling YAML parse error pointing at a line the
+    # user can see is fine — so refuse instead.
+    if (n > 1048576) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+        _rt_cat2("input exceeds the 1 MiB convert limit: ", input));
+        return CMDIT_EXIT_RUN;
+    }
     store8(buf + n, 0);
 
     var fmt = cmdit_get_str(vh, f_fmt);
@@ -135,10 +159,11 @@ fn _cli_convert(h) {
             return CMDIT_EXIT_RUN;
         }
     } elif (streq(fmt, "compose") == 1) {
-        _cli_puts("stiva convert --format compose: not yet implemented in the Cyrius port\n");
-        _cli_puts("  (compose_yaml_to_toml needs a Cyrius YAML parser — deferred to v3.1;\n");
-        _cli_puts("   use --format dockerfile for now)\n");
-        return CMDIT_EXIT_RUN;
+        toml = compose_yaml_to_toml(buf);
+        if (toml == 0) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE, compose_last_error());
+            return CMDIT_EXIT_RUN;
+        }
     } else {
         _cli_puts("stiva convert: unknown format (expected 'compose' or 'dockerfile')\n");
         return CMDIT_EXIT_USAGE;
@@ -161,8 +186,8 @@ fn _cli_convert(h) {
 # ready (single-threaded run-to-completion + a blocking sandhi HTTP client), so
 # these are synchronous/blocking work on the v3.0.x runtime-completion line
 # (registry pull/push, container manager, exec/CRIU) — NOT async and NOT v3.1.
-# The small genuinely-blocked residue (detached `run -d`, `convert compose`) is
-# v3.1. See docs/development/roadmap.md.
+# The small genuinely-blocked residue (detached `run -d`, interactive
+# `exec -it`) is v3.1. See docs/development/roadmap.md.
 fn _cli_deferred(verb_name) {
     _cli_puts("stiva ");
     _cli_puts(verb_name);
@@ -509,11 +534,21 @@ fn _cli_find_container(root, id) {
     return c;
 }
 
-# `logs <container> [-n N]` — show a container's captured output (rust-old:
-# Commands::Logs → log_tail). N = last N lines (0 = all).
+# `logs <container> [-n N] [--scan]` — show a container's captured output
+# (rust-old: Commands::Logs → log_tail). N = last N lines (0 = all).
+#
+# `--scan` routes the body through runtime.cyr's scan_output (kavach's
+# externalization gate) before printing: secrets are redacted at WARN, and a
+# QUARANTINE/BLOCK verdict refuses to print at all. The oracle gates this on
+# a PERSISTED `container.config.scan_policy` (rust-old/src/container.rs:1210-
+# 1222), but the Cyrius port zeroes that field on save/load (container.cyr
+# TODO(v3.1)), so it is an explicit opt-in flag here rather than a silent
+# record-driven default. Off by default — scanning changes what `logs` prints,
+# and that must never happen behind the operator's back.
 fn _cli_logs(h, root) {
     var vh = cmdit_new("stiva logs");
     var f_tail = cmdit_int(vh, 110, "tail", 0, "Show only the last N lines (0 = all)");
+    var f_scan = cmdit_bool(vh, 0, "scan", "Scan output for secrets/PII before printing (redacts, or refuses)");
     var vr = cmdit_parse_verb(vh, h);
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
@@ -524,7 +559,16 @@ fn _cli_logs(h, root) {
     var cc: Container = c;
     var logpath = _rt_cat3(root, "/containers/", _rt_cat2(cc.id, "/container.log"));
     var out = container_log_tail(logpath, cmdit_get_int(vh, f_tail));
-    if (out != 0) { _cli_puts(out); }
+    if (out == 0) { return CMDIT_EXIT_OK; }
+    if (cmdit_get_bool(vh, f_scan) == 1) {
+        # Synthesize the ContainerExecResult the gate expects — the oracle
+        # does the same at container.rs:1213-1219 (exit_code 0, empty stderr).
+        var sres = scan_output(container_exec_result_new(0, out, "", 0, 0),
+        ext_policy_default());
+        if (sres == 0) { return CMDIT_EXIT_RUN; }   # detail printed by scan_output
+        out = load64(sres + 8);                     # scanned.stdout, raw offset
+    }
+    _cli_puts(out);
     return CMDIT_EXIT_OK;
 }
 
