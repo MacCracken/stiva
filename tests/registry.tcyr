@@ -1,0 +1,351 @@
+# stiva test suite — registry client (roadmap §B)
+#
+# Split from tests/store.tcyr with the IDENTICAL 6-module include set: the same
+# closure means the same struct-id assignment (no new unit shape to re-verify
+# against the open cycc 20/21 bug), while keeping store.tcyr's budget flat.
+#
+# Covers: the manifest-list/platform JSON parsers, registry URL construction,
+# and the bearer token cache. Every test here is OFFLINE — no socket is opened.
+# The network-touching paths are driven through a canned transport seam, which
+# is what makes the oracle's 27 wiremock cases portable to a suite that has
+# never opened a connection.
+#
+# Oracle: rust-old/src/registry.rs.
+# Stdlib auto-included via cyrius.cyml.
+
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+
+# Substring-present helper (this stdlib strstr returns a 0-based INDEX, -1 absent).
+fn _rg_contains(hay, needle) {
+    if (strstr(hay, needle) >= 0) { return 1; }
+    return 0;
+}
+
+# Parse a JSON cstr into a bayan value graph.
+fn _rg_parse(s) {
+    return bayan_json_v_parse_str(s, strlen(s));
+}
+
+# The OCI manifest media type, as a fixture fragment (keeps JSON literals short).
+fn _rg_mt() {
+    return "\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",";
+}
+
+# ══ Inc-0: index / platform JSON parsing ════════════════════════
+
+fn test_rg_platform_from_jv() {
+    test_group("rg_platform_from_jv");
+    var p: Platform = platform_from_jv(_rg_parse("{\"architecture\":\"amd64\",\"os\":\"linux\"}"));
+    assert_neq(p, 0, "minimal platform parses");
+    assert_eq(streq(p.architecture, "amd64"), 1, "architecture");
+    assert_eq(streq(p.os, "linux"), 1, "os");
+    assert_eq(p.variant, 0, "variant absent -> 0");
+    assert_eq(p.os_version, 0, "os.version absent -> 0");
+    # optional fields, incl. the dotted `os.version` key
+    var q: Platform = platform_from_jv(_rg_parse(
+    "{\"architecture\":\"arm\",\"os\":\"linux\",\"variant\":\"v7\",\"os.version\":\"10.0.1\"}"));
+    assert_eq(streq(q.variant, "v7"), 1, "variant");
+    assert_eq(streq(q.os_version, "10.0.1"), 1, "os.version (dotted key)");
+    # architecture/os are required
+    assert_eq(platform_from_jv(_rg_parse("{\"os\":\"linux\"}")), 0, "missing architecture -> 0");
+    assert_eq(platform_from_jv(_rg_parse("{\"architecture\":\"amd64\"}")), 0, "missing os -> 0");
+    # a non-object (or absent) yields 0, not a crash
+    assert_eq(platform_from_jv(_rg_parse("[]")), 0, "non-object -> 0");
+    assert_eq(platform_from_jv(0), 0, "null -> 0");
+    return 0;
+}
+
+fn test_rg_platform_manifest_from_jv() {
+    test_group("rg_platform_manifest_from_jv");
+    var eb = str_builder_new();
+    str_builder_add_cstr(eb, "{");
+    str_builder_add_cstr(eb, _rg_mt());
+    str_builder_add_cstr(eb, "\"digest\":\"sha256:aaa\",\"size\":528,");
+    str_builder_add_cstr(eb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}");
+    var e: PlatformManifest = platform_manifest_from_jv(_rg_parse(str_cstr(str_builder_build(eb))));
+    assert_neq(e, 0, "entry parses");
+    assert_eq(streq(e.digest, "sha256:aaa"), 1, "digest");
+    assert_eq(e.size, 528, "size");
+    assert_neq(e.platform, 0, "platform attached");
+    # platform is optional
+    var e2: PlatformManifest = platform_manifest_from_jv(_rg_parse(
+    "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb\",\"size\":1}"));
+    assert_neq(e2, 0, "entry without platform parses");
+    assert_eq(e2.platform, 0, "platform absent -> 0");
+    # the three required fields are tag-guarded
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"digest\":\"sha256:x\",\"size\":1}")), 0, "no mediaType -> 0");
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"size\":1}")), 0, "no digest -> 0");
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\"}")), 0, "no size -> 0");
+    # a STRING size is rejected, not silently coerced to 0
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\",\"size\":\"1\"}")), 0,
+    "string size rejected");
+    return 0;
+}
+
+fn test_rg_oci_index_from_jv() {
+    test_group("rg_oci_index_from_jv");
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"schemaVersion\":2,");
+    str_builder_add_cstr(sb, "\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[");
+    str_builder_add_cstr(sb, "{");
+    str_builder_add_cstr(sb, _rg_mt());
+    str_builder_add_cstr(sb, "\"digest\":\"sha256:amd\",\"size\":100,");
+    str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},");
+    str_builder_add_cstr(sb, "{");
+    str_builder_add_cstr(sb, _rg_mt());
+    str_builder_add_cstr(sb, "\"digest\":\"sha256:arm\",\"size\":200,");
+    str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}");
+    var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
+    assert_neq(idx, 0, "index parses");
+    assert_eq(idx.schema_version, 2, "schemaVersion");
+    assert_eq(_rg_contains(idx.media_type, "image.index"), 1, "mediaType");
+    assert_eq(vec_len(idx.manifests), 2, "two entries");
+
+    # select_platform now sees real registry bytes for the first time.
+    var want = platform_new("amd64", "linux", 0, 0);
+    var sel: PlatformManifest = select_platform(idx, want);
+    assert_neq(sel, 0, "amd64 selected");
+    assert_eq(streq(sel.digest, "sha256:amd"), 1, "picked the amd64 entry");
+    var want2 = platform_new("arm64", "linux", 0, 0);
+    var sel2: PlatformManifest = select_platform(idx, want2);
+    assert_eq(streq(sel2.digest, "sha256:arm"), 1, "picked the arm64 entry");
+    # a platform not in the index -> 0 (UnsupportedPlatform at the caller)
+    assert_eq(select_platform(idx, platform_new("s390x", "linux", 0, 0)), 0, "absent platform -> 0");
+    return 0;
+}
+
+fn test_rg_oci_index_hostile_entries() {
+    test_group("rg_oci_index_hostile_entries");
+    # DIVERGENCE from the oracle's serde-strict decode: one malformed entry is
+    # dropped, not fatal — a remote registry must not be able to fail an
+    # otherwise-valid pull with a single junk element.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{\"schemaVersion\":2,\"manifests\":[");
+    str_builder_add_cstr(sb, "{\"junk\":true},");
+    str_builder_add_cstr(sb, "{\"mediaType\":\"m\",\"digest\":\"sha256:good\",\"size\":10},");
+    str_builder_add_cstr(sb, "\"not-an-object\"]}");
+    var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
+    assert_neq(idx, 0, "index still parses");
+    assert_eq(vec_len(idx.manifests), 1, "only the valid entry survives");
+    # a missing `manifests` is an empty index, not an error (serde Vec default)
+    var empty: OciIndex = oci_index_from_jv(_rg_parse("{\"schemaVersion\":2}"));
+    assert_neq(empty, 0, "no manifests key still parses");
+    assert_eq(vec_len(empty.manifests), 0, "empty manifest list");
+    assert_eq(oci_index_from_jv(_rg_parse("[]")), 0, "non-object -> 0");
+    return 0;
+}
+
+fn test_rg_body_is_index() {
+    test_group("rg_body_is_index");
+    # The structural sniff used when Content-Type is absent/unhelpful.
+    assert_eq(_reg_body_is_index(_rg_parse("{\"manifests\":[]}")), 1, "manifests array -> index");
+    assert_eq(_reg_body_is_index(_rg_parse("{\"config\":{},\"layers\":[]}")), 0, "config -> manifest");
+    assert_eq(_reg_body_is_index(_rg_parse("{\"manifests\":\"nope\"}")), 0, "non-array manifests -> not index");
+    assert_eq(_reg_body_is_index(_rg_parse("[]")), 0, "non-object -> 0");
+    return 0;
+}
+
+fn test_rg_manifest_schema_version_guard() {
+    test_group("rg_manifest_schema_version_guard");
+    # Regression: schemaVersion was read unguarded, and bayan's json_v_int
+    # returns 0 for a non-INT tag — so a registry sending "2" as a STRING
+    # silently produced schema_version 0.
+    var good: OciManifest = oci_manifest_from_jv(_rg_parse(
+    "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c\",\"size\":1},\"layers\":[]}"));
+    assert_neq(good, 0, "manifest parses");
+    assert_eq(good.schema_version, 2, "int schemaVersion read");
+    var bad: OciManifest = oci_manifest_from_jv(_rg_parse(
+    "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c\",\"size\":1},\"layers\":[]}"));
+    assert_neq(bad, 0, "still parses (config is what matters)");
+    # the guard leaves the constructor default rather than clobbering it to 0
+    assert_eq(bad.schema_version, 2, "string schemaVersion does not clobber the default");
+    return 0;
+}
+
+# ══ Inc-1: client construction + URL building ════════════════════
+
+fn _rg_ref(registry, repo, tag) {
+    return image_ref_new(registry, repo, tag, 0);
+}
+
+fn test_rg_api_base() {
+    test_group("rg_api_base");
+    var c = registry_client_new();
+    assert_neq(c, 0, "client built");
+    # docker.io is rewritten to registry-1.docker.io (registry_host).
+    assert_eq(streq(_reg_api_base(c, _rg_ref("docker.io", "library/nginx", "latest")),
+    "https://registry-1.docker.io"), 1, "docker.io rewritten");
+    assert_eq(streq(_reg_api_base(c, _rg_ref("ghcr.io", "o/r", "v1")),
+    "https://ghcr.io"), 1, "ghcr.io as-is");
+    # a host:port registry is left alone
+    assert_eq(streq(_reg_api_base(c, _rg_ref("localhost:5000", "r", "v1")),
+    "https://localhost:5000"), 1, "host:port preserved");
+    # the base_url override wins outright, ignoring the registry entirely
+    var t = registry_client_with_base_url("http://127.0.0.1:5999");
+    assert_eq(streq(_reg_api_base(t, _rg_ref("docker.io", "library/nginx", "latest")),
+    "http://127.0.0.1:5999"), 1, "base_url overrides");
+    return 0;
+}
+
+fn test_rg_urls() {
+    test_group("rg_urls");
+    var c = registry_client_with_base_url("http://reg");
+    var r = _rg_ref("ghcr.io", "acme/app", "v1");
+    assert_eq(streq(_reg_manifest_url(c, r), "http://reg/v2/acme/app/manifests/v1"), 1, "manifest by tag");
+    assert_eq(streq(_reg_blob_url(c, r, "sha256:abc"), "http://reg/v2/acme/app/blobs/sha256:abc"), 1, "blob");
+    assert_eq(streq(_reg_uploads_url(c, r), "http://reg/v2/acme/app/blobs/uploads/"), 1, "uploads (trailing slash)");
+    assert_eq(streq(_reg_tags_url(c, r), "http://reg/v2/acme/app/tags/list"), 1, "tags");
+    assert_eq(streq(_reg_referrers_url(c, r, "sha256:d"), "http://reg/v2/acme/app/referrers/sha256:d"), 1, "referrers");
+    # a digest pins over the tag on the manifest URL
+    var pinned = image_ref_new("ghcr.io", "acme/app", "v1", "sha256:pin");
+    assert_eq(streq(_reg_manifest_url(c, pinned), "http://reg/v2/acme/app/manifests/sha256:pin"), 1,
+    "digest wins over tag");
+    return 0;
+}
+
+fn test_rg_scopes_and_accept() {
+    test_group("rg_scopes_and_accept");
+    var r = _rg_ref("ghcr.io", "acme/app", "v1");
+    assert_eq(streq(_reg_pull_scope(r), "repository:acme/app:pull"), 1, "pull scope");
+    # the spec's order is push,pull — not pull,push
+    assert_eq(streq(_reg_push_scope(r), "repository:acme/app:push,pull"), 1, "push scope");
+    var a = _reg_manifest_accept();
+    assert_eq(_rg_contains(a, "image.manifest.v1+json"), 1, "accepts OCI manifest");
+    assert_eq(_rg_contains(a, "image.index.v1+json"), 1, "accepts OCI index");
+    assert_eq(_rg_contains(a, "distribution.manifest.v2+json"), 1, "accepts docker v2");
+    assert_eq(_rg_contains(a, "distribution.manifest.list.v2+json"), 1, "accepts docker list");
+    return 0;
+}
+
+fn test_rg_location_and_digest_query() {
+    test_group("rg_location_and_digest_query");
+    # an absolute Location is used as-is; a path is joined to the base
+    assert_eq(streq(_reg_resolve_location("https://reg", "https://cdn/upload/1"), "https://cdn/upload/1"), 1,
+    "absolute location kept");
+    assert_eq(streq(_reg_resolve_location("https://reg", "/v2/x/blobs/uploads/1"),
+    "https://reg/v2/x/blobs/uploads/1"), 1, "relative location joined");
+    # the query separator flips once the URL already carries one
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1", "sha256:a"),
+    "https://reg/up/1?digest=sha256:a"), 1, "first query param uses ?");
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz", "sha256:a"),
+    "https://reg/up/1?_state=xyz&digest=sha256:a"), 1, "subsequent uses &");
+    return 0;
+}
+
+fn test_rg_api_bases_mirrors() {
+    test_group("rg_api_bases_mirrors");
+    # mirrors first, the canonical base always last (parity port; NOT wired —
+    # api_bases is dead code in the oracle too).
+    var mirrors = vec_new();
+    vec_push(mirrors, "https://mirror.internal");
+    var c = registry_client_with_config(registry_config_new(0, 0, mirrors));
+    var bases = _reg_api_bases(c, _rg_ref("ghcr.io", "a/b", "v1"));
+    assert_eq(vec_len(bases), 2, "mirror + canonical");
+    assert_eq(streq(vec_get(bases, 0), "https://mirror.internal"), 1, "mirror first");
+    assert_eq(streq(vec_get(bases, 1), "https://ghcr.io"), 1, "canonical last");
+    # no mirrors configured -> just the canonical base
+    var plain = _reg_api_bases(registry_client_new(), _rg_ref("quay.io", "a/b", "v1"));
+    assert_eq(vec_len(plain), 1, "no mirrors -> one base");
+    return 0;
+}
+
+# ══ Inc-2: token cache ══════════════════════════════
+
+fn test_rg_cache_key_scope_separation() {
+    test_group("rg_cache_key_scope_separation");
+    # THE regression this test exists for: the oracle joins registry+scope with
+    # a NUL byte. Cyrius maps are cstr-keyed, so a NUL-joined key would compare
+    # equal for every scope on the same registry — a push would silently reuse a
+    # pull-scoped token and 401 with no retry.
+    var pull = _reg_cache_key("ghcr.io", "repository:a/b:pull");
+    var push = _reg_cache_key("ghcr.io", "repository:a/b:push,pull");
+    assert_eq(streq(pull, push), 0, "pull and push keys differ");
+    # and both survive a real map round-trip as distinct entries
+    var c = registry_client_new();
+    _reg_cache_token_at(c, pull, "tok-pull", 0);
+    _reg_cache_token_at(c, push, "tok-push", 0);
+    assert_eq(streq(_reg_get_cached_token_at(c, pull, 1), "tok-pull"), 1, "pull token distinct");
+    assert_eq(streq(_reg_get_cached_token_at(c, push, 1), "tok-push"), 1, "push token distinct");
+    # different registries stay separate too
+    assert_eq(_reg_get_cached_token_at(c, _reg_cache_key("quay.io", "repository:a/b:pull"), 1), 0,
+    "other registry not found");
+    return 0;
+}
+
+fn test_rg_token_cache_expiry() {
+    test_group("rg_token_cache_expiry");
+    var c = registry_client_new();
+    var k = _reg_cache_key("ghcr.io", "repository:a/b:pull");
+    assert_eq(_reg_get_cached_token_at(c, k, 0), 0, "empty cache -> 0");
+    _reg_cache_token_at(c, k, "tok", 1000);
+    # live just before the deadline...
+    assert_eq(streq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS - 1), "tok"), 1,
+    "valid before expiry");
+    # ...and gone at/after it (the TTL is 270s, despite the oracle's "5 minutes" comment)
+    assert_eq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS), 0, "expired at the deadline");
+    assert_eq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS + 1), 0, "expired after");
+    # re-caching revives it
+    _reg_cache_token_at(c, k, "tok2", 1000 + _REG_TOKEN_TTL_NS);
+    assert_eq(streq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS + 1), "tok2"), 1, "re-cached");
+    return 0;
+}
+
+fn test_rg_token_url_and_basic_auth() {
+    test_group("rg_token_url_and_basic_auth");
+    assert_eq(streq(_reg_token_url("https://auth.example.com/token", "registry.example.com",
+    "repository:a/b:pull"),
+    "https://auth.example.com/token?scope=repository:a/b:pull&service=registry.example.com"), 1,
+    "realm + scope + service");
+    # service is optional
+    assert_eq(streq(_reg_token_url("https://auth/token", 0, "repository:a/b:pull"),
+    "https://auth/token?scope=repository:a/b:pull"), 1, "no service");
+    # RFC 4648 base64 of "user:pass"
+    assert_eq(streq(_reg_basic_auth_header("user", "pass"), "Basic dXNlcjpwYXNz"), 1, "basic auth header");
+    assert_eq(_reg_basic_auth_header(0, "pass"), 0, "no username -> no header");
+    return 0;
+}
+
+fn test_rg_token_from_body() {
+    test_group("rg_token_from_body");
+    var a = "{\"token\":\"abc123\"}";
+    assert_eq(streq(_reg_token_from_body(a, strlen(a)), "abc123"), 1, "token key");
+    # the access_token fallback (GitLab/Quay style)
+    var b = "{\"access_token\":\"xyz789\"}";
+    assert_eq(streq(_reg_token_from_body(b, strlen(b)), "xyz789"), 1, "access_token fallback");
+    # `token` wins when both are present
+    var c = "{\"access_token\":\"second\",\"token\":\"first\"}";
+    assert_eq(streq(_reg_token_from_body(c, strlen(c)), "first"), 1, "token preferred");
+    var d = "{\"expires_in\":300}";
+    assert_eq(_reg_token_from_body(d, strlen(d)), 0, "no token key -> 0");
+    var e = "not json";
+    assert_eq(_reg_token_from_body(e, strlen(e)), 0, "malformed -> 0");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    test_rg_platform_from_jv();
+    test_rg_platform_manifest_from_jv();
+    test_rg_oci_index_from_jv();
+    test_rg_oci_index_hostile_entries();
+    test_rg_body_is_index();
+    test_rg_manifest_schema_version_guard();
+    test_rg_api_base();
+    test_rg_urls();
+    test_rg_scopes_and_accept();
+    test_rg_location_and_digest_query();
+    test_rg_api_bases_mirrors();
+    test_rg_cache_key_scope_separation();
+    test_rg_token_cache_expiry();
+    test_rg_token_url_and_basic_auth();
+    test_rg_token_from_body();
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

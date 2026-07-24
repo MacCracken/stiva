@@ -270,8 +270,11 @@ fn oci_manifest_from_jv(v) {
     }
     var m = oci_manifest_new(cfg, layers);
     var mm: OciManifest = m;
+    # Guard the tag like every sibling field does. bayan's json_v_int returns 0
+    # for any non-INT tag, so an unguarded read silently turns a registry-sent
+    # `"schemaVersion": "2"` into 0 — and this parses attacker-controlled bytes.
     var svf = json_v_obj_get(v, "schemaVersion");
-    if (svf != 0) { mm.schema_version = json_v_int(svf); }
+    if (json_v_is_int(svf) == 1) { mm.schema_version = json_v_int(svf); }
     var mtf = json_v_obj_get(v, "mediaType");
     if (json_v_is_str(mtf) == 1) { mm.media_type = str_cstr(json_v_str(mtf)); }
     var atf = json_v_obj_get(v, "artifactType");
@@ -367,6 +370,87 @@ fn oci_index_new(media_type, manifests) {
     ii.media_type = media_type;
     ii.manifests = manifests;
     return idx;
+}
+
+# ── index / platform JSON parsing (rust-old: serde Deserialize) ──
+# `descriptor_from_jv` above deliberately drops `platform` (a Descriptor has no
+# such field); a manifest LIST needs it, so these three parse the index shape.
+# Required for `select_platform` to ever see real registry bytes.
+
+# Platform from a JSON object (rust-old: registry.rs:131-139).
+# `architecture` + `os` are required; `variant`/`os.version` optional.
+#[must_use]
+fn platform_from_jv(v) {
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var af = json_v_obj_get(v, "architecture");
+    var of = json_v_obj_get(v, "os");
+    if (json_v_is_str(af) == 0) { return 0; }
+    if (json_v_is_str(of) == 0) { return 0; }
+    var variant = 0;
+    var vf = json_v_obj_get(v, "variant");
+    if (json_v_is_str(vf) == 1) { variant = str_cstr(json_v_str(vf)); }
+    var osver = 0;
+    var ovf = json_v_obj_get(v, "os.version");
+    if (json_v_is_str(ovf) == 1) { osver = str_cstr(json_v_str(ovf)); }
+    return platform_new(str_cstr(json_v_str(af)), str_cstr(json_v_str(of)), variant, osver);
+}
+
+# One manifest-list entry (rust-old: registry.rs:121-128). mediaType/digest/size
+# required (tag-guarded like descriptor_from_jv); `platform` optional.
+#[must_use]
+fn platform_manifest_from_jv(v) {
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var mtf = json_v_obj_get(v, "mediaType");
+    var df = json_v_obj_get(v, "digest");
+    var sf = json_v_obj_get(v, "size");
+    if (json_v_is_str(mtf) == 0) { return 0; }
+    if (json_v_is_str(df) == 0) { return 0; }
+    if (json_v_is_int(sf) == 0) { return 0; }
+    return platform_manifest_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(df)),
+    json_v_int(sf), platform_from_jv(json_v_obj_get(v, "platform")));
+}
+
+# A manifest list / image index (rust-old: registry.rs:111-118).
+#
+# DIVERGENCE from the oracle's serde-strict decode: a malformed ENTRY is dropped
+# rather than failing the whole index. This parses bytes a remote registry
+# controls, and one junk entry must not be able to fail an otherwise-valid pull
+# — the same hostile-input posture as the tar reader's name checks. A missing or
+# non-array `manifests` still yields an empty index (not an error), matching the
+# oracle's `Vec` default.
+#[must_use]
+fn oci_index_from_jv(v) {
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var manifests = vec_new();
+    var mf = json_v_obj_get(v, "manifests");
+    if (json_v_is_arr(mf) == 1) {
+        var n = json_v_arr_len(mf);
+        var i = 0;
+        while (i < n) {
+            var e = platform_manifest_from_jv(json_v_arr_get(mf, i));
+            if (e != 0) { vec_push(manifests, e); }
+            i = i + 1;
+        }
+    }
+    var mt = 0;
+    var mtf = json_v_obj_get(v, "mediaType");
+    if (json_v_is_str(mtf) == 1) { mt = str_cstr(json_v_str(mtf)); }
+    var idx = oci_index_new(mt, manifests);
+    var ii: OciIndex = idx;
+    var svf = json_v_obj_get(v, "schemaVersion");
+    if (json_v_is_int(svf) == 1) { ii.schema_version = json_v_int(svf); }
+    return idx;
+}
+
+# True (1) iff a parsed body looks like an index rather than a single manifest.
+# Structural sniff used when Content-Type is absent or unhelpful: an index has
+# `manifests` (array), a manifest has `config` (object). The oracle dispatches on
+# Content-Type alone and mis-parses an index sent without one.
+#[must_use]
+fn _reg_body_is_index(v) {
+    if (json_v_is_obj(v) == 0) { return 0; }
+    if (json_v_is_arr(json_v_obj_get(v, "manifests")) == 1) { return 1; }
+    return 0;
 }
 
 # ── RegistryCredential (rust-old: struct RegistryCredential) ────
@@ -855,3 +939,281 @@ fn credential_store_to_config(store, registry) {
 # These require an HTTP client, async runtime, a JSON object model, and a
 # credential-file (de)serializer — none present in the ported base. They
 # land with the transport layer for parity. Tracked in the roadmap.
+
+# ══ RegistryClient (roadmap §B) ═══════════════════════════
+# The blocking client over sandhi's HTTPS transport. `Arc<RwLock<HashMap>>`
+# collapses to a plain map (single-node run-to-completion), so no locking.
+#
+# ── Why offset accessors and not `struct` declarations ──
+# The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile is STILL OPEN and moves
+# with each compilation unit's struct-id assignment. Declaring new structs in
+# this file would RENUMBER struct ids in all five units that include it and
+# could move the collision onto a currently-clean struct. Adding zero structs
+# makes §B provably unable to perturb the existing assignment. Same idiom as
+# lib/sandhi.cyr's SANDHI_*_OFF enums.
+
+# RegistryClient layout — 32 bytes.
+#   REG_CL_CONFIG    @0  — RegistryConfig* | 0
+#   REG_CL_TOKENS    @8  — map: cache-key cstr -> AuthToken*
+#   REG_CL_BASE_URL  @16 — cstr | 0; overrides https://{host}. This is the
+#                          oracle's #[cfg(test)] base_url, promoted to a real
+#                          field so the CLI can target a self-hosted registry.
+#   REG_CL_TRANSPORT @24 — 0 = live sandhi; else a canned transport (test seam)
+enum RegClientOff {
+    REG_CL_CONFIG = 0;
+    REG_CL_TOKENS = 8;
+    REG_CL_BASE_URL = 16;
+    REG_CL_TRANSPORT = 24;
+}
+
+# AuthToken layout — 16 bytes (rust-old: struct AuthToken).
+enum RegTokenOff {
+    REG_TOK_TOKEN = 0;        # cstr
+    REG_TOK_EXPIRES_NS = 8;   # monotonic ns deadline; 0 = never expires
+}
+
+# Registry tokens are short-lived; the oracle caches for 270 s (its comment says
+# 5 minutes, the code says 270 — the code wins).
+var _REG_TOKEN_TTL_NS = 270000000000;
+
+fn registry_client_new() {
+    return registry_client_with_config(registry_config_default());
+}
+
+fn registry_client_with_config(config) {
+    var c = alloc(32);
+    if (c == 0) { return 0; }
+    store64(c + REG_CL_CONFIG, config);
+    store64(c + REG_CL_TOKENS, map_new());
+    store64(c + REG_CL_BASE_URL, 0);
+    store64(c + REG_CL_TRANSPORT, 0);
+    return c;
+}
+
+# Point the client at an explicit base URL (e.g. http://localhost:5000),
+# replacing `https://{registry_host}` everywhere. In the oracle this is
+# `#[cfg(test)]`-only; here it is a real field so the CLI can target a local or
+# self-hosted registry, and so tests can drive the client without a socket.
+fn registry_client_with_base_url(base_url) {
+    var c = registry_client_new();
+    if (c == 0) { return 0; }
+    store64(c + REG_CL_BASE_URL, base_url);
+    return c;
+}
+
+#[must_use]
+fn registry_client_config(client) { return load64(client + REG_CL_CONFIG); }
+
+# ── URL construction (rust-old: api_base / api_bases + the per-call formats) ──
+
+# The API base for an image's registry (rust-old: api_base, registry.rs:348).
+# The base_url override wins outright; otherwise https:// + the rewritten host
+# (registry_host maps docker.io -> registry-1.docker.io).
+#[must_use]
+fn _reg_api_base(client, ref) {
+    var b = load64(client + REG_CL_BASE_URL);
+    if (b != 0) { return b; }
+    var rr: ImageRef = ref;
+    return _reg_cat2("https://", registry_host(rr.registry));
+}
+
+# Every base to try, mirrors first (rust-old: api_bases, registry.rs:358).
+# NOTE: dead code in the oracle too — `#[allow(dead_code)]`, never consulted by
+# any request path. Ported for parity; deliberately NOT wired (wiring it would
+# be a behavior change, not a port). Tracked in the roadmap.
+#[must_use]
+fn _reg_api_bases(client, ref) {
+    var out = vec_new();
+    var cfg = load64(client + REG_CL_CONFIG);
+    if (cfg != 0) {
+        var cc: RegistryConfig = cfg;
+        if (cc.mirrors != 0) {
+            var n = vec_len(cc.mirrors);
+            var i = 0;
+            while (i < n) { vec_push(out, vec_get(cc.mirrors, i)); i = i + 1; }
+        }
+    }
+    vec_push(out, _reg_api_base(client, ref));
+    return out;
+}
+
+# "{base}/v2/{repository}/manifests/{reference}". A digest pins over a tag
+# (rust-old: registry.rs:384-388).
+#[must_use]
+fn _reg_manifest_url(client, ref) {
+    var rr: ImageRef = ref;
+    var reference = rr.digest;
+    if (reference == 0) { reference = rr.tag; }
+    var u = _reg_cat2(_reg_api_base(client, ref), "/v2/");
+    u = _reg_cat2(u, rr.repository);
+    u = _reg_cat2(u, "/manifests/");
+    return _reg_cat2(u, reference);
+}
+
+# "{base}/v2/{repository}/blobs/{digest}" (rust-old: registry.rs:468-472).
+#[must_use]
+fn _reg_blob_url(client, ref, digest) {
+    var rr: ImageRef = ref;
+    var u = _reg_cat2(_reg_api_base(client, ref), "/v2/");
+    u = _reg_cat2(u, rr.repository);
+    u = _reg_cat2(u, "/blobs/");
+    return _reg_cat2(u, digest);
+}
+
+# "{base}/v2/{repository}/blobs/uploads/" — the trailing slash is required by
+# the distribution spec (rust-old: registry.rs:588).
+#[must_use]
+fn _reg_uploads_url(client, ref) {
+    var rr: ImageRef = ref;
+    var u = _reg_cat2(_reg_api_base(client, ref), "/v2/");
+    u = _reg_cat2(u, rr.repository);
+    return _reg_cat2(u, "/blobs/uploads/");
+}
+
+# "{base}/v2/{repository}/tags/list" (rust-old: registry.rs:812).
+#[must_use]
+fn _reg_tags_url(client, ref) {
+    var rr: ImageRef = ref;
+    var u = _reg_cat2(_reg_api_base(client, ref), "/v2/");
+    u = _reg_cat2(u, rr.repository);
+    return _reg_cat2(u, "/tags/list");
+}
+
+# "{base}/v2/{repository}/referrers/{digest}" (rust-old: registry.rs:878).
+#[must_use]
+fn _reg_referrers_url(client, ref, digest) {
+    var rr: ImageRef = ref;
+    var u = _reg_cat2(_reg_api_base(client, ref), "/v2/");
+    u = _reg_cat2(u, rr.repository);
+    u = _reg_cat2(u, "/referrers/");
+    return _reg_cat2(u, digest);
+}
+
+# The bearer scopes (rust-old: registry.rs:400, :763). Order matters: the
+# distribution spec's push scope is "push,pull", not "pull,push".
+#[must_use]
+fn _reg_pull_scope(ref) {
+    var rr: ImageRef = ref;
+    return _reg_cat2(_reg_cat2("repository:", rr.repository), ":pull");
+}
+
+#[must_use]
+fn _reg_push_scope(ref) {
+    var rr: ImageRef = ref;
+    return _reg_cat2(_reg_cat2("repository:", rr.repository), ":push,pull");
+}
+
+# The Accept header for a manifest GET — all four types the client understands,
+# in the oracle's order (rust-old: registry.rs:390-396).
+#[must_use]
+fn _reg_manifest_accept() {
+    var a = _reg_cat2(media_oci_manifest(), ", ");
+    a = _reg_cat2(a, media_oci_index());
+    a = _reg_cat2(a, ", ");
+    a = _reg_cat2(a, media_manifest_v2());
+    a = _reg_cat2(a, ", ");
+    return _reg_cat2(a, media_manifest_list_v2());
+}
+
+# Resolve an upload Location against the API base (rust-old: registry.rs:600-604).
+# An absolute URL is used as-is; a path is appended to the base.
+#[must_use]
+fn _reg_resolve_location(base, location) {
+    if (location == 0) { return 0; }
+    if (strlen(location) >= 4) {
+        if (memeq(location, "http", 4) == 1) { return location; }
+    }
+    return _reg_cat2(base, location);
+}
+
+# Append ?digest= (or &digest=) to an upload URL (rust-old: registry.rs:607-608).
+#[must_use]
+fn _reg_append_digest_query(url, digest) {
+    var sep = "?";
+    if (_reg_find_byte(url, 63) >= 0) { sep = "&"; }   # '?'
+    return _reg_cat2(_reg_cat2(_reg_cat2(url, sep), "digest="), digest);
+}
+
+# ── Token cache (rust-old: get_cached_token / cache_token) ──
+#
+# DIVERGENCE, mandatory: the oracle keys on `format!("{}\0{}", registry, scope)`
+# — a NUL-separated Rust String. Cyrius maps are CSTR-keyed (lib/hashmap.cyr's
+# hash_str walks to the first NUL, and key equality is streq), so a NUL-joined
+# key would hash and compare as just the registry, COLLAPSING the pull and
+# push,pull scopes into one entry. A push would then reuse a pull-scoped token
+# and 401 with no retry (the PUT leg has no re-auth). '|' cannot occur in a
+# registry host or an OCI scope (repository names are [a-z0-9._/-]), so it is a
+# safe separator with identical semantics.
+#[must_use]
+fn _reg_cache_key(registry, scope) {
+    return _reg_cat2(_reg_cat2(registry, "|"), scope);
+}
+
+fn _reg_auth_token_new(token, expires_at_ns) {
+    var t = alloc(16);
+    store64(t + REG_TOK_TOKEN, token);
+    store64(t + REG_TOK_EXPIRES_NS, expires_at_ns);
+    return t;
+}
+
+# Cache a token with an explicit `now` (rust-old: cache_token, registry.rs:999).
+# The `_at` variant is the deterministic-expiry seam the tests drive — same
+# pattern as _credential_store_save_to.
+fn _reg_cache_token_at(client, key, token, now_ns) {
+    map_set(load64(client + REG_CL_TOKENS), key,
+    _reg_auth_token_new(token, now_ns + _REG_TOKEN_TTL_NS));
+    return 0;
+}
+
+fn _reg_cache_token(client, key, token) {
+    return _reg_cache_token_at(client, key, token, clock_now_ns());
+}
+
+# A cached, unexpired token for `key`, else 0 (rust-old: get_cached_token,
+# registry.rs:988). An expired entry is left in place, matching the oracle —
+# the next cache_token overwrites it.
+#[must_use]
+fn _reg_get_cached_token_at(client, key, now_ns) {
+    var tokens = load64(client + REG_CL_TOKENS);
+    if (map_has(tokens, key) == 0) { return 0; }
+    var t = map_get(tokens, key);
+    if (t == 0) { return 0; }
+    var exp = load64(t + REG_TOK_EXPIRES_NS);
+    if (exp != 0 && now_ns >= exp) { return 0; }
+    return load64(t + REG_TOK_TOKEN);
+}
+
+#[must_use]
+fn _reg_get_cached_token(client, key) {
+    return _reg_get_cached_token_at(client, key, clock_now_ns());
+}
+
+# "{realm}?scope={scope}[&service={service}]" (rust-old: registry.rs:513-516).
+#[must_use]
+fn _reg_token_url(realm, service, scope) {
+    var u = _reg_cat2(_reg_cat2(realm, "?scope="), scope);
+    if (service != 0) { u = _reg_cat2(_reg_cat2(u, "&service="), service); }
+    return u;
+}
+
+# "Basic {base64(user:pass)}" (rust-old: registry.rs:521 basic_auth).
+# NOTE: base64_encode returns a raw NUL-terminated cstr, not a Str.
+#[must_use]
+fn _reg_basic_auth_header(username, password) {
+    if (username == 0) { return 0; }
+    var raw = _reg_cat2(_reg_cat2(username, ":"), password);
+    return _reg_cat2("Basic ", base64_encode(raw, strlen(raw)));
+}
+
+# Pull the token out of a token-endpoint body: "token", else "access_token"
+# (rust-old: registry.rs:541-545). Returns a cstr, or 0 when neither is present.
+#[must_use]
+fn _reg_token_from_body(body, body_len) {
+    var v = bayan_json_v_parse_str(body, body_len);
+    if (v == 0) { return 0; }
+    var t = json_v_obj_get(v, "token");
+    if (json_v_is_str(t) == 1) { return str_cstr(json_v_str(t)); }
+    var a = json_v_obj_get(v, "access_token");
+    if (json_v_is_str(a) == 1) { return str_cstr(json_v_str(a)); }
+    return 0;
+}
