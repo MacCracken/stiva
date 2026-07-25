@@ -7,6 +7,10 @@
 #     + setup_overlay / teardown_overlay   (mkdir + overlay mount syscalls)
 #   mount_volumes                          (parse_volume + bind mount syscall)
 #
+# NET-NEW (no oracle counterpart): `flatten_layers` — the rootfs the container
+# actually gets when overlayfs is unavailable. See its header for why the
+# inherited "empty directory" fallback is not usable.
+#
 # Layer unpacking (unpack_layer / prepare_layers) is implemented on the Cyrius
 # stdlib `sankoch` gzip_decompress + zstd_decompress and a hand-rolled USTAR
 # tar reader. Both compressed layer media types the OCI image-spec defines are
@@ -21,8 +25,8 @@
 # becomes an integer sentinel here. parse_volume returns 0 (null) on an
 # invalid spec (rust-old: Err(StivaError::Storage(...)); caller reports via
 # stiva_err_print(STIVA_ERR_STORAGE, detail)). setup_overlay returns 0 on
-# no-layers / mount failure (caller: STIVA_ERR_OVERLAY). mount_volumes
-# returns -1 on failure (caller: STIVA_ERR_STORAGE).
+# no-layers / mount failure (caller: STIVA_ERR_OVERLAY). mount_volumes and
+# flatten_layers return -1 on failure (caller: STIVA_ERR_STORAGE).
 
 # ── small cstr helpers (parity-exact byte handling) ──────────────
 
@@ -813,6 +817,210 @@ fn prepare_layers(store, layers) {
         i = i + 1;
     }
     return layer_dirs;
+}
+
+# ── Layer FLATTEN — the rootfs when overlayfs is unavailable ──────
+# NET-NEW (no oracle): rust-old has no counterpart. `setup_overlay` needs
+# CAP_SYS_ADMIN and an overlayfs-capable kernel; when it fails, the oracle
+# falls back to a bare `container_root.join("rootfs")` and never puts anything
+# in it (rust-old/src/container.rs:366-369), so an unprivileged container runs
+# against an EMPTY directory. Flattening the already-unpacked layer dirs into
+# that directory is what makes the fallback a usable rootfs.
+#
+# Semantics match the overlayfs lowerdir stack this module builds: layers are
+# applied BOTTOM-TO-TOP and a later layer's entry replaces an earlier one.
+#
+# COPY, not hard-link. Hard links would share inodes with the store's `layers/`
+# cache, so the first write inside any container would corrupt the layer every
+# other container reads. That is the same reason Docker's `vfs` driver copies.
+#
+# WHITEOUTS ARE NOT APPLIED, deliberately. OCI `.wh.<name>` / `.wh..wh..opq`
+# markers are extracted literally by `_stor_extract_tar`, so overlayfs (which
+# understands only its own char-dev-0:0 whiteouts, not the tar convention) does
+# not honour them either. Applying them here alone would make an unprivileged
+# rootfs differ from a privileged one for the same image. It is a real gap —
+# a file deleted in an upper layer stays visible — but it belongs to BOTH paths
+# and is tracked as one item; see docs/development/roadmap.md.
+
+# Copy the BYTES of regular file `src` to `dst`, streaming through the caller's
+# `buf` (`buflen` bytes) so peak memory is one chunk no matter how large the file
+# is — unlike `_stor_read_file` + `file_write_all`, which would hold every file
+# of the tree at once in the bump arena (`alloc` never frees).
+#
+# Ownership and mode are the CALLER's job (lchown then chmod, in that order).
+# O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577, created 0o600 (384) so the file is
+# never even briefly world-readable while its real mode is still pending.
+# Returns 0 on success, -1 on any open/read/write failure.
+fn _stor_copy_file_streamed(src, dst, buf, buflen) {
+    var rfd = file_open(src, 0, 0);                # O_RDONLY
+    if (rfd < 0) { return 0 - 1; }
+    var wfd = file_open(dst, 577, 384);
+    if (wfd < 0) {
+        file_close(rfd);
+        return 0 - 1;
+    }
+    var rc = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_read(rfd, buf, buflen);
+        if (n < 0) { rc = 0 - 1; rgo = 0; }
+        else {
+            if (n == 0) { rgo = 0; }               # EOF
+            else {
+                # A short write is legal; drain the chunk before reading more.
+                var off = 0;
+                while (off < n) {
+                    var w = sys_write(wfd, buf + off, n - off);
+                    if (w <= 0) {
+                        rc = 0 - 1;
+                        off = n;                   # abandon the chunk
+                        rgo = 0;
+                    } else {
+                        off = off + w;
+                    }
+                }
+            }
+        }
+    }
+    file_close(wfd);
+    file_close(rfd);
+    return rc;
+}
+
+# Clear whatever currently occupies `path` so a higher layer's entry can take
+# it: a directory is removed recursively, anything else unlinked. Absent → no-op.
+# `sb` is a caller-owned 144-byte struct stat scratch. Always returns 0.
+fn _stor_replace_existing(path, sb) {
+    if (sys_lstat(path, sb) != 0) { return 0; }             # nothing there
+    if ((load64(sb + 24) & 61440) == 16384) {               # S_IFDIR
+        _stor_remove_dir_all(path);
+        return 0;
+    }
+    sys_unlink(path);
+    return 0;
+}
+
+# Merge the tree under `src` into `dst`, source entries winning over anything
+# already present (so calling this once per layer, bottom-to-top, yields the
+# overlay stack's view). Perms-preserving: real mode via chmod and uid/gid via
+# lchown (best-effort, needs root), chown BEFORE chmod because chown clears
+# setuid/setgid — the same ordering `_stor_extract_tar` uses. Symlinks are
+# recreated as links, never dereferenced.
+#
+# Linux struct stat: st_mode@24(u32) st_uid@28 st_gid@32; dirent64: d_reclen@16
+# d_name@19 — matching `_stor_tar_collect`. `cpbuf`/`cplen` is the shared file
+# copy buffer. Returns 0, or -1 if any entry could not be materialized.
+#
+# SECURITY: a directory replaces a same-named symlink left by a lower layer
+# instead of being descended through. Without that, a layer shipping `usr →
+# /etc` followed by one shipping `usr/passwd` would write outside the rootfs —
+# the escape `_stor_has_symlink_ancestor` blocks on the extraction side.
+fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
+    var fd = sys_open(src, 65536, 0);      # O_DIRECTORY (dir-only open)
+    if (fd < 0) { return 0 - 1; }
+    var buf = alloc(4096);
+    var sb = alloc(144);                    # struct stat
+    var rc = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var reclen = load16(buf + pos + 16);
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {                      # '.'
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                if (skip == 0) {
+                    # Copy the name out of the dirent buffer before recursing.
+                    var named = _stor_dup(nm);
+                    # `.unpacked` is prepare_layers' own bookkeeping marker, not
+                    # image content — it must not land in the container rootfs.
+                    if (streq(named, ".unpacked") == 1) { skip = 1; }
+                    if (skip == 0) {
+                        var s_child = _stor_join(src, named);
+                        var d_child = _stor_join(dst, named);
+                        if (sys_lstat(s_child, sb) == 0) {
+                            var st = load64(sb + 24);
+                            var perms = st & 4095;                        # & 0o7777
+                            var uid = (st >> 32) & 4294967295;            # st_uid
+                            var gid = load64(sb + 32) & 4294967295;       # st_gid
+                            var typ = st & 61440;                         # S_IFMT
+                            if (typ == 16384) {                           # S_IFDIR
+                                # Merge into an existing dir; displace anything else.
+                                if (sys_lstat(d_child, sb) == 0) {
+                                    if ((load64(sb + 24) & 61440) != 16384) { sys_unlink(d_child); }
+                                }
+                                sys_mkdir(d_child, 493);
+                                _stor_lchown(d_child, uid, gid);
+                                if (perms != 0) { sys_chmod(d_child, perms); }
+                                if (_stor_flatten_tree(s_child, d_child, cpbuf, cplen) != 0) {
+                                    rc = 0 - 1;
+                                }
+                            } else {
+                                if (typ == 40960) {                       # S_IFLNK
+                                    var tgt = alloc(1024);
+                                    var tn = sys_readlink(s_child, tgt, 1023);
+                                    if (tn < 0) { tn = 0; }
+                                    store8(tgt + tn, 0);
+                                    _stor_replace_existing(d_child, sb);
+                                    if (sys_symlink(tgt, d_child) != 0) { rc = 0 - 1; }
+                                    _stor_lchown(d_child, uid, gid);      # perms follow target
+                                } else {
+                                    if (typ == 32768) {                   # S_IFREG
+                                        _stor_replace_existing(d_child, sb);
+                                        if (_stor_copy_file_streamed(s_child, d_child, cpbuf, cplen) != 0) {
+                                            rc = 0 - 1;
+                                        }
+                                        _stor_lchown(d_child, uid, gid);
+                                        if (perms != 0) { sys_chmod(d_child, perms); }
+                                    }
+                                    # else: fifo/socket/device — skipped, as the
+                                    # tar reader and writer both skip them.
+                                }
+                            }
+                        }
+                    }
+                }
+                pos = pos + reclen;
+            }
+        }
+    }
+    sys_close(fd);
+    return rc;
+}
+
+# Flatten prepared `layer_dirs` (a vec of cstr dirs, bottom-to-top, as
+# `prepare_layers` returns) into `dest` — the container rootfs used when
+# `setup_overlay` could not mount. Creates `dest`, then merges each layer in
+# order so the top layer wins.
+#
+# An EMPTY layer vec succeeds with an empty `dest`: an image with no layers
+# genuinely has no filesystem, which is a different fact from a copy that
+# failed. (`setup_overlay` returns 0 for the same input because overlayfs
+# rejects a mount with no lowerdir, not because it is an error here.)
+#
+# Returns 0 on success, -1 on failure; the caller reports via
+# stiva_err_print(STIVA_ERR_STORAGE, detail) — the same convention as
+# parse_volume / setup_overlay / mount_volumes above.
+fn flatten_layers(layer_dirs, dest) {
+    var n = vec_len(layer_dirs);
+    _stor_mkdir_p(dest);
+    if (n == 0) { return 0; }
+    sakshi_info("flattening layers into rootfs", strlen("flattening layers into rootfs"));
+    var cpbuf = alloc(65536);
+    var i = 0;
+    while (i < n) {
+        if (_stor_flatten_tree(vec_get(layer_dirs, i), dest, cpbuf, 65536) != 0) {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # ── USTAR tar WRITER + export ─────────────────────

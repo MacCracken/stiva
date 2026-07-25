@@ -1,18 +1,19 @@
 # Benchmarks
 
-Latest: **2026-07-25T20:12:08Z** — commit `4ea6bec`
+Latest: **2026-07-25T20:36:42Z** — commit `3dfd1d5`
 
-Tracking: `3808225` (baseline) → `73437f2` (mid) → `4ea6bec` (current)
+Tracking: `3808225` (baseline) → `73437f2` (mid) → `3dfd1d5` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`73437f2`) | Current (`4ea6bec`) |
+| Benchmark | Baseline (`3808225`) | Mid (`73437f2`) | Current (`3dfd1d5`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 6.954 µs **-3%** | 6.981 µs **-3%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.347 µs **-3%** | 15.266 µs **-4%** |
-| `compose_yaml_to_toml` | — | 29.099 µs | 29.242 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.338 ms | 1.326 ms |
+| `oci_config_build+serialize` | 7.203 µs | 6.886 µs **-4%** | 6.937 µs **-4%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.182 µs **-4%** | 15.437 µs |
+| `compose_yaml_to_toml` | — | 29.084 µs | 29.119 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.322 ms | 1.334 ms |
+| `flatten_layers_2x60_files_4kib` | — | — | 1.358 ms |
 
 ---
 

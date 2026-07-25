@@ -102,6 +102,75 @@ fn main(): i64 {
     while (rc2 < 200) { compose_yaml_to_toml(rev_src); rc2 = rc2 + 1; }
     bench_batch_stop(brv, 200);
     bench_report(brv);
+
+    # flatten_layers — the rootfs materialized when overlayfs is unavailable.
+    # This is the one place stiva pays real disk I/O per container CREATE, so the
+    # opt-out (STIVA_ROOTFS_FALLBACK=none) is only justifiable if the cost is
+    # known. Two layers, 60 files of 4 KiB over 4 directories, with the upper
+    # layer overwriting 10 of the lower's — ~240 KiB moved per iteration.
+    #
+    # I/O bound, so the absolute number tracks the host filesystem (and page
+    # cache) more than the code; the CSV trend is what guards against a
+    # regression. The dest is NOT cleared between iterations on purpose: after
+    # the first, every entry goes down the replace-existing path, which is the
+    # steady state a multi-layer image actually exercises.
+    var fl0 = "/tmp/stiva_bench_flat_l0";
+    var fl1 = "/tmp/stiva_bench_flat_l1";
+    var fdst = "/tmp/stiva_bench_flat_dst";
+    _stor_remove_dir_all(fl0);
+    _stor_remove_dir_all(fl1);
+    _stor_remove_dir_all(fdst);
+    sys_mkdir(fl0, 493);
+    sys_mkdir(fl1, 493);
+    var payload = alloc(4096);
+    var pz = 0;
+    while (pz < 4096) { store8(payload + pz, 65); pz = pz + 1; }   # 4 KiB of 'A'
+    var fd_i = 0;
+    while (fd_i < 4) {
+        var dsb = str_builder_new();
+        str_builder_add_cstr(dsb, fl0);
+        str_builder_add_cstr(dsb, "/d");
+        str_builder_add_int(dsb, fd_i);
+        var subdir = str_cstr(str_builder_build(dsb));
+        sys_mkdir(subdir, 493);
+        var ff = 0;
+        while (ff < 10) {
+            var fsb = str_builder_new();
+            str_builder_add_cstr(fsb, subdir);
+            str_builder_add_cstr(fsb, "/f");
+            str_builder_add_int(fsb, ff);
+            file_write_all(str_cstr(str_builder_build(fsb)), payload, 4096);
+            ff = ff + 1;
+        }
+        fd_i = fd_i + 1;
+    }
+    var ftop = 0;
+    while (ftop < 10) {
+        var tsb = str_builder_new();
+        str_builder_add_cstr(tsb, fl1);
+        str_builder_add_cstr(tsb, "/f");
+        str_builder_add_int(tsb, ftop);
+        file_write_all(str_cstr(str_builder_build(tsb)), payload, 4096);
+        # same name in the lower layer's d0 — exercises the collision path.
+        var lsb = str_builder_new();
+        str_builder_add_cstr(lsb, fl0);
+        str_builder_add_cstr(lsb, "/f");
+        str_builder_add_int(lsb, ftop);
+        file_write_all(str_cstr(str_builder_build(lsb)), payload, 4096);
+        ftop = ftop + 1;
+    }
+    var flayers = vec_new();
+    vec_push(flayers, fl0);
+    vec_push(flayers, fl1);
+    var bfl = bench_new("flatten_layers_2x60_files_4kib");
+    bench_batch_start(bfl);
+    var fi = 0;
+    while (fi < 100) { flatten_layers(flayers, fdst); fi = fi + 1; }
+    bench_batch_stop(bfl, 100);
+    bench_report(bfl);
+    _stor_remove_dir_all(fl0);
+    _stor_remove_dir_all(fl1);
+    _stor_remove_dir_all(fdst);
     return 0;
 }
 

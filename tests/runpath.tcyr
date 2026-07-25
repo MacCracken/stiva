@@ -442,6 +442,60 @@ fn test_cm_create_start_oneshot() {
     return 0;
 }
 
+# The rootfs a created container actually gets is NOT empty. rust-old falls back
+# to a bare `container_root.join("rootfs")` whenever the overlay mount is
+# unavailable — every unprivileged run — discarding the layers it had just
+# unpacked (rust-old/src/container.rs:366-369), so the container starts with no
+# filesystem. Asserted through container_manager_get_rootfs so the test is
+# mode-agnostic: it must hold whether the overlay mounted or the flatten
+# fallback ran, and the CI user has no CAP_SYS_ADMIN so it is the latter here.
+fn test_cm_create_rootfs_populated() {
+    test_group("cm_create_rootfs_populated");
+    kavach_init();
+    var root = _rt_cat2("/tmp/stiva-cm-rootfs-", _rt_int_to_cstr(getpid()));
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+
+    # A REAL rootfs tar, so prepare_layers has something to unpack — unlike
+    # _test_import's short non-tar payload, which extracts to nothing at all.
+    var src = _rt_cat2(root, "/imgsrc");
+    sys_mkdir(src, 493);
+    file_write_all(_rt_cat2(src, "/hello.txt"), "in-image", 8);
+    var sh = _rt_cat2(src, "/entry.sh");
+    file_write_all(sh, "#!/bin/sh\n", 10);
+    sys_chmod(sh, 493);                        # 0o755
+    var tarp = _rt_cat2(root, "/rootfs.tar");
+    assert_eq(create_tar(src, tarp), 1, "rootfs tar built");
+
+    var store = image_store_new(root);
+    var img = image_import(store, tarp, "app", "v1");
+    assert_neq(img, 0, "image imported");
+
+    var mgr = container_manager_new(root, store);
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var rec = container_manager_create(mgr, img, cfg);
+    assert_neq(rec, 0, "container created");
+    var rc: Container = rec;
+
+    var rootfs = container_manager_get_rootfs(mgr, rc.id);
+    assert_neq(rootfs, 0, "rootfs resolved");
+    assert_eq(file_exists(_rt_cat2(rootfs, "/hello.txt")), 1, "image content is in the container rootfs");
+    # An entrypoint that lost its exec bit in the copy is still an unrunnable
+    # container, so the mode matters as much as the presence of the file.
+    var sb = alloc(144);
+    assert_eq(sys_lstat(_rt_cat2(rootfs, "/entry.sh"), sb), 0, "lstat entry.sh");
+    assert_eq(load64(sb + 24) & 4095, 493, "entrypoint kept its exec bit");
+
+    # When the fallback ran, it left the marker `diff` needs to tell a flattened
+    # rootfs from an overlay merged dir (internals is never persisted).
+    var croot = _rt_cat3(root, "/containers/", rc.id);
+    if (streq(rootfs, _rt_cat2(croot, "/rootfs")) == 1) {
+        assert_eq(file_exists(_rt_cat2(croot, "/.rootfs-flattened")), 1, "flatten marker written");
+    }
+    return 0;
+}
+
 # ── moved from stiva.tcyr (image ref/digest/blob/index) — cycc identifier cap ──
 fn test_image_ref_parse() {
     test_group("image_ref_parse");
@@ -856,6 +910,7 @@ fn main() {
     test_scan_output_null_guards();
     test_scan_output_scans_stderr();
     test_cm_create_start_oneshot();
+    test_cm_create_rootfs_populated();
     test_security_score();
     test_security_score_for();
     test_runpath_logging_emits();

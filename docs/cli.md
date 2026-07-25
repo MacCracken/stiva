@@ -64,7 +64,7 @@ remains). The **Status** column marks each:
 | `stiva checkpoint <ID> [--leave-running]` | v3.0.x (planned) | CRIU checkpoint a running container |
 | `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
 | `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
-| `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image |
+| `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image (must handle both rootfs layouts — over an overlay the changed set is `{croot}/upper`; a flattened rootfs has none and is compared against the layer dirs, flagged by `{croot}/.rootfs-flattened`) |
 | `stiva completions <SHELL>` | **Live** | Generate shell completions (bash, zsh, fish) on **stdout**, from cmdit's own verb table — so the script cannot drift from the CLI |
 | `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
 | `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` tarball into the store (`docker-archive` → v3.0.3) |
@@ -247,6 +247,20 @@ stiva info
 | Variable | Description |
 |----------|-------------|
 | `STIVA_ROOT` | Root directory for container + image data (overridden by `--root`) |
+| `STIVA_ROOTFS_FALLBACK` | `copy` (default) or `none`. How `run`/`create` build the container rootfs when the overlay mount is unavailable — see below |
+
+### `STIVA_ROOTFS_FALLBACK`
+
+Mounting an overlay needs `CAP_SYS_ADMIN` and an overlayfs-capable kernel. Without them — the
+normal case for an unprivileged user — stiva falls back to a plain directory at
+`{root}/containers/<id>/rootfs` and, by default (`copy`), **flattens the image layers into it**
+bottom-to-top so the container has the filesystem its image describes. Modes and symlinks are
+preserved; the copy is reclaimed by `stiva rm` with the rest of the container directory.
+
+Set `none` to skip that copy and leave the directory empty. It saves one copy of the image per
+container, and it is the right choice only if nothing will actually run against the rootfs — a
+`create` you never start, or a host that mounts the overlay itself. A container started against
+an empty rootfs cannot find its own entrypoint.
 
 Log level is currently fixed at `INFO` (`sakshi_set_level`); there is no log-filter env
 var. `RUST_LOG` was a Rust-era leftover and is not read.

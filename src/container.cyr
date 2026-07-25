@@ -994,12 +994,49 @@ fn _cm_container_dir(root, id) {
     return _container_cat2(_container_cat2(root, "/containers/"), id);
 }
 
+# Whether the no-overlay rootfs is materialized by flattening the image layers
+# (1) or left empty the way the oracle leaves it (0).
+#
+# Default ON: an empty rootfs is not a cheaper container, it is a container that
+# cannot run its own entrypoint, so "off" is not a sane default. The opt-out
+# exists because flattening costs real disk — one copy of the image per
+# container, reclaimed by `stiva rm` with the rest of {croot} — and a caller who
+# only wants the record and the spec (a `create` that is never started, a
+# privileged host that will mount the overlay itself) should be able to decline.
+#
+# STIVA_ROOTFS_FALLBACK=none → off; unset or "copy" → on. Any other value is a
+# typo, and silently guessing "on" for `STIVA_ROOTFS_FALLBACK=off` would make
+# the knob look broken, so it warns and keeps the default.
+#[must_use]
+fn _cm_flatten_fallback_enabled() {
+    var e = getenv("STIVA_ROOTFS_FALLBACK");
+    if (e == 0) { return 1; }
+    if (streq(e, "none") == 1) { return 0; }
+    if (streq(e, "copy") == 1) { return 1; }
+    sakshi_warn("STIVA_ROOTFS_FALLBACK: expected \"copy\" or \"none\"; using \"copy\"",
+    strlen("STIVA_ROOTFS_FALLBACK: expected \"copy\" or \"none\"; using \"copy\""));
+    return 1;
+}
+
+# Marker recording that {croot}/rootfs is a FLATTENED COPY of the image layers
+# rather than an overlay merged dir. `internals` is process-local and never
+# persisted, and `setup_overlay` creates upper/work/merged even when the mount
+# fails, so neither an OverlayPaths nor the presence of `upper` tells a later
+# process which layout it is looking at. `diff` needs that distinction: over an
+# overlay the changed set IS {croot}/upper, whereas a flattened rootfs has no
+# upper and has to be compared against the layer dirs.
+#[must_use]
+fn _cm_flatten_marker(croot) {
+    return _container_cat2(croot, "/.rootfs-flattened");
+}
+
 # Create a container record + its rootfs from `image` under `config`
 # (rust-old: create, container.rs:325). Unpacks layers, sets up the overlay
-# (falling back to {croot}/rootfs when the mount is unavailable, matching the
-# oracle's overlay match arm), generates the runtime spec, records the runtime-
-# only internals, appends the CREATED record, and persists. Returns the
-# Container*, or 0 on failure (detail already printed).
+# (falling back to a flattened {croot}/rootfs when the mount is unavailable —
+# see the fallback branch; this is the one place create diverges from the
+# oracle), generates the runtime spec, records the runtime-only internals,
+# appends the CREATED record, and persists. Returns the Container*, or 0 on
+# failure (detail already printed).
 #
 # `image` is in the cycc struct-id 20/21 class, so its fields are read through
 # the raw-offset accessors (_img_layers/_img_id/_image_reference), never
@@ -1025,8 +1062,27 @@ fn container_manager_create(mgr, image, config) {
     if (overlay != 0) {
         rootfs = load64(overlay + 0);   # OverlayPaths.merged
     } else {
+        # No overlay — no CAP_SYS_ADMIN or no overlayfs, i.e. every unprivileged
+        # run. DIVERGENCE FROM THE ORACLE, deliberately: rust-old stops at the
+        # bare `container_root.join("rootfs")` (container.rs:366-369) and never
+        # fills it, discarding the layers it just unpacked, so the container
+        # starts against an empty directory and cannot execute its own
+        # entrypoint. Flatten the prepared layers into it instead.
         rootfs = _container_cat2(croot, "/rootfs");
         sys_mkdir(rootfs, 493);
+        if (_cm_flatten_fallback_enabled() == 1) {
+            if (flatten_layers(layer_dirs, rootfs) != 0) {
+                # Half a rootfs runs even worse than none: fail the create rather
+                # than hand back a container whose filesystem is silently partial.
+                # Drop what was copied — no container record exists to `rm`, so
+                # otherwise a failed create leaks a whole image's worth of disk.
+                _stor_remove_dir_all(rootfs);
+                stiva_err_print(STIVA_ERR_STORAGE,
+                _container_cat2("cannot materialize container rootfs from image ", _img_id(image)));
+                return 0;
+            }
+            file_write_all(_cm_flatten_marker(croot), "", 0);
+        }
     }
 
     var full_ref = image_ref_full_ref(_image_reference(image));

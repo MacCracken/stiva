@@ -889,6 +889,150 @@ fn test_prepare_layers_dedup() {
     return 0;
 }
 
+# ── flatten_layers (net-new — the rootfs when overlayfs is unavailable) ──────
+
+# Stacking + perms: two layers merged bottom-to-top. The upper layer wins on a
+# collision, non-colliding entries from both survive, and mode / symlink-ness
+# are preserved — an image whose /bin/sh lost its exec bit in the copy would
+# still be an unrunnable container.
+fn test_flatten_layers_stacks_and_preserves_perms() {
+    test_group("flatten_layers_stacks_and_preserves_perms");
+    var l0 = "/tmp/stiva_flat_l0";
+    var l1 = "/tmp/stiva_flat_l1";
+    var dst = "/tmp/stiva_flat_rootfs";
+    _stor_remove_dir_all(l0);
+    _stor_remove_dir_all(l1);
+    _stor_remove_dir_all(dst);
+    sys_mkdir(l0, 493);
+    sys_mkdir(l1, 493);
+
+    # lower: an executable, a plain file the upper layer overwrites, a nested
+    # file, a symlink, and prepare_layers' own .unpacked bookkeeping marker.
+    var sh = _stor_cat2(l0, "/run.sh");
+    file_write_all(sh, "lower", 5);
+    sys_chmod(sh, 493);                        # 0o755
+    file_write_all(_stor_cat2(l0, "/shared.txt"), "from-lower", 10);
+    file_write_all(_stor_cat2(l0, "/only-lower.txt"), "keep", 4);
+    sys_mkdir(_stor_cat2(l0, "/etc"), 493);
+    file_write_all(_stor_cat2(l0, "/etc/nested.conf"), "deep", 4);
+    sys_symlink("run.sh", _stor_cat2(l0, "/link"));
+    file_write_all(_stor_cat2(l0, "/.unpacked"), "", 0);
+
+    # upper: overwrites shared.txt, adds its own file.
+    file_write_all(_stor_cat2(l1, "/shared.txt"), "from-upper", 10);
+    file_write_all(_stor_cat2(l1, "/only-upper.txt"), "new", 3);
+    file_write_all(_stor_cat2(l1, "/.unpacked"), "", 0);
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+
+    # Every layer's content is present — the whole point of the fallback.
+    assert_eq(file_exists(_stor_cat2(dst, "/only-lower.txt")), 1, "lower-only file present");
+    assert_eq(file_exists(_stor_cat2(dst, "/only-upper.txt")), 1, "upper-only file present");
+    assert_eq(file_exists(_stor_cat2(dst, "/etc/nested.conf")), 1, "nested file present");
+
+    # Upper wins the collision (bottom-to-top order).
+    var rbuf = alloc(32);
+    var rn = file_read_all(_stor_cat2(dst, "/shared.txt"), rbuf, 32);
+    store8(rbuf + rn, 0);
+    assert_eq(streq(rbuf, "from-upper"), 1, "upper layer wins on collision");
+
+    # Perms + symlink survive.
+    var sb = alloc(144);
+    assert_eq(sys_lstat(_stor_cat2(dst, "/run.sh"), sb), 0, "lstat run.sh");
+    assert_eq(load64(sb + 24) & 4095, 493, "exec bit preserved (0755)");
+    assert_eq(sys_lstat(_stor_cat2(dst, "/link"), sb), 0, "lstat link");
+    assert_eq((load64(sb + 24) & 61440) == 40960, 1, "symlink copied as a link, not dereferenced");
+
+    # The unpack marker is bookkeeping, not image content.
+    assert_eq(file_exists(_stor_cat2(dst, "/.unpacked")), 0, ".unpacked marker not copied");
+    return 0;
+}
+
+# An image with no layers flattens to an empty rootfs and SUCCEEDS — "this image
+# has no filesystem" is a different fact from "the copy failed", and conflating
+# them would fail every create for a layerless image.
+fn test_flatten_layers_empty() {
+    test_group("flatten_layers_empty");
+    var dst = "/tmp/stiva_flat_empty";
+    _stor_remove_dir_all(dst);
+    assert_eq(flatten_layers(vec_new(), dst), 0, "no layers => ok");
+    assert_eq(file_exists(dst), 1, "dest created");
+    return 0;
+}
+
+# Security: a lower layer's symlink must not be followed when a higher layer
+# ships a directory of the same name. `usr -> /tmp/stiva_flat_escape_target`
+# then `usr/pwned` would write OUTSIDE the rootfs; the directory must displace
+# the link instead. Mirrors tar_extract_rejects_traversal on the unpack side.
+fn test_flatten_layers_no_symlink_escape() {
+    test_group("flatten_layers_no_symlink_escape");
+    var l0 = "/tmp/stiva_flat_e0";
+    var l1 = "/tmp/stiva_flat_e1";
+    var dst = "/tmp/stiva_flat_erootfs";
+    var outside = "/tmp/stiva_flat_escape_target";
+    _stor_remove_dir_all(l0);
+    _stor_remove_dir_all(l1);
+    _stor_remove_dir_all(dst);
+    _stor_remove_dir_all(outside);
+    sys_mkdir(l0, 493);
+    sys_mkdir(l1, 493);
+    sys_mkdir(outside, 493);
+
+    sys_symlink(outside, _stor_cat2(l0, "/usr"));      # lower: usr -> outside dir
+    sys_mkdir(_stor_cat2(l1, "/usr"), 493);            # upper: usr is a real dir
+    file_write_all(_stor_cat2(l1, "/usr/pwned"), "x", 1);
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+
+    var sb = alloc(144);
+    assert_eq(sys_lstat(_stor_cat2(dst, "/usr"), sb), 0, "lstat usr");
+    assert_eq((load64(sb + 24) & 61440) == 16384, 1, "usr is a real directory, not the lower symlink");
+    assert_eq(file_exists(_stor_cat2(dst, "/usr/pwned")), 1, "file landed inside the rootfs");
+    assert_eq(file_exists(_stor_cat2(outside, "/pwned")), 0, "nothing written through the symlink");
+    return 0;
+}
+
+# End-to-end over the real unpack path: prepare_layers unpacks a gzip'd layer,
+# flatten_layers turns it into a rootfs. This is the sequence
+# container_manager_create runs when the overlay mount is unavailable.
+fn test_flatten_layers_from_prepared() {
+    test_group("flatten_layers_from_prepared");
+    var root = "/tmp/stiva-flat-prep";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+
+    var tar = alloc(5120);
+    var data = "real layer content";
+    var tlen = _t_build_tar(tar, "file.txt", data, strlen(data));
+    var gz = alloc(8192);
+    var glen = gzip_compress(tar, tlen, gz, 8192);
+    assert(glen > 0, "gzip ok");
+    var digest = sha256_digest(gz, glen);
+    assert(image_store_store_blob(store, digest, gz, glen) != 0, "blob stored");
+
+    var layers = vec_new();
+    vec_push(layers, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    var dirs = prepare_layers(store, layers);
+    assert(dirs != 0, "prepare ok");
+
+    var dst = _stor_cat2(root, "/containers/c1/rootfs");
+    assert_eq(flatten_layers(dirs, dst), 0, "flatten ok");
+    var got = _stor_cat2(dst, "/file.txt");
+    assert_eq(file_exists(got), 1, "unpacked layer content reached the rootfs");
+    var rbuf = alloc(32);
+    var rn = file_read_all(got, rbuf, 32);
+    store8(rbuf + rn, 0);
+    assert_eq(streq(rbuf, "real layer content"), 1, "content round-trips");
+    return 0;
+}
+
 # verify_integrity on an untampered store reports no corruption (rust-old:
 # verify_integrity — no #[cfg(test)] in the oracle, so this exercises the
 # happy path the Rust doc promises).
@@ -967,6 +1111,10 @@ fn main() {
     test_docker_archive_rejects_traversal();
     test_prepare_layers_missing_blob();
     test_prepare_layers_dedup();
+    test_flatten_layers_stacks_and_preserves_perms();
+    test_flatten_layers_empty();
+    test_flatten_layers_no_symlink_escape();
+    test_flatten_layers_from_prepared();
     test_verify_integrity_clean();
     test_verify_integrity_detects_corruption();
     return assert_summary();

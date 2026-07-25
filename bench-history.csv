@@ -45,3 +45,15 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-07-25T20:12:08Z,4ea6bec,main,oci_manifest_to_jv+serialize,15266.0000
 2026-07-25T20:12:08Z,4ea6bec,main,compose_yaml_to_toml,29242.0000
 2026-07-25T20:12:08Z,4ea6bec,main,compose_400_reverse_sorted_keys,1326000.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,noop,2.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,oci_config_build+serialize,7195.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,oci_manifest_to_jv+serialize,15858.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,compose_yaml_to_toml,32539.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,compose_400_reverse_sorted_keys,1383000.0000
+2026-07-25T20:32:25Z,3dfd1d5,claude/beautiful-heisenberg-674652,flatten_layers_2x60_files_4kib,1484000.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,noop,2.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,oci_config_build+serialize,6937.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,oci_manifest_to_jv+serialize,15437.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,compose_yaml_to_toml,29119.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,compose_400_reverse_sorted_keys,1334000.0000
+2026-07-25T20:36:42Z,3dfd1d5,claude/beautiful-heisenberg-674652,flatten_layers_2x60_files_4kib,1358000.0000

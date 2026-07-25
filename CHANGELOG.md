@@ -5,6 +5,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — containers ran with no filesystem when overlayfs was unavailable
+The defect filed as "Known" in 3.0.11. `container_manager_create` unpacked the image layers with
+`prepare_layers`, then — whenever `setup_overlay` could not mount, **which is every unprivileged
+run** — fell back to a bare `{croot}/rootfs`, created it, and **threw the unpacked layer dirs
+away**. The container started against an empty directory, so
+`stiva run local/demo:v1 /bin/echo hi` was executing a path that did not exist.
+
+This was **exact parity** with the frozen oracle
+(`rust-old/src/container.rs:366-369`, `unwrap_or_else(|| container_root.join("rootfs"))`), so it
+is inherited rather than a port divergence. The oracle stays frozen; the fix below is a
+**deliberate divergence from it**, and the only one on the create path.
+
+**`flatten_layers` (`src/storage.cyr`) — net-new, no oracle counterpart.** The prepared layer dirs
+are merged into `{croot}/rootfs` bottom-to-top, later layers winning: the same view the overlayfs
+lowerdir stack would have produced. Four things worth stating, because each is a place the obvious
+implementation is wrong:
+
+- **Copy, not hard-link.** Linking is nearly free, and it is also how you corrupt the image store:
+  the links would share inodes with the store's `layers/` cache, so the first write inside *any*
+  container would rewrite the layer every other container reads. Docker's `vfs` driver copies for
+  the same reason.
+- **Perms and symlinks are preserved.** mode via `chmod`, uid/gid via `lchown`, chown **before**
+  chmod because chown clears setuid/setgid, and symlinks recreated as links rather than
+  dereferenced — the ordering `_stor_extract_tar` already uses. A rootfs whose `/bin/sh` lost its
+  exec bit in the copy is still an unrunnable container, so this is not cosmetic.
+- **A directory displaces a same-named symlink from a lower layer** instead of being descended
+  through. Without that, a layer shipping `usr → /etc` followed by one shipping `usr/passwd`
+  writes **outside** the rootfs — the escape `_stor_has_symlink_ancestor` blocks on the extraction
+  side, reintroduced here by the flatten. Covered by a test that asserts nothing lands in the
+  symlink's target directory.
+- **Bytes stream through one shared 64 KiB buffer**, not `_stor_read_file` + `file_write_all`.
+  `alloc` is a bump arena with no free, so the whole-file form would hold *every file of the tree*
+  in memory at once; peak is now one chunk regardless of image size.
+
+`prepare_layers`' own `.unpacked` bookkeeping marker is skipped — it is not image content and must
+not appear in a container's `/`.
+
+**On by default; opt out with `STIVA_ROOTFS_FALLBACK=none`.** Flattening costs one copy of the
+image per container (reclaimed by `stiva rm` along with the rest of `{croot}`), which is a real
+cost worth being able to decline — a `create` that is never started, or a privileged host that
+will mount the overlay itself, gains nothing from it. But an empty rootfs is not a cheaper
+container, it is a broken one, so off is not a defensible default. `none` restores the exact
+oracle behaviour; an unrecognized value warns and keeps the default rather than silently guessing
+(`STIVA_ROOTFS_FALLBACK=off` would otherwise look like a broken knob). A flatten that fails
+**fails the create** — a partial rootfs runs worse than no rootfs, and silently handing back a
+half-populated container is how this class of bug survives to begin with.
+
+### Added — `{croot}/.rootfs-flattened`, so `diff` can tell the two layouts apart
+`diff` (still not wired) means different things over the two rootfs shapes: with an overlay the
+changed set **is** `{croot}/upper`, whereas a flattened rootfs has no upper layer and has to be
+compared against the layer dirs. Nothing already on disk distinguishes them — `internals` is
+process-local and never persisted, and `setup_overlay` creates `upper`/`work`/`merged`
+**even when the mount fails**, so their presence proves nothing about which path ran. `create`
+now drops a marker file for whoever implements the verb.
+
+### Known — OCI whiteouts are still not applied, by *either* rootfs path
+`.wh.<name>` / `.wh..wh..opq` markers are extracted literally by `_stor_extract_tar`, and
+overlayfs honours only its own char-dev-0:0 whiteouts rather than the tar convention, so a file
+deleted in an upper layer stays visible over an overlay *and* after a flatten. `flatten_layers`
+deliberately matches that instead of fixing it unilaterally — handling whiteouts only in the
+fallback would make an unprivileged rootfs differ from a privileged one for the same image. The
+fix belongs at unpack time, where it lands for both paths at once. `rust-old/src/storage.rs` has
+no whiteout handling either. Tracked in `docs/development/roadmap.md`.
+
+### Tests + benchmarks
+**1739 → 1771.** `tests/store.tcyr` gains `flatten_layers_stacks_and_preserves_perms`,
+`flatten_layers_empty` (a layerless image flattens to an empty rootfs and **succeeds** — "no
+filesystem" and "the copy failed" are different facts), `flatten_layers_no_symlink_escape`, and
+`flatten_layers_from_prepared` (over the real gzip unpack path). `tests/runpath.tcyr` gains
+`cm_create_rootfs_populated`, which drives `container_manager_create` end-to-end and asserts
+through `container_manager_get_rootfs` so it holds whether the overlay mounted or the fallback
+ran. New benchmark `flatten_layers_2x60_files_4kib` — **≈1.36 ms** for ~240 KiB across 60 files
+over two layers; I/O bound, so the CSV trend rather than the absolute number is the guard.
+
 ## [3.0.11] — 2026-07-25 — Tier-1 CLI sweep: 6 verbs wired · cmdit 1.2.0 · main.cyr gets coverage
 
 ### Added — six verbs whose logic was already ported, now reachable
