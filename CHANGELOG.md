@@ -65,6 +65,12 @@ The first three increments of the blocking registry client (`src/registry.cyr`, 
 struct-id assignment that the still-open 20/21 miscompile keys on.
 
 ### Note — the cycc struct-id 20/21 miscompile appears fixed at 6.4.77
+> **RETRACTED after this release.** During §B Inc-4, in the *same* 6-module
+> `tests/registry.tcyr` unit this probe certified, an `ImageRef` obtained from a wrapper
+> function read back as garbage — silently, producing a wrong cache key rather than a crash.
+> The bug is context-dependent per **function**, not merely per unit, and the probe below
+> certified only the expression it ran. See CLAUDE.md for the full write-up. The workarounds
+> stay.
 The probe that segfaulted the 6-module `tests/store.tcyr` unit at 6.4.76 — a typed
 `var im: Image = p; im.id` against raw-offset ground truth — is now **green in every unit
 shape**: `store` (6-module), `registry` (6-module), `runpath` (26-module), `stiva` (25-module),

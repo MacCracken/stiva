@@ -972,6 +972,278 @@ enum RegTokenOff {
     REG_TOK_EXPIRES_NS = 8;   # monotonic ns deadline; 0 = never expires
 }
 
+# ── Transport seam (Inc-3) ───────────────────────
+# REG_CL_TRANSPORT (@24) holds 0 for the live sandhi path, else one of these.
+# It exists because the bearer state machine is only reachable over a real
+# socket otherwise: a canned transport makes the oracle's wiremock cases
+# (rust-old/src/registry.rs:1591-2503) portable to a suite that never opens a
+# connection. Same no-struct rule as the rest of §B — offsets, not a type.
+#
+#   REG_TP_SEND @0  — fn(ctx, method, url, headers, body, body_len)
+#                     -> sandhi-shaped response* (SANDHI_RESP_OFF_*)
+#   REG_TP_SINK @8  — fn(ctx, url, cb, sink_ctx, headers)
+#                     -> sandhi-shaped download result* | 0 = no download script
+#   REG_TP_CTX  @16 — opaque, handed back as arg 0 of both
+#
+# The canned side returns SANDHI-shaped values on purpose: every consumer from
+# Inc-4 up reads through sandhi_http_status/_body/_body_len/_headers, so a
+# stiva-specific response type would be both a new struct AND a translation
+# layer for no gain.
+enum RegTransportOff {
+    REG_TP_SEND = 0;
+    REG_TP_SINK = 8;
+    REG_TP_CTX = 16;
+}
+
+#[must_use]
+fn registry_transport_new(send_fp, sink_fp, ctx) {
+    var t = alloc(24);
+    if (t == 0) { return 0; }
+    store64(t + REG_TP_SEND, send_fp);
+    store64(t + REG_TP_SINK, sink_fp);
+    store64(t + REG_TP_CTX, ctx);
+    return t;
+}
+
+fn registry_client_set_transport(client, transport) {
+    store64(client + REG_CL_TRANSPORT, transport);
+    return 0;
+}
+
+# ── last-error channel ───────────────────────────
+# The §B surface returns pointer-0 / -1 sentinels (module idiom), which has no
+# room for the oracle's error inventory. Same shape as convert.cyr's
+# _cv_compose_err and runtime.cyr's _rt_last_scan_verdict: the call returns the
+# sentinel, the detail is read back here.
+var _reg_last_err = 0;
+var _reg_last_status = 0;
+
+#[must_use]
+fn registry_last_error() { return _reg_last_err; }
+
+#[must_use]
+fn registry_last_status() { return _reg_last_status; }
+
+# Record a failure and return `ret` (so call sites read `return _reg_fail(...)`).
+fn _reg_fail(code, msg, status) {
+    _reg_last_err = code;
+    _reg_last_status = status;
+    if (msg != 0) { stiva_err_print(code, msg); }
+    return 0;
+}
+
+fn _reg_clear_err() {
+    _reg_last_err = 0;
+    _reg_last_status = 0;
+    return 0;
+}
+
+# ── HTTP options ────────────────────
+# sandhi defaults are wrong for a registry on two counts: redirect following is
+# OFF (registries 307 manifests and blobs to a CDN), and the buffered cap is
+# 256 KiB — a fat multi-arch index or a config blob with a long `history` array
+# exceeds it, and sandhi reports that as SANDHI_ERR_PROTOCOL, which is also
+# what an unparseable status line returns. Set both explicitly on EVERY
+# buffered call; a call that forgets silently reverts to 256 KiB.
+var _REG_MANIFEST_MAX_BYTES = 8388608;   # 8 MiB
+var _REG_HTTP_TOTAL_MS = 60000;
+var _REG_HTTP_MAX_HOPS = 10;             # oracle: Policy::limited(10)
+
+#[must_use]
+fn _reg_http_opts() {
+    var o = sandhi_http_options_new();
+    if (o == 0) { return 0; }
+    sandhi_http_options_follow_redirects(o, 1);
+    sandhi_http_options_max_hops(o, _REG_HTTP_MAX_HOPS);
+    sandhi_http_options_max_response_bytes(o, _REG_MANIFEST_MAX_BYTES);
+    sandhi_http_options_total_ms(o, _REG_HTTP_TOTAL_MS);
+    return o;
+}
+
+# ── transport dispatch ───────────────────────────
+
+# One buffered request. Returns a sandhi response*, or 0.
+fn _reg_send(client, method, url, headers, body, body_len) {
+    var t = load64(client + REG_CL_TRANSPORT);
+    if (t == 0) {
+        return sandhi_http_request_auto(method, url, headers, body, body_len, _reg_http_opts());
+    }
+    return fncall6(load64(t + REG_TP_SEND), load64(t + REG_TP_CTX),
+    method, url, headers, body, body_len);
+}
+
+# One streaming download. Returns a sandhi download-result*, or 0.
+fn _reg_download(client, url, cb, sink_ctx, headers) {
+    var t = load64(client + REG_CL_TRANSPORT);
+    if (t == 0) {
+        return sandhi_http_download_sink_headers(url, cb, sink_ctx, headers, _reg_http_opts());
+    }
+    var f = load64(t + REG_TP_SINK);
+    if (f == 0) { return 0; }
+    return fncall5(f, load64(t + REG_TP_CTX), url, cb, sink_ctx, headers);
+}
+
+# ── header building ──────────────────────────────
+
+# `accept` / `authorization` are cstr or 0. Returns a headers handle, or 0.
+# sandhi_headers_add returns -1 on a CR/LF-bearing value — and a
+# registry-supplied token flows straight into Authorization, so that branch is
+# reachable by hostile input and MUST fail closed rather than send a smuggled
+# request line.
+#[must_use]
+fn _reg_headers(accept, authorization) {
+    var h = sandhi_headers_new();
+    if (h == 0) { return 0; }
+    if (accept != 0) {
+        if (sandhi_headers_add(h, "Accept", accept) != 0) { return 0; }
+    }
+    if (authorization != 0) {
+        if (sandhi_headers_add(h, "Authorization", authorization) != 0) { return 0; }
+    }
+    return h;
+}
+
+# "Bearer {token}". Never call with token == 0 (_reg_cat2 strlens both args).
+#[must_use]
+fn _reg_bearer(token) {
+    if (token == 0) { return 0; }
+    return _reg_cat2("Bearer ", token);
+}
+
+# ══ Bearer state machine (Inc-4) ═════════════════════════
+# rust-old/src/registry.rs:905-985 (authenticated_request) + :506-546
+# (acquire_token). Four phases: try a cached token, probe unauthenticated,
+# acquire on the challenge, retry once. A second 401 is terminal.
+
+# Exchange a WWW-Authenticate challenge for a bearer token
+# (rust-old: acquire_token, registry.rs:506-546). Returns the token cstr, or 0.
+fn _reg_acquire_token(client, www_auth, scope) {
+    var params = parse_www_authenticate(www_auth);
+    var realm = auth_params_get(params, "realm");
+    if (realm == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "no realm in www-authenticate", 0);
+    }
+    # The challenge's own `scope` is DISCARDED and the caller's sent instead
+    # (registry.rs:512-516). That is what makes a push scope survive a registry
+    # that answers with a pull-scoped challenge.
+    var url = _reg_token_url(realm, auth_params_get(params, "service"), scope);
+
+    # Basic credentials go to the TOKEN endpoint only, never to the resource
+    # (registry.rs:518-521). Both fields must be present; a username without a
+    # password sends nothing.
+    var cfg = load64(client + REG_CL_CONFIG);
+    var basic = 0;
+    if (cfg != 0) {
+        var cc: RegistryConfig = cfg;
+        if (cc.username != 0 && cc.password != 0) {
+            basic = _reg_basic_auth_header(cc.username, cc.password);
+        }
+    }
+    var h = _reg_headers(0, basic);
+    if (h == 0) { return _reg_fail(STIVA_ERR_AUTH_FAILED, "malformed credentials", 0); }
+
+    var r = _reg_send(client, "GET", url, h, 0, 0);
+    if (r == 0) { return _reg_fail(STIVA_ERR_AUTH_FAILED, "token request failed", 0); }
+    if (sandhi_http_err_kind(r) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "token request transport failure", 0);
+    }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "token endpoint returned an error status", st);
+    }
+    var tok = _reg_token_from_body(sandhi_http_body(r), sandhi_http_body_len(r));
+    if (tok == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "no token in auth response", st);
+    }
+    return tok;
+}
+
+# Classify a response that is neither a transport failure nor a 401.
+# 2xx AND 3xx are both success (registry.rs:926-928) — the caller decides what
+# to do with a redirect it was handed rather than followed.
+fn _reg_resp_terminal(r) {
+    var st = sandhi_http_status(r);
+    if (st >= 400) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "registry returned an error status", st);
+    }
+    return r;
+}
+
+# Perform `method url` against `ref`'s registry, acquiring and caching a bearer
+# token as needed (rust-old: authenticated_request, registry.rs:905-985).
+# `accept` is a cstr or 0. Returns the sandhi response* on 2xx/3xx, else 0 with
+# the detail in registry_last_error()/_status().
+fn _reg_authenticated_request(client, ref, method, url, scope, accept) {
+    _reg_clear_err();
+    # Keyed on the RAW registry, not registry_host() (registry.rs:913): a
+    # docker.io ref caches under "docker.io|…" while the URL targets
+    # registry-1.docker.io. Keying on the mapped host would re-authenticate on
+    # every request.
+    #
+    # ImageRef.registry is read by RAW OFFSET (@0), not `var rr: ImageRef =
+    # ref; rr.registry`. The cycc struct-id 20/21 miscompile bites THIS
+    # function context in the 6-module tests/registry.tcyr unit under 6.4.77:
+    # the typed read returned a pointer-shaped garbage value, so the cache key
+    # became "<junk>|<scope>". Every lookup then missed and every request
+    # re-authenticated — a silent 3x request amplification against the
+    # registry, not a crash. Caught only because a test asserted the cached
+    # token was reachable by an independently-built key.
+    var key = _reg_cache_key(load64(ref + 0), scope);
+
+    # ── Phase 1: cached-token attempt ──
+    var tok = _reg_get_cached_token(client, key);
+    if (tok != 0) {
+        var h1 = _reg_headers(accept, _reg_bearer(tok));
+        if (h1 == 0) { return _reg_fail(STIVA_ERR_AUTH_FAILED, "malformed cached token", 0); }
+        var r1 = _reg_send(client, method, url, h1, 0, 0);
+        if (r1 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+        if (sandhi_http_err_kind(r1) != SANDHI_OK) {
+            return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+        }
+        if (sandhi_http_status(r1) != 401) { return _reg_resp_terminal(r1); }
+        # 401 with a cached token: fall through and re-authenticate. The stale
+        # entry is deliberately NOT evicted — the oracle only overwrites it via
+        # cache_token (registry.rs:934, no map removal).
+    }
+
+    # ── Phase 2: unauthenticated probe (elicits the challenge) ──
+    var h2 = _reg_headers(accept, 0);
+    if (h2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "cannot build request headers", 0); }
+    var r2 = _reg_send(client, method, url, h2, 0, 0);
+    if (r2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+    if (sandhi_http_err_kind(r2) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+    }
+    if (sandhi_http_status(r2) != 401) { return _reg_resp_terminal(r2); }
+
+    # ── Phase 3: challenge -> token ──
+    var www = sandhi_headers_get(sandhi_http_headers(r2), "WWW-Authenticate");
+    if (www == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "401 without www-authenticate header", 401);
+    }
+    var fresh = _reg_acquire_token(client, www, scope);
+    if (fresh == 0) { return 0; }   # already failed + printed
+    _reg_cache_token(client, key, fresh);
+
+    # ── Phase 4: retry once; a second 401 is terminal ──
+    var h3 = _reg_headers(accept, _reg_bearer(fresh));
+    if (h3 == 0) { return _reg_fail(STIVA_ERR_AUTH_FAILED, "malformed token", 0); }
+    var r3 = _reg_send(client, method, url, h3, 0, 0);
+    if (r3 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+    if (sandhi_http_err_kind(r3) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+    }
+    if (sandhi_http_status(r3) == 401) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "authentication failed", 401);
+    }
+    return _reg_resp_terminal(r3);
+}
+
+# GET convenience (rust-old: authenticated_get, registry.rs:494-503).
+fn _reg_authenticated_get(client, ref, url, scope, accept) {
+    return _reg_authenticated_request(client, ref, "GET", url, scope, accept);
+}
+
 # Registry tokens are short-lived; the oracle caches for 270 s (its comment says
 # 5 minutes, the code says 270 — the code wins).
 var _REG_TOKEN_TTL_NS = 270000000000;

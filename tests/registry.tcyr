@@ -26,6 +26,100 @@ fn _rg_contains(hay, needle) {
     return 0;
 }
 
+# ══ Canned transport (Inc-3 seam) ════════════════════════
+# The bearer state machine is only reachable over a socket otherwise: sandhi
+# surfaces the 401 challenge in a real response's headers. A scripted transport
+# makes the oracle's wiremock cases (rust-old/src/registry.rs:1591-2503)
+# portable to a suite that never opens a connection.
+#
+# The context uses byte offsets rather than a struct, mirroring the src rule —
+# a test-only type would perturb struct-id assignment in this unit just as
+# readily as a src one, and this is the 6-module shape the cycc 20/21 bug is
+# known to bite.
+#
+#   RG_CTX_ROUTES  @0  — vec, flattened 4-tuples: method, url_substr, status, body
+#   RG_CTX_LOG     @8  — vec of "METHOD url" cstrs, in call order
+#   RG_CTX_AUTHLOG @16 — vec of the Authorization value per call (0 when absent)
+#   RG_CTX_HDRS    @24 — headers handle attached to EVERY canned response
+#                        (that is where WWW-Authenticate lives), or 0
+enum RgCtxOff {
+    RG_CTX_ROUTES = 0;
+    RG_CTX_LOG = 8;
+    RG_CTX_AUTHLOG = 16;
+    RG_CTX_HDRS = 24;
+}
+
+fn _rg_ctx_new() {
+    var c = alloc(32);
+    store64(c + RG_CTX_ROUTES, vec_new());
+    store64(c + RG_CTX_LOG, vec_new());
+    store64(c + RG_CTX_AUTHLOG, vec_new());
+    store64(c + RG_CTX_HDRS, 0);
+    return c;
+}
+
+# Append a route. First match on (method, url substring) wins.
+fn _rg_route(ctx, method, url_substr, status, body) {
+    var r = load64(ctx + RG_CTX_ROUTES);
+    vec_push(r, method);
+    vec_push(r, url_substr);
+    vec_push(r, status);
+    vec_push(r, body);
+    return 0;
+}
+
+fn _rg_log_len(ctx) { return vec_len(load64(ctx + RG_CTX_LOG)); }
+fn _rg_log_at(ctx, i) { return vec_get(load64(ctx + RG_CTX_LOG), i); }
+fn _rg_auth_at(ctx, i) { return vec_get(load64(ctx + RG_CTX_AUTHLOG), i); }
+
+# The send hook: records the call, then answers from the route table.
+# An unmatched request answers 500 so a missing route fails loudly rather than
+# looking like a network fault.
+fn _rg_canned_send(ctx, method, url, headers, body, body_len) {
+    vec_push(load64(ctx + RG_CTX_LOG), _reg_cat2(_reg_cat2(method, " "), url));
+    var a = 0;
+    if (headers != 0) { a = sandhi_headers_get(headers, "Authorization"); }
+    vec_push(load64(ctx + RG_CTX_AUTHLOG), a);
+
+    var routes = load64(ctx + RG_CTX_ROUTES);
+    var n = vec_len(routes);
+    var i = 0;
+    while (i < n) {
+        var m = vec_get(routes, i);
+        var u = vec_get(routes, i + 1);
+        if (streq(m, method) == 1 && strstr(url, u) >= 0) {
+            var st = vec_get(routes, i + 2);
+            var bd = vec_get(routes, i + 3);
+            var hh = load64(ctx + RG_CTX_HDRS);
+            if (hh == 0) { hh = sandhi_headers_new(); }
+            return _sandhi_resp_new(st, bd, strlen(bd), hh, SANDHI_OK);
+        }
+        i = i + 4;
+    }
+    return _sandhi_resp_new(500, "", 0, sandhi_headers_new(), SANDHI_OK);
+}
+
+fn _rg_transport(ctx) {
+    return registry_transport_new(&_rg_canned_send, 0, ctx);
+}
+
+# A client wired to a scripted transport, with a fixed base URL so the built
+# URLs are deterministic.
+fn _rg_client(ctx) {
+    var c = registry_client_with_base_url("https://reg.test");
+    registry_client_set_transport(c, _rg_transport(ctx));
+    return c;
+}
+
+# A ref for reg.test/library/alpine:latest.
+# NOTE: there is deliberately NO shared ref helper. In this 6-module unit under
+# cycc 6.4.77, an ImageRef obtained from a WRAPPER function reads back as
+# garbage — the struct-id 20/21 miscompile, still live and still
+# context-dependent (traced: correct inside image_ref_new, garbage at the
+# wrapper's caller; both the direct-return and return-via-local forms fail).
+# Constructing it inline in each test is the form that provably works here.
+# Do not "tidy" these into a shared helper.
+
 # Parse a JSON cstr into a bayan value graph.
 fn _rg_parse(s) {
     return bayan_json_v_parse_str(s, strlen(s));
@@ -327,8 +421,271 @@ fn test_rg_token_from_body() {
     return 0;
 }
 
+# ══ Inc-3: the transport seam ════════════════════════════
+
+fn test_rg_transport_seam() {
+    test_group("rg_transport_seam");
+    # A client with no transport keeps the live path (slot stays 0).
+    var plain = registry_client_new();
+    assert_eq(load64(plain + REG_CL_TRANSPORT), 0, "no transport by default");
+
+    var ctx = _rg_ctx_new();
+    var c = _rg_client(ctx);
+    assert_neq(load64(c + REG_CL_TRANSPORT), 0, "transport installed");
+
+    _rg_route(ctx, "GET", "/v2/", 200, "{}");
+    var r = _reg_send(c, "GET", "https://reg.test/v2/", 0, 0, 0);
+    assert_neq(r, 0, "canned response returned");
+    assert_eq(sandhi_http_status(r), 200, "scripted status");
+    assert_eq(_rg_log_len(ctx), 1, "one call logged");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), "GET https://reg.test/v2/"), 1, "method+url logged");
+    # An unmatched route answers 500, not a transport error — a missing script
+    # entry must fail loudly rather than look like a dropped connection.
+    var miss = _reg_send(c, "GET", "https://reg.test/nope", 0, 0, 0);
+    assert_eq(sandhi_http_status(miss), 500, "unmatched route -> 500");
+    return 0;
+}
+
+fn test_rg_headers_fail_closed_on_crlf() {
+    test_group("rg_headers_fail_closed_on_crlf");
+    # A registry-supplied token flows into Authorization, so a CR/LF-bearing
+    # value is reachable by hostile input and must fail closed rather than
+    # smuggle a second request line.
+    assert_neq(_reg_headers("application/json", "Bearer good"), 0, "clean headers build");
+    assert_eq(_reg_headers(0, "Bearer bad\r\nX-Evil: 1"), 0, "CRLF in Authorization -> 0");
+    assert_eq(_reg_headers("app\r\nlication/json", 0), 0, "CRLF in Accept -> 0");
+    return 0;
+}
+
+fn test_rg_http_opts_overrides_sandhi_defaults() {
+    test_group("rg_http_opts_overrides_sandhi_defaults");
+    var o = _reg_http_opts();
+    assert_neq(o, 0, "opts built");
+    # sandhi defaults are follow=0 and a 256 KiB cap; both are wrong for a
+    # registry (307s to a CDN; multi-arch indexes exceed 256 KiB).
+    assert_eq(sandhi_http_options_follow(o), 1, "redirects followed");
+    assert(sandhi_http_options_bytes(o) > 262144, "cap lifted above sandhi's 256 KiB default");
+    return 0;
+}
+
+# ══ Inc-4: the bearer state machine ══════════════════════
+# Each case mirrors a wiremock test in rust-old/src/registry.rs.
+
+fn test_rg_auth_flow() {
+    test_group("rg_auth_flow");   # oracle: mock_auth_flow, registry.rs:1719
+    var ctx = _rg_ctx_new();
+    var hdrs = sandhi_headers_new();
+    sandhi_headers_add(hdrs, "WWW-Authenticate",
+    "Bearer realm=\"https://auth.test/token\",service=\"reg.test\"");
+    store64(ctx + RG_CTX_HDRS, hdrs);
+
+    # Unauthenticated probe 401s; the token endpoint mints; the retry succeeds.
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"test-bearer-token\"}");
+    _rg_route(ctx, "GET", "/manifests/", 401, "");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    "repository:library/alpine:pull", 0);
+    # Always-401 resource -> terminal AUTH_FAILED after exactly one retry.
+    assert_eq(r, 0, "second 401 is terminal");
+    assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "reports AUTH_FAILED");
+    # 3 calls: probe, token, retry.
+    assert_eq(_rg_log_len(ctx), 3, "probe + token + retry");
+    assert_eq(_rg_auth_at(ctx, 0), 0, "probe carries no Authorization");
+    assert_eq(_rg_contains(_rg_auth_at(ctx, 2), "Bearer test-bearer-token"), 1,
+    "retry carries the minted bearer token");
+    return 0;
+}
+
+fn test_rg_auth_flow_success() {
+    test_group("rg_auth_flow_success");
+    var ctx = _rg_ctx_new();
+    var hdrs = sandhi_headers_new();
+    sandhi_headers_add(hdrs, "WWW-Authenticate", "Bearer realm=\"https://auth.test/token\"");
+    store64(ctx + RG_CTX_HDRS, hdrs);
+    # Route order matters: first match wins, so the token route precedes the
+    # 401 catch-all and the manifest route precedes neither.
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"tok-1\"}");
+    _rg_route(ctx, "GET", "/manifests/latest", 401, "");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var scope = "repository:library/alpine:pull";
+    var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    scope, 0);
+    assert_eq(r, 0, "always-401 script fails");
+    # But the token WAS cached, so a subsequent call skips the probe.
+    # Key built from a LITERAL, deliberately not from the ref: if the client
+    # ever computes its key from a miscompiled field read, this must FAIL
+    # rather than match the same garbage.
+    var key = _reg_cache_key("reg.test", "repository:library/alpine:pull");
+    assert_neq(_reg_get_cached_token(c, key), 0, "token cached under the expected key");
+    return 0;
+}
+
+fn test_rg_auth_access_token_key() {
+    test_group("rg_auth_access_token_key");   # oracle: registry.rs:1770
+    var ctx = _rg_ctx_new();
+    var hdrs = sandhi_headers_new();
+    sandhi_headers_add(hdrs, "WWW-Authenticate", "Bearer realm=\"https://auth.test/token\"");
+    store64(ctx + RG_CTX_HDRS, hdrs);
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"access_token\":\"alt-key-token\"}");
+    var c = _rg_client(ctx);
+    var tok = _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
+    assert_neq(tok, 0, "access_token accepted as a fallback key");
+    assert_eq(streq(tok, "alt-key-token"), 1, "correct token extracted");
+    return 0;
+}
+
+fn test_rg_auth_basic_credentials_on_token_endpoint() {
+    test_group("rg_auth_basic_credentials_on_token_endpoint");   # oracle: registry.rs:2282
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
+    var cfg = registry_config_new("user", "pass", 0);
+    var c = registry_client_with_config(cfg);
+    registry_client_set_transport(c, _rg_transport(ctx));
+    _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
+    # base64("user:pass") == dXNlcjpwYXNz
+    assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Basic dXNlcjpwYXNz"), 1,
+    "basic creds go to the TOKEN endpoint");
+    return 0;
+}
+
+fn test_rg_cached_token_reused() {
+    test_group("rg_cached_token_reused");   # oracle: registry.rs:2048
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/manifests/", 200, "{\"ok\":1}");
+    var c = _rg_client(ctx);
+    var key = _reg_cache_key("reg.test", "repository:library/alpine:pull");
+    _reg_cache_token(c, key, "cached-tok");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    "repository:library/alpine:pull", 0);
+    assert_neq(r, 0, "succeeds on the cached token");
+    assert_eq(sandhi_http_status(r), 200, "200 returned");
+    # THE assertion: a valid cached token costs exactly ONE request.
+    assert_eq(_rg_log_len(ctx), 1, "cached token -> single request, no probe");
+    assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Bearer cached-tok"), 1, "cached token sent");
+    return 0;
+}
+
+fn test_rg_cached_token_401_triggers_reauth() {
+    test_group("rg_cached_token_401_triggers_reauth");   # oracle: registry.rs:2171
+    var ctx = _rg_ctx_new();
+    var hdrs = sandhi_headers_new();
+    sandhi_headers_add(hdrs, "WWW-Authenticate", "Bearer realm=\"https://auth.test/token\"");
+    store64(ctx + RG_CTX_HDRS, hdrs);
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"fresh\"}");
+    _rg_route(ctx, "GET", "/manifests/", 401, "");
+    var c = _rg_client(ctx);
+    _reg_cache_token(c, _reg_cache_key("reg.test", "repository:library/alpine:pull"), "stale");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    "repository:library/alpine:pull", 0);
+    # 4 calls: stale-token attempt, unauthenticated probe, token endpoint, retry.
+    assert_eq(_rg_log_len(ctx), 4, "stale token costs 3 resource calls + 1 token call");
+    assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Bearer stale"), 1, "first uses the stale token");
+    assert_eq(_rg_auth_at(ctx, 1), 0, "probe drops Authorization entirely");
+    assert_eq(_rg_contains(_rg_auth_at(ctx, 3), "Bearer fresh"), 1, "retry uses the fresh token");
+    return 0;
+}
+
+fn test_rg_401_without_challenge_header() {
+    test_group("rg_401_without_challenge_header");   # oracle: registry.rs:1929
+    var ctx = _rg_ctx_new();   # no WWW-Authenticate attached
+    _rg_route(ctx, "GET", "/manifests/", 401, "");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    "repository:library/alpine:pull", 0);
+    assert_eq(r, 0, "401 without a challenge fails");
+    assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
+    assert_eq(registry_last_status(), 401, "status recorded");
+    assert_eq(_rg_log_len(ctx), 1, "no token request attempted");
+    return 0;
+}
+
+fn test_rg_challenge_without_realm() {
+    test_group("rg_challenge_without_realm");   # oracle: registry.rs:2260
+    var c = _rg_client(_rg_ctx_new());
+    assert_eq(_reg_acquire_token(c, "Bearer service=\"reg.test\"", "repository:x:pull"), 0,
+    "no realm -> no token");
+    assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
+    return 0;
+}
+
+fn test_rg_token_endpoint_no_token_field() {
+    test_group("rg_token_endpoint_no_token_field");   # oracle: registry.rs:1947
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"unexpected\":\"shape\"}");
+    var c = _rg_client(ctx);
+    assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
+    "no token/access_token field -> 0");
+    assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
+    return 0;
+}
+
+fn test_rg_token_endpoint_error_status() {
+    test_group("rg_token_endpoint_error_status");   # oracle: registry.rs:1976
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "auth.test/token", 403, "denied");
+    var c = _rg_client(ctx);
+    assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
+    "403 from the token endpoint -> 0");
+    assert_eq(registry_last_status(), 403, "status recorded");
+    return 0;
+}
+
+fn test_rg_server_error_is_registry_not_auth() {
+    test_group("rg_server_error_is_registry_not_auth");   # oracle: registry.rs:2129
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/manifests/", 500, "boom");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
+    "repository:library/alpine:pull", 0);
+    assert_eq(r, 0, "500 fails");
+    # A server error must NOT be reported as an auth failure — that would send
+    # the operator chasing credentials for a registry outage.
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "REGISTRY, not AUTH_FAILED");
+    assert_eq(registry_last_status(), 500, "status recorded");
+    assert_eq(_rg_log_len(ctx), 1, "no auth attempted on a 500");
+    return 0;
+}
+
+fn test_rg_token_url_carries_caller_scope() {
+    test_group("rg_token_url_carries_caller_scope");
+    # The challenge's own scope is DISCARDED and the caller's sent instead
+    # (registry.rs:512-516) — that is what makes a push scope survive a
+    # registry that answers with a pull-scoped challenge.
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
+    var c = _rg_client(ctx);
+    _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\",scope=\"repository:other:pull\"",
+    "repository:library/alpine:push,pull");
+    var sent = _rg_log_at(ctx, 0);
+    assert_eq(_rg_contains(sent, "scope=repository:library/alpine:push,pull"), 1,
+    "caller's scope is sent");
+    assert_eq(_rg_contains(sent, "repository:other:pull"), 0, "challenge's scope discarded");
+    return 0;
+}
+
 fn main() {
     alloc_init();
+    test_rg_transport_seam();
+    test_rg_headers_fail_closed_on_crlf();
+    test_rg_http_opts_overrides_sandhi_defaults();
+    test_rg_auth_flow();
+    test_rg_auth_flow_success();
+    test_rg_auth_access_token_key();
+    test_rg_auth_basic_credentials_on_token_endpoint();
+    test_rg_cached_token_reused();
+    test_rg_cached_token_401_triggers_reauth();
+    test_rg_401_without_challenge_header();
+    test_rg_challenge_without_realm();
+    test_rg_token_endpoint_no_token_field();
+    test_rg_token_endpoint_error_status();
+    test_rg_server_error_is_registry_not_auth();
+    test_rg_token_url_carries_caller_scope();
     test_rg_platform_from_jv();
     test_rg_platform_manifest_from_jv();
     test_rg_oci_index_from_jv();

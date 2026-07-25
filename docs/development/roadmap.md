@@ -199,7 +199,24 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
     sleeping. **Mandatory divergence:** the cache key joins scope parts with `'|'`, not NUL —
     Cyrius maps are cstr-keyed, so a NUL separator truncates the key at the first part, collapsing
     every scope into one entry and silently serving a *pull* token for a *push* (401 on every push).
-  - **Remaining:** Inc-3 transport seam + canned transport · Inc-4 bearer state machine ·
+  - **Inc-3 (transport seam)** — `RegTransportOff` (SEND@0/SINK@8/CTX@16) + `_reg_send` /
+    `_reg_download` dispatch, `_reg_http_opts` (sandhi defaults to follow=**0** and a 256 KiB
+    cap — both wrong for a registry, which 307s to CDNs and serves multi-arch indexes past
+    256 KiB), `_reg_headers` failing **closed** on a CR/LF-bearing value (a registry-supplied
+    token reaches `Authorization`, so header smuggling is reachable by hostile input), and a
+    `registry_last_error()`/`_status()` channel since the pointer-return idiom has no payload slot.
+  - **Inc-4 (bearer state machine)** — `_reg_acquire_token` + `_reg_authenticated_request`'s four
+    phases (cached-token attempt → unauthenticated probe → challenge+token → retry once, second
+    401 terminal). The canned transport makes the oracle's wiremock cases portable offline, with
+    a request log so tests assert what was **sent**: a valid cached token costs exactly 1 request,
+    a stale one costs 4. `tests/registry.tcyr` 85 → 132 assertions.
+    > **cycc landmine found here.** An `ImageRef` obtained from a **wrapper function** reads back
+    > as garbage in this 6-module unit under 6.4.77 — `image_ref_new` writes `"reg.test"`, the
+    > wrapper's caller sees `0@!Z`. It does **not** crash: it silently produced a junk token-cache
+    > key, so every request re-authenticated. Caught only because a test rebuilt the key from a
+    > literal and compared. Construct refs inline or as a direct call assigned to a local; never
+    > through a helper. This also **retracts** v3.0.8's "the miscompile appears fixed" note.
+  - **Remaining:** Inc-5 manifest fetch/resolve ·
     Inc-5 manifest fetch/resolve · Inc-6 blob fetch · Inc-7 the `image_store_pull` driver (lands in
     `imagelayout.cyr` — include order: `registry.cyr` cannot call `image_store_add_to_index`) ·
     Inc-8 push · Inc-9 discovery · Inc-10 facade + CLI + docs.

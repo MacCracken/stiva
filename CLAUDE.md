@@ -56,7 +56,34 @@ have all landed (v3.0.5–v3.0.6), closing roadmap §G. `rust-old/` stays the or
 ported modules; the group A OCI-layout/transfer surface is **net-new**, so the OCI
 **image-spec** (not rust-old) is its oracle.
 
-> ℹ️ **cycc struct-id miscompile — APPEARS FIXED at 6.4.77; workarounds still in place.**
+> ⚠️ **cycc struct-id miscompile — STILL LIVE at 6.4.77. The "appears fixed" reading below was
+> WRONG and is kept as a worked example of how this bug fools a probe.**
+>
+> **What actually happened (2026-07-24, during §B Inc-4).** A probe asserting typed
+> `Image`/`Layer` field access against raw-offset ground truth passed in all four unit shapes,
+> so 3.0.8 recorded the bug as "appears fixed". Hours later, in the *same* 6-module
+> `tests/registry.tcyr` unit that probe had certified, an `ImageRef` obtained from a **wrapper
+> function** read back as garbage: `image_ref_new` wrote `"reg.test"` correctly, and the
+> wrapper's caller saw `0@!Z`. Both the direct-return and the return-via-local wrapper forms
+> failed; constructing the ref inline in the caller worked. The symptom was **not a crash** —
+> it was a cache key silently built from junk, which merely made every registry request
+> re-authenticate.
+>
+> **Two lessons, both expensive:**
+> 1. **A probe certifies the exact expression it runs, in the exact function it runs in — nothing
+>    more.** Same struct, same unit, different *function context* → different answer. "Green in
+>    every unit shape" is not a property this bug respects.
+> 2. **It fails silently far more often than it crashes.** The 6.4.76 instance segfaulted, which
+>    is why it was caught in minutes. This one produced a wrong string and a working-but-wrong
+>    program; it was caught only because a test built the same cache key independently and
+>    compared. Prefer assertions that reconstruct a value from a second source over assertions
+>    that read it back the way the code under test does — the latter matches the garbage.
+>
+> **Do not attempt retirement again without a test that would fail on a silent wrong value**, not
+> just one that survives a segfault.
+>
+> ℹ️ *(Original 3.0.8 note, now known to be wrong, retained deliberately:)*
+> **cycc struct-id miscompile — APPEARS FIXED at 6.4.77; workarounds still in place.**
 > cycc's struct-id **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** made `Image`/`Layer`/
 > `Platform` field access read garbage (or **segfault** — a scalar field compiled as a vector
 > load reads out of bounds) in some function contexts, and it **moved with the compilation
