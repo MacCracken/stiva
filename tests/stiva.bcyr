@@ -24,6 +24,11 @@ include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
 include "src/imagelayout.cyr"
+# …plus the container chain, for the §E lifecycle-event-log benches below.
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
 
 fn bench_noop(): i64 { return 0; }
 
@@ -171,6 +176,49 @@ fn main(): i64 {
     _stor_remove_dir_all(fl0);
     _stor_remove_dir_all(fl1);
     _stor_remove_dir_all(fdst);
+
+    # §E: the lifecycle event log. Persisting to {root}/events.jsonl puts disk
+    # I/O on every container state change, so the question the design has to
+    # answer is what one transition now costs. Measured against the numbers
+    # above, not in the abstract: flatten_layers is what a CREATE actually pays,
+    # and the append has to be small next to it.
+    #
+    # Three parts, because they are paid at different rates:
+    #   1. the JSON assembly            — per event
+    #   2. the append (open+flock+write+close, no rotation) — per event
+    #   3. the ts parse                 — per LINE READ, only by `stiva events`
+    var ev_root = "/tmp/stiva_bench_events";
+    _stor_remove_dir_all(ev_root);
+    sys_mkdir(ev_root, 493);
+
+    var bej = bench_new("event_json_build");
+    bench_batch_start(bej);
+    var ej = 0;
+    while (ej < 200000) {
+        _cm_event_json("created", "3f3827cb64803633dfd3dafe4c999c1b", "image", "local/demo:v1");
+        ej = ej + 1;
+    }
+    bench_batch_stop(bej, 200000);
+    bench_report(bej);
+
+    # Rotation is disabled here (max_bytes 0) so this measures the steady-state
+    # append alone; rotation is the rare path by construction (~70k events at
+    # the 8 MiB default) and folding it in would misprice the common one.
+    var ev_line = _cm_event_json("started", "3f3827cb64803633dfd3dafe4c999c1b", "detach", "false");
+    var bea = bench_new("event_log_append");
+    bench_batch_start(bea);
+    var ea = 0;
+    while (ea < 20000) { container_events_append_with(ev_root, ev_line, 0, 0); ea = ea + 1; }
+    bench_batch_stop(bea, 20000);
+    bench_report(bea);
+
+    var bet = bench_new("event_ts_parse");
+    bench_batch_start(bet);
+    var et = 0;
+    while (et < 200000) { container_event_ts(ev_line); et = et + 1; }
+    bench_batch_stop(bet, 200000);
+    bench_report(bet);
+    _stor_remove_dir_all(ev_root);
     return 0;
 }
 

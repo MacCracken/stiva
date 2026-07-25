@@ -1,7 +1,7 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`); **29 of 35 execute end-to-end today**, and the rest print a clear "not yet
+`--help`); **30 of 35 execute end-to-end today** (`logs` gained `-f`; `events` is live), and the rest print a clear "not yet
 wired" message (their module logic is ported — only the wiring over the sync core
 remains). The **Status** column marks each:
 
@@ -41,7 +41,7 @@ remains). The **Status** column marks each:
 | `stiva unpause <ID>` | **Live** | Unpause a paused container |
 | `stiva inspect <ID>` | **Live** | Inspect container or image (JSON output) |
 | `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
-| `stiva logs <ID> [-n LINES] [--scan]` | **Live** / v3.0.x (planned) | Show last N lines (snapshot live; `-f` poll-loop is v3.0.x). `--scan` runs the output through kavach's externalization gate first |
+| `stiva logs <ID> [-n LINES] [-f] [--scan]` | **Live** | Show last N lines, or `-f` to follow until the container stops (polls the log file — the lifecycle bus is process-local). `--scan` runs the output through kavach's externalization gate first; it cannot be combined with `-f` |
 | `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
 | `stiva run <IMAGE> -d ...` | v3.1 (blocked) | Detached `run -d` (needs kavach sandbox_spawn) |
@@ -63,7 +63,7 @@ remains). The **Status** column marks each:
 | `stiva convert <FILE> -f compose ...` | **Live** | Convert docker-compose YAML to a compose TOML (documented YAML subset — see below) |
 | `stiva checkpoint <ID> [--leave-running]` | v3.0.x (planned) | CRIU checkpoint a running container |
 | `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
-| `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
+| `stiva events [--since SEC] [--until SEC] [-n N] [-f]` | **Live** | Replay container lifecycle events from `{root}/events.jsonl` (one JSON object per line, printed verbatim so `\| jq` works). Without `-f` it dumps and exits; `-f` follows until `-n`, `--until`, or an interrupt. See [Lifecycle events](#lifecycle-events) |
 | `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image (must handle both rootfs layouts — over an overlay the changed set is `{croot}/upper`; a flattened rootfs has none and is compared against the layer dirs, flagged by `{croot}/.rootfs-flattened`) |
 | `stiva completions <SHELL>` | **Live** | Generate shell completions (bash, zsh, fish) on **stdout**, from cmdit's own verb table — so the script cannot drift from the CLI |
 | `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
@@ -248,6 +248,9 @@ stiva info
 |----------|-------------|
 | `STIVA_ROOT` | Root directory for container + image data (overridden by `--root`) |
 | `STIVA_ROOTFS_FALLBACK` | `copy` (default) or `none`. How `run`/`create` build the container rootfs when the overlay mount is unavailable — see below |
+| `STIVA_EVENTS` | `on` (default) or `off`. Whether lifecycle events are persisted to `{root}/events.jsonl` — see [Lifecycle events](#lifecycle-events) |
+| `STIVA_EVENTS_MAX_BYTES` | `8388608` (8 MiB). Rotate the event log once a write would push it past this size |
+| `STIVA_EVENTS_MAX_FILES` | `3`. How many rotated generations to keep |
 
 ### `STIVA_ROOTFS_FALLBACK`
 
@@ -264,6 +267,62 @@ an empty rootfs cannot find its own entrypoint.
 
 Log level is currently fixed at `INFO` (`sakshi_set_level`); there is no log-filter env
 var. `RUST_LOG` was a Rust-era leftover and is not read.
+
+## Lifecycle events
+
+Every container state change publishes an event to the in-process majra hub **and** appends it to
+`{root}/events.jsonl`. `stiva events` reads that file.
+
+The file is what makes the verb work at all. The hub is a `pubsub_new()` owned by one
+`ContainerManager` and is never persisted, and every CLI invocation is a separate process building
+its own manager — so a subscriber can never observe a publish from anywhere else. The file is
+observable across processes; the hub is not.
+
+One JSON object per line, printed **verbatim** so `stiva events | jq` works:
+
+```bash
+stiva events | jq -r '"\(.ts) \(.event) \(.container_id)"'
+```
+
+```json
+{"ts":1785021407505,"event":"created","container_id":"3f38…","image":"local/demo:v1"}
+{"ts":1785021407517,"event":"started","container_id":"3f38…","detach":"false"}
+{"ts":1785021407680,"event":"stopped","container_id":"3f38…","exit_code":0}
+{"ts":1785021407691,"event":"removed","container_id":"3f38…","state":"removed"}
+```
+
+`ts` is epoch **milliseconds**; `--since` / `--until` take Unix **seconds** (what `date +%s`
+gives) and are inclusive at both ends. Hints and warnings go to stderr, so redirecting stdout gives
+a clean stream.
+
+### What terminates `stiva events`
+
+Unlike `logs -f` there is no single container whose state ends the stream, so the plain form is
+bounded by default:
+
+| Form | Terminates when |
+|---|---|
+| `stiva events` | Immediately after dumping the matching events |
+| `stiva events -f -n 5` | 5 events have been printed |
+| `stiva events -f --until $(date +%s)` | The wall clock passes that second |
+| `stiva events -f` | The operator interrupts it (`Ctrl+C`), like `docker events` |
+
+An inverted window (`--since` after `--until`) is a **usage error**, not an empty stream — zero
+events looks exactly like "the runtime did nothing". A line whose `ts` will not parse is always
+shown rather than filtered out; an event stream is an audit surface, and hiding a malformed record
+hides the evidence. A log that ends in a torn record skips it and says so on stderr.
+
+### Rotation
+
+The log rotates like a container log — `events.jsonl` → `.1` → … → `.N`, oldest dropped — at
+8 MiB × 3 generations by default (`STIVA_EVENTS_MAX_BYTES` / `STIVA_EVENTS_MAX_FILES`). Rotated
+generations are **not** read back by `stiva events`; it reads the live file only, so `--since`
+cannot reach past the last rotation. A follower tracks the log's inode, so a rotation under it
+resumes at the new file rather than stalling.
+
+Persistence costs about **7.8 µs** per event — roughly 31 µs over a container's whole lifecycle,
+against the ~1.3 ms one `flatten_layers` call costs on the same create. Set `STIVA_EVENTS=off` to
+skip it entirely; `stiva events` then reports that no events are recorded.
 
 ## Exit Codes
 

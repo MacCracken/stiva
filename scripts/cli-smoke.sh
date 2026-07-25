@@ -154,6 +154,89 @@ assert_contains "cp refuses two container sides" "only one side" "$out"
 out="$(run cp /tmp/a /tmp/b)"
 assert_contains "cp refuses zero container sides" "must be" "$out"
 
+group "logs --follow"
+# -f must TERMINATE once the container is no longer running, the way
+# `docker logs -f` does; a follow that hangs on a stopped container would wedge
+# any script that uses it. The timeout is the assertion.
+timeout 15 "$STIVA" logs c2 --follow >/dev/null 2>&1; rc=$?
+assert_exit "logs --follow terminates on a stopped container" 0 "$rc"
+out="$(run logs c2 --follow --scan)"
+assert_contains "--follow refuses --scan" "cannot be combined" "$out"
+out="$(run logs no-such-container --follow)"
+assert_contains "--follow on an unknown container reports it" "not found" "$out"
+
+group "events"
+# By now the script has run a container and renamed it, so the log under
+# $STIVA_ROOT holds at least a created + started pair.
+out="$(run events)"
+assert_contains "events replays the lifecycle log" '"event":"created"' "$out"
+assert_contains "events records the start" '"event":"started"' "$out"
+# One JSON object per line, verbatim — `stiva events | jq` is the point of the
+# verb, so no "[HH:MM:SS] " prefix may creep in front of the payload.
+first="$(run events | head -1)"
+case "$first" in
+    '{'*'}') ok "each line is a bare JSON object" ;;
+    *)       bad "each line is a bare JSON object" "got: $first" ;;
+esac
+assert_contains "events stamps a wall-clock ts" '"ts":1' "$first"
+
+n="$("$STIVA" events -n 1 2>/dev/null | wc -l)"
+assert_exit "--count bounds the output" 1 "$n"
+n="$("$STIVA" events --since "$(( $(date +%s) + 3600 ))" 2>/dev/null | wc -l)"
+assert_exit "--since in the future matches nothing" 0 "$n"
+n="$("$STIVA" events --until "$(( $(date +%s) - 3600 ))" 2>/dev/null | wc -l)"
+assert_exit "--until in the past matches nothing" 0 "$n"
+out="$(run events --since 200 --until 100)"
+assert_contains "an inverted window is refused, not silently empty" "window is empty" "$out"
+"$STIVA" events --since 200 --until 100 >/dev/null 2>&1; rc=$?
+assert_exit "  and exits USAGE" 2 "$rc"
+out="$(run events -n -1)"
+assert_contains "a negative bound is refused" "must not be negative" "$out"
+
+# The plain form must always terminate, and each -f terminator must actually
+# terminate: an `events` that hangs is exactly the failure this verb was
+# blocked on. The timeouts are the assertions.
+timeout 15 "$STIVA" events >/dev/null 2>&1; rc=$?
+assert_exit "events without -f terminates" 0 "$rc"
+timeout 15 "$STIVA" events -f -n 1 >/dev/null 2>&1; rc=$?
+assert_exit "--follow terminates on --count" 0 "$rc"
+timeout 15 "$STIVA" events -f --until "$(( $(date +%s) - 3600 ))" >/dev/null 2>&1; rc=$?
+assert_exit "--follow terminates on a past --until" 0 "$rc"
+
+# A follower in one process must see events published by another — the whole
+# reason this is a file and not the in-process pubsub bus.
+FOLLOW_ROOT="$(mktemp -d)"
+( STIVA_ROOT="$FOLLOW_ROOT" timeout 20 "$STIVA" events -f -n 2 >"$WORK/follow.out" 2>/dev/null ) &
+follow_pid=$!
+sleep 1
+STIVA_ROOT="$FOLLOW_ROOT" "$STIVA" import "$WORK/rf.tar" followed v1 >/dev/null 2>&1
+STIVA_ROOT="$FOLLOW_ROOT" "$STIVA" run local/followed:v1 /bin/true >/dev/null 2>&1
+wait "$follow_pid"; rc=$?
+assert_exit "a cross-process follow terminates on its count" 0 "$rc"
+assert_contains "and saw the other process's events" '"event":"created"' "$(cat "$WORK/follow.out")"
+rm -rf "$FOLLOW_ROOT"
+
+# An empty root reports itself on stderr and leaves stdout clean, so a
+# `stiva events > file` on a fresh host produces an empty file, not a message.
+EMPTY_ROOT="$(mktemp -d)"
+out="$(STIVA_ROOT="$EMPTY_ROOT" "$STIVA" events 2>&1 >/dev/null)"
+assert_contains "an empty root explains itself on stderr" "no lifecycle events" "$out"
+out="$(STIVA_ROOT="$EMPTY_ROOT" "$STIVA" events 2>/dev/null)"
+if [ -z "$out" ]; then ok "and writes nothing to stdout"
+else bad "and writes nothing to stdout" "got: $out"; fi
+rm -rf "$EMPTY_ROOT"
+
+# STIVA_EVENTS=off must actually stop the writes.
+OFF_ROOT="$(mktemp -d)"
+STIVA_ROOT="$OFF_ROOT" "$STIVA" import "$WORK/rf.tar" quiet v1 >/dev/null 2>&1
+STIVA_ROOT="$OFF_ROOT" STIVA_EVENTS=off "$STIVA" run local/quiet:v1 /bin/true >/dev/null 2>&1
+if [ -f "$OFF_ROOT/events.jsonl" ]; then
+    bad "STIVA_EVENTS=off writes no event log" "events.jsonl exists"
+else
+    ok "STIVA_EVENTS=off writes no event log"
+fi
+rm -rf "$OFF_ROOT"
+
 group "deferred verbs still say so"
 out="$(run exec c2 /bin/true)"
 assert_contains "exec reports not-yet-wired" "not yet wired" "$out"

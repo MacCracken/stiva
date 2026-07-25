@@ -395,8 +395,58 @@ handlers still hand-roll and should migrate opportunistically.
 **D. `exec` (nsenter) + CRIU** — fork+exec host tools:
 - [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
 
-**E. MCP live dispatch + streaming poll-loops**:
-- [ ] `handle_tool` + `handle_ps`/`stop`/`inspect`/`pull`/`push`/`exec` + `list_resources`/`read_resource` (one-shot over the facade); **`logs -f`/`events`** as foreground CLI poll-loops (file read / majra `chan_try_recv`). (`handle_run` needs detached run → v3.1; multiplexed streaming → v3.1.)
+**E. MCP live dispatch + streaming poll-loops** — ✅ COMPLETE at v3.0.13:
+- [x] `mcp_handle_tool` + `mcp_handle_pull`/`ps`/`stop`/`push`/`inspect` + `mcp_list_resources` /
+  `mcp_read_resource`, all over the `Stiva` facade. Lands in **`stiva_core.cyr`, not `mcp.cyr`** —
+  include order puts `mcp.cyr` first, so it cannot reach the facade; `mcp.cyr` keeps the schema,
+  `McpResult`, and the two facade-free handlers (build, ansamblu). Same split, same reason, as the
+  §B pull driver living in `imagelayout.cyr`. Facade gained `stiva_images` / `stiva_inspect_image`.
+  - `stiva_run` and `stiva_exec` stay **advertised in `tool_list()`** but return a precise
+    unavailable-and-why error. The schema is the contract a client caches; silently shrinking it is
+    worse than a clear failure. `run` is gated on kavach `sandbox_spawn` (the oracle's MCP run is
+    detached, mcp.rs:291-334), `exec` on §D.
+- [x] **`logs -f`** — polls the log FILE and terminates when the container is no longer Running,
+  the way `docker logs -f` does. It polls the file rather than the lifecycle bus deliberately: the
+  bus is a per-ContainerManager in-process `pubsub_new()` and is never persisted, so a second
+  process sees an empty one. `--scan` is refused alongside `--follow`: the externalization gate
+  scans a *complete* output, and chunking a stream could split a secret across two reads and pass
+  both halves.
+- [x] **`events`** (v3.0.13) — was blocked on that same fact, and by nothing external: lifecycle
+  events existed only in the in-memory bus, so a one-shot `stiva events` would have subscribed to
+  its own empty publisher and printed nothing forever. Unblocked by giving the events the property
+  `logs -f` already relied on — **a file on disk**. `container_manager_publish_event` now also
+  appends each payload to `{root}/events.jsonl` (one JSON object per line) via `file_append_locked`,
+  rotated by the same `container_should_rotate` / `rotate_logs` pair the container logs use
+  (8 MiB × 3 generations by default; `STIVA_EVENTS_MAX_BYTES` / `_MAX_FILES` tune it,
+  `STIVA_EVENTS=off` disables persistence entirely).
+  - **Per-root, not per-container.** `stiva events` is a whole-runtime stream, so per-container
+    files would have to be discovered and merged in timestamp order; a container that failed before
+    its directory existed would have nowhere to write; and decisively, `container_manager_remove`
+    deletes `{root}/containers/{id}`, which would destroy the `removed` event as it was written.
+  - **What terminates it.** Unlike `logs -f` there is no single container whose state ends the
+    stream, so the default is a bounded one: no `-f` = dump the matching events and exit. `-f` then
+    stops on the first of `--count N`, wall clock past `--until T`, or an interrupt; with neither
+    bound it follows until interrupted, the way `docker events` does. Every terminator is asserted
+    under a `timeout` in `scripts/cli-smoke.sh` — a hanging `events` is the failure mode this whole
+    design exists to avoid.
+  - Events gained a `ts` field (epoch **millis**, from `clock_epoch_ns` — *not* `clock_now_ms`,
+    which lib/chrono.cyr:45 documents as monotonic and which would make `--since $(date +%s)`
+    compare a date against an uptime). `--since` / `--until` take Unix **seconds**. A line whose
+    `ts` will not parse is always shown: an event stream is an audit surface, so hiding the
+    malformed record hides the evidence.
+  - The follower tracks the log's **inode**, not just its size. Size alone fails in the ordinary
+    case rather than a corner — lifecycle events are near enough fixed-width that a rotated log
+    routinely grows back to exactly the offset the reader held, and a `size < pos` test then sees
+    nothing to do and goes quiet permanently. (Caught by a smoke run, not by reasoning.)
+  - Cost, measured (`tests/stiva.bcyr`): the append is **7.8 µs**, so a whole container lifecycle
+    (created/started/stopped/removed) pays ~31 µs of new I/O — against the **1.3 ms** one
+    `flatten_layers` call costs on the same create. Acceptable; the off switch exists anyway.
+  - Output is the stored JSON line **verbatim**, one per line — no `[HH:MM:SS.mmm] ` prefix like the
+    oracle's (main.rs:525), which would break `stiva events | jq`. Hints and warnings go to stderr.
+    The oracle is not a parity target here: it looped on `rx.recv()` over the same in-process bus,
+    so in a one-shot CLI it printed nothing until Ctrl+C. This is a rewrite.
+
+  (`handle_run` → v3.1; multiplexed streaming → v3.1.)
 
 **F. `build` completion**:
 - [ ] `build`'s OCI config/manifest JSON assembly + gzip layer tar (the remaining v3.0.x build item).

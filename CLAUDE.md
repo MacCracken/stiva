@@ -7,13 +7,13 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.4.78** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.11
+- **Version**: SemVer, currently 3.0.13
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.11 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.13 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
@@ -31,11 +31,16 @@ Inc-9 discovery (tags/catalog/referrers/verify-signature) + Inc-10 facade & CLI,
 and `stiva push` are LIVE (23 of 35 verbs), plus a digest-aware image index**; **v3.0.11 = the
 Tier-1 CLI sweep — `kill`/`restart`/`rename`/`top`/`cp`/`completions` wired over already-ported
 logic (29 of 35 verbs), cmdit 1.2.0 adds verb introspection + shell completions, and
-`scripts/cli-smoke.sh` gives `src/main.cyr` its first coverage**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
-net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
-rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1739 tests** across the `.tcyr` files (stiva 664 · registry 326 · runpath 217 · store 197 ·
-mgmt 219 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
+`scripts/cli-smoke.sh` gives `src/main.cyr` its first coverage**; **v3.0.12 = roadmap §E in
+part — MCP live dispatch over the facade (in `stiva_core.cyr`, since include order keeps
+`mcp.cyr` upstream of it) + `stiva logs -f` + the empty-rootfs fix**; **v3.0.13 = roadmap §E
+COMPLETE — lifecycle events are now PERSISTED to `{root}/events.jsonl` (JSONL, flock-appended,
+rotated via the existing `container_should_rotate`/`rotate_logs` pair), which is what made
+`stiva events` possible: the majra hub is per-ContainerManager and in-process, so a one-shot CLI
+could only ever subscribe to its own empty bus. 30 of 35 verbs**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+net-new `imagelayout.cyr`) + a **35-verb CLI, 30 live**.
+**1846 tests** across the `.tcyr` files (stiva 664 · registry 326 · runpath 225 · store 221 ·
+mgmt 294 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -51,9 +56,9 @@ The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.
 ready and the runtime is single-threaded run-to-completion, so most of the remaining
 container-orchestration surface is **blocking** work now folded onto the **v3.0.x line
 (Wave 2)** — buildable now over the ported sync core. The `ContainerManager` + `Stiva`
-facade landed at **v3.0.7 (§C)** and the blocking registry client completed at **v3.0.10 (§B)**;
-still buildable: non-interactive `exec`, CRIU checkpoint/restore, and MCP dispatch
-(ps/stop/inspect/pull/push/exec).
+facade landed at **v3.0.7 (§C)**, the blocking registry client completed at **v3.0.10 (§B)**, and
+**§E closed at v3.0.13** (MCP dispatch + `logs -f` at 3.0.12, `events` over a persisted event log
+at 3.0.13); still buildable: non-interactive `exec` and CRIU checkpoint/restore (§D), plus §F.
 Only a small
 **externally-blocked residue** is **v3.1 (blocked)** — genuinely gated on an external
 landing: detached `run -d` (needs kavach `sandbox_spawn`), interactive `exec -it` and
@@ -168,7 +173,7 @@ daimon (container management), sutra (fleet deployment)
 |--------|---------|
 | `image` | Substrate: image reference parsing, `Image`/`Layer`/`ImageRef` structs, content-addressable **blob store** + sha256 digests, integrity verify (the store/index/import layer moved to `imagelayout`) |
 | `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store (load/add/remove/gc/import/tag), and `oci-archive` + `docker-archive` `save`/`load` |
-| `container` | Container lifecycle, state persistence, events, restart, rename, update |
+| `container` | Container lifecycle, state persistence, lifecycle events (majra pub/sub **+ the rotated `{root}/events.jsonl` log behind `stiva events`**), restart, rename, update |
 | `runtime` | OCI spec, kavach integration, cgroups (CPU/mem/PID/IO), CRIU (checkpoint/pre-dump/lazy), exec, signals, export/import, copy |
 | `network/` | Bridge, NAT, DNS, IP pools (IPv4+IPv6), port mapping, network policy, container DNS registry (6 submodules) |
 | `storage` | Overlay FS, volume mounts, layer unpacking (gzip + zstd); **perms-preserving USTAR tar** codec (mode/uid/gid, dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) |
@@ -184,7 +189,7 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — 35 registered verbs, **21 live** (19 at v3.0.0 + `save`/`load` at v3.0.2; `convert` gained its compose format at v3.0.6, and `logs` a `--scan` flag); the rest print a "not yet wired" message — most are **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
+CLI binary: `stiva` — 35 registered verbs, **30 live** (19 at v3.0.0 + `save`/`load` at v3.0.2 + `pull`/`push` at v3.0.10 + the Tier-1 sweep at v3.0.11 + `events` at v3.0.13; `convert` gained its compose format at v3.0.6, and `logs` a `--scan` flag then `-f`); the remaining 5 (`build`, `exec`, `checkpoint`, `restore`, `diff`) print a "not yet wired" message — mostly **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
 
 ## kavach Integration
 
@@ -234,7 +239,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1739 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1846 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -269,8 +274,8 @@ docs/ (when earned):
 
 ## Testing
 
-**1739 Cyrius tests** across `tests/*.tcyr` (stiva 664 · registry 326 · runpath 217 · store 197 ·
-mgmt 219 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
+**1846 Cyrius tests** across `tests/*.tcyr` (stiva 664 · registry 326 · runpath 225 · store 221 ·
+mgmt 294 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
 across files because a monolith hits the cycc identifier-dedup cap — split by **include
 set**, not by test count.
 

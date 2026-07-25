@@ -939,10 +939,22 @@ fn container_manager_require_pid(mgr, id, allowed, n) {
 # lifecycle transition to the "container.lifecycle" topic. Payloads are
 # non-zero JSON cstr pointers (the chan_try_recv 0-sentinel is ambiguous).
 
-# {"event":<event>,"container_id":<id>,<key2>:<val2>} as a fresh cstr.
+# Event timestamp: epoch MILLIS, via clock_epoch_ns (wall clock), NOT
+# clock_now_ms — which lib/chrono.cyr:45 documents as monotonic (ns since boot)
+# and which would make `stiva events --since $(date +%s)` compare a wall-clock
+# bound against an uptime. Millis rather than seconds so events inside the same
+# second still order (the oracle printed %H:%M:%S%.3f, container.rs:531).
+#[must_use]
+fn _cm_event_ts_ms() {
+    return clock_epoch_ns() / 1000000;
+}
+
+# {"ts":<millis>,"event":<event>,"container_id":<id>,<key2>:<val2>} as a fresh
+# cstr. `ts` leads so a line is orderable without a full parse.
 #[must_use]
 fn _cm_event_json(event, id, key2, val2) {
     var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("ts"), json_v_int_new(_cm_event_ts_ms()));
     json_v_obj_set(o, str_from("event"), json_v_str_new(str_from(event)));
     json_v_obj_set(o, str_from("container_id"), json_v_str_new(str_from(id)));
     json_v_obj_set(o, str_from(key2), json_v_str_new(str_from(val2)));
@@ -951,10 +963,176 @@ fn _cm_event_json(event, id, key2, val2) {
 
 # Publish a pre-built event JSON to the lifecycle topic (rust-old: publish_event,
 # container.rs:1341). Topic is the exact string "container.lifecycle".
+#
+# The port additionally APPENDS the payload to {root}/events.jsonl, because the
+# bus alone cannot serve `stiva events` — see the event-log section below. The
+# append is best-effort and never changes this function's result: an event log
+# that could fail `stiva run` would be a worse liability than a missing line.
 fn container_manager_publish_event(mgr, event_json) {
     var mm: ContainerManager = mgr;
     pubsub_publish(mm.publisher, "container.lifecycle", event_json);
+    container_events_append(mm.root, event_json);
     return 0;
+}
+
+# ── the on-disk lifecycle event log ({root}/events.jsonl) ─────────
+# The pubsub hub above is an in-process `pubsub_new()` owned by ONE
+# ContainerManager and never persisted (:896). Every stiva CLI invocation is a
+# separate process building its own manager, so a subscriber in one process can
+# never observe a publish from another: a `stiva events` built on the bus would
+# subscribe to its own empty publisher and poll forever printing nothing. The
+# verb needs the property `logs -f` relies on — a file on disk, observable
+# across processes — so each published event is also appended here as one JSON
+# object per line (JSONL).
+#
+# The log is PER-ROOT, not per-container. `stiva events` is a whole-runtime
+# stream, so per-container files would have to be discovered and merged in
+# timestamp order; a container that failed before its directory existed would
+# have nowhere to write; and — decisively — container_manager_remove deletes
+# {root}/containers/{id}, which would destroy the `removed` event as it was
+# written. A log that loses the record of a removal at the moment of the removal
+# is not an event log.
+#
+# Writes go through file_append_locked: O_APPEND under an flock, so concurrent
+# stiva processes interleave whole lines instead of shredding each other.
+
+# Default rotation policy: 8 MiB per file, 3 rotated generations kept (so at
+# most ~32 MiB total). At the ~120 bytes an event costs, 8 MiB is roughly 70k
+# lifecycle transitions — enough that rotation is rare on a real host, small
+# enough that an unattended root cannot fill a disk.
+var _CM_EVENTS_MAX_BYTES = 8388608;
+var _CM_EVENTS_MAX_FILES = 3;
+
+# {root}/events.jsonl — the lifecycle event log.
+#[must_use]
+fn container_events_path(root) {
+    return _container_cat2(root, "/events.jsonl");
+}
+
+# Size of `path` in bytes; 0 when it does not exist or cannot be stat'd (both
+# mean "nothing to rotate" here). sys_stat rather than open+SEEK_END+close: one
+# syscall instead of three, on a path that runs at every lifecycle transition.
+#[must_use]
+fn _cm_file_size(path) {
+    var st = alloc(STAT_BUFSZ);
+    if (sys_stat(path, st) < 0) { return 0; }
+    return load64(st + STAT_SIZE);
+}
+
+# Whether lifecycle events are persisted at all. STIVA_EVENTS=off → no; unset
+# or "on" → yes. The opt-out exists because persistence adds two syscalls-plus
+# to every state change; an operator who does not use `stiva events` and wants
+# the run path to touch nothing but the container's own directory can say so.
+# An unrecognized value is a typo, and silently reading "0"/"false"/"no" as "on"
+# would make the knob look broken, so it warns and keeps the default.
+#[must_use]
+fn _cm_events_enabled() {
+    var e = getenv("STIVA_EVENTS");
+    if (e == 0) { return 1; }
+    if (streq(e, "off") == 1) { return 0; }
+    if (streq(e, "on") == 1) { return 1; }
+    sakshi_warn("STIVA_EVENTS: expected \"on\" or \"off\"; using \"on\"",
+    strlen("STIVA_EVENTS: expected \"on\" or \"off\"; using \"on\""));
+    return 1;
+}
+
+# A positive integer from the environment, or `dflt`. Non-positive is REFUSED
+# rather than honored: atoi returns 0 for junk, and 0 means "never rotate" to
+# container_should_rotate — so a typo in STIVA_EVENTS_MAX_BYTES would silently
+# buy an unbounded log file instead of the smaller one the operator asked for.
+#[must_use]
+fn _cm_events_int_env(name, dflt) {
+    var e = getenv(name);
+    if (e == 0) { return dflt; }
+    var v = atoi(e);
+    if (v > 0) { return v; }
+    sakshi_warn("events: ignoring a non-positive rotation limit from the environment",
+    strlen("events: ignoring a non-positive rotation limit from the environment"));
+    return dflt;
+}
+
+# Append one event to {root}/events.jsonl under an explicit rotation policy —
+# the same container_should_rotate / rotate_logs pair the container logs use,
+# so ".jsonl → .jsonl.1 → … → .jsonl.N, oldest dropped". Returns 1 when the line
+# was written, else 0.
+#
+# Best-effort by contract: every failure path returns 0 without printing to
+# stdout, because the caller is a lifecycle transition (`create`, `stop`, `rm`)
+# whose success must not hinge on a log append.
+fn container_events_append_with(root, event_json, max_bytes, max_files) {
+    if (root == 0) { return 0; }
+    if (event_json == 0) { return 0; }
+    var jlen = strlen(event_json);
+    if (jlen == 0) { return 0; }
+
+    # One line = one event. The newline is part of the SAME write as the
+    # payload, so a reader never sees a record without its terminator unless
+    # the write itself was torn.
+    var line = alloc(jlen + 2);
+    memcpy(line, event_json, jlen);
+    store8(line + jlen, 10);
+    store8(line + jlen + 1, 0);
+
+    var path = container_events_path(root);
+    if (container_should_rotate(max_bytes, max_files, _cm_file_size(path), jlen + 1) == 1) {
+        rotate_logs(path, max_files);
+    }
+    if (file_append_locked(path, line, jlen + 1) >= 0) { return 1; }
+
+    # The only routine reason for that to fail is {root} not existing yet — the
+    # store creates it on the normal path, but a manager can be opened against a
+    # bare path. Create it once and retry rather than mkdir'ing on every event.
+    sys_mkdir(root, 493);
+    if (file_append_locked(path, line, jlen + 1) >= 0) { return 1; }
+    sakshi_warn("events: failed to append to the lifecycle event log",
+    strlen("events: failed to append to the lifecycle event log"));
+    return 0;
+}
+
+# container_events_append_with under the environment's policy (see
+# _CM_EVENTS_MAX_BYTES / _CM_EVENTS_MAX_FILES and STIVA_EVENTS*).
+fn container_events_append(root, event_json) {
+    if (_cm_events_enabled() == 0) { return 0; }
+    return container_events_append_with(root, event_json,
+    _cm_events_int_env("STIVA_EVENTS_MAX_BYTES", _CM_EVENTS_MAX_BYTES),
+    _cm_events_int_env("STIVA_EVENTS_MAX_FILES", _CM_EVENTS_MAX_FILES));
+}
+
+# The `ts` of one event-log line as epoch millis, or -1 when the line carries no
+# parsable timestamp (unparsable JSON, missing key, or an explicit null).
+# `line` must be NUL-terminated and must NOT include the trailing newline.
+#[must_use]
+fn container_event_ts(line) {
+    if (line == 0) { return 0 - 1; }
+    var v = bayan_json_v_parse_str(line, strlen(line));
+    if (v == 0) { return 0 - 1; }
+    return _ct_jv_int_or(v, "ts", 0 - 1);
+}
+
+# Whether an event stamped `ts` falls inside the [since, until] window (both
+# epoch millis, both inclusive; <= 0 means unbounded on that side).
+#
+# A line with NO timestamp (ts < 0) is always included. An event stream is an
+# audit surface, and silently dropping a record because one field failed to
+# parse hides exactly the malformed entry an operator most needs to see.
+#[must_use]
+fn container_event_in_range(ts, since_ms, until_ms) {
+    if (ts < 0) { return 1; }
+    if (since_ms > 0 && ts < since_ms) { return 0; }
+    if (until_ms > 0 && ts > until_ms) { return 0; }
+    return 1;
+}
+
+# The on-disk log path for a container, resolved through its record so a
+# name works as well as an id, or 0 when the container is unknown. `logs -f`
+# needs the path itself, not its contents, so it can poll for growth.
+#[must_use]
+fn container_manager_log_path(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    return _cm_log_path(mgr, cc.id);
 }
 
 # The lifecycle event bus (rust-old: event_bus, container.rs:1346). A consumer
@@ -1165,11 +1343,12 @@ fn container_manager_start(mgr, id) {
     return STIVA_ERR_OK;
 }
 
-# {"event":<event>,"container_id":<id>,<key>:<intval>} — int-valued variant
-# for the `stopped` event's numeric exit_code.
+# {"ts":<millis>,"event":<event>,"container_id":<id>,<key>:<intval>} — int-valued
+# variant for the `stopped` event's numeric exit_code.
 #[must_use]
 fn _cm_event_json_int(event, id, key, intval) {
     var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("ts"), json_v_int_new(_cm_event_ts_ms()));
     json_v_obj_set(o, str_from("event"), json_v_str_new(str_from(event)));
     json_v_obj_set(o, str_from("container_id"), json_v_str_new(str_from(id)));
     json_v_obj_set(o, str_from(key), json_v_int_new(intval));

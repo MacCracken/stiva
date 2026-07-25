@@ -70,7 +70,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.11 — OCI container runtime (Cyrius port)";
+    return "3.0.13 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -501,10 +501,73 @@ fn _cli_import(h, root) {
 # TODO(v3.1)), so it is an explicit opt-in flag here rather than a silent
 # record-driven default. Off by default — scanning changes what `logs` prints,
 # and that must never happen behind the operator's back.
+# How long to wait between polls while following, and how long to keep polling
+# after the container has stopped before concluding the writer is done.
+var _CLI_FOLLOW_POLL_MS = 200;
+var _CLI_FOLLOW_DRAIN_MS = 600;
+
+# `logs -f` — print the log, then poll for growth until the container is no
+# longer Running, exactly as `docker logs -f` terminates.
+#
+# This polls the FILE, deliberately, rather than subscribing to the lifecycle
+# bus: the bus is an in-process `pubsub_new()` created per ContainerManager
+# (src/container.cyr:896) and is never persisted, so a second process sees an
+# empty one. The log is on disk and therefore actually observable across
+# processes. `--scan` is not offered here — the externalization gate works on a
+# complete output, and redacting a stream a chunk at a time could split a secret
+# across two reads and pass both halves.
+fn _cli_logs_follow(mgr, id, scan) {
+    if (scan == 1) {
+        _cli_eputs("stiva logs: --scan cannot be combined with --follow\n");
+        _cli_eputs("  the gate scans a complete output; a chunked stream could split a secret across reads\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var path = container_manager_log_path(mgr, id);
+    if (path == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return CMDIT_EXIT_RUN;
+    }
+    var buf = alloc(65536);
+    var off = 0;
+    var drained_ms = 0;
+    var going = 1;
+    while (going == 1) {
+        var fd = file_open(path, 0, 0);           # O_RDONLY; absent until first write
+        if (fd >= 0) {
+            xlseek(fd, off, 0);                   # SEEK_SET — resume where we stopped
+            var reading = 1;
+            while (reading == 1) {
+                var n = sys_read(fd, buf, 65536);
+                if (n <= 0) { reading = 0; }
+                else {
+                    sys_write(1, buf, n);
+                    off = off + n;
+                }
+            }
+            file_close(fd);
+        }
+        # Stop once the container is no longer Running AND a further drain
+        # window produced nothing — the writer may still be flushing its last
+        # bytes as the state flips.
+        var c = container_manager_get(mgr, id);
+        var running = 0;
+        if (c != 0) {
+            var cc: Container = c;
+            if (cc.state == CONTAINER_STATE_RUNNING) { running = 1; }
+        }
+        if (running == 1) { drained_ms = 0; }
+        else { drained_ms = drained_ms + _CLI_FOLLOW_POLL_MS; }
+        if (drained_ms >= _CLI_FOLLOW_DRAIN_MS) { going = 0; }
+        else { sleep_ms(_CLI_FOLLOW_POLL_MS); }
+    }
+    return CMDIT_EXIT_OK;
+}
+
 fn _cli_logs(h, root) {
     var vh = cmdit_new("stiva logs");
     var f_tail = cmdit_int(vh, 110, "tail", 0, "Show only the last N lines (0 = all)");
     var f_scan = cmdit_bool(vh, 0, "scan", "Scan output for secrets/PII before printing (redacts, or refuses)");
+    var f_follow = cmdit_bool(vh, 102, "follow", "Follow the log until the container stops");
     var vr = cmdit_parse_verb(vh, h);
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
@@ -518,6 +581,9 @@ fn _cli_logs(h, root) {
         stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
         return CMDIT_EXIT_RUN;
     }
+    if (cmdit_get_bool(vh, f_follow) == 1) {
+        return _cli_logs_follow(mgr, id, cmdit_get_bool(vh, f_scan));
+    }
     var out = container_manager_log_tail(mgr, id, cmdit_get_int(vh, f_tail));
     if (out == 0) { return CMDIT_EXIT_OK; }
     if (cmdit_get_bool(vh, f_scan) == 1) {
@@ -529,6 +595,231 @@ fn _cli_logs(h, root) {
         out = load64(sres + 8);                     # scanned.stdout, raw offset
     }
     _cli_puts(out);
+    return CMDIT_EXIT_OK;
+}
+
+# ── `events` ─────────────────────────────────
+# Reads {root}/events.jsonl, the log every container_manager_publish_event
+# appends to (src/container.cyr, "the on-disk lifecycle event log"). The oracle
+# (rust-old/src/main.rs:525) subscribed to the in-process bus and looped on
+# rx.recv() forever — in a one-shot CLI that subscribes to a publisher nothing
+# else in the process will ever publish to, so it printed nothing until Ctrl+C.
+# This is a rewrite, not a port; the file is what makes it observable.
+#
+# Output is the stored JSON line VERBATIM, one per line — no "[HH:MM:SS.mmm] "
+# prefix like the oracle's. Each line already carries its own `ts`, and a prefix
+# would break `stiva events | jq`, which is the main reason to have the verb.
+# Anything that is not an event (hints, warnings) goes to stderr.
+
+# How much of the log to hold in memory. Larger than the 8 MiB default rotation
+# size so a default-configured log is always read whole; a log configured larger
+# than this is read from its TAIL, since the newest events are the ones an
+# operator is asking about.
+var _CLI_EVENTS_BUF = 16777216;
+
+# Index just past the last '\n' in buf[0,len), or 0 when there is none — i.e.
+# how many bytes of the buffer are complete lines. A trailing partial line is
+# deliberately left unconsumed: while following, the writer is mid-append and
+# the rest arrives next poll.
+#[must_use]
+fn _cli_last_line_end(buf, len) {
+    var i = len - 1;
+    while (i >= 0) {
+        if (load8(buf + i) == 10) { return i + 1; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+# Print every complete line in buf[0,len) that falls inside the [since,until]
+# window, stopping early once `count` events have been printed (count <= 0 =
+# unlimited). `printed` is the running total from earlier chunks; the new total
+# is returned.
+fn _cli_events_scan(buf, len, since_ms, until_ms, printed, count) {
+    var total = printed;
+    var start = 0;
+    var i = 0;
+    while (i < len) {
+        if (load8(buf + i) == 10) {
+            if (i > start) {
+                if (count > 0 && total >= count) { return total; }
+                # Terminate the line in place rather than copying it out: the
+                # buffer is ours, and a 70k-line log would otherwise be 70k
+                # allocations. The newline is restored immediately.
+                store8(buf + i, 0);
+                if (container_event_in_range(container_event_ts(buf + start),
+                since_ms, until_ms) == 1) {
+                    _cli_puts(buf + start);
+                    _cli_puts("\n");
+                    total = total + 1;
+                }
+                store8(buf + i, 10);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+# Read from `off` to EOF into `buf` (capped at _CLI_EVENTS_BUF), returning the
+# byte count, or -1 when the file cannot be opened. Rotation and truncation are
+# handled by the caller via the size it gets from _cli_events_size.
+fn _cli_events_read_from(path, off, buf) {
+    var fd = file_open(path, 0, 0);            # O_RDONLY
+    if (fd < 0) { return 0 - 1; }
+    xlseek(fd, off, 0);                        # SEEK_SET
+    var got = 0;
+    var reading = 1;
+    while (reading == 1) {
+        var n = sys_read(fd, buf + got, _CLI_EVENTS_BUF - got);
+        if (n <= 0) { reading = 0; }
+        else {
+            got = got + n;
+            if (got >= _CLI_EVENTS_BUF) { reading = 0; }
+        }
+    }
+    file_close(fd);
+    return got;
+}
+
+# st_ino's offset in `struct stat`. The stdlib's Stat enum exposes MODE/NLINK/
+# UID/GID/SIZE but no INO slot; st_dev@0 + st_ino@8 happens to hold on all three
+# layouts the enum covers — x86_64 (syscalls_x86_64_linux.cyr:285-286),
+# asm-generic/aarch64 (syscalls_aarch64_linux.cyr:377-378), and Darwin stat64,
+# whose 4-byte st_dev + 2-byte st_mode + 2-byte st_nlink (STAT_MODE=4,
+# STAT_NLINK=6 there) also put st_ino at 8.
+var _CLI_STAT_INO = 8;
+
+# Stat the event log into the caller's buffer. Returns 1, or 0 when the file is
+# not there — which is a NORMAL momentary state while following, since
+# rotate_logs renames the live log and only the next append recreates it.
+# The buffer is caller-owned so an unbounded follow does not allocate per poll.
+fn _cli_events_stat(path, st) {
+    if (sys_stat(path, st) < 0) { return 0; }
+    return 1;
+}
+
+# Follow the log from byte `off`, printing new events as they land. Terminates
+# on the FIRST of: `count` events printed, wall clock past `until_ms`, or the
+# operator interrupting. With neither bound it runs until interrupted — which is
+# the shape `docker events` has, and the reason both bounds exist.
+#
+# `ino0` is the inode the dump read from, so rotation can be detected by
+# IDENTITY rather than by size. Size alone is not enough and fails in the
+# ordinary case, not a corner: lifecycle events are near enough fixed-width that
+# a rotated log routinely grows back to exactly the offset the reader held, and
+# a `size < pos` test then sees nothing to do and goes quiet for good.
+fn _cli_events_follow(path, off, ino0, since_ms, until_ms, printed, count) {
+    var total = printed;
+    var pos = off;
+    var ino = ino0;
+    var buf = alloc(_CLI_EVENTS_BUF);
+    var st = alloc(STAT_BUFSZ);
+    var going = 1;
+    while (going == 1) {
+        if (count > 0 && total >= count) { return total; }
+        if (until_ms > 0 && _cm_event_ts_ms() > until_ms) { return total; }
+        sleep_ms(_CLI_FOLLOW_POLL_MS);
+
+        if (_cli_events_stat(path, st) == 1) {
+            var now_ino = load64(st + _CLI_STAT_INO);
+            var size = load64(st + STAT_SIZE);
+            # A different inode means rotation replaced the file; a size below
+            # our offset means it was truncated in place. Either way the bytes
+            # we already consumed are gone and the right move is to start over
+            # at its beginning.
+            if (now_ino != ino) { pos = 0; ino = now_ino; }
+            elif (size < pos) { pos = 0; }
+            if (size > pos) {
+                var n = _cli_events_read_from(path, pos, buf);
+                if (n > 0) {
+                    var end = _cli_last_line_end(buf, n);
+                    total = _cli_events_scan(buf, end, since_ms, until_ms, total, count);
+                    pos = pos + end;
+                }
+            }
+        }
+    }
+    return total;
+}
+
+# `events [--since SEC] [--until SEC] [-n COUNT] [-f]` — the lifecycle event
+# stream. Without `-f` it dumps the matching events and exits, so the plain form
+# always terminates.
+fn _cli_events(h, root) {
+    var vh = cmdit_new("stiva events");
+    var f_since = cmdit_int(vh, 0, "since", 0, "Only events at or after this Unix timestamp (seconds)");
+    var f_until = cmdit_int(vh, 0, "until", 0,
+    "Only events at or before this Unix timestamp (seconds); with -f, stop there");
+    var f_count = cmdit_int(vh, 110, "count", 0, "Stop after N events (0 = unlimited)");
+    var f_follow = cmdit_bool(vh, 102, "follow", "Keep polling for new events (until -n/--until, or interrupted)");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+
+    var since = cmdit_get_int(vh, f_since);
+    var until = cmdit_get_int(vh, f_until);
+    var count = cmdit_get_int(vh, f_count);
+    if (since < 0 || until < 0 || count < 0) {
+        _cli_eputs("stiva events: --since/--until/--count must not be negative\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    # An inverted window selects nothing. Printing zero events for it would look
+    # exactly like "the runtime did nothing", so name the mistake instead.
+    if (since > 0 && until > 0 && since > until) {
+        _cli_eputs("stiva events: --since is after --until; the window is empty\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    # The flags are Unix SECONDS (what `date +%s` gives); the log stores millis.
+    var since_ms = since * 1000;
+    var until_ms = until * 1000;
+    if (until > 0) { until_ms = until_ms + 999; }   # --until T includes all of second T
+
+    var path = container_events_path(root);
+    var buf = alloc(_CLI_EVENTS_BUF);
+    var st = alloc(STAT_BUFSZ);
+    var printed = 0;
+    var pos = 0;
+    var ino = 0;
+    if (_cli_events_stat(path, st) == 0) {
+        # No log at all — a fresh root, or persistence turned off. Say so on
+        # stderr; stdout stays a clean (empty) event stream either way.
+        _cli_eputs("stiva events: no lifecycle events recorded yet under ");
+        _cli_eputs(root); _cli_eputs("\n");
+        if (cmdit_get_bool(vh, f_follow) == 0) { return CMDIT_EXIT_OK; }
+    } else {
+        var size = load64(st + STAT_SIZE);
+        ino = load64(st + _CLI_STAT_INO);
+        # Read the tail when the log is bigger than the buffer, and drop the
+        # partial first line that window starts in.
+        var start_off = 0;
+        if (size > _CLI_EVENTS_BUF) {
+            start_off = size - _CLI_EVENTS_BUF;
+            _cli_eputs("stiva events: log exceeds the read buffer; showing the most recent 16 MiB\n");
+        }
+        var n = _cli_events_read_from(path, start_off, buf);
+        if (n < 0) { n = 0; }
+        var from = 0;
+        if (start_off > 0) {
+            while (from < n && load8(buf + from) != 10) { from = from + 1; }
+            if (from < n) { from = from + 1; }
+        }
+        var end = _cli_last_line_end(buf, n);
+        printed = _cli_events_scan(buf + from, end - from, since_ms, until_ms, 0, count);
+        pos = start_off + end;
+        # A log whose last record has no terminator was torn mid-append. Do not
+        # print it (a half-JSON line would poison a `jq` pipeline), but do not
+        # hide it either.
+        if (end < n) {
+            _cli_eputs("stiva events: the log ends in an incomplete record; it was skipped\n");
+        }
+    }
+
+    if (cmdit_get_bool(vh, f_follow) == 1) {
+        _cli_events_follow(path, pos, ino, since_ms, until_ms, printed, count);
+    }
     return CMDIT_EXIT_OK;
 }
 
@@ -1055,6 +1346,7 @@ fn main() {
     if (v == V_TAG) { return _cli_tag(h, _cli_root(h, f_root)); }
     if (v == V_IMPORT) { return _cli_import(h, _cli_root(h, f_root)); }
     if (v == V_LOGS) { return _cli_logs(h, _cli_root(h, f_root)); }
+    if (v == V_EVENTS) { return _cli_events(h, _cli_root(h, f_root)); }
     if (v == V_WAIT) { return _cli_wait(h, _cli_root(h, f_root)); }
     if (v == V_STATS) { return _cli_stats(h, _cli_root(h, f_root)); }
     if (v == V_PAUSE) { return _cli_pause(h, _cli_root(h, f_root)); }

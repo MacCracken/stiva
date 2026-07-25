@@ -5,6 +5,144 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.13] — 2026-07-25 — §E complete: `stiva events` + a persisted lifecycle event log
+
+### Added — lifecycle events are written to disk
+`container_manager_publish_event` still publishes to the majra hub, and now **also appends the
+payload to `{root}/events.jsonl`** — one JSON object per line, through `file_append_locked`
+(O_APPEND under an flock), so concurrent stiva processes interleave whole lines instead of
+shredding each other. Rotation reuses the pair the container logs already use,
+`container_should_rotate` + `rotate_logs`: `events.jsonl` → `.1` → … → `.N`, oldest dropped.
+Defaults are 8 MiB × 3 generations; `STIVA_EVENTS_MAX_BYTES` and `STIVA_EVENTS_MAX_FILES` tune
+them, and a non-positive value from the environment is **refused** rather than honored — `atoi`
+returns 0 for junk and 0 means "never rotate", so a typo would otherwise buy an unbounded log.
+
+The append is best-effort by contract: it never fails the lifecycle operation that produced the
+event. `STIVA_EVENTS=off` turns persistence off entirely.
+
+**The log is per-root, not per-container.** `stiva events` is a whole-runtime stream, so
+per-container files would have to be discovered and merged in timestamp order; a container that
+failed before its directory existed would have nowhere to write; and decisively,
+`container_manager_remove` deletes `{root}/containers/{id}`, which would destroy the `removed`
+event as it was being written. A log that loses the record of a removal at the moment of the
+removal is not an event log.
+
+Events gained a **`ts`** field, epoch millis from `clock_epoch_ns`. Deliberately *not*
+`clock_now_ms`, which `lib/chrono.cyr:45` documents as monotonic (ns since boot): stamping an
+uptime would make `stiva events --since $(date +%s)` compare a date against a boot offset and
+silently match nothing. A test bounds `ts` against `clock_epoch_secs` to keep that substitution
+from creeping back.
+
+### Added — `stiva events` (30 of 35 verbs live)
+`stiva events [--since SEC] [--until SEC] [-n COUNT] [-f]`, reading the log above.
+
+**What terminates it** was the open design question. Unlike `logs -f` there is no single container
+whose state ends the stream, so the plain form is bounded by default: without `-f` it dumps the
+matching events and exits. With `-f` it stops on the first of `--count N`, wall clock past
+`--until T`, or an interrupt; with neither bound it follows until interrupted, the way
+`docker events` does. Every terminator is asserted under a `timeout` in `scripts/cli-smoke.sh` — an
+`events` that hangs is precisely the failure this design exists to avoid.
+
+`--since` / `--until` take Unix **seconds** (what `date +%s` gives) and are inclusive on both ends;
+the log stores millis. An inverted window is a usage error rather than a silently empty stream,
+because zero events looks exactly like "the runtime did nothing". A line whose `ts` will not parse
+is **always** shown: an event stream is an audit surface, and dropping the malformed record hides
+the evidence. A log ending in a torn record skips that record on stdout and says so on stderr.
+
+Output is the stored JSON line **verbatim**, one per line — no `[HH:MM:SS.mmm] ` prefix like the
+oracle's, which would break `stiva events | jq`. Hints and warnings go to stderr, so
+`stiva events > file` on a fresh root yields an empty file rather than a message.
+
+The oracle (`rust-old/src/main.rs:525`) is not a parity target here. It subscribed to the
+in-process bus and looped on `rx.recv()` forever — in a one-shot CLI, against a publisher nothing
+else in the process ever publishes to, so it printed nothing until Ctrl+C. This is a rewrite; the
+file is what makes it observable across processes.
+
+### Fixed — the follower tracks the log's inode, not just its size
+First cut detected rotation with `size < offset` and lost the stream permanently when it missed.
+This is the ordinary case, not a corner: lifecycle events are near enough fixed-width that a
+rotated log grows back to *exactly* the offset the reader held, at which point `size < pos` is
+false, `size > pos` is false, and the follower sits quiet forever with events accumulating in front
+of it. Caught by a smoke run across a forced rotation, not by reading the code. The follower now
+compares `st_ino` and restarts at the new file's beginning when the identity changes, falling back
+to the size test for truncation-in-place.
+
+### Benchmarks — what persistence costs on the run path
+Persisting on every state change puts I/O on the container path, so it was measured rather than
+assumed (`tests/stiva.bcyr`, which now includes the container chain):
+
+| benchmark | result |
+|---|---|
+| `event_json_build` | 5.98 µs |
+| `event_log_append` (open+flock+write+close, no rotation) | **7.78 µs** |
+| `event_ts_parse` (read path only) | 1.58 µs |
+| `flatten_layers_2x60_files_4kib` (context: one create) | 1.34 ms |
+
+Only the append is new — the JSON was already built for the bus. A full container lifecycle
+(created/started/stopped/removed) therefore pays **~31 µs** of added I/O, against the 1.34 ms a
+single `flatten_layers` costs on the same create. Acceptable; `STIVA_EVENTS=off` exists regardless.
+
+### Tests
++9 in `tests/mgmt.tcyr` (**1846** total): per-root path, one-line-per-event framing, null/empty
+guards, root auto-creation, rotation at `max_files` (including that `.3` is dropped at
+`max_files=2`), `max_bytes=0` meaning never-rotate, publish→persist with the wall-clock `ts` bound,
+the `removed`-event-survives-`rm` case that justifies per-root, `container_event_ts` across
+valid/missing/null/unparsable/torn input, and `container_event_in_range` boundaries.
++18 assertions in `scripts/cli-smoke.sh` (**61** total), including a cross-process follow: one
+process follows while another runs a container, which is the property the in-memory bus could never
+have.
+
+### Superseded
+The 3.0.12 "Not shipped — `events`, and why" note below. Its diagnosis was right; this release
+removes the cause.
+
+## [3.0.12] — 2026-07-25 — §E MCP live dispatch · `logs -f` · the empty-rootfs fix
+
+### Added — roadmap §E: MCP tools now drive the runtime
+`mcp_handle_tool` plus `mcp_handle_pull` / `_ps` / `_stop` / `_push` / `_inspect`, and the resource
+layer (`mcp_list_resources` / `mcp_read_resource`). Until now `src/mcp.cyr` had the tool schema and
+two facade-free handlers (build, ansamblu); everything touching a container or image was a comment
+block listing what the async oracle did.
+
+These land in **`stiva_core.cyr`, not `mcp.cyr`** — include order puts `mcp.cyr` first, so it
+cannot reach the `Stiva` facade. `mcp.cyr` keeps the schema, `McpResult`, and the two facade-free
+handlers; everything that drives the runtime sits downstream. Same split, and the same reason, as
+the §B pull driver living in `imagelayout.cyr`. The facade gained `stiva_images` and
+`stiva_inspect_image` to serve it.
+
+**`stiva_run` and `stiva_exec` stay advertised in `tool_list()`** and return a precise
+unavailable-and-why error rather than being dropped from the schema. The schema is the contract a
+client caches; silently shrinking it is worse than a clear failure, and both are gated on work not
+done rather than on anything a caller can fix — `run` on kavach `sandbox_spawn` (the oracle's MCP
+run is detached, `mcp.rs:291-334`), `exec` on §D.
+
+One shape divergence, deliberate: `config.command` / `env` / `ports` / `volumes` are always emitted
+as `[]` / `{}` rather than omitted when empty. `_il_str_arr` omits an empty vec, which is right for
+a manifest and wrong here — an MCP client reading `config.command` should find an empty array, not
+a missing field it has to special-case.
+
+### Added — `stiva logs -f`
+Follows the log and terminates once the container is no longer Running, exactly as `docker logs -f`
+does. A follow that hung on a stopped container would wedge any script using it, so that
+termination is asserted by the smoke suite with a `timeout`.
+
+It polls the **file**, deliberately, rather than subscribing to the lifecycle bus: the bus is a
+per-`ContainerManager` in-process `pubsub_new()` (`src/container.cyr:896`) and is never persisted,
+so a second process sees an empty one. The log is on disk and therefore observable across
+processes.
+
+`--scan` is **refused** alongside `--follow`. The externalization gate scans a *complete* output;
+redacting a stream a chunk at a time could split a secret across two reads and let both halves
+through. Failing loudly beats a redaction that silently does not hold.
+
+### Not shipped — `events`, and why
+Roadmap §E pairs `logs -f` with `events`. `events` is blocked, and not by anything external:
+lifecycle events exist only in that same in-memory bus, so a one-shot `stiva events` would
+construct its own manager, subscribe to its own empty publisher, and poll forever printing nothing
+— strictly worse than the current "not yet wired" message. It needs events persisted (a rotated
+JSONL log under the root) before the verb can mean anything. Filed rather than shipped as a verb
+that cannot work.
+
 ### Fixed — containers ran with no filesystem when overlayfs was unavailable
 The defect filed as "Known" in 3.0.11. `container_manager_create` unpacked the image layers with
 `prepare_layers`, then — whenever `setup_overlay` could not mount, **which is every unprivileged
@@ -59,6 +197,12 @@ compared against the layer dirs. Nothing already on disk distinguishes them — 
 process-local and never persisted, and `setup_overlay` creates `upper`/`work`/`merged`
 **even when the mount fails**, so their presence proves nothing about which path ran. `create`
 now drops a marker file for whoever implements the verb.
+
+### Tests — 1739 → 1804, smoke 40 → 43
+MCP dispatch is covered in the **26-module** `tests/mgmt.tcyr` — the include set `src/main.cyr`
+itself uses. Coverage includes the two failure contracts that matter: an unknown tool and an
+unavailable-but-advertised tool must both fail *with a reason*, and `mcp_read_resource` must
+distinguish an unknown URI scheme from a missing object rather than collapsing both to "not found".
 
 ### Known — OCI whiteouts are still not applied, by *either* rootfs path
 `.wh.<name>` / `.wh..wh..opq` markers are extracted literally by `_stor_extract_tar`, and

@@ -1113,6 +1113,308 @@ fn test_mg_pull_index_dedup_by_digest() {
     return 0;
 }
 
+# ══ MCP live dispatch (§E) ═══════════════════════════════
+
+fn _mg_mcp_params(json) {
+    return bayan_json_v_parse_str(json, strlen(json));
+}
+
+# The result's content JSON (McpResult -> first content part's text).
+fn _mg_mcp_text(r) {
+    var parts = mcp_result_content(r);
+    if (parts == 0) { return ""; }
+    if (vec_len(parts) == 0) { return ""; }
+    var t = content_part_text_of(vec_get(parts, 0));
+    if (t == 0) { return ""; }
+    return t;
+}
+
+fn test_mg_mcp_dispatch_unknown_tool() {
+    test_group("mg_mcp_dispatch_unknown_tool");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-unk");
+    var r = mcp_handle_tool(s, "stiva_nope", _mg_mcp_params("{}"));
+    assert_eq(mcp_result_success(r), 0, "unknown tool -> failure");
+    assert_eq(strstr(_mg_mcp_text(r), "unknown tool") >= 0, 1, "says so");
+    var r2 = mcp_handle_tool(s, 0, _mg_mcp_params("{}"));
+    assert_eq(mcp_result_success(r2), 0, "null name -> failure");
+    return 0;
+}
+
+fn test_mg_mcp_advertised_but_unavailable() {
+    test_group("mg_mcp_advertised_but_unavailable");
+    # stiva_run and stiva_exec stay in tool_list(), so a client WILL call them.
+    # They must fail with a reason, not silently succeed and not vanish from the
+    # advertised schema.
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-unavail");
+    var r = mcp_handle_tool(s, "stiva_run", _mg_mcp_params("{\"image\":\"x\"}"));
+    assert_eq(mcp_result_success(r), 0, "stiva_run reports unavailable");
+    assert_eq(strstr(_mg_mcp_text(r), "sandbox_spawn") >= 0, 1, "names the actual blocker");
+    var r2 = mcp_handle_tool(s, "stiva_exec", _mg_mcp_params("{\"id\":\"x\"}"));
+    assert_eq(mcp_result_success(r2), 0, "stiva_exec reports unavailable");
+    # And they are still advertised — dropping them would churn the client's
+    # cached schema.
+    var tools = tool_list();
+    var i = 0;
+    var saw_run = 0;
+    while (i < vec_len(tools)) {
+        if (streq(tool_def_name(vec_get(tools, i)), "stiva_run") == 1) { saw_run = 1; }
+        i = i + 1;
+    }
+    assert_eq(saw_run, 1, "stiva_run is still in tool_list()");
+    return 0;
+}
+
+fn test_mg_mcp_missing_params() {
+    test_group("mg_mcp_missing_params");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-params");
+    var e = _mg_mcp_params("{}");
+    assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_pull", e)), 0, "pull needs image");
+    assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_stop", e)), 0, "stop needs id");
+    assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_push", e)), 0, "push needs image");
+    assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_inspect", e)), 0, "inspect needs id");
+    assert_eq(strstr(_mg_mcp_text(mcp_handle_tool(s, "stiva_pull", e)), "missing required") >= 0, 1,
+    "and says which parameter");
+    return 0;
+}
+
+fn test_mg_mcp_pull_and_inspect_image() {
+    test_group("mg_mcp_pull_and_inspect_image");
+    var ctx = _mg_pull_ctx();
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-mcp-pull");
+    var r = mcp_handle_tool(s, "stiva_pull",
+    _mg_mcp_params("{\"image\":\"reg.test/library/alpine:latest\"}"));
+    assert_eq(mcp_result_success(r), 1, "pull succeeded");
+    var txt = _mg_mcp_text(r);
+    assert_eq(strstr(txt, "\"reference\"") >= 0, 1, "payload carries the reference");
+    assert_eq(strstr(txt, "reg.test/library/alpine:latest") >= 0, 1, "the one that was pulled");
+    assert_eq(strstr(txt, "\"layers\": 1") >= 0, 1, "and the layer count");
+
+    # inspect type=image finds it by id.
+    var cfg = _mg_cfg_json();
+    var id = sha256_digest(cfg, strlen(cfg));
+    var ir = mcp_handle_tool(s, "stiva_inspect",
+    _mg_mcp_params(_reg_cat2(_reg_cat2("{\"type\":\"image\",\"id\":\"", id), "\"}")));
+    assert_eq(mcp_result_success(ir), 1, "inspect image succeeded");
+    assert_eq(strstr(_mg_mcp_text(ir), id) >= 0, 1, "returns that image");
+
+    # An unknown inspect type is an error, not a silent default to container.
+    var br = mcp_handle_tool(s, "stiva_inspect",
+    _mg_mcp_params("{\"type\":\"volume\",\"id\":\"x\"}"));
+    assert_eq(mcp_result_success(br), 0, "unknown inspect type rejected");
+    assert_eq(strstr(_mg_mcp_text(br), "unknown inspect type") >= 0, 1, "says so");
+    return 0;
+}
+
+fn test_mg_mcp_ps_shape() {
+    test_group("mg_mcp_ps_shape");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-ps");
+    var r = mcp_handle_tool(s, "stiva_ps", _mg_mcp_params("{}"));
+    assert_eq(mcp_result_success(r), 1, "ps succeeds on an empty store");
+    # The key must exist with an empty array, not be omitted — a client reading
+    # `containers` should not have to special-case its absence.
+    assert_eq(strstr(_mg_mcp_text(r), "\"containers\"") >= 0, 1, "containers key present");
+    return 0;
+}
+
+fn test_mg_mcp_resources() {
+    test_group("mg_mcp_resources");
+    var ctx = _mg_pull_ctx();
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-mcp-res");
+    assert_neq(stiva_pull(s, "reg.test/library/alpine:latest"), 0, "pulled");
+
+    var res = mcp_list_resources(s);
+    assert_neq(res, 0, "resources listed");
+    assert_eq(vec_len(res) >= 1, 1, "at least the image resource");
+    var first = json_v_build(vec_get(res, 0));
+    assert_eq(strstr(str_cstr(first), "stiva://images/") >= 0, 1, "image resource URI scheme");
+    assert_eq(strstr(str_cstr(first), "application/json") >= 0, 1, "mimeType");
+
+    # read_resource round-trips that URI.
+    var cfg = _mg_cfg_json();
+    var id = sha256_digest(cfg, strlen(cfg));
+    var body = mcp_read_resource(s, _reg_cat2("stiva://images/", id));
+    assert_neq(body, 0, "image resource readable");
+    assert_eq(strstr(body, id) >= 0, 1, "and it is the right image");
+
+    # An unknown scheme and a missing id are DIFFERENT failures; both return 0
+    # but the caller can tell them apart from the error channel.
+    assert_eq(mcp_read_resource(s, "stiva://volumes/x"), 0, "unknown scheme -> 0");
+    assert_eq(mcp_read_resource(s, "stiva://images/sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
+    "missing image -> 0");
+    assert_eq(mcp_read_resource(s, 0), 0, "null uri -> 0");
+    # A bare prefix with no id must not be treated as a lookup.
+    assert_eq(mcp_read_resource(s, "stiva://images/"), 0, "bare prefix -> 0");
+    return 0;
+}
+
+# ══ §E the on-disk lifecycle event log ════════════════════
+# {root}/events.jsonl — what makes `stiva events` possible at all. The pubsub
+# hub these events also go to is per-ContainerManager and in-process, so a
+# second process (which every CLI invocation is) can only ever see the file.
+
+fn _ev_root() {
+    var root = _rt_cat2("/tmp/stiva-ev-", _rt_int_to_cstr(getpid()));
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    return root;
+}
+
+# Whole event log as a cstr ("" when absent).
+fn _ev_read(root) {
+    var buf = alloc(65536);
+    var n = file_read_all(container_events_path(root), buf, 65535);
+    if (n < 0) { return ""; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+fn _ev_count_lines(s) {
+    var n = 0;
+    var i = 0;
+    while (i < strlen(s)) {
+        if (load8(s + i) == 10) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_ev_path_is_per_root() {
+    test_group("ev_path_is_per_root");
+    # Per-ROOT, not per-container: container_manager_remove deletes
+    # {root}/containers/{id}, so a per-container log would destroy the `removed`
+    # event at the moment it was written.
+    assert_eq(streq(container_events_path("/var/lib/stiva"), "/var/lib/stiva/events.jsonl"), 1,
+    "log sits directly under the root");
+    assert_eq(strstr(container_events_path("/r"), "/containers/") >= 0, 0,
+    "and NOT under the per-container directory");
+    return 0;
+}
+
+fn test_ev_append_one_line_per_event() {
+    test_group("ev_append_one_line_per_event");
+    var root = _ev_root();
+    assert_eq(container_events_append_with(root, "{\"a\":1}", 8388608, 3), 1, "appended");
+    assert_eq(container_events_append_with(root, "{\"b\":2}", 8388608, 3), 1, "appended again");
+    var body = _ev_read(root);
+    assert_eq(streq(body, "{\"a\":1}\n{\"b\":2}\n"), 1, "two whole lines, newline-terminated");
+    assert_eq(_ev_count_lines(body), 2, "two records");
+    return 0;
+}
+
+fn test_ev_append_guards() {
+    test_group("ev_append_guards");
+    var root = _ev_root();
+    assert_eq(container_events_append_with(0, "{\"a\":1}", 8388608, 3), 0, "null root -> 0");
+    assert_eq(container_events_append_with(root, 0, 8388608, 3), 0, "null payload -> 0");
+    assert_eq(container_events_append_with(root, "", 8388608, 3), 0, "empty payload -> 0");
+    assert_eq(streq(_ev_read(root), ""), 1, "and none of them wrote anything");
+    # A root that does not exist yet is created rather than dropped — the append
+    # must not depend on the store having been opened first.
+    var fresh = _rt_cat2(root, "/nested");
+    assert_eq(container_events_append_with(fresh, "{\"a\":1}", 8388608, 3), 1, "missing root created");
+    assert_eq(_ev_count_lines(_ev_read(fresh)), 1, "and the event landed");
+    return 0;
+}
+
+fn test_ev_rotation() {
+    test_group("ev_rotation");
+    var root = _ev_root();
+    # 40-byte cap, 2 generations: every append after the first rotates.
+    var i = 0;
+    while (i < 5) {
+        container_events_append_with(root, "{\"n\":\"0123456789012345678901234\"}", 40, 2);
+        i = i + 1;
+    }
+    var live = container_events_path(root);
+    assert_eq(file_exists(live), 1, "live log present");
+    assert_eq(file_exists(_container_rotated_path(live, 1)), 1, ".1 present");
+    assert_eq(file_exists(_container_rotated_path(live, 2)), 1, ".2 present");
+    # max_files=2 keeps exactly two generations — .3 must have been dropped, or
+    # the log grows without bound and the cap means nothing.
+    assert_eq(file_exists(_container_rotated_path(live, 3)), 0, ".3 dropped at max_files=2");
+    assert_eq(_ev_count_lines(_ev_read(root)), 1, "live log holds only the newest record");
+    return 0;
+}
+
+fn test_ev_rotation_disabled_by_zero() {
+    test_group("ev_rotation_disabled_by_zero");
+    var root = _ev_root();
+    var i = 0;
+    while (i < 4) { container_events_append_with(root, "{\"n\":1}", 0, 3); i = i + 1; }
+    assert_eq(_ev_count_lines(_ev_read(root)), 4, "max_bytes 0 = never rotate");
+    assert_eq(file_exists(_container_rotated_path(container_events_path(root), 1)), 0, "no .1");
+    return 0;
+}
+
+fn test_ev_publish_persists_and_stamps_wall_clock() {
+    test_group("ev_publish_persists_and_stamps_wall_clock");
+    var root = _ev_root();
+    var mgr = container_manager_new(root, image_store_new(root));
+    container_manager_publish_event(mgr, _cm_event_json("created", "cid1", "image", "local/a:v1"));
+    container_manager_publish_event(mgr, _cm_event_json_int("stopped", "cid1", "exit_code", 7));
+    var body = _ev_read(root);
+    assert_eq(_ev_count_lines(body), 2, "both events persisted");
+    assert_eq(strstr(body, "\"event\":\"created\"") >= 0, 1, "created recorded");
+    assert_eq(strstr(body, "\"exit_code\":7") >= 0, 1, "int-valued event recorded");
+
+    # The timestamp must be WALL CLOCK. clock_now_ms() is monotonic (ns since
+    # boot — lib/chrono.cyr:45) and reads as ~uptime, which would make
+    # `--since $(date +%s)` compare a date against an uptime and silently match
+    # nothing. Bound it against clock_epoch_secs to catch that substitution.
+    var v = bayan_json_v_parse_str(body, strstr(body, "\n"));
+    var ts = _ct_jv_int_or(v, "ts", 0 - 1);
+    assert_neq(ts, 0 - 1, "the line carries a ts");
+    var now = clock_epoch_secs();
+    assert_eq(ts / 1000 <= now + 2, 1, "ts is not in the future");
+    assert_eq(ts / 1000 > now - 60, 1, "ts is wall-clock recent, not an uptime");
+    return 0;
+}
+
+fn test_ev_survives_container_removal() {
+    test_group("ev_survives_container_removal");
+    # The whole reason the log is per-root: `rm` deletes the container's own
+    # directory, and the record of the removal has to outlive it.
+    var root = _ev_root();
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    var cfg = container_config_default();
+    var rec = container_new("evcid", "evname", "img", "local/a:v1",
+    CONTAINER_STATE_STOPPED, 0 - 1, 1700000000000, 0 - 1, cfg, 0 - 1);
+    vec_push(container_manager_list(mgr), rec);
+    assert_eq(container_manager_remove(mgr, "evcid"), STIVA_ERR_OK, "removed");
+    assert_eq(is_dir(str_new(_rt_cat3(root, "/containers/", "evcid"),
+    strlen(_rt_cat3(root, "/containers/", "evcid")))), 0, "container dir is gone");
+    assert_eq(strstr(_ev_read(root), "\"event\":\"removed\"") >= 0, 1,
+    "but the removal event survives it");
+    return 0;
+}
+
+fn test_ev_ts_parse() {
+    test_group("ev_ts_parse");
+    assert_eq(container_event_ts("{\"ts\":1785000000123,\"event\":\"x\"}"), 1785000000123, "reads ts");
+    assert_eq(container_event_ts("{\"event\":\"x\"}"), 0 - 1, "missing ts -> -1");
+    assert_eq(container_event_ts("{\"ts\":null}"), 0 - 1, "null ts -> -1");
+    assert_eq(container_event_ts("not json at all"), 0 - 1, "unparsable -> -1");
+    assert_eq(container_event_ts("{\"ts\":1,\"event\":"), 0 - 1, "torn line -> -1");
+    assert_eq(container_event_ts(0), 0 - 1, "null line -> -1");
+    return 0;
+}
+
+fn test_ev_in_range() {
+    test_group("ev_in_range");
+    assert_eq(container_event_in_range(500, 0, 0), 1, "unbounded window takes everything");
+    assert_eq(container_event_in_range(500, 500, 0), 1, "--since is inclusive");
+    assert_eq(container_event_in_range(499, 500, 0), 0, "before --since is dropped");
+    assert_eq(container_event_in_range(500, 0, 500), 1, "--until is inclusive");
+    assert_eq(container_event_in_range(501, 0, 500), 0, "after --until is dropped");
+    assert_eq(container_event_in_range(500, 400, 600), 1, "inside a bounded window");
+    assert_eq(container_event_in_range(700, 400, 600), 0, "outside a bounded window");
+    # A record with no parsable timestamp is ALWAYS shown: an event stream is an
+    # audit surface, and hiding the malformed line is hiding the evidence.
+    assert_eq(container_event_in_range(0 - 1, 400, 600), 1, "ts-less lines are never filtered out");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_cm_new_empty_and_list();
@@ -1170,6 +1472,21 @@ fn main() {
     test_mg_stiva_catalog();
     test_mg_stiva_verify_signature_by_id();
     test_mg_pull_index_dedup_by_digest();
+    test_mg_mcp_dispatch_unknown_tool();
+    test_mg_mcp_advertised_but_unavailable();
+    test_mg_mcp_missing_params();
+    test_mg_mcp_pull_and_inspect_image();
+    test_mg_mcp_ps_shape();
+    test_mg_mcp_resources();
+    test_ev_path_is_per_root();
+    test_ev_append_one_line_per_event();
+    test_ev_append_guards();
+    test_ev_rotation();
+    test_ev_rotation_disabled_by_zero();
+    test_ev_publish_persists_and_stamps_wall_clock();
+    test_ev_survives_container_removal();
+    test_ev_ts_parse();
+    test_ev_in_range();
     return assert_summary();
 }
 

@@ -13,6 +13,7 @@
 | [0009](0009-mcp-structured-output.md) | MCP structured output with typed content parts |
 | [0010](0010-content-addressable-build-cache.md) | Content-addressable build cache |
 | [0011](0011-dual-stack-networking.md) | IPv6 dual-stack networking |
+| [0012](0012-persisted-lifecycle-event-log.md) | Persisted lifecycle event log at `{root}/events.jsonl` (extends 0006) |
 
 ## Adding ADRs
 

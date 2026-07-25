@@ -389,8 +389,298 @@ fn stiva_verify_signature(s, reference) {
     return registry_verify_signature(ss.registry_client, _image_reference(found), md);
 }
 
+# Local images (rust-old: Stiva::images). Returns a vec of Image*.
+#[must_use]
+fn stiva_images(s) {
+    var ss: Stiva = s;
+    return image_store_list(ss.image_store);
+}
+
+# One local image by config-digest ID or full reference (rust-old:
+# Stiva::inspect_image). Returns Image*, or 0.
+#[must_use]
+fn stiva_inspect_image(s, id) {
+    var ss: Stiva = s;
+    return image_store_find(ss.image_store, id);
+}
+
 # Security strength score for the current backend (rust-old: security_score).
 #[must_use]
 fn stiva_security_score(s) {
     return security_score();
+}
+
+# ══ MCP live dispatch (roadmap §E) ═══════════════════════
+# Oracle: rust-old/src/mcp.rs:256-585 (handle_tool + the per-tool handlers +
+# list_resources / read_resource).
+#
+# This lives in stiva_core.cyr rather than mcp.cyr purely because of include
+# order: mcp.cyr is included FIRST, so it cannot reach the Stiva facade. mcp.cyr
+# keeps the schema, McpResult, and the two facade-free handlers (build,
+# ansamblu); everything that drives the runtime is here. Same split, and the
+# same reason, as the §B pull driver living in imagelayout.cyr.
+
+# A container as the JSON object the ps / inspect / resource paths all return.
+# `full` adds created_at + the config block (oracle: inspect and read_resource
+# carry it, ps does not).
+fn _mcp_container_jv(c, full) {
+    var cc: Container = c;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(cc.id)));
+    var nm = cc.name;
+    if (nm == 0) { nm = cc.id; }
+    json_v_obj_set(o, str_from("name"), json_v_str_new(str_from(nm)));
+    json_v_obj_set(o, str_from("state"), json_v_str_new(str_from(container_state_name(cc.state))));
+    if (full == 0) {
+        json_v_obj_set(o, str_from("image"), json_v_str_new(str_from(cc.image_ref)));
+        return o;
+    }
+    json_v_obj_set(o, str_from("created_at"), json_v_int_new(cc.created_at));
+    var cfg: ContainerConfig = cc.config;
+    var co = json_v_obj_new();
+    json_v_obj_set(co, str_from("command"), _mcp_str_arr_jv(cfg.command));
+    json_v_obj_set(co, str_from("env"), _mcp_map_jv(cfg.env));
+    json_v_obj_set(co, str_from("ports"), _mcp_str_arr_jv(cfg.ports));
+    json_v_obj_set(co, str_from("volumes"), _mcp_str_arr_jv(cfg.volumes));
+    json_v_obj_set(co, str_from("detach"), json_v_bool_new(cfg.detach));
+    json_v_obj_set(o, str_from("config"), co);
+    return o;
+}
+
+# vec<cstr> → JSON array, ALWAYS an array (never omitted). _il_str_arr returns 0
+# for an empty vec so the caller can skip the key — right for a manifest, wrong
+# here: an MCP client reading `config.command` should find `[]`, not a missing
+# field it has to special-case.
+fn _mcp_str_arr_jv(v) {
+    var arr = json_v_arr_new();
+    if (v == 0) { return arr; }
+    var n = vec_len(v);
+    var i = 0;
+    while (i < n) {
+        json_v_arr_push(arr, json_v_str_new(str_from(vec_get(v, i))));
+        i = i + 1;
+    }
+    return arr;
+}
+
+# map<cstr,cstr> → JSON object (empty object when absent, same reasoning).
+fn _mcp_map_jv(m) {
+    var o = json_v_obj_new();
+    if (m == 0) { return o; }
+    var keys = map_keys(m);
+    if (keys == 0) { return o; }
+    var n = vec_len(keys);
+    var i = 0;
+    while (i < n) {
+        var k = vec_get(keys, i);
+        var val = map_get(m, k);
+        if (val != 0) { json_v_obj_set(o, str_from(k), json_v_str_new(str_from(val))); }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn _mcp_image_jv(im) {
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(_img_id(im))));
+    json_v_obj_set(o, str_from("reference"),
+    json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
+    var ii: Image = im;
+    json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ii.size_bytes));
+    var nl = 0;
+    if (ii.layers != 0) { nl = vec_len(ii.layers); }
+    json_v_obj_set(o, str_from("layers"), json_v_int_new(nl));
+    json_v_obj_set(o, str_from("created_at"), json_v_int_new(ii.created_at));
+    return o;
+}
+
+fn _mcp_uri(prefix, id) {
+    return _img_cat2(prefix, id);
+}
+
+# stiva_pull (oracle mcp.rs:271).
+fn mcp_handle_pull(s, params) {
+    var image = _mcp_param_str(params, "image");
+    if (image == 0) { return mcp_result_err("missing required parameter: image"); }
+    var im = stiva_pull(s, image);
+    if (im == 0) { return mcp_result_err(_img_cat2("pull failed: ", image)); }
+    return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
+    str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+}
+
+# stiva_ps (oracle mcp.rs:336).
+fn mcp_handle_ps(s) {
+    var list = json_v_arr_new();
+    var cs = stiva_ps(s);
+    if (cs != 0) {
+        var n = vec_len(cs);
+        var i = 0;
+        while (i < n) {
+            json_v_arr_push(list, _mcp_container_jv(vec_get(cs, i), 0));
+            i = i + 1;
+        }
+    }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("containers"), list);
+    return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+}
+
+# stiva_stop (oracle mcp.rs:356).
+fn mcp_handle_stop(s, params) {
+    var id = _mcp_param_str(params, "id");
+    if (id == 0) { return mcp_result_err("missing required parameter: id"); }
+    if (stiva_stop(s, id) != STIVA_ERR_OK) {
+        return mcp_result_err(_img_cat2("stop failed: ", id));
+    }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(id)));
+    json_v_obj_set(o, str_from("status"), json_v_str_new(str_from("stopped")));
+    return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+}
+
+# stiva_push (oracle mcp.rs:417). `target` is optional — absent means "push to
+# the image's own reference", which stiva_push resolves from the store.
+fn mcp_handle_push(s, params) {
+    var image = _mcp_param_str(params, "image");
+    if (image == 0) { return mcp_result_err("missing required parameter: image"); }
+    var target = _mcp_param_str(params, "target");
+    if (stiva_push(s, image, target) != 1) {
+        return mcp_result_err(_img_cat2("push failed: ", image));
+    }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("image"), json_v_str_new(str_from(image)));
+    if (target != 0) {
+        json_v_obj_set(o, str_from("target"), json_v_str_new(str_from(target)));
+    }
+    json_v_obj_set(o, str_from("status"), json_v_str_new(str_from("pushed")));
+    return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+}
+
+# stiva_inspect (oracle mcp.rs:434). `type` ∈ {"container","image"}, defaulting
+# to "container".
+fn mcp_handle_inspect(s, params) {
+    var id = _mcp_param_str(params, "id");
+    if (id == 0) { return mcp_result_err("missing required parameter: id"); }
+    var kind = _mcp_param_str(params, "type");
+    if (kind == 0) { kind = "container"; }
+    if (streq(kind, "container") == 1) {
+        var c = stiva_inspect(s, id);
+        if (c == 0) { return mcp_result_err(_img_cat2("inspect failed: ", id)); }
+        var cc: Container = c;
+        return mcp_result_resource(_mcp_uri("stiva://containers/", cc.id),
+        str_cstr(json_v_build_pretty(_mcp_container_jv(c, 1), 2)));
+    }
+    if (streq(kind, "image") == 1) {
+        var im = stiva_inspect_image(s, id);
+        if (im == 0) { return mcp_result_err(_img_cat2("inspect failed: ", id)); }
+        return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
+        str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+    }
+    return mcp_result_err(_img_cat2("unknown inspect type: ", kind));
+}
+
+# Container + image resources (oracle mcp.rs:521). Returns a vec of jv objects.
+fn mcp_list_resources(s) {
+    var out = vec_new();
+    var cs = stiva_ps(s);
+    if (cs != 0) {
+        var n = vec_len(cs);
+        var i = 0;
+        while (i < n) {
+            var cc: Container = vec_get(cs, i);
+            var o = json_v_obj_new();
+            json_v_obj_set(o, str_from("uri"),
+            json_v_str_new(str_from(_mcp_uri("stiva://containers/", cc.id))));
+            var nm = cc.name;
+            if (nm == 0) { nm = cc.id; }
+            json_v_obj_set(o, str_from("name"), json_v_str_new(str_from(nm)));
+            json_v_obj_set(o, str_from("mimeType"), json_v_str_new(str_from("application/json")));
+            json_v_obj_set(o, str_from("description"),
+            json_v_str_new(str_from(_img_cat2(_img_cat2("Container ", cc.id),
+            _img_cat2(" (", _img_cat2(container_state_name(cc.state), ")"))))));
+            vec_push(out, o);
+            i = i + 1;
+        }
+    }
+    var ims = stiva_images(s);
+    if (ims != 0) {
+        var m = vec_len(ims);
+        var j = 0;
+        while (j < m) {
+            var im = vec_get(ims, j);
+            var o2 = json_v_obj_new();
+            json_v_obj_set(o2, str_from("uri"),
+            json_v_str_new(str_from(_mcp_uri("stiva://images/", _img_id(im)))));
+            json_v_obj_set(o2, str_from("name"),
+            json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
+            json_v_obj_set(o2, str_from("mimeType"), json_v_str_new(str_from("application/json")));
+            var iid: Image = im;
+            json_v_obj_set(o2, str_from("description"),
+            json_v_str_new(str_from(_img_cat2(_img_cat2("Image ", _img_id(im)),
+            _img_cat2(" (", _img_cat2(_rt_int_to_cstr(iid.size_bytes), " bytes)"))))));
+            vec_push(out, o2);
+            j = j + 1;
+        }
+    }
+    return out;
+}
+
+# Read one resource by URI (oracle mcp.rs:552). Returns the JSON cstr, or 0 with
+# the reason on the error channel — an unknown scheme and a missing container
+# are different failures and the caller has to be able to say which.
+fn mcp_read_resource(s, uri) {
+    if (uri == 0) { return 0; }
+    var cpfx = "stiva://containers/";
+    var ipfx = "stiva://images/";
+    var clen = strlen(cpfx);
+    var ilen = strlen(ipfx);
+    if (strlen(uri) > clen) {
+        if (memeq(uri, cpfx, clen) == 1) {
+            var c = stiva_inspect(s, uri + clen);
+            if (c == 0) {
+                stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, uri + clen);
+                return 0;
+            }
+            return str_cstr(json_v_build_pretty(_mcp_container_jv(c, 1), 2));
+        }
+    }
+    if (strlen(uri) > ilen) {
+        if (memeq(uri, ipfx, ilen) == 1) {
+            var im = stiva_inspect_image(s, uri + ilen);
+            if (im == 0) {
+                stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, uri + ilen);
+                return 0;
+            }
+            return str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2));
+        }
+    }
+    stiva_err_print(STIVA_ERR_INVALID_REFERENCE, _img_cat2("unknown resource URI: ", uri));
+    return 0;
+}
+
+# Tool dispatch by name (oracle mcp.rs:256).
+#
+# `stiva_run` and `stiva_exec` stay advertised in tool_list() but report why they
+# are unavailable rather than being dropped from the schema: the schema is the
+# contract a client caches, and silently shrinking it is worse than a precise
+# error. Both are gated on work that is not done, not on anything a caller can
+# fix — `run` needs kavach `sandbox_spawn` for the detached mode the oracle uses
+# (mcp.rs:291-334 sets detach=true), and `exec` needs roadmap §D.
+fn mcp_handle_tool(s, name, params) {
+    if (name == 0) { return mcp_result_err("missing tool name"); }
+    if (streq(name, "stiva_pull") == 1) { return mcp_handle_pull(s, params); }
+    if (streq(name, "stiva_ps") == 1) { return mcp_handle_ps(s); }
+    if (streq(name, "stiva_stop") == 1) { return mcp_handle_stop(s, params); }
+    if (streq(name, "stiva_push") == 1) { return mcp_handle_push(s, params); }
+    if (streq(name, "stiva_inspect") == 1) { return mcp_handle_inspect(s, params); }
+    if (streq(name, "stiva_build") == 1) { return mcp_handle_build(params); }
+    if (streq(name, "stiva_ansamblu") == 1) { return mcp_handle_ansamblu(params); }
+    if (streq(name, "stiva_run") == 1) {
+        return mcp_result_err(
+        "stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)");
+    }
+    if (streq(name, "stiva_exec") == 1) {
+        return mcp_result_err("stiva_exec is not available in this build: exec is roadmap section D");
+    }
+    return mcp_result_err(_img_cat2("unknown tool: ", name));
 }

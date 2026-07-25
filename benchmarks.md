@@ -1,19 +1,22 @@
 # Benchmarks
 
-Latest: **2026-07-25T20:36:42Z** — commit `3dfd1d5`
+Latest: **2026-07-25T23:22:38Z** — commit `7cf8210`
 
-Tracking: `3808225` (baseline) → `73437f2` (mid) → `3dfd1d5` (current)
+Tracking: `3808225` (baseline) → `71a5d50` (mid) → `7cf8210` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`73437f2`) | Current (`3dfd1d5`) |
+| Benchmark | Baseline (`3808225`) | Mid (`71a5d50`) | Current (`7cf8210`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 6.886 µs **-4%** | 6.937 µs **-4%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.182 µs **-4%** | 15.437 µs |
-| `compose_yaml_to_toml` | — | 29.084 µs | 29.119 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.322 ms | 1.334 ms |
-| `flatten_layers_2x60_files_4kib` | — | — | 1.358 ms |
+| `oci_config_build+serialize` | 7.203 µs | 7.176 µs | 6.996 µs |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.797 µs | 15.392 µs |
+| `compose_yaml_to_toml` | — | 29.348 µs | 29.226 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.385 ms | 1.338 ms |
+| `flatten_layers_2x60_files_4kib` | — | — | 1.300 ms |
+| `event_json_build` | — | — | 5.979 µs |
+| `event_log_append` | — | — | 7.792 µs |
+| `event_ts_parse` | — | — | 1.582 µs |
 
 ---
 

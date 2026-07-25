@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.11: single-node OCI runtime (group A complete, §B complete)
+## Status — v3.0.13: single-node OCI runtime (group A complete, §B complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -38,7 +38,7 @@ subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
 sync core — the **v3.0.x line** (buildable now, e.g. non-interactive `exec` and CRIU),
 with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
-**1739 tests** across `tests/*.tcyr`.
+**1846 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (1739 tests)
+cyrius tests tests/                      # run the test suite (1846 tests)
 ```
 
 ### CLI
@@ -69,32 +69,32 @@ stiva prune                                          # remove stopped containers
 See [docs/cli.md](docs/cli.md) for every command, including which are live, which
 are planned for the v3.0.x line, and which are the blocked v3.1 residue.
 
-## Live commands (29 of 35)
+## Live commands (30 of 35)
 
 `run` · `ps` · `stop` · `rm` · `inspect` · `images` · `rmi` · `tag` · `import` ·
 `export` · `stats` · `pause` · `unpause` · `logs` · `wait` · `gc` · `prune` · `info` ·
 `pull` / `push` (OCI distribution, streaming + digest-verified) ·
 `kill` · `restart` · `rename` · `top` · `cp` · `completions` (bash/zsh/fish) ·
 `convert` (Dockerfile → Stivafile) · `save` / `load` (oci-archive; `load` also reads
-docker-archive).
+docker-archive) · `events` (lifecycle stream over a persisted JSONL log).
 
-Every other verb (6) is registered (visible in `--help`) but prints a clear
-"not yet wired" message — its module logic is ported. The remaining six are
-`build`, `exec`, `checkpoint`, `restore`, `events`, `diff` — blocking glue over
+Every other verb (5) is registered (visible in `--help`) but prints a clear
+"not yet wired" message — its module logic is ported. The remaining five are
+`build`, `exec`, `checkpoint`, `restore`, `diff` — blocking glue over
 the sync core, on the v3.0.x line, except the interactive half of `exec`, which
 is blocked on an external landing (v3.1).
 
 ## Capabilities
 
-| Category | Live (v3.0.11) | v3.0.x (planned) | v3.1 (blocked) |
+| Category | Live (v3.0.13) | v3.0.x (planned) | v3.1 (blocked) |
 |----------|---------------|------------------|----------------|
 | **Images** | import, tag, list, rmi, gc, export; **OCI image-layout store** (oci-layout + index.json + blobs); **`save`/`load` as oci-archive** + **`docker-archive` read**; per-image platform passthrough; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers | — |
-| **Containers** | **`ContainerManager` + `Stiva` facade**; run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait, rename, restart, update — all **routed through the manager**, with **lifecycle events over majra pub/sub**; state persistence | non-interactive `exec` (nsenter), streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
+| **Containers** | **`ContainerManager` + `Stiva` facade**; run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot **and `-f`**), wait, rename, restart, update — all **routed through the manager**, with **lifecycle events over majra pub/sub *and* a rotated `{root}/events.jsonl`** behind `stiva events`; state persistence | non-interactive `exec` (nsenter), CRIU checkpoint/restore | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
 | **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack) | live network attach on the run path | — |
 | **Storage** | overlay FS, volume mounts, **gzip + zstd layer unpack**, cgroups v2 (CPU/mem/PID/IO); **perms-preserving tar** (mode/uid/gid + dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) | — | — |
 | **Orchestration** | TOML ansamblu parse, DAG ordering, health-check / restart-policy / rolling-update / scaling logic | live deploy/scale driving the Stiva facade | — |
 | **Security** | rootless mapping, seccomp/Landlock policy, NO_NEW_PRIVS, fd cleanup, credential store, strength scoring; **`scan_output` secret/PII scanning** via `stiva logs --scan` (container exec output is gated by kavach automatically) | scanning wired into `exec` once that lands; per-container `scan_policy` persisted in `state.json` | — |
-| **Integration** | 9 MCP tool definitions + 2 sync tool handlers (build/ansamblu), lifecycle-event model; **`convert`** from a Dockerfile **or a docker-compose YAML** (documented subset) | live MCP dispatch (ps/stop/inspect/pull/push/exec), daimon agent | MCP handle_run (needs `run -d`) |
+| **Integration** | 9 MCP tool definitions + **live dispatch** (ps/stop/inspect/pull/push, plus build/ansamblu) and MCP resources; **`stiva events`** over the persisted lifecycle log; **`convert`** from a Dockerfile **or a docker-compose YAML** (documented subset) | MCP `exec` (with §D), daimon agent | MCP handle_run (needs `run -d`) |
 
 ## <a name="whats-next"></a>What's next: v3.0.x and v3.1
 
@@ -152,7 +152,7 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 1739 tests
+cyrius tests tests/                            # 1846 tests
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)
