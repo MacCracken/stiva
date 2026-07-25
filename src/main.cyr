@@ -64,7 +64,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.7 — OCI container runtime (Cyrius port)";
+    return "3.0.8 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).

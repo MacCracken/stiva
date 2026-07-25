@@ -185,7 +185,32 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
 - [x] **(v3.0.4)** GNU **longname**/longlink for names > 255 B / symlink targets > 100 B (`storage.cyr` `_tar_write_long` + reader `pending_name`/`pending_link` — no path-length limit); per-image **`platform` passthrough** in index descriptors (real config `architecture`/`os`, host fallback); empty-registry `ref.name` no longer emits a leading `/`. **Group A complete.**
 
 **B. Registry client** — a **blocking** port over `sandhi`/`tls_native` + bayan JSON, not async:
-- [ ] `acquire_token`/`authenticated_request` bearer state machine → `fetch_manifest`/`fetch_blob` → the `image_store_pull` driver = live **`stiva pull`**; then `blob_exists`/`push_blob`/`push_manifest` = **`stiva push`**; `list_tags`/`catalog`/`referrers`. Token cache = plain map. Writes into the **A** layout. (Sequential layer download; true parallelism → v3.1.)
+- [~] **In progress — increments 0–2 landed at v3.0.8** (`src/registry.cyr` +364 lines; new
+  `tests/registry.tcyr`, **85 assertions**, mirroring `store.tcyr`'s exact 6-module include set).
+  §B adds **zero new structs** (offset-accessor enums throughout) so it provably cannot perturb
+  the cycc struct-id assignment the still-open 20/21 miscompile keys on.
+  - **Inc-0** index/platform JSON: `platform_from_jv` / `platform_manifest_from_jv` /
+    `oci_index_from_jv` / `_reg_body_is_index`. Found and fixed a latent bug on the way in —
+    `oci_manifest_from_jv` read `schemaVersion` unguarded, so a JSON **string** `"2"` silently
+    became `0` and the manifest would have been mis-dispatched as schema-version zero.
+  - **Inc-1** client construction, every `/v2/` URL builder, auth scopes, `Accept` sets,
+    `Location`/digest-query helpers, `api_bases` mirror-fallback parity.
+  - **Inc-2** token cache with an injectable clock (the `_at` seam) so expiry is testable without
+    sleeping. **Mandatory divergence:** the cache key joins scope parts with `'|'`, not NUL —
+    Cyrius maps are cstr-keyed, so a NUL separator truncates the key at the first part, collapsing
+    every scope into one entry and silently serving a *pull* token for a *push* (401 on every push).
+  - **Remaining:** Inc-3 transport seam + canned transport · Inc-4 bearer state machine ·
+    Inc-5 manifest fetch/resolve · Inc-6 blob fetch · Inc-7 the `image_store_pull` driver (lands in
+    `imagelayout.cyr` — include order: `registry.cyr` cannot call `image_store_add_to_index`) ·
+    Inc-8 push · Inc-9 discovery · Inc-10 facade + CLI + docs.
+  - **Plan change at v3.0.8:** the brief specified blobs on the *buffered* path behind a
+    descriptor-derived cap and a 256 MiB refuse-loudly ceiling, **because sandhi's streaming API
+    could not authenticate** (`sandhi_http_download_sink_a` hardcoded `headers = 0`). sandhi 1.9.3
+    fixed that, so **Inc-6 streams layers straight to disk** with bounded resident memory instead.
+    Two sandhi blockers stiva filed are now closed (see the v3.0.8 CHANGELOG): that one, and DNS
+    being unable to follow CNAME chains — which made `auth.docker.io`, the Docker Hub *token
+    endpoint*, unresolvable while `registry-1.docker.io` resolved fine.
+  (Sequential layer download; true parallelism → v3.1.)
 
 **C. `ContainerManager` + `Stiva` facade** — glue over the ported run path (plain maps + majra PubSub):
 - [x] **COMPLETE (2026-07-24).** The manager fills the DEFERRED block in `src/container.cyr` and the

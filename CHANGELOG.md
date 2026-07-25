@@ -5,6 +5,81 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.8] — 2026-07-24 — §B foundations · toolchain 6.4.77 unblocks the registry client
+
+### Changed — cyrius pin 6.4.76 → 6.4.77, which finally lands the sandhi DNS + download fixes
+The 6.4.77 snapshot vendors **sandhi 1.9.3**, carrying two fixes stiva filed while building §B.
+Both were hard blockers for a real registry pull, and neither was reachable from stiva until a
+toolchain release re-vendored `lib/sandhi.cyr`:
+
+- **DNS could not follow CNAME chains** (sandhi 1.9.2). The resolver accepted an answer record
+  only when its owner name equalled the question name, so every CNAME-led answer was discarded
+  and the host did not resolve *at all* — `SANDHI_ERR_DISCOVERY`, indistinguishable from "no such
+  host". Measured from stiva's own vendored bundle, before → after: `auth.docker.io`
+  **FAIL → 172.64.144.78**, `public.ecr.aws` **FAIL → 75.2.101.78**, `mcr.microsoft.com`
+  **FAIL → 150.171.69.10**; `registry-1.docker.io` / `ghcr.io` / `quay.io` unchanged. Note the
+  shape of the Docker Hub break: the *registry* host resolved while its **auth realm** did not,
+  so an authenticated pull would have died at the token step with a discovery error.
+- **The streaming download API could not send request headers** (sandhi 1.9.3).
+  `sandhi_http_download_sink_a` hardcoded `headers = 0`, so the one API that does *not* buffer the
+  whole body could not send `Authorization: Bearer …` — useless for authenticated blob fetches.
+  New `sandhi_http_download_headers` / `_sink_headers` variants fix it, purely additively.
+
+  This **changes §B's plan**: the increment brief assumed layers would come down the *buffered*
+  path behind a descriptor-derived cap and a 256 MiB refuse-loudly ceiling, precisely because
+  streaming could not authenticate. Inc-6 (blob fetch) can now stream a layer straight to disk
+  with bounded resident memory, which is both correct and what a runtime should do.
+
+Verified from stiva rather than assumed: a probe built in stiva's own context resolves all five
+registry hosts through the vendored bundle, and the 1.9.3 download entry points link.
+
+> **Toolchain-bump sequence, learned the hard way — `cyrius deps` alone is NOT enough.**
+> After bumping the pin, `cyrius deps` reported "10 deps resolved / 83 locked" with a clean
+> `--verify`, and `lib/sandhi.cyr` was **still 1.9.1** with zero references to either fix. Only
+> `cyrius lib sync` refreshes the vendored `[deps].stdlib` subset. This is the exact inverse of
+> the 3.0.7 bump, where `lib sync` alone left the lockfile at 56 entries with `--verify` failing
+> and `cyrius deps` was the authority. **Both are required: `cyrius lib sync` then `cyrius deps`.**
+> The dangerous half is this one — it looks entirely clean while silently keeping stale
+> dependency code.
+
+### Added — roadmap §B increments 0–2: the registry client's foundations
+The first three increments of the blocking registry client (`src/registry.cyr`, +364 lines; new
+`tests/registry.tcyr`, **85 assertions**):
+
+- **Inc-0 — index/platform JSON.** `platform_from_jv` / `platform_manifest_from_jv` /
+  `oci_index_from_jv` / `_reg_body_is_index`. Fixed a latent bug found while writing them:
+  `oci_manifest_from_jv` read `schemaVersion` unguarded, so a JSON **string** `"2"` silently
+  became `0` — a manifest from a registry that serializes it as a string would have parsed as
+  schema-version zero and been mis-dispatched.
+- **Inc-1 — client construction + URL builders.** All `/v2/` path builders, auth scopes, `Accept`
+  header sets, `Location`/digest-query helpers, and `api_bases` mirror-fallback parity with the
+  oracle.
+- **Inc-2 — token cache** with an injectable clock (the `_at` seam) so expiry is testable without
+  sleeping. Carries one **mandatory divergence** from the oracle: the cache key joins scope parts
+  with `'|'`, not NUL. Cyrius maps are cstr-keyed, so a NUL separator truncates the key at the
+  first part — every scope would collide under one entry, silently serving a *pull* token for a
+  *push* request and 401-ing every push.
+
+`tests/registry.tcyr` deliberately mirrors `store.tcyr`'s exact 6-module include set, and §B adds
+**zero new structs** (offset-accessor enums throughout) so it provably cannot perturb the cycc
+struct-id assignment that the still-open 20/21 miscompile keys on.
+
+### Note — the cycc struct-id 20/21 miscompile appears fixed at 6.4.77
+The probe that segfaulted the 6-module `tests/store.tcyr` unit at 6.4.76 — a typed
+`var im: Image = p; im.id` against raw-offset ground truth — is now **green in every unit
+shape**: `store` (6-module), `registry` (6-module), `runpath` (26-module), `stiva` (25-module),
+plus a clean `main.cyr` build.
+
+**The raw-offset workarounds are deliberately left in place for this release.** 6.4.76 also
+looked fixed by the probe that mattered then, the accessors were retired on that basis, and the
+suite SIGSEGV'd in `image_store_save_archive` — a passing probe is necessary but not sufficient.
+Retiring them touches hot paths and earns its own increment with the conversion actually
+attempted end-to-end. New code is free to use `x.field` (§B and §C already do, green throughout).
+
+Suite **1374 → 1459**. Remaining §B: Inc-3 transport seam, Inc-4 bearer state machine, Inc-5
+manifest fetch/resolve, Inc-6 blob fetch (now streaming), Inc-7 the `image_store_pull` driver,
+Inc-8 push, Inc-9 discovery, Inc-10 facade + CLI + docs.
+
 ## [3.0.7] — 2026-07-24 — §C: ContainerManager + Stiva facade · toolchain 6.4.76
 
 Completes roadmap **§C** — the stateful container manager and the top-level facade, with the

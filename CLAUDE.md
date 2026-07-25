@@ -6,14 +6,14 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.4.76** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.7
+- **Toolchain**: Cyrius, pin **6.4.77** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.0.8
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.7 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.8 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
@@ -21,11 +21,12 @@ complete**; **v3.0.5 = zstd layer decode + dependency hygiene**; **v3.0.6 = road
 complete — output scanning (`stiva logs --scan`) + `convert --format compose` + working
 benchmark scripts**; **v3.0.7 = roadmap §C complete — the `ContainerManager` + `Stiva`
 facade, with the 12 live container CLI verbs routed through the manager (lifecycle events over
-majra pub/sub) + toolchain 6.4.76**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+majra pub/sub)**; **v3.0.8 = roadmap §B increments 0–2 (registry-client foundations) + toolchain
+6.4.77, whose sandhi 1.9.3 fixes the DNS CNAME + streaming-download-headers blockers stiva filed**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
-**1374 tests** across the `.tcyr` files (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
-convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.76**.
+**1459 tests** across the `.tcyr` files (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
+convert 116 · registry 85; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.77**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -55,24 +56,31 @@ have all landed (v3.0.5–v3.0.6), closing roadmap §G. `rust-old/` stays the or
 ported modules; the group A OCI-layout/transfer surface is **net-new**, so the OCI
 **image-spec** (not rust-old) is its oracle.
 
-> ⚠️ **cycc miscompile (STILL OPEN at 6.4.76 — NOT fully fixed; worked around):** cycc's
-> struct-id **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes `Image`/`Layer`/`Platform`
-> field access read garbage (or **segfault** — a scalar field compiled as a vector load reads
-> out of bounds) in some function contexts; it **moves with the compilation unit's struct-id
-> assignment**, so it is present in some units and absent in others.
+> ℹ️ **cycc struct-id miscompile — APPEARS FIXED at 6.4.77; workarounds still in place.**
+> cycc's struct-id **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** made `Image`/`Layer`/
+> `Platform` field access read garbage (or **segfault** — a scalar field compiled as a vector
+> load reads out of bounds) in some function contexts, and it **moved with the compilation
+> unit's struct-id assignment**, so it was present in some units and absent in others.
 >
-> **6.4.76 partially fixed it and that is a trap.** Verified 2026-07-24: the 6-module
-> `docs/development/cycc-repro/repro_min.tcyr` prints `MATCH` and a probe added to the
-> 26-module `tests/runpath.tcyr` unit passes — but the **6-module `tests/store.tcyr` unit
-> still SIGSEGVs** on `var im: Image = p; im.id`. So a green repro in one unit shape proves
-> nothing about another. An attempt to retire the raw-offset accessors under 6.4.76 was made,
-> passed the 26-module probe, then crashed `store.tcyr`'s `oci_archive_save_load`, and was
-> reverted. **Do not retire the workarounds** until a probe in *every* unit shape that
-> includes the struct (esp. the 6-module store unit) is green.
+> **History, because the shape of this bug matters.** 6.4.14 "fixed" it and it regressed as the
+> code grew. **6.4.76 partially fixed it, which was a trap**: the 6-module
+> `docs/development/cycc-repro/repro_min.tcyr` printed `MATCH` and a probe in the 26-module
+> `tests/runpath.tcyr` passed, so the accessors were retired — and the suite then **SIGSEGV'd**
+> in `image_store_save_archive` under the 6-module `tests/store.tcyr` unit. All of it was
+> reverted. **A green probe in one unit shape proves nothing about another.**
 >
-> Work around with **raw-offset accessors** (`_img_id`/`_img_layers`/`_img_manifest_digest`/
-> `_layer_digest`) or literals, NOT `var x: T = ptr; x.field`, in the affected hot paths.
-> Repro scratch: `docs/development/cycc-repro/`.
+> **At 6.4.77 the probe is green in every unit shape** (verified 2026-07-24, typed
+> `var im: Image = p; im.id` + `Layer.digest` against raw-offset ground truth):
+> `store` (6-module — the one that crashed at 6.4.76) · `registry` (6-module) ·
+> `runpath` (26-module) · `stiva` (25-module). Plus `main.cyr` builds clean.
+>
+> **The raw-offset accessors are nonetheless STILL IN PLACE** (`_img_id` / `_img_layers` /
+> `_img_manifest_digest` / `_layer_digest`, and the `load64(res + N)` reads in
+> `scan_output` / `container_manager_start`). Retiring them is a real change to hot paths that
+> deserves its own increment, its own full-suite run, and the *actual conversion* attempted —
+> a passing probe is necessary, not sufficient; that is exactly the 6.4.76 lesson. Until then,
+> keep using the accessors in the affected paths, and treat any *new* code touching these
+> structs as free to use `x.field` (§B and §C already do, and are green).
 
 - **The Rust crate is frozen at `rust-old/`** — it is the **parity oracle**. The
   bar for every ported module is "matches what the Rust did." Do NOT edit it.
@@ -189,7 +197,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1374 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1459 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -224,8 +232,8 @@ docs/ (when earned):
 
 ## Testing
 
-**1374 Cyrius tests** across `tests/*.tcyr` (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
-convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
+**1459 Cyrius tests** across `tests/*.tcyr` (stiva 664 · runpath 217 · store 197 · mgmt 180 ·
+convert 116 · registry 85), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
 across files because a monolith hits the cycc identifier-dedup cap — split by **include
 set**, not by test count.
 
