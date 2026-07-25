@@ -185,8 +185,9 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
 - [x] **(v3.0.4)** GNU **longname**/longlink for names > 255 B / symlink targets > 100 B (`storage.cyr` `_tar_write_long` + reader `pending_name`/`pending_link` — no path-length limit); per-image **`platform` passthrough** in index descriptors (real config `architecture`/`os`, host fallback); empty-registry `ref.name` no longer emits a leading `/`. **Group A complete.**
 
 **B. Registry client** — a **blocking** port over `sandhi`/`tls_native` + bayan JSON, not async:
-- [~] **In progress — increments 0–2 landed at v3.0.8** (`src/registry.cyr` +364 lines; new
-  `tests/registry.tcyr`, **85 assertions**, mirroring `store.tcyr`'s exact 6-module include set).
+- [x] **COMPLETE at v3.0.10.** Increments 0–2 landed at v3.0.8, 3–8 at v3.0.9, 9–10 at v3.0.10.
+  `tests/registry.tcyr` grew 85 → **326 assertions** (mirroring `store.tcyr`'s exact 6-module
+  include set), with the facade covered in the 26-module `tests/mgmt.tcyr`.
   §B adds **zero new structs** (offset-accessor enums throughout) so it provably cannot perturb
   the cycc struct-id assignment the still-open 20/21 miscompile keys on.
   - **Inc-0** index/platform JSON: `platform_from_jv` / `platform_manifest_from_jv` /
@@ -290,8 +291,50 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
       (`lib/sandhi.cyr:5077-5117`); the Location hop is not a redirect, so it needs it explicitly.
 
     `tests/registry.tcyr` 181 → 248 assertions.
-  - **Remaining:** Inc-9 discovery · Inc-10 facade + CLI + docs. `pull`/`push` are library-complete
-    but **not yet reachable from the CLI** — that wiring is Inc-10.
+  - **Inc-9 (discovery)** — `registry_list_tags` (`GET /v2/<repo>/tags/list`), `registry_catalog`
+    (`GET /v2/_catalog`, sent unauthenticated because the catalog is not repository-scoped, so
+    there is no scope to mint a token for), `registry_referrers`
+    (`GET /v2/<repo>/referrers/<digest>`, OCI distribution v1.1.0), and
+    `registry_verify_signature`.
+    - An absent or non-array list field yields an **empty** vec, not an error (the oracle's
+      `unwrap_or_default`); a failed *request* yields 0. Callers must distinguish "the repository
+      has no tags" from "the query failed", so these are deliberately not the same value.
+    - A malformed referrers entry is **skipped**, unlike a manifest's layers where a bad descriptor
+      fails the whole parse. Referrers is a discovery list — one unreadable artifact must not hide
+      the readable ones — whereas a missing layer is a broken image.
+    - **`registry_verify_signature` returns 1 / 0 / −1**, not a bool. The oracle returns
+      `Ok(false)` for unsigned and `Err` for a failed query, which callers routinely collapse; that
+      is how an *unverifiable* image gets treated as merely an *unsigned* one. It also only checks
+      that a cosign/notation artifact **exists** — it does not verify the signature
+      cryptographically. Neither does the oracle, despite the name.
+  - **Inc-10 (facade + CLI + docs)** — `stiva_pull` / `stiva_push` / `stiva_list_tags` /
+    `stiva_catalog` / `stiva_verify_signature` on the `Stiva` facade, with `AUDIT_OP_PULL` /
+    `AUDIT_OP_PUSH` emitted on both success and failure; `registry_client` is now always
+    constructed (`stiva_with_registry` builds it from the supplied credentials/mirrors instead of
+    parking them). CLI verbs `stiva pull <IMAGE>` and `stiva push <IMAGE> [TARGET]` are **live** —
+    23 of 35 verbs now execute end-to-end.
+    > **`push` with no TARGET resolves the image's own stored reference**, not the id parsed as
+    > one. `image_ref_parse("sha256:c0ffee…")` yields `docker.io/library/sha256:c0ffee…`, so the
+    > naive version would push a local — possibly private — image to Docker Hub under a nonsense
+    > repository name. Matches the oracle (`lib.rs:322`).
+
+    Facade tests live in the **26-module** `tests/mgmt.tcyr`, not only the 6-module
+    `tests/registry.tcyr`: the cycc miscompile is per-compilation-unit, so a driver green in the
+    small unit proves nothing about the shape `src/main.cyr` actually ships.
+  - **Index dedup is now digest-aware** (`image_store_add_to_index`). `image_ref_full_ref` drops
+    the digest and a digest-only reference parses with tag `latest`, so two digest-pinned pulls of
+    one repository rendered under the same key and the second silently evicted the first —
+    different content at one name, the first image's blobs orphaned until `gc`. A pinned add now
+    replaces only the same manifest digest; an unpinned (tag) add still replaces, because a tag is
+    a mutable pointer.
+    > **Known limitation:** `index.json` carries the reference in the
+    > `org.opencontainers.image.ref.name` annotation, which has no digest field, so a pinned
+    > reference does not survive a store reload — after a restart both entries read as unpinned.
+    > Making the annotation digest-aware is an on-disk format change and is deliberately not part
+    > of this increment.
+  - **Remaining in §B:** nothing blocking. Layer-parallel pull stays v3.1 (needs the async
+    substrate); Link-header pagination for `tags/list` and `_catalog` is unimplemented in the
+    oracle too and is not a parity gap.
   - **Plan change at v3.0.8:** the brief specified blobs on the *buffered* path behind a
     descriptor-derived cap and a 256 MiB refuse-loudly ceiling, **because sandhi's streaming API
     could not authenticate** (`sandhi_http_download_sink_a` hardcoded `headers = 0`). sandhi 1.9.3

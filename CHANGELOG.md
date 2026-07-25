@@ -5,6 +5,93 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.10] — 2026-07-25 — §B COMPLETE: discovery + `stiva pull` / `stiva push` are live
+
+### Added — roadmap §B Inc-9: discovery
+`registry_list_tags` (`GET /v2/<repo>/tags/list`), `registry_catalog` (`GET /v2/_catalog`),
+`registry_referrers` (`GET /v2/<repo>/referrers/<digest>`, OCI distribution v1.1.0), and
+`registry_verify_signature`. Three contracts worth stating, because each is a place the oracle
+loses information:
+
+- **An empty list and a failed query are different values.** An absent or non-array field yields
+  an empty vec (the oracle's `unwrap_or_default`); a failed *request* yields 0. "This repository
+  has no tags" must not read the same as "the question could not be asked".
+- **`registry_verify_signature` returns 1 / 0 / −1**, not a bool. The oracle returns `Ok(false)`
+  for unsigned and `Err` for a failed query — routinely collapsed by callers, which is how an
+  *unverifiable* image comes to be treated as merely an *unsigned* one. It also only checks that a
+  cosign/notation artifact **exists**; it does not verify the signature cryptographically. Neither
+  does the oracle, despite the name.
+- **A malformed referrers entry is skipped**, unlike a manifest's layers where a bad descriptor
+  fails the whole parse. Referrers is a discovery list — one unreadable artifact should not hide
+  the readable ones — whereas a missing layer is a broken image.
+
+**Divergence:** the oracle queries referrers with `image.id`, the **config** digest
+(`rust-old/src/image.rs:531`), which no cosign or notation `subject` ever carries — so its
+signature lookup can only ever come back empty. We key on the **manifest** digest.
+
+### Added — roadmap §B Inc-10: the facade and CLI
+`stiva_pull` / `stiva_push` / `stiva_list_tags` / `stiva_catalog` / `stiva_verify_signature` on the
+`Stiva` facade; `registry_client` is now always constructed, and `stiva_with_registry` builds it
+from the supplied credentials and mirrors instead of parking them. `stiva pull <IMAGE>` and
+`stiva push <IMAGE> [TARGET]` are **live** — **23 of 35** verbs now execute end-to-end.
+
+`AUDIT_OP_PUSH` is emitted on both success and failure. That is **net-new, not parity**: the oracle
+never constructs `AuditOperation::Push` anywhere, so a push left no trace in the audit log at all.
+Publishing an image is precisely the operation you want a record of.
+
+### Security — two ways an image ID could redirect a request to Docker Hub
+`image_ref_parse("sha256:<64hex>")` has no digest special-case: no `@`, no `/`, so it rsplits at
+the last `:` and yields `docker.io/library/sha256:<hex>`. Both new verbs accept a config-digest ID
+as a lookup key, and both initially parsed that key into the target reference:
+
+- **`stiva push <image-id>` with no TARGET** would have pushed a local — possibly private — image
+  to **Docker Hub**, under a repository literally named `sha256`.
+- **`stiva verify-signature <image-id>`** would have sent that repository's manifest digest to
+  Docker Hub and run a `repository:library/sha256:pull` bearer exchange against any `docker.io`
+  credential in the store — while reporting a genuinely signed image as unverifiable.
+
+Both now resolve the image against the local index **first** and take the registry target from what
+the store holds, never from the lookup key — matching the oracle, which sidesteps this by taking an
+`&Image` (`lib.rs:322`). The second was caught only by adversarial review: the same defect, in the
+sibling function, after the first had been found and fixed.
+
+### Fixed
+- **Index dedup is now digest-aware** (deferred from the 3.0.9 review). `image_ref_full_ref` drops
+  the digest and a digest-only reference parses with tag `latest`, so two digest-pinned pulls of
+  one repository rendered under the same key — the second silently evicting the first, leaving
+  different content at one name and the first image's blobs orphaned until `gc`. A pinned add now
+  replaces only the same manifest digest; an unpinned (tag) add still replaces, because a tag is a
+  mutable pointer.
+  **Known limitation:** `index.json` carries the reference in the
+  `org.opencontainers.image.ref.name` annotation, which has no digest field, so a pinned reference
+  does not survive a store reload — after a restart both entries read as unpinned. Fixing that is
+  an on-disk format change, deliberately not in this increment.
+- **`image_store_find` is first-match-wins**, matching the oracle's `.find()` and the two other
+  resolvers in the tree (`_stiva_find_image`, `_cli_find_image`). It was last-wins, which was
+  unobservable until the dedup change above made duplicate `full_ref` entries reachable — at which
+  point `push <ref>` would have uploaded an image that `run`/`rmi`/`inspect` never touch.
+- **`registry_catalog` honours an explicit base URL.** It hardcoded `https://` + host, so a client
+  built with `registry_client_with_base_url("http://localhost:5000")` — a configuration this port
+  promotes to production, where the oracle gates it behind `#[cfg(test)]` — sent a TLS ClientHello
+  into a plaintext registry.
+
+### Tests — 1656 → 1739
+`tests/registry.tcyr` 282 → 326, `tests/mgmt.tcyr` 180 → 219.
+
+Facade tests deliberately live in the **26-module** `tests/mgmt.tcyr`, whose include set is
+byte-identical to `src/main.cyr`'s. The cycc struct-id miscompile is per-compilation-unit, so the
+pull/push drivers being green in the 6-module `tests/registry.tcyr` proved nothing about the shape
+the shipped binary actually uses. That gap was flagged in the 3.0.9 review; this closes it.
+
+Adversarial review found **six surviving mutations** — assertions that would stay green with the
+behaviour broken. All six are now caught, verified by re-running each mutation:
+`stiva_pull` ignoring its own argument; `stiva_list_tags` querying a third party's repository;
+`registry_verify_signature` stopping after the first referrer (a signed image whose SBOM is listed
+first reads as unsigned); a 3xx accepted as success; an empty body becoming "the repository exists
+with no tags"; and discovery requesting `push,pull` scope for a read. The first needed a *second*
+pull of a **different** reference — asserting the URL of the only pull in the test could not
+distinguish a threaded argument from a hardcoded one.
+
 ## [3.0.9] — 2026-07-25 — §B increments 3–8: pull and push, end to end · toolchain 6.4.78
 
 ### Security — a registry-controlled digest was an unvalidated filesystem path

@@ -64,7 +64,7 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.9 — OCI container runtime (Cyrius port)";
+    return "3.0.10 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -656,6 +656,62 @@ fn _cli_save(h, root) {
     return CMDIT_EXIT_OK;
 }
 
+# A Stiva facade over `root` — the CLI's route to the registry client.
+#
+# NOTE: no audit log. stiva_config_default leaves audit_log at 0 and there is no
+# global flag to set it, so the facade's audit emissions are inert from the CLI.
+# Wiring `--audit-log` is its own change.
+fn _cli_stiva(root) {
+    var cfg = stiva_config_default();
+    var cc: StivaConfig = cfg;
+    cc.root_path = root;
+    cc.image_path = root;
+    return stiva_new(cfg);
+}
+
+fn _cli_pull(h, root) {
+    var vh = cmdit_new("stiva pull");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva pull: usage: pull <image>\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var reference = cmdit_positional(vh, 0);
+    var s = _cli_stiva(root);
+    if (s == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    var im = stiva_pull(s, reference);
+    if (im == 0) { return CMDIT_EXIT_RUN; }   # detail already printed
+    var ii: Image = im;
+    _cli_puts(ii.id); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
+fn _cli_push(h, root) {
+    var vh = cmdit_new("stiva push");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva push: usage: push <image> [target]\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var image = cmdit_positional(vh, 0);
+    # Optional second positional: push under a different reference.
+    var target = 0;
+    if (cmdit_positional_count(vh) >= 2) { target = cmdit_positional(vh, 1); }
+    var s = _cli_stiva(root);
+    if (s == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    if (stiva_push(s, image, target) != 1) { return CMDIT_EXIT_RUN; }
+    var shown = target;
+    if (shown == 0) { shown = image; }
+    _cli_puts(shown); _cli_puts("\n");
+    return CMDIT_EXIT_OK;
+}
+
 # `load <input.tar>` — import images from an oci-archive tarball into the store.
 fn _cli_load(h, root) {
     var vh = cmdit_new("stiva load");
@@ -782,6 +838,8 @@ fn main() {
     if (v == V_INFO) { return _cli_info(); }
     if (v == V_SAVE) { return _cli_save(h, _cli_root(h, f_root)); }
     if (v == V_LOAD) { return _cli_load(h, _cli_root(h, f_root)); }
+    if (v == V_PULL) { return _cli_pull(h, _cli_root(h, f_root)); }
+    if (v == V_PUSH) { return _cli_push(h, _cli_root(h, f_root)); }
     # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
     return _cli_deferred(_cli_verb_name(v));
 }

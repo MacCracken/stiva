@@ -815,6 +815,304 @@ fn _agent_caps_contains(v, needle) {
     return 0;
 }
 
+# ══ Facade registry verbs (§B Inc-10) ════════════════════
+#
+# These live in the 26-MODULE unit on purpose. The pull/push drivers are
+# compiled into five test units plus src/main.cyr but were exercised in only
+# the 6-module tests/registry.tcyr — and the cycc struct-id miscompile is
+# per-compilation-unit, so a driver green there proves nothing about the shape
+# the shipped binary uses. This is that missing coverage.
+
+enum MgCtxOff {
+    MG_CTX_ROUTES = 0;
+    MG_CTX_LOG = 8;
+}
+
+fn _mg_ctx_new() {
+    var c = alloc(16);
+    store64(c + MG_CTX_ROUTES, vec_new());
+    store64(c + MG_CTX_LOG, vec_new());
+    return c;
+}
+
+fn _mg_route(ctx, method, url_substr, status, body) {
+    var r = load64(ctx + MG_CTX_ROUTES);
+    vec_push(r, method); vec_push(r, url_substr);
+    vec_push(r, status); vec_push(r, body);
+    return 0;
+}
+
+fn _mg_log_len(ctx) { return vec_len(load64(ctx + MG_CTX_LOG)); }
+fn _mg_log_at(ctx, i) { return vec_get(load64(ctx + MG_CTX_LOG), i); }
+
+fn _mg_send(ctx, method, url, headers, body, body_len) {
+    vec_push(load64(ctx + MG_CTX_LOG), _reg_cat2(_reg_cat2(method, " "), url));
+    var routes = load64(ctx + MG_CTX_ROUTES);
+    var n = vec_len(routes);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(routes, i), method) == 1) {
+            if (strstr(url, vec_get(routes, i + 1)) >= 0) {
+                var bd = vec_get(routes, i + 3);
+                return _sandhi_resp_new(vec_get(routes, i + 2), bd, strlen(bd),
+                sandhi_headers_new(), SANDHI_OK);
+            }
+        }
+        i = i + 4;
+    }
+    return _sandhi_resp_new(500, "", 0, sandhi_headers_new(), SANDHI_OK);
+}
+
+fn _mg_sink(ctx, url, cb, sink_ctx, headers) {
+    vec_push(load64(ctx + MG_CTX_LOG), _reg_cat2("GET ", url));
+    var routes = load64(ctx + MG_CTX_ROUTES);
+    var n = vec_len(routes);
+    var i = 0;
+    while (i < n) {
+        if (streq(vec_get(routes, i), "GET") == 1) {
+            if (strstr(url, vec_get(routes, i + 1)) >= 0) {
+                var st = vec_get(routes, i + 2);
+                var bd = vec_get(routes, i + 3);
+                if (st < 200 || st >= 300) {
+                    return _sandhi_dl_result_a(default_alloc(), st, 0, SANDHI_ERR_REMOTE, 0);
+                }
+                var total = strlen(bd);
+                if (fncall3(cb, sink_ctx, bd, total) != 1) {
+                    return _sandhi_dl_result_a(default_alloc(), st, 0, SANDHI_ERR_INTERNAL, 0);
+                }
+                return _sandhi_dl_result_a(default_alloc(), st, total, SANDHI_OK, 0);
+            }
+        }
+        i = i + 4;
+    }
+    return _sandhi_dl_result_a(default_alloc(), 500, 0, SANDHI_ERR_REMOTE, 0);
+}
+
+# A Stiva facade whose registry client speaks to a canned transport.
+fn _mg_stiva(ctx, root) {
+    _stor_remove_dir_all(root);
+    var cfg = stiva_config_default();
+    var cc: StivaConfig = cfg;
+    cc.root_path = root;
+    cc.image_path = root;
+    var s = stiva_new(cfg);
+    if (s == 0) { return 0; }
+    registry_client_set_transport(stiva_registry_client(s),
+    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+    return s;
+}
+
+fn _mg_cfg_json() {
+    return "{\"architecture\":\"amd64\",\"os\":\"linux\",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[]}}";
+}
+
+fn _mg_pull_ctx() {
+    var cfg = _mg_cfg_json();
+    var lay = "mgmt-layer-bytes";
+    var cfg_d = sha256_digest(cfg, strlen(cfg));
+    var lay_d = sha256_digest(lay, strlen(lay));
+    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    man = _reg_cat2(man, cfg_d);
+    man = _reg_cat2(man, "\",\"size\":");
+    man = _reg_cat2(man, _reg_uint_str(strlen(cfg)));
+    man = _reg_cat2(man, "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"");
+    man = _reg_cat2(man, lay_d);
+    man = _reg_cat2(man, "\",\"size\":");
+    man = _reg_cat2(man, _reg_uint_str(strlen(lay)));
+    man = _reg_cat2(man, "}]}");
+
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "GET", "/manifests/", 200, man);
+    _mg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _mg_route(ctx, "GET", cfg_d, 200, cfg);
+    _mg_route(ctx, "GET", lay_d, 200, lay);
+    return ctx;
+}
+
+fn test_mg_stiva_pull() {
+    test_group("mg_stiva_pull");
+    var ctx = _mg_pull_ctx();
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-pull");
+    assert_neq(s, 0, "facade built");
+    assert_neq(stiva_registry_client(s), 0, "registry client is live, not 0");
+
+    var im = stiva_pull(s, "reg.test/library/alpine:latest");
+    assert_neq(im, 0, "pull succeeded through the facade");
+    var cfg = _mg_cfg_json();
+    assert_eq(streq(_img_id(im), sha256_digest(cfg, strlen(cfg))), 1,
+    "image id is the config digest");
+    var ii: Image = im;
+    assert_eq(vec_len(ii.layers), 1, "one layer recorded");
+    # The CALLER's reference must reach the wire. Asserting the URL of THIS
+    # pull is not enough — a facade that hardcoded this very reference would
+    # still match. So pull a DIFFERENT one and check the URL follows it; that
+    # is the assertion a hardcoded argument cannot satisfy.
+    assert_eq(strstr(_mg_log_at(ctx, 0), "reg.test/v2/library/alpine/manifests/latest") >= 0, 1,
+    "the requested reference is what got fetched");
+    assert_eq(streq(image_ref_full_ref(ii.reference), "reg.test/library/alpine:latest"), 1,
+    "and it is recorded under that reference");
+
+    var before = _mg_log_len(ctx);
+    var im2 = stiva_pull(s, "reg.test/team/other:v9");
+    assert_neq(im2, 0, "second pull, different reference");
+    assert_eq(strstr(_mg_log_at(ctx, before), "reg.test/v2/team/other/manifests/v9") >= 0, 1,
+    "a DIFFERENT reference produces a different URL — the argument is threaded");
+    var i2: Image = im2;
+    assert_eq(streq(image_ref_full_ref(i2.reference), "reg.test/team/other:v9"), 1,
+    "and is recorded under the reference it was asked for");
+    return 0;
+}
+
+fn test_mg_stiva_pull_bad_reference() {
+    test_group("mg_stiva_pull_bad_reference");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-badref");
+    assert_eq(stiva_pull(s, ""), 0, "empty reference refused");
+    assert_eq(stiva_pull(s, 0), 0, "null reference refused");
+    return 0;
+}
+
+fn test_mg_stiva_push() {
+    test_group("mg_stiva_push");
+    var pctx = _mg_pull_ctx();
+    var s = _mg_stiva(pctx, "/tmp/stiva-mg-push");
+    assert_neq(stiva_pull(s, "reg.test/library/alpine:latest"), 0, "pulled");
+
+    # Re-point the same client at a push script.
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "HEAD", "/blobs/", 404, "");
+    _mg_route(ctx, "HEAD", "/manifests/", 404, "");
+    _mg_route(ctx, "POST", "/blobs/uploads/", 202, "");
+    _mg_route(ctx, "PUT", "/", 201, "");
+    registry_client_set_transport(stiva_registry_client(s),
+    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+    # No Location header in this script, so the upload session has none to
+    # resolve — assert the failure is reported rather than silently ignored.
+    assert_eq(stiva_push(s, "reg.test/library/alpine:latest", 0), 0,
+    "a Location-less upload response fails loudly");
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "reported as a registry error");
+    return 0;
+}
+
+fn test_mg_stiva_push_default_target_is_the_image_ref() {
+    test_group("mg_stiva_push_default_target_is_the_image_ref");
+    # Pushing BY ID with no target must resolve the image's own reference from
+    # the store. Parsing the id as a reference instead gives
+    # docker.io/library/sha256:<hex> — a private image pushed to Docker Hub
+    # under a nonsense repository.
+    var pctx = _mg_pull_ctx();
+    var s = _mg_stiva(pctx, "/tmp/stiva-mg-deftarget");
+    var im = stiva_pull(s, "reg.test/library/alpine:latest");
+    assert_neq(im, 0, "pulled");
+    var id = _img_id(im);
+
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "HEAD", "/blobs/", 200, "");        # everything already present
+    _mg_route(ctx, "HEAD", "/manifests/", 404, "");
+    _mg_route(ctx, "PUT", "/manifests/", 201, "");
+    registry_client_set_transport(stiva_registry_client(s),
+    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+
+    assert_eq(stiva_push(s, id, 0), 1, "push by id, no target");
+    # Every request must be aimed at reg.test/library/alpine — never docker.io,
+    # and never a repository called "sha256".
+    var i = 0;
+    var n = _mg_log_len(ctx);
+    var bad = 0;
+    while (i < n) {
+        var e = _mg_log_at(ctx, i);
+        if (strstr(e, "docker.io") >= 0) { bad = 1; }
+        if (strstr(e, "/v2/library/sha256") >= 0) { bad = 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "never targets docker.io or a 'sha256' repository");
+    assert_eq(n > 0, 1, "requests were made");
+    assert_eq(strstr(_mg_log_at(ctx, 0), "reg.test") >= 0, 1, "targets the image's own registry");
+    return 0;
+}
+
+fn test_mg_stiva_push_missing() {
+    test_group("mg_stiva_push_missing");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-pushmiss");
+    assert_eq(stiva_push(s, "reg.test/nope:latest", 0), 0, "unknown image -> 0");
+    return 0;
+}
+
+fn test_mg_stiva_list_tags() {
+    test_group("mg_stiva_list_tags");
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "GET", "/tags/list", 200, "{\"tags\":[\"a\",\"b\"]}");
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-tags");
+    var t = stiva_list_tags(s, "reg.test/library/alpine:latest");
+    assert_neq(t, 0, "tags returned");
+    assert_eq(vec_len(t), 2, "two tags");
+    assert_eq(streq(vec_get(t, 0), "a"), 1, "first tag");
+    # Pin the URL: the facade must thread the caller's reference through, not
+    # some other repository's.
+    assert_eq(strstr(_mg_log_at(ctx, 0), "reg.test/v2/library/alpine/tags/list") >= 0, 1,
+    "queried the requested repository");
+    return 0;
+}
+
+fn test_mg_stiva_catalog() {
+    test_group("mg_stiva_catalog");
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "GET", "/v2/_catalog", 200, "{\"repositories\":[\"alpine\",\"nginx\",\"redis\"]}");
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-catalog");
+    var r = stiva_catalog(s, "reg.test");
+    assert_neq(r, 0, "catalog returned");
+    assert_eq(vec_len(r), 3, "three repositories");
+    assert_eq(streq(vec_get(r, 1), "nginx"), 1, "second repository");
+    return 0;
+}
+
+fn test_mg_stiva_verify_signature_by_id() {
+    test_group("mg_stiva_verify_signature_by_id");
+    # Looking an image up BY ID must still query the image's own registry.
+    # Parsing the id as a reference gives docker.io/library/sha256:<hex>, which
+    # would leak this repository's manifest digest to Docker Hub and
+    # authenticate there.
+    var pctx = _mg_pull_ctx();
+    var s = _mg_stiva(pctx, "/tmp/stiva-mg-verifysig");
+    var im = stiva_pull(s, "reg.test/library/alpine:latest");
+    assert_neq(im, 0, "pulled");
+    var id = _img_id(im);
+    var md = _img_manifest_digest(im);
+
+    var ctx = _mg_ctx_new();
+    _mg_route(ctx, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+    registry_client_set_transport(stiva_registry_client(s),
+    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+
+    assert_eq(stiva_verify_signature(s, id), 1, "signed, looked up by id");
+    var url = _mg_log_at(ctx, 0);
+    assert_eq(strstr(url, "reg.test") >= 0, 1, "queried the image's own registry");
+    assert_eq(strstr(url, "docker.io") >= 0, 0, "NOT docker.io");
+    assert_eq(strstr(url, "library/sha256") >= 0, 0, "NOT a 'sha256' repository");
+    # And it queries the MANIFEST digest, not the config digest (image.id).
+    assert_eq(strstr(url, md) >= 0, 1, "keyed on the manifest digest");
+    assert_eq(strstr(url, id) >= 0, 0, "not on the config digest");
+
+    # An unknown image is -1, not a silent 0.
+    assert_eq(stiva_verify_signature(s, "reg.test/nope:latest"), 0 - 1, "unknown image -> -1");
+    return 0;
+}
+
+fn test_mg_pull_index_dedup_by_digest() {
+    test_group("mg_pull_index_dedup_by_digest");
+    # Two pulls of the SAME reference and same content collapse to one entry
+    # (idempotent), which is the property the digest-aware dedup must preserve
+    # while still letting genuinely different content coexist.
+    var ctx = _mg_pull_ctx();
+    var s = _mg_stiva(ctx, "/tmp/stiva-mg-dedup");
+    assert_neq(stiva_pull(s, "reg.test/library/alpine:latest"), 0, "first pull");
+    assert_neq(stiva_pull(s, "reg.test/library/alpine:latest"), 0, "second pull");
+    var ss: Stiva = s;
+    assert_eq(vec_len(image_store_list(ss.image_store)), 1,
+    "re-pulling the same tag stays one entry");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_cm_new_empty_and_list();
@@ -863,6 +1161,15 @@ fn main() {
     test_fleet_node_status_names();
     test_fleet_constraints_default();
     test_fleet_free_slots();
+    test_mg_stiva_pull();
+    test_mg_stiva_pull_bad_reference();
+    test_mg_stiva_push();
+    test_mg_stiva_push_default_target_is_the_image_ref();
+    test_mg_stiva_push_missing();
+    test_mg_stiva_list_tags();
+    test_mg_stiva_catalog();
+    test_mg_stiva_verify_signature_by_id();
+    test_mg_pull_index_dedup_by_digest();
     return assert_summary();
 }
 

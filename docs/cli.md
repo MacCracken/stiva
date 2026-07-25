@@ -1,7 +1,7 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`); **21 of 35 execute end-to-end today**, and the rest print a clear "not yet
+`--help`); **23 of 35 execute end-to-end today**, and the rest print a clear "not yet
 wired" message (their module logic is ported — only the wiring over the sync core
 remains). The **Status** column marks each:
 
@@ -25,8 +25,8 @@ remains). The **Status** column marks each:
 | `stiva images` | **Live** | List local images |
 | `stiva tag <SOURCE> <TARGET>` | **Live** | Tag a local image with a new reference |
 | `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
-| `stiva pull <IMAGE>` | v3.0.x (planned) | Pull an image from a registry (over the blocking registry client) |
-| `stiva push <IMAGE> [TARGET]` | v3.0.x (planned) | Push a local image to a registry |
+| `stiva pull <IMAGE>` | **Live** | Pull from a registry. Resolves multi-arch indexes to this platform, streams each layer straight to disk, and verifies every digest before the blob becomes visible. Prints the image ID |
+| `stiva push <IMAGE> [TARGET]` | **Live** | Push a local image to a registry. Uploads the config, then every layer, then the manifest — a manifest is only valid once everything it references is present. `TARGET` re-tags on the way out; omitted, it pushes to the image's own reference |
 | `stiva build [-f FILE] [-c CONTEXT]` | v3.0.x (planned) | Build from `Stivafile` (parse is done; the layer build is blocking) |
 
 ### Containers

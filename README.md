@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.9: single-node OCI runtime (group A complete)
+## Status — v3.0.10: single-node OCI runtime (group A complete, §B complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -26,20 +26,19 @@ turns a docker-compose file into stiva TOML over a documented YAML subset. **v3.
 completes roadmap §C**: the stateful `ContainerManager` + top-level `Stiva` facade, with
 the 12 live container CLI verbs (`run`/`ps`/`stop`/`rm`/`inspect`/`pause`/`unpause`/`stats`/
 `logs`/`wait`/`export`) routed through the manager — `run` now has a real
-CREATED→RUNNING→STOPPED lifecycle publishing events over majra pub/sub. **v3.0.9 completes roadmap §B
-increments 3–8**: the registry client authenticates (bearer challenge + token cache),
+CREATED→RUNNING→STOPPED lifecycle publishing events over majra pub/sub. **v3.0.10 completes roadmap §B**: the registry client authenticates (bearer challenge + token cache),
 resolves a multi-arch manifest, **streams a layer straight to disk** with the digest
 verified before the blob becomes visible, and drives a full `image_store_pull` /
 `image_store_push`. The same pass fixed a registry-controlled **path traversal** in the
 blob store — a manifest digest was used as a filesystem path unvalidated (see the 3.0.9
-CHANGELOG). `pull`/`push` are library-complete but **not yet CLI-wired** (§B Inc-10). It
-imports,
+CHANGELOG). `stiva pull` and `stiva push` are **live**, alongside registry discovery
+(tags, catalog, referrers, signature lookup). It imports,
 runs, and manages real containers end-to-end via a CLI, with the algorithm-dense
 subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
-sync core — the **v3.0.x line** (buildable now, e.g. the registry `pull`/`push` client),
+sync core — the **v3.0.x line** (buildable now, e.g. non-interactive `exec` and CRIU),
 with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
-**1656 tests** across `tests/*.tcyr`.
+**1739 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -51,7 +50,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (1656 tests)
+cyrius tests tests/                      # run the test suite (1739 tests)
 ```
 
 ### CLI
@@ -70,14 +69,15 @@ stiva prune                                          # remove stopped containers
 See [docs/cli.md](docs/cli.md) for every command, including which are live, which
 are planned for the v3.0.x line, and which are the blocked v3.1 residue.
 
-## Live commands (21 of 35)
+## Live commands (23 of 35)
 
 `run` · `ps` · `stop` · `rm` · `inspect` · `images` · `rmi` · `tag` · `import` ·
 `export` · `stats` · `pause` · `unpause` · `logs` · `wait` · `gc` · `prune` · `info` ·
+`pull` / `push` (OCI distribution, streaming + digest-verified) ·
 `convert` (Dockerfile → Stivafile) · `save` / `load` (oci-archive; `load` also reads
 docker-archive).
 
-Every other verb (14) is registered (visible in `--help`) but prints a clear
+Every other verb (12) is registered (visible in `--help`) but prints a clear
 "not yet wired" message — its module logic is ported. Most such verbs are planned
 for the v3.0.x line (blocking glue over the sync core: `pull`/`push`, `build`, `exec`,
 `top`/`cp`/`kill`, `checkpoint`/`restore`, `restart`/`rename`, `events`/`diff`,
@@ -151,7 +151,7 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 1656 tests
+cyrius tests tests/                            # 1739 tests
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)

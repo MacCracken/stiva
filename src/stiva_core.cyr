@@ -56,18 +56,21 @@ fn stiva_config_default() {
 # ══ Stiva runtime facade (rust-old/src/lib.rs) ═══════════════════
 # The top-level entry point: wires the ImageStore, ContainerManager, audit
 # log, and config, and delegates the lifecycle verbs to the manager while
-# emitting audit around the mutating ones (stop/rm/signal — exactly the set
-# the oracle audits; run/ps/etc. are not audited). Single-node, synchronous:
+# emitting audit around the mutating ones (stop/rm/signal/pull — the set the
+# oracle audits — PLUS push, which is net-new: the oracle never constructs
+# AuditOperation::Push at all, so a push left no trace. run/ps/etc. are not
+# audited, matching the oracle). Single-node, synchronous:
 # the oracle's Arc/async collapses to plain pointers.
 #
-# Registry-dependent methods (pull/push/build) stay stubbed — the blocking
-# registry client is roadmap §B. So facade `run` resolves the image from the
-# LOCAL store (not a registry pull), a documented divergence from the oracle's
-# `run` = pull-then-create-then-start; every other verb is faithful.
+# pull/push/discovery are LIVE as of §B Inc-10 (v3.0.10); `build` is still
+# stubbed. Facade `run` still resolves the image from the LOCAL store rather
+# than pulling it — a documented divergence from the oracle's `run` =
+# pull-then-create-then-start, kept deliberately so `run` never reaches the
+# network implicitly. Pull first, then run.
 
 struct Stiva {
     image_store;      # ImageStore*
-    registry_client;  # RegistryClient* | 0 (registry is §B — stays 0)
+    registry_client;  # RegistryClient* (§B Inc-10: always constructed)
     containers;       # ContainerManager*
     audit;            # AuditLog* | 0 (stiva_audit_log_new when config.audit_log set)
     config;           # StivaConfig*
@@ -91,18 +94,30 @@ fn stiva_new(config) {
     var s = alloc(40);
     var ss: Stiva = s;
     ss.image_store = image_store;
-    ss.registry_client = 0;
+    ss.registry_client = registry_client_new();
     ss.containers = containers;
     ss.audit = audit;
     ss.config = config;
     return s;
 }
 
-# As stiva_new, but records an explicit registry config (rust-old:
-# with_registry, lib.rs:154). The blocking registry client is §B, so the
-# config is accepted and parked; registry_client stays 0.
+# As stiva_new, but builds the registry client from an explicit registry config
+# (rust-old: with_registry, lib.rs:154) — credentials and mirrors.
 fn stiva_with_registry(config, registry_config) {
-    return stiva_new(config);
+    var s = stiva_new(config);
+    if (s == 0) { return 0; }
+    if (registry_config != 0) {
+        var ss: Stiva = s;
+        ss.registry_client = registry_client_with_config(registry_config);
+    }
+    return s;
+}
+
+# The registry client (rust-old: registry_client field).
+#[must_use]
+fn stiva_registry_client(s) {
+    var ss: Stiva = s;
+    return ss.registry_client;
 }
 
 # The audit log handle, or 0 (rust-old: audit()).
@@ -261,6 +276,117 @@ fn stiva_prune(s) {
     }
     image_store_gc(ss.image_store);
     return removed;
+}
+
+# ══ Registry verbs (§B Inc-10) ══════════════════════════
+
+# Pull an image by reference (rust-old: Stiva::pull, lib.rs:180). Returns the
+# Image*, or 0. Audited either way, like the oracle.
+fn stiva_pull(s, reference) {
+    var ss: Stiva = s;
+    if (reference == 0) { return 0; }
+    var parsed = image_ref_parse(reference);
+    if (parsed == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_REFERENCE, reference);
+        return 0;
+    }
+    var im = image_store_pull(ss.registry_client, ss.image_store, parsed);
+    var res = AUDIT_RESULT_FAILED;
+    if (im != 0) { res = AUDIT_RESULT_SUCCESS; }
+    _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_PULL, reference, res, 0));
+    return im;
+}
+
+# Push a local image to a registry (rust-old: Stiva::push, lib.rs:314).
+# `target` may be 0, meaning "push to the image's own reference".
+# Returns 1 on success, 0 on failure.
+#
+# Audited either way. NET-NEW, not parity: the oracle's push emits no audit
+# entry and never constructs AuditOperation::Push, so a push was invisible to
+# the audit trail. Publishing an image is exactly the operation you want a
+# record of.
+fn stiva_push(s, image_id, target) {
+    var ss: Stiva = s;
+    if (image_id == 0) { return 0; }
+
+    # No target => push to the image's OWN reference, read from the store
+    # (rust-old lib.rs:322: `None => image.reference.clone()`).
+    #
+    # NOT to image_id-parsed-as-a-reference: image_id is routinely a config
+    # digest, and image_ref_parse("sha256:c0ffee…") yields
+    # docker.io/library/sha256:c0ffee… — which would push a local, possibly
+    # private, image to Docker Hub under a nonsense repository name.
+    var parsed = 0;
+    var tref = target;
+    if (target == 0) {
+        var found = image_store_find(ss.image_store, image_id);
+        if (found == 0) {
+            stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, image_id);
+            _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_PUSH, image_id, AUDIT_RESULT_FAILED, 0));
+            return 0;
+        }
+        parsed = _image_reference(found);
+        tref = image_ref_full_ref(parsed);
+    } else {
+        parsed = image_ref_parse(target);
+        if (parsed == 0) {
+            stiva_err_print(STIVA_ERR_INVALID_REFERENCE, target);
+            _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_PUSH, target, AUDIT_RESULT_FAILED, 0));
+            return 0;
+        }
+    }
+    var r = image_store_push(ss.registry_client, ss.image_store, image_id, parsed);
+    var res = AUDIT_RESULT_FAILED;
+    if (r == 1) { res = AUDIT_RESULT_SUCCESS; }
+    _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_PUSH, tref, res, 0));
+    return r;
+}
+
+# Tags for a repository reference (rust-old: RegistryClient::list_tags).
+# Returns a vec of cstr, or 0 on failure. Read-only — not audited.
+fn stiva_list_tags(s, reference) {
+    var ss: Stiva = s;
+    if (reference == 0) { return 0; }
+    var parsed = image_ref_parse(reference);
+    if (parsed == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_REFERENCE, reference);
+        return 0;
+    }
+    return registry_list_tags(ss.registry_client, parsed);
+}
+
+# Repositories in a registry (rust-old: RegistryClient::catalog).
+fn stiva_catalog(s, registry) {
+    var ss: Stiva = s;
+    return registry_catalog(ss.registry_client, registry);
+}
+
+# 1 signed · 0 unsigned · -1 the query failed. See registry_verify_signature
+# for why "unsigned" and "could not ask" are kept distinct.
+fn stiva_verify_signature(s, reference) {
+    var ss: Stiva = s;
+    if (reference == 0) { return 0 - 1; }
+    # Resolve the image FIRST, then take the registry target from what the store
+    # holds — never from the lookup key. `reference` may be a config-digest ID,
+    # and image_ref_parse("sha256:<64hex>") yields docker.io/library/sha256:…,
+    # which would send this repository's manifest digest to Docker Hub and
+    # authenticate there. Same defect as stiva_push's default target.
+    var found = image_store_find(ss.image_store, reference);
+    if (found == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, reference);
+        return 0 - 1;
+    }
+    # Referrers are keyed on the MANIFEST digest.
+    #
+    # DIVERGENCE: the oracle passes image.id — the CONFIG digest
+    # (rust-old/src/image.rs:531) — which no cosign or notation `subject` ever
+    # carries, so its signature lookup can only ever come back empty.
+    var md = _img_manifest_digest(found);
+    if (md == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, reference);
+        return 0 - 1;
+    }
+    return registry_verify_signature(ss.registry_client, _image_reference(found), md);
 }
 
 # Security strength score for the current backend (rust-old: security_score).

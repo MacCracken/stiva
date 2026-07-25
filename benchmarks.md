@@ -1,18 +1,18 @@
 # Benchmarks
 
-Latest: **2026-07-25T18:29:39Z** — commit `73437f2`
+Latest: **2026-07-25T19:33:44Z** — commit `71a5d50`
 
-Tracking: `3808225` (baseline) → `b7e7c25` (mid) → `73437f2` (current)
+Tracking: `3808225` (baseline) → `0682530` (mid) → `71a5d50` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`b7e7c25`) | Current (`73437f2`) |
+| Benchmark | Baseline (`3808225`) | Mid (`0682530`) | Current (`71a5d50`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 6.967 µs **-3%** | 6.886 µs **-4%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.824 µs | 15.182 µs **-4%** |
-| `compose_yaml_to_toml` | — | 29.313 µs | 29.084 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.372 ms | 1.322 ms |
+| `oci_config_build+serialize` | 7.203 µs | 7.049 µs | 6.964 µs **-3%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.542 µs | 15.289 µs **-3%** |
+| `compose_yaml_to_toml` | — | 29.202 µs | 29.063 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.366 ms | 1.342 ms |
 
 ---
 

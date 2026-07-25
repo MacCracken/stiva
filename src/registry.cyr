@@ -2020,6 +2020,173 @@ fn registry_push_manifest(client, ref, body, blen, ctype) {
     return 1;
 }
 
+# ══ Discovery (Inc-9) ═══════════════════════════
+# Oracle: rust-old/src/registry.rs:806-897 (list_tags / catalog / referrers)
+# and rust-old/src/image.rs:524-551 (verify_signature).
+
+# Parse a JSON body into a vec of the string elements under `key`. An absent or
+# non-array field yields an EMPTY vec, not an error — the oracle's
+# `.unwrap_or_default()` (registry.rs:826, :866). Non-string elements are
+# skipped, matching its `filter_map`.
+fn _reg_str_array_field(body, blen, key) {
+    var v = bayan_json_v_parse_str(body, blen);
+    if (v == 0) { return 0; }
+    var out = vec_new();
+    var f = json_v_obj_get(v, key);
+    if (json_v_is_arr(f) == 0) { return out; }
+    var n = json_v_arr_len(f);
+    var i = 0;
+    while (i < n) {
+        var e = json_v_arr_get(f, i);
+        if (json_v_is_str(e) == 1) { vec_push(out, str_cstr(json_v_str(e))); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Tags for a repository: GET /v2/{repo}/tags/list. Returns a vec of cstr, or 0.
+# An empty vec means "the repository exists and has no tags"; 0 means the
+# request or the parse failed — the two are NOT the same, so callers must
+# distinguish them.
+fn registry_list_tags(client, ref) {
+    _reg_clear_err();
+    var r = _reg_authenticated_get(client, ref, _reg_tags_url(client, ref),
+    _reg_pull_scope(ref), 0);
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "tag list failed", st);
+    }
+    var body = sandhi_http_body(r);
+    var blen = sandhi_http_body_len(r);
+    if (body == 0 || blen <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "empty tag list body", st);
+    }
+    var tags = _reg_str_array_field(body, blen, "tags");
+    if (tags == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "failed to parse tag list", st); }
+    return tags;
+}
+
+# Repositories in a registry: GET /v2/_catalog. Returns a vec of cstr, or 0.
+#
+# Sent UNAUTHENTICATED, like the oracle (registry.rs:840-845): the catalog is
+# not repository-scoped, so there is no scope to request a token for. Many
+# registries disable it outright, and Docker Hub never supported it — a 401 or
+# 404 here is ordinary, not a malfunction.
+fn registry_catalog(client, registry) {
+    _reg_clear_err();
+    if (registry == 0) { return 0; }
+    # Honour an explicit base URL. Every other builder goes through
+    # _reg_api_base; hardcoding https:// here (as the oracle does at
+    # registry.rs:840) sends a TLS ClientHello into a plaintext registry for a
+    # client built with registry_client_with_base_url("http://localhost:5000"),
+    # which this port promotes to a production configuration where the oracle
+    # gated it behind #[cfg(test)].
+    var base = load64(client + REG_CL_BASE_URL);
+    if (base == 0) { base = _reg_cat2("https://", registry_host(registry)); }
+    var url = _reg_cat2(base, "/v2/_catalog");
+    var h = _reg_headers(0, 0);
+    if (h == 0) { return _reg_fail(STIVA_ERR_HTTP, "cannot build request headers", 0); }
+    var r = _reg_send(client, "GET", url, h, 0, 0);
+    if (r == 0) { return _reg_fail(STIVA_ERR_HTTP, "catalog request failed", 0); }
+    if (sandhi_http_err_kind(r) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_HTTP, "catalog request failed", 0);
+    }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "catalog failed", st);
+    }
+    var body = sandhi_http_body(r);
+    var blen = sandhi_http_body_len(r);
+    if (body == 0 || blen <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "empty catalog body", st);
+    }
+    var repos = _reg_str_array_field(body, blen, "repositories");
+    if (repos == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "failed to parse catalog", st); }
+    return repos;
+}
+
+# Artifacts referencing a manifest: GET /v2/{repo}/referrers/{digest}
+# (OCI distribution v1.1.0). Returns a vec of Descriptor*, or 0.
+#
+# A registry that does not implement referrers answers 404; the oracle
+# propagates that as an error and so do we — "no referrers" and "this registry
+# cannot answer" are different facts.
+fn registry_referrers(client, ref, digest) {
+    _reg_clear_err();
+    if (digest_is_valid(digest) == 0) {
+        return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "malformed digest", 0);
+    }
+    var r = _reg_authenticated_get(client, ref, _reg_referrers_url(client, ref, digest),
+    _reg_pull_scope(ref), 0);
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "referrers query failed", st);
+    }
+    var body = sandhi_http_body(r);
+    var blen = sandhi_http_body_len(r);
+    if (body == 0 || blen <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "empty referrers body", st);
+    }
+    var v = bayan_json_v_parse_str(body, blen);
+    if (v == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "failed to parse referrers", st); }
+    var out = vec_new();
+    var f = json_v_obj_get(v, "manifests");
+    if (json_v_is_arr(f) == 0) { return out; }
+    var n = json_v_arr_len(f);
+    var i = 0;
+    while (i < n) {
+        var d = descriptor_from_jv(json_v_arr_get(f, i));
+        # A malformed entry is SKIPPED here, unlike a manifest's layers where a
+        # bad descriptor fails the whole parse. Referrers is a discovery list:
+        # one unreadable artifact should not hide the readable ones, and nothing
+        # downstream depends on the list being complete (oracle: filter_map,
+        # registry.rs:892).
+        if (d != 0) { vec_push(out, d); }
+        i = i + 1;
+    }
+    return out;
+}
+
+# Signature media types recognised by verify_signature (oracle image.rs:535).
+#[must_use]
+fn media_cosign_signature() {
+    return "application/vnd.dev.cosign.simplesigning.v1+json";
+}
+
+#[must_use]
+fn media_notary_signature() {
+    return "application/vnd.cncf.notary.signature";
+}
+
+# 1 when a cosign or notation signature artifact references `digest`, 0 when
+# none does, and 0 - 1 when the query itself failed.
+#
+# DIVERGENCE, deliberate: the oracle returns Ok(false) / Err, i.e. two values;
+# we return three, because collapsing "no signature" and "could not ask" into
+# one falsy answer is how an unverifiable image gets treated as an unsigned one.
+# The caller must be able to tell them apart.
+#
+# This checks only that a signature artifact EXISTS. It does not verify the
+# signature cryptographically — neither does the oracle, despite the name.
+fn registry_verify_signature(client, ref, digest) {
+    var refs = registry_referrers(client, ref, digest);
+    if (refs == 0) { return 0 - 1; }
+    var n = vec_len(refs);
+    var i = 0;
+    while (i < n) {
+        var dd: Descriptor = vec_get(refs, i);
+        var mt = dd.media_type;
+        if (mt != 0) {
+            if (streq(mt, media_cosign_signature()) == 1) { return 1; }
+            if (streq(mt, media_notary_signature()) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Registry tokens are short-lived; the oracle caches for 270 s (its comment says
 # 5 minutes, the code says 270 — the code wins).
 var _REG_TOKEN_TTL_NS = 270000000000;

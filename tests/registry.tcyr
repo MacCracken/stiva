@@ -1748,6 +1748,300 @@ fn test_rg_push_missing_image() {
     return 0;
 }
 
+# ══ Inc-9: discovery ═════════════════════════════════════
+
+fn test_rg_list_tags() {
+    test_group("rg_list_tags");
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/tags/list", 200, "{\"name\":\"library/alpine\",\"tags\":[\"3.18\",\"3.19\",\"latest\"]}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var tags = registry_list_tags(c, ref);
+    assert_neq(tags, 0, "tags returned");
+    assert_eq(vec_len(tags), 3, "three tags");
+    assert_eq(streq(vec_get(tags, 0), "3.18"), 1, "first tag");
+    assert_eq(streq(vec_get(tags, 2), "latest"), 1, "last tag");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), "/v2/library/alpine/tags/list"), 1, "correct URL");
+    return 0;
+}
+
+fn test_rg_discovery_uses_pull_scope() {
+    test_group("rg_discovery_uses_pull_scope");
+    # Discovery is read-only, so it must request `:pull` — asking for
+    # `push,pull` on a repository you can only read gets the whole request
+    # refused by registries that scope-check, and over-requests rights besides.
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "WWW-Authenticate",
+    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+    store64(ctx + RG_CTX_HDRS, h);
+    store64(ctx + RG_CTX_ACCEPT, "Bearer tok-x");
+    _rg_route(ctx, "GET", "/token", 200, "{\"token\":\"tok-x\"}");
+    _rg_route(ctx, "GET", "/tags/list", 200, "{\"tags\":[\"a\"]}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_neq(registry_list_tags(c, ref), 0, "tags fetched");
+    # The token request carries the scope; find it in the log.
+    var i = 0;
+    var n = _rg_log_len(ctx);
+    var saw_pull = 0;
+    var saw_push = 0;
+    while (i < n) {
+        var e = _rg_log_at(ctx, i);
+        if (_rg_contains(e, "/token") == 1) {
+            if (_rg_contains(e, "repository:library/alpine:pull") == 1) { saw_pull = 1; }
+            if (_rg_contains(e, "push") == 1) { saw_push = 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(saw_pull, 1, "requested the pull scope");
+    assert_eq(saw_push, 0, "did NOT request push rights for a read");
+    return 0;
+}
+
+fn test_rg_discovery_status_boundaries() {
+    test_group("rg_discovery_status_boundaries");
+    # A 3xx that survived the redirect budget is NOT success. Widening the
+    # check to `>= 400` would parse a redirect body as a tag list.
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/tags/list", 302, "{\"tags\":[\"phantom\"]}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_list_tags(c, ref), 0, "302 is not success");
+
+    # A 2xx with an EMPTY body is a failure, not an empty tag list — the two
+    # must stay distinguishable.
+    var ctx2 = _rg_ctx_new();
+    _rg_route(ctx2, "GET", "/tags/list", 200, "");
+    var c2 = _rg_client(ctx2);
+    var ref2 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_list_tags(c2, ref2), 0, "empty body -> 0, not an empty vec");
+
+    # A 404 WITH a body still fails.
+    var ctx3 = _rg_ctx_new();
+    _rg_route(ctx3, "GET", "/tags/list", 404, "{\"errors\":[{\"code\":\"NAME_UNKNOWN\"}]}");
+    var c3 = _rg_client(ctx3);
+    var ref3 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_list_tags(c3, ref3), 0, "404 with a body still fails");
+    assert_eq(registry_last_status(), 404, "status preserved");
+    return 0;
+}
+
+fn test_rg_list_tags_edge_cases() {
+    test_group("rg_list_tags_edge_cases");
+    # An absent or non-array "tags" field is an EMPTY list, not an error — the
+    # oracle's unwrap_or_default (registry.rs:826). A registry that has the
+    # repository but no tags answers exactly this.
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/tags/list", 200, "{\"name\":\"library/alpine\"}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var t = registry_list_tags(c, ref);
+    assert_neq(t, 0, "empty list is not a failure");
+    assert_eq(vec_len(t), 0, "zero tags");
+
+    # Non-string elements are skipped, matching filter_map.
+    var ctx2 = _rg_ctx_new();
+    _rg_route(ctx2, "GET", "/tags/list", 200, "{\"tags\":[\"ok\",7,null,\"also-ok\"]}");
+    var c2 = _rg_client(ctx2);
+    var ref2 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var t2 = registry_list_tags(c2, ref2);
+    assert_eq(vec_len(t2), 2, "non-strings skipped");
+    assert_eq(streq(vec_get(t2, 1), "also-ok"), 1, "survivors keep order");
+
+    # A failed request is 0 — distinguishable from an empty list.
+    var ctx3 = _rg_ctx_new();
+    _rg_route(ctx3, "GET", "/tags/list", 404, "");
+    var c3 = _rg_client(ctx3);
+    var ref3 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_list_tags(c3, ref3), 0, "404 -> 0, not an empty list");
+    return 0;
+}
+
+fn test_rg_catalog() {
+    test_group("rg_catalog");
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/v2/_catalog", 200, "{\"repositories\":[\"alpine\",\"nginx\"]}");
+    var c = _rg_client(ctx);
+    var repos = registry_catalog(c, "reg.test");
+    assert_neq(repos, 0, "catalog returned");
+    assert_eq(vec_len(repos), 2, "two repositories");
+    assert_eq(streq(vec_get(repos, 0), "alpine"), 1, "first repo");
+    # Sent unauthenticated — the catalog is not repository-scoped, so there is
+    # no scope to mint a token for (oracle registry.rs:840).
+    assert_eq(_rg_auth_at(ctx, 0), 0, "no Authorization header");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), "https://reg.test/v2/_catalog"), 1, "correct URL");
+    return 0;
+}
+
+fn test_rg_catalog_unsupported() {
+    test_group("rg_catalog_unsupported");
+    # Most registries disable _catalog; Docker Hub never supported it. That is
+    # an ordinary answer, and it must be distinguishable from "no repositories".
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/v2/_catalog", 404, "");
+    var c = _rg_client(ctx);
+    assert_eq(registry_catalog(c, "reg.test"), 0, "404 -> 0");
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "REGISTRY error");
+    assert_eq(registry_last_status(), 404, "status preserved");
+    return 0;
+}
+
+fn test_rg_referrers() {
+    test_group("rg_referrers");
+    var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/referrers/", 200,
+    "{\"schemaVersion\":2,\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var refs = registry_referrers(c, ref, d);
+    assert_neq(refs, 0, "referrers returned");
+    assert_eq(vec_len(refs), 1, "one artifact");
+    var dd: Descriptor = vec_get(refs, 0);
+    assert_eq(streq(dd.media_type, media_cosign_signature()), 1, "cosign media type");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), _reg_cat2("/referrers/", d)), 1, "correct URL");
+    return 0;
+}
+
+fn test_rg_referrers_skips_malformed() {
+    test_group("rg_referrers_skips_malformed");
+    # Referrers is a DISCOVERY list, so one unreadable artifact must not hide
+    # the readable ones — the opposite of a manifest's layers, where a bad
+    # descriptor fails the whole parse because a missing layer is a broken image.
+    var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"x\",\"digest\":\"sha256:bad\",\"size\":1},{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"size\":9}]}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var refs = registry_referrers(c, ref, d);
+    assert_eq(vec_len(refs), 1, "malformed entry skipped, valid one kept");
+    return 0;
+}
+
+fn test_rg_referrers_rejects_bad_digest() {
+    test_group("rg_referrers_rejects_bad_digest");
+    var ctx = _rg_ctx_new();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_referrers(c, ref, "sha256:../../etc/passwd"), 0, "traversal digest refused");
+    assert_eq(_rg_log_len(ctx), 0, "no request issued");
+    return 0;
+}
+
+fn test_rg_verify_signature() {
+    test_group("rg_verify_signature");
+    var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    # Signed (cosign).
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+    assert_eq(registry_verify_signature(_rg_client(ctx), ref, d), 1, "cosign signature found");
+
+    # Signed (notation).
+    var ctx2 = _rg_ctx_new();
+    _rg_route(ctx2, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+    assert_eq(registry_verify_signature(_rg_client(ctx2), ref, d), 1, "notation signature found");
+
+    # Present but not a signature.
+    var ctx3 = _rg_ctx_new();
+    _rg_route(ctx3, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+    assert_eq(registry_verify_signature(_rg_client(ctx3), ref, d), 0, "an SBOM is not a signature");
+
+    # The signature must be found even when it is NOT first — an SBOM listed
+    # ahead of it is the common real-world shape, and a scan that stops after
+    # one entry reports a signed image as unsigned.
+    var ctx5 = _rg_ctx_new();
+    _rg_route(ctx5, "GET", "/referrers/", 200,
+    "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"size\":10},{\"mediaType\":\"application/vnd.example.attestation\",\"digest\":\"sha256:8888888888888888888888888888888888888888888888888888888888888888\",\"size\":11},{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:9999999999999999999999999999999999999999999999999999999999999999\",\"size\":12}]}");
+    assert_eq(registry_verify_signature(_rg_client(ctx5), ref, d), 1,
+    "signature found even when it is the LAST referrer");
+
+    # THE distinction that matters: a failed query is -1, NOT 0. Collapsing it
+    # into "unsigned" is how an unverifiable image gets treated as merely
+    # unsigned — the oracle returns Ok(false)/Err and callers routinely lose it.
+    var ctx4 = _rg_ctx_new();
+    _rg_route(ctx4, "GET", "/referrers/", 500, "");
+    assert_eq(registry_verify_signature(_rg_client(ctx4), ref, d), 0 - 1,
+    "query failure is -1, distinct from unsigned");
+    return 0;
+}
+
+fn test_rg_index_dedup_digest_aware() {
+    test_group("rg_index_dedup_digest_aware");
+    # image_ref_full_ref drops the digest, and a digest-only reference parses
+    # with tag "latest" — so two digest-pinned images of one repository render
+    # under the SAME key. Keyed on that alone the second silently evicted the
+    # first: different content at one name, with the first image's blobs
+    # orphaned until gc. Dedup now also considers the manifest digest.
+    var store = _rg_blob_store("dedup");
+    var dA = "sha256:aaaa000000000000000000000000000000000000000000000000000000000000";
+    var dB = "sha256:bbbb000000000000000000000000000000000000000000000000000000000000";
+    var cfgA = "sha256:c0a0000000000000000000000000000000000000000000000000000000000000";
+    var cfgB = "sha256:c0b0000000000000000000000000000000000000000000000000000000000000";
+
+    # Pinned refs: same repo, distinct digests.
+    var refA = image_ref_new("reg.test", "library/alpine", "latest", dA);
+    var imA = image_new(cfgA, refA, 10, vec_new(), 0);
+    _img_set_manifest_digest(imA, dA);
+    var refB = image_ref_new("reg.test", "library/alpine", "latest", dB);
+    var imB = image_new(cfgB, refB, 20, vec_new(), 0);
+    _img_set_manifest_digest(imB, dB);
+
+    # Both need a manifest blob present, since load_index rebuilds from it.
+    var manA = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var mA = _reg_cat2(_reg_cat2(manA, cfgA), "\",\"size\":7},\"layers\":[]}");
+    var mB = _reg_cat2(_reg_cat2(manA, cfgB), "\",\"size\":7},\"layers\":[]}");
+    # Store them under the digests the Images claim (store_blob verifies, so
+    # write the files directly at the content-addressed paths).
+    file_write_all(_img_blob_path(image_store_root(store), dA), mA, strlen(mA));
+    file_write_all(_img_blob_path(image_store_root(store), dB), mB, strlen(mB));
+
+    assert_neq(image_store_add_to_index(store, imA), 0, "first pinned image added");
+    assert_neq(image_store_add_to_index(store, imB), 0, "second pinned image added");
+    assert_eq(vec_len(image_store_list(store)), 2,
+    "two distinct pinned digests COEXIST — the second does not evict the first");
+
+    # Re-adding the same digest is still idempotent.
+    assert_neq(image_store_add_to_index(store, imA), 0, "re-add A");
+    assert_eq(vec_len(image_store_list(store)), 2, "re-adding the same digest replaces in place");
+    return 0;
+}
+
+fn test_rg_index_dedup_tag_still_moves() {
+    test_group("rg_index_dedup_tag_still_moves");
+    # A tag is a mutable pointer: an UNPINNED add under the same name must
+    # still replace, or `pull alpine:latest` twice would pile up entries.
+    var store = _rg_blob_store("dedup2");
+    var d1 = "sha256:1111000000000000000000000000000000000000000000000000000000000000";
+    var d2 = "sha256:2222000000000000000000000000000000000000000000000000000000000000";
+    var cfg1 = "sha256:c110000000000000000000000000000000000000000000000000000000000000";
+    var cfg2 = "sha256:c220000000000000000000000000000000000000000000000000000000000000";
+    var head = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var m1 = _reg_cat2(_reg_cat2(head, cfg1), "\",\"size\":7},\"layers\":[]}");
+    var m2 = _reg_cat2(_reg_cat2(head, cfg2), "\",\"size\":7},\"layers\":[]}");
+    file_write_all(_img_blob_path(image_store_root(store), d1), m1, strlen(m1));
+    file_write_all(_img_blob_path(image_store_root(store), d2), m2, strlen(m2));
+
+    # digest = 0 -> unpinned, i.e. pulled by tag.
+    var im1 = image_new(cfg1, image_ref_new("reg.test", "library/alpine", "latest", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(im1, d1);
+    var im2 = image_new(cfg2, image_ref_new("reg.test", "library/alpine", "latest", 0), 20, vec_new(), 0);
+    _img_set_manifest_digest(im2, d2);
+
+    image_store_add_to_index(store, im1);
+    image_store_add_to_index(store, im2);
+    assert_eq(vec_len(image_store_list(store)), 1, "the tag moved — one entry, not two");
+    var got: Image = vec_get(image_store_list(store), 0);
+    assert_eq(streq(got.id, cfg2), 1, "and it points at the newer content");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_rg_transport_seam();
@@ -1822,6 +2116,18 @@ fn main() {
     test_rg_push_manifest_targets_the_tag();
     test_rg_manifest_fetch_still_prefers_digest();
     test_rg_push_missing_image();
+    test_rg_list_tags();
+    test_rg_list_tags_edge_cases();
+    test_rg_discovery_uses_pull_scope();
+    test_rg_discovery_status_boundaries();
+    test_rg_catalog();
+    test_rg_catalog_unsupported();
+    test_rg_referrers();
+    test_rg_referrers_skips_malformed();
+    test_rg_referrers_rejects_bad_digest();
+    test_rg_verify_signature();
+    test_rg_index_dedup_digest_aware();
+    test_rg_index_dedup_tag_still_moves();
     return assert_summary();
 }
 

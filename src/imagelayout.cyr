@@ -410,16 +410,44 @@ fn image_store_add_to_index(store, image) {
         }
     }
     image_store_write_oci_layout(store);
-    var ii: Image = image;
     var new_ref = image_ref_full_ref(_image_reference(image));
+    var new_md = _img_manifest_digest(image);
+    # Is the incoming reference pinned to a digest? image_ref_full_ref drops the
+    # digest field, so two digest-pinned pulls of the same repository both
+    # render as "repo:latest" and, keyed on that alone, the second would silently
+    # evict the first — different content under one key, with the first image's
+    # blobs orphaned until gc.
+    # ImageRef.digest by RAW OFFSET (@24). An ImageRef obtained from a wrapper
+    # function, stored in a typed local and then field-read, is the exact form
+    # CLAUDE.md's 2026-07-24 note records reading back as garbage under the live
+    # cycc struct-id miscompile — and this file already avoids a Platform field
+    # read for the same reason. Consistent with _img_manifest_digest above.
+    var new_pinned = 0;
+    if (load64(_image_reference(image) + 24) != 0) { new_pinned = 1; }
+
     var images = image_store_load_index(store);
     var kept = vec_new();
     var n = vec_len(images);
     var i = 0;
     while (i < n) {
         var ex = vec_get(images, i);
-        var ee: Image = ex;
-        if (streq(image_ref_full_ref(_image_reference(ex)), new_ref) == 0) { vec_push(kept, ex); }
+        var drop = 0;
+        # Same content under the same name: an idempotent re-add, replace it.
+        if (streq(image_ref_full_ref(_image_reference(ex)), new_ref) == 1) {
+            if (new_pinned == 0) {
+                drop = 1;              # a tag is a mutable pointer — it moved
+            } else {
+                var ex_md = _img_manifest_digest(ex);
+                if (ex_md != 0 && new_md != 0) {
+                    # Pinned add: replace only the SAME manifest, so a second
+                    # distinct digest coexists rather than evicting the first.
+                    if (streq(ex_md, new_md) == 1) { drop = 1; }
+                } else {
+                    drop = 1;
+                }
+            }
+        }
+        if (drop == 0) { vec_push(kept, ex); }
         i = i + 1;
     }
     vec_push(kept, image);
@@ -1080,6 +1108,29 @@ fn _il_push_blob(client, store, target, digest) {
     return registry_push_blob(client, target, digest, buf, n);
 }
 
+# Resolve a local image by config-digest ID or by full reference, the dual key
+# every image-taking verb uses (rust-old: lib.rs:316-320). Returns Image*, or 0.
+#
+# FIRST match wins, matching the oracle's `.find()` and the two other resolvers
+# in this tree (_stiva_find_image, _cli_find_image). It matters now that the
+# digest-aware index dedup lets two pinned images share a full_ref: a last-wins
+# resolver here would make `push <ref>` upload a different image than
+# `run <ref>` starts, with nothing to signal the divergence.
+#[must_use]
+fn image_store_find(store, ref_or_id) {
+    if (store == 0 || ref_or_id == 0) { return 0; }
+    var images = image_store_load_index(store);
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        if (streq(_img_id(im), ref_or_id) == 1) { return im; }
+        if (streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) { return im; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Push the local image `ref_or_id` to `target`. Returns 1 on success, 0 on
 # failure.
 #
@@ -1090,16 +1141,7 @@ fn _il_push_blob(client, store, target, digest) {
 fn image_store_push(client, store, ref_or_id, target) {
     if (client == 0 || store == 0 || target == 0 || ref_or_id == 0) { return 0; }
 
-    var images = image_store_load_index(store);
-    var found = 0;
-    var n = vec_len(images);
-    var i = 0;
-    while (i < n) {
-        var im = vec_get(images, i);
-        if (streq(_img_id(im), ref_or_id) == 1) { found = im; }
-        if (streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) { found = im; }
-        i = i + 1;
-    }
+    var found = image_store_find(store, ref_or_id);
     if (found == 0) {
         stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, ref_or_id);
         return 0;
