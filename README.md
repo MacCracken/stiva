@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.8: single-node OCI runtime (group A complete)
+## Status — v3.0.9: single-node OCI runtime (group A complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -26,18 +26,20 @@ turns a docker-compose file into stiva TOML over a documented YAML subset. **v3.
 completes roadmap §C**: the stateful `ContainerManager` + top-level `Stiva` facade, with
 the 12 live container CLI verbs (`run`/`ps`/`stop`/`rm`/`inspect`/`pause`/`unpause`/`stats`/
 `logs`/`wait`/`export`) routed through the manager — `run` now has a real
-CREATED→RUNNING→STOPPED lifecycle publishing events over majra pub/sub. **v3.0.8 lays
-roadmap §B's foundations** — the registry client's index/platform JSON, URL builders, and
-token cache — and takes the toolchain to cyrius 6.4.77, whose **sandhi 1.9.3** fixes two
-blockers stiva filed: DNS could not follow CNAME chains (so `auth.docker.io`, the Docker
-Hub token endpoint, did not resolve at all), and the streaming download API could not send
-`Authorization`. Both are verified working from stiva. It imports,
+CREATED→RUNNING→STOPPED lifecycle publishing events over majra pub/sub. **v3.0.9 completes roadmap §B
+increments 3–8**: the registry client authenticates (bearer challenge + token cache),
+resolves a multi-arch manifest, **streams a layer straight to disk** with the digest
+verified before the blob becomes visible, and drives a full `image_store_pull` /
+`image_store_push`. The same pass fixed a registry-controlled **path traversal** in the
+blob store — a manifest digest was used as a filesystem path unvalidated (see the 3.0.9
+CHANGELOG). `pull`/`push` are library-complete but **not yet CLI-wired** (§B Inc-10). It
+imports,
 runs, and manages real containers end-to-end via a CLI, with the algorithm-dense
 subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
 sync core — the **v3.0.x line** (buildable now, e.g. the registry `pull`/`push` client),
 with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
-**1459 tests** across `tests/*.tcyr`.
+**1656 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -49,7 +51,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (1459 tests)
+cyrius tests tests/                      # run the test suite (1656 tests)
 ```
 
 ### CLI
@@ -83,7 +85,7 @@ for the v3.0.x line (blocking glue over the sync core: `pull`/`push`, `build`, `
 
 ## Capabilities
 
-| Category | Live (v3.0.8) | v3.0.x (planned) | v3.1 (blocked) |
+| Category | Live (v3.0.9) | v3.0.x (planned) | v3.1 (blocked) |
 |----------|---------------|------------------|----------------|
 | **Images** | import, tag, list, rmi, gc, export; **OCI image-layout store** (oci-layout + index.json + blobs); **`save`/`load` as oci-archive** + **`docker-archive` read**; per-image platform passthrough; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers | — |
 | **Containers** | **`ContainerManager` + `Stiva` facade**; run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait, rename, restart, update — all **routed through the manager**, with **lifecycle events over majra pub/sub**; state persistence | non-interactive `exec` (nsenter), streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |
@@ -149,7 +151,7 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 1459 tests
+cyrius tests tests/                            # 1656 tests
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)

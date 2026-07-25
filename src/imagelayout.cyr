@@ -281,7 +281,7 @@ fn _il_manifest_descriptor_jv(store, image, manifest_size) {
     var arch = 0;
     var os = 0;
     var cfg_path = _img_blob_path(image_store_root(store), _img_id(image));
-    if (file_exists(cfg_path) == 1) {
+    if (cfg_path != 0 && file_exists(cfg_path) == 1) {
         var cc = alloc(8);
         var cbuf = _img_read_file(cfg_path, cc);
         if (cbuf != 0) {
@@ -313,6 +313,7 @@ fn _il_manifest_descriptor_jv(store, image, manifest_size) {
 #[must_use]
 fn _il_read_manifest(store, digest) {
     var path = _img_blob_path(image_store_root(store), digest);
+    if (path == 0) { return 0; }
     if (file_exists(path) == 0) { return 0; }
     var len_cell = alloc(8);
     var buf = _img_read_file(path, len_cell);
@@ -625,6 +626,7 @@ fn image_store_tag(store, source, new_ref) {
 fn _il_blob_tar_entry(store, digest) {
     if (digest == 0) { return 0; }
     var path = _img_blob_path(image_store_root(store), digest);
+    if (path == 0) { return 0; }
     if (file_exists(path) == 0) { return 0; }
     var len_cell = alloc(8);
     var data = _img_read_file(path, len_cell);
@@ -915,4 +917,241 @@ fn image_store_load_archive(store, path) {
     var count = _il_load_oci_layout(store, tmp);
     _stor_remove_dir_all(tmp);
     return count;
+}
+
+# ══ Registry pull driver (roadmap §B Inc-7) ══════════════
+# Oracle: rust-old/src/image.rs:139-236 (ImageStore::pull).
+#
+# This lives in imagelayout.cyr rather than registry.cyr purely because of
+# include order: registry.cyr is included FIRST, so it cannot call
+# image_store_add_to_index. The dependency only runs one way.
+
+# Fetch one layer or config blob into the store.
+# Foreign/non-distributable layers (a descriptor carrying `urls`) are NOT
+# followed — see the note in image_store_pull.
+fn _il_pull_blob(client, store, ref, digest, size) {
+    if (image_store_has_blob(store, digest) == 1) { return 1; }
+    if (registry_fetch_blob_to_store(client, store, ref, digest, size) == 0) { return 0; }
+    return 1;
+}
+
+# Pull `ref` from `client` into `store`. Returns the Image*, or 0.
+#
+# Divergences from the oracle, each deliberate:
+#
+#  * **The manifest is stored under the digest the registry served**, using the
+#    bytes as received. The oracle re-serializes the parsed manifest with
+#    `to_vec_pretty` and stores that under the re-encoded digest
+#    (image.rs:151-153), so the stored blob's digest is not the manifest's real
+#    identity: index.json then points at something the registry never served and
+#    `Docker-Content-Digest` can never be re-checked from disk. For a store that
+#    claims to be an OCI image layout that is simply wrong.
+#  * **Layers download sequentially.** The oracle uses `buffer_unordered(4)`.
+#    The Cyrius runtime is single-threaded run-to-completion; parallel layer
+#    fetch is roadmap v3.1.
+#  * **Foreign layers are refused, not fetched.** The oracle follows
+#    `descriptor.urls` to an arbitrary external host (image.rs:186-190). That
+#    URL comes from the manifest, i.e. from the registry — following it is an
+#    SSRF primitive against whatever the daemon can reach, and the bytes are
+#    still digest-checked but the *request* has already happened. Refusing is
+#    the safe default; a flag to opt in belongs with the CLI work in Inc-10.
+fn image_store_pull(client, store, ref) {
+    if (client == 0 || store == 0 || ref == 0) { return 0; }
+    sakshi_info("pulling image", strlen("pulling image"));
+
+    # 1. Resolve (transparently handles a multi-arch index).
+    var man = registry_resolve_manifest(client, ref);
+    if (man == 0) { return 0; }
+
+    # 2. Persist the manifest bytes exactly as served.
+    var mbody = registry_last_manifest_body();
+    var mlen = registry_last_manifest_body_len();
+    var mdigest = registry_last_manifest_digest();
+    if (mbody == 0 || mlen <= 0 || mdigest == 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "manifest bytes unavailable after resolve");
+        return 0;
+    }
+    if (image_store_store_blob(store, mdigest, mbody, mlen) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "cannot store manifest blob");
+        return 0;
+    }
+
+    var mm: OciManifest = man;
+
+    # 3. Config blob. Its digest becomes the image id, so this one is not
+    #    optional — a missing config means no inspect, no run.
+    var cfg: Descriptor = mm.config;
+    var cfg_digest = cfg.digest;
+    if (cfg_digest == 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "manifest has no config descriptor");
+        return 0;
+    }
+    if (_il_pull_blob(client, store, ref, cfg_digest, cfg.size) == 0) { return 0; }
+
+    # 4. Layers, in manifest order. A failure aborts the pull WITHOUT adding to
+    #    index.json, so a half-pulled image is never listable or runnable; the
+    #    blobs that did land stay content-addressed and are either reused by the
+    #    next attempt or swept by `gc`.
+    var layers = vec_new();
+    var total = 0;
+    var descs = mm.layers;
+    var n = 0;
+    if (descs != 0) { n = vec_len(descs); }
+    var i = 0;
+    while (i < n) {
+        var ld: Descriptor = vec_get(descs, i);
+        var ldigest = ld.digest;
+        if (ldigest == 0) {
+            stiva_err_print(STIVA_ERR_REGISTRY, "layer descriptor has no digest");
+            return 0;
+        }
+        if (ld.urls != 0) {
+            if (vec_len(ld.urls) > 0) {
+                stiva_err_print(STIVA_ERR_PULL_FAILED,
+                "foreign layer (descriptor carries urls); refusing to fetch from an external host");
+                return 0;
+            }
+        }
+        if (_il_pull_blob(client, store, ref, ldigest, ld.size) == 0) { return 0; }
+        vec_push(layers, layer_new(ldigest, ld.size, ld.media_type));
+        total = total + ld.size;
+        i = i + 1;
+    }
+
+    # 5. Image record — id is the config digest (oracle image.rs:218).
+    # created_at is epoch SECONDS (image.cyr:272-278) — clock_epoch_secs, not
+    # clock_now_ns, which is monotonic uptime in ns (lib/chrono.cyr:10-15) and
+    # would record an image as created a few seconds after boot, in 1970.
+    # Note it is not durable: index.json carries no `created` field, so
+    # image_store_load_index reconstructs it as 0 (imagelayout.cyr:363).
+    var image = image_new(cfg_digest, ref, total, layers, clock_epoch_secs());
+    _img_set_manifest_digest(image, mdigest);
+
+    # 6. Publish. Only now does the image become visible to list/inspect/run.
+    if (image_store_add_to_index(store, image) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "failed to update image index");
+        return 0;
+    }
+    sakshi_info("pull complete", strlen("pull complete"));
+    return image;
+}
+
+# ══ Registry push driver (roadmap §B Inc-8) ══════════════
+# Oracle: rust-old has no equivalent driver — it exposes push_blob /
+# push_manifest and leaves assembly to the caller. The ordering below is the OCI
+# distribution requirement, not an invention: a manifest may only be PUT once
+# every blob it references is already in the registry, otherwise the registry
+# rejects it (or, worse, accepts a manifest with dangling references).
+
+# Read a blob out of the store. Returns the buffer; writes its length to
+# `out_len`. 0 on failure.
+fn _il_read_blob(store, digest, out_len) {
+    var path = _img_blob_path(image_store_root(store), digest);
+    if (path == 0) { store64(out_len, 0); return 0; }
+    if (file_exists(path) == 0) { store64(out_len, 0); return 0; }
+    return _img_read_file(path, out_len);
+}
+
+# Upload one blob from the store. `_IL_PUSH_CHUNK_THRESHOLD` picks monolithic vs
+# chunked: a single PUT is one round trip and every registry supports it, but a
+# very large layer in one request risks proxy body limits and gives up all
+# progress on a failure.
+var _IL_PUSH_CHUNK_THRESHOLD = 67108864;
+var _IL_PUSH_CHUNK_SIZE = 16777216;
+
+fn _il_push_blob(client, store, target, digest) {
+    # Precheck BEFORE reading. _img_read_file allocates the whole blob out of a
+    # bump arena with no free on this path, so reading first would make peak RSS
+    # the sum of every layer — even when the registry already has them all and
+    # nothing is uploaded. That is exactly the failure Inc-6 streams to avoid.
+    if (registry_blob_exists(client, target, digest) == 1) { return 1; }
+    var lc = alloc(8);
+    var buf = _il_read_blob(store, digest, lc);
+    var n = load64(lc);
+    if (buf == 0 || n <= 0) {
+        # Name the digest: on a twenty-layer image "blob missing from local
+        # store" alone does not tell the operator which layer to re-pull.
+        stiva_err_print(STIVA_ERR_IO, _img_cat2("cannot read blob for push: ", digest));
+        return 0;
+    }
+    if (n > _IL_PUSH_CHUNK_THRESHOLD) {
+        return registry_push_blob_chunked(client, target, digest, buf, n, _IL_PUSH_CHUNK_SIZE);
+    }
+    return registry_push_blob(client, target, digest, buf, n);
+}
+
+# Push the local image `ref_or_id` to `target`. Returns 1 on success, 0 on
+# failure.
+#
+# The manifest is pushed as the EXACT bytes held in the store, so an image
+# pulled from one registry and pushed to another keeps its digest — which is the
+# entire point of content addressing, and only works because Inc-7 stores the
+# manifest as served rather than re-serializing it.
+fn image_store_push(client, store, ref_or_id, target) {
+    if (client == 0 || store == 0 || target == 0 || ref_or_id == 0) { return 0; }
+
+    var images = image_store_load_index(store);
+    var found = 0;
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        if (streq(_img_id(im), ref_or_id) == 1) { found = im; }
+        if (streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) { found = im; }
+        i = i + 1;
+    }
+    if (found == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, ref_or_id);
+        return 0;
+    }
+
+    var mdigest = _img_manifest_digest(found);
+    if (mdigest == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "image has no manifest digest");
+        return 0;
+    }
+    var man = _il_read_manifest(store, mdigest);
+    if (man == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "manifest blob missing or unparseable");
+        return 0;
+    }
+
+    sakshi_info("pushing image", strlen("pushing image"));
+
+    # 1. Config blob first. The manifest references it, so it has to land first.
+    var mm: OciManifest = man;
+    var cfg: Descriptor = mm.config;
+    if (cfg.digest == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "manifest has no config descriptor");
+        return 0;
+    }
+    if (_il_push_blob(client, store, target, cfg.digest) == 0) { return 0; }
+
+    # 2. Every layer.
+    var descs = mm.layers;
+    var ln = 0;
+    if (descs != 0) { ln = vec_len(descs); }
+    var j = 0;
+    while (j < ln) {
+        var ld: Descriptor = vec_get(descs, j);
+        if (ld.digest == 0) {
+            stiva_err_print(STIVA_ERR_STORAGE, "layer descriptor has no digest");
+            return 0;
+        }
+        if (_il_push_blob(client, store, target, ld.digest) == 0) { return 0; }
+        j = j + 1;
+    }
+
+    # 3. The manifest last — only now are all its references resolvable.
+    var mc = alloc(8);
+    var mbuf = _il_read_blob(store, mdigest, mc);
+    var mlen = load64(mc);
+    if (mbuf == 0 || mlen <= 0) {
+        stiva_err_print(STIVA_ERR_IO, "cannot read manifest blob");
+        return 0;
+    }
+    if (registry_push_manifest(client, target, mbuf, mlen, mm.media_type) == 0) { return 0; }
+
+    sakshi_info("push complete", strlen("push complete"));
+    return 1;
 }

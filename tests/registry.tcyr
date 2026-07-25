@@ -42,19 +42,37 @@ fn _rg_contains(hay, needle) {
 #   RG_CTX_AUTHLOG @16 — vec of the Authorization value per call (0 when absent)
 #   RG_CTX_HDRS    @24 — headers handle attached to EVERY canned response
 #                        (that is where WWW-Authenticate lives), or 0
+#   RG_CTX_ACCEPT  @32 — when set, the Authorization value this registry will
+#                        honor; any resource request without it answers 401.
+#                        Models a real registry rejecting a stale token, which
+#                        a static route table cannot: the same URL has to
+#                        answer 401 then 200 across one re-auth.
 enum RgCtxOff {
     RG_CTX_ROUTES = 0;
     RG_CTX_LOG = 8;
     RG_CTX_AUTHLOG = 16;
     RG_CTX_HDRS = 24;
+    RG_CTX_ACCEPT = 32;
+}
+
+# 1 when this request must be rejected for want of the accepted credential.
+# The token endpoint is exempt — it is what MINTS the credential.
+fn _rg_unauthorized(ctx, url, auth) {
+    var acc = load64(ctx + RG_CTX_ACCEPT);
+    if (acc == 0) { return 0; }
+    if (strstr(url, "/token") >= 0) { return 0; }
+    if (auth == 0) { return 1; }
+    if (streq(auth, acc) == 0) { return 1; }
+    return 0;
 }
 
 fn _rg_ctx_new() {
-    var c = alloc(32);
+    var c = alloc(40);
     store64(c + RG_CTX_ROUTES, vec_new());
     store64(c + RG_CTX_LOG, vec_new());
     store64(c + RG_CTX_AUTHLOG, vec_new());
     store64(c + RG_CTX_HDRS, 0);
+    store64(c + RG_CTX_ACCEPT, 0);
     return c;
 }
 
@@ -81,6 +99,12 @@ fn _rg_canned_send(ctx, method, url, headers, body, body_len) {
     if (headers != 0) { a = sandhi_headers_get(headers, "Authorization"); }
     vec_push(load64(ctx + RG_CTX_AUTHLOG), a);
 
+    if (_rg_unauthorized(ctx, url, a) == 1) {
+        var uh = load64(ctx + RG_CTX_HDRS);
+        if (uh == 0) { uh = sandhi_headers_new(); }
+        return _sandhi_resp_new(401, "", 0, uh, SANDHI_OK);
+    }
+
     var routes = load64(ctx + RG_CTX_ROUTES);
     var n = vec_len(routes);
     var i = 0;
@@ -99,8 +123,68 @@ fn _rg_canned_send(ctx, method, url, headers, body, body_len) {
     return _sandhi_resp_new(500, "", 0, sandhi_headers_new(), SANDHI_OK);
 }
 
+# The download hook. Feeds the scripted body through the sink in THREE chunks
+# so the multi-call accumulation path (write + hash + count per chunk) is
+# actually exercised — a single-shot delivery would not distinguish a correct
+# streaming hash from one that only hashes the last buffer.
+#
+# Non-2xx delivers NOTHING to the sink and reports err=REMOTE, which is sandhi's
+# real contract: the download driver never surfaces the hop's headers, so a 401
+# here carries no WWW-Authenticate. That is exactly why the blob path acquires
+# its token on the buffered path first.
+fn _rg_canned_sink(ctx, url, cb, sink_ctx, headers) {
+    vec_push(load64(ctx + RG_CTX_LOG), _reg_cat2("GET ", url));
+    var a = 0;
+    if (headers != 0) { a = sandhi_headers_get(headers, "Authorization"); }
+    vec_push(load64(ctx + RG_CTX_AUTHLOG), a);
+
+    if (_rg_unauthorized(ctx, url, a) == 1) {
+        return _sandhi_dl_result_a(default_alloc(), 401, 0, SANDHI_ERR_REMOTE, 0);
+    }
+
+    var routes = load64(ctx + RG_CTX_ROUTES);
+    var n = vec_len(routes);
+    var i = 0;
+    while (i < n) {
+        var m = vec_get(routes, i);
+        var u = vec_get(routes, i + 1);
+        if (streq(m, "GET") == 1 && strstr(url, u) >= 0) {
+            var st = vec_get(routes, i + 2);
+            var bd = vec_get(routes, i + 3);
+            if (st < 200 || st >= 300) {
+                return _sandhi_dl_result_a(default_alloc(), st, 0, SANDHI_ERR_REMOTE, 0);
+            }
+            var total = strlen(bd);
+            var delivered = 0;
+            var part = total / 3;
+            if (part < 1) { part = 1; }
+            while (delivered < total) {
+                var take = part;
+                if (delivered + take > total) { take = total - delivered; }
+                # Mirror sandhi's three-way contract EXACTLY (lib/sandhi.cyr:
+                # _sandhi_dl_emit callers): 1 continue · 0 graceful stop
+                # (stopped=1, OK) · <0 abort (ERR_INTERNAL, stopped=0). A
+                # harness that collapsed these would not be testing what the
+                # real driver does with our sink's return value.
+                var v = fncall3(cb, sink_ctx, bd + delivered, take);
+                if (v == 0) {
+                    return _sandhi_dl_result_a(default_alloc(), st, delivered, SANDHI_OK, 1);
+                }
+                if (v < 0) {
+                    return _sandhi_dl_result_a(default_alloc(), st, delivered,
+                    SANDHI_ERR_INTERNAL, 0);
+                }
+                delivered = delivered + take;
+            }
+            return _sandhi_dl_result_a(default_alloc(), st, delivered, SANDHI_OK, 0);
+        }
+        i = i + 4;
+    }
+    return _sandhi_dl_result_a(default_alloc(), 500, 0, SANDHI_ERR_REMOTE, 0);
+}
+
 fn _rg_transport(ctx) {
-    return registry_transport_new(&_rg_canned_send, 0, ctx);
+    return registry_transport_new(&_rg_canned_send, &_rg_canned_sink, ctx);
 }
 
 # A client wired to a scripted transport, with a fixed base URL so the built
@@ -159,20 +243,20 @@ fn test_rg_platform_manifest_from_jv() {
     var eb = str_builder_new();
     str_builder_add_cstr(eb, "{");
     str_builder_add_cstr(eb, _rg_mt());
-    str_builder_add_cstr(eb, "\"digest\":\"sha256:aaa\",\"size\":528,");
+    str_builder_add_cstr(eb, "\"digest\":\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"size\":528,");
     str_builder_add_cstr(eb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}");
     var e: PlatformManifest = platform_manifest_from_jv(_rg_parse(str_cstr(str_builder_build(eb))));
     assert_neq(e, 0, "entry parses");
-    assert_eq(streq(e.digest, "sha256:aaa"), 1, "digest");
+    assert_eq(streq(e.digest, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 1, "digest");
     assert_eq(e.size, 528, "size");
     assert_neq(e.platform, 0, "platform attached");
     # platform is optional
     var e2: PlatformManifest = platform_manifest_from_jv(_rg_parse(
-    "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb\",\"size\":1}"));
+    "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\",\"size\":1}"));
     assert_neq(e2, 0, "entry without platform parses");
     assert_eq(e2.platform, 0, "platform absent -> 0");
     # the three required fields are tag-guarded
-    assert_eq(platform_manifest_from_jv(_rg_parse("{\"digest\":\"sha256:x\",\"size\":1}")), 0, "no mediaType -> 0");
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}")), 0, "no mediaType -> 0");
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"size\":1}")), 0, "no digest -> 0");
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\"}")), 0, "no size -> 0");
     # a STRING size is rejected, not silently coerced to 0
@@ -188,11 +272,11 @@ fn test_rg_oci_index_from_jv() {
     str_builder_add_cstr(sb, "\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[");
     str_builder_add_cstr(sb, "{");
     str_builder_add_cstr(sb, _rg_mt());
-    str_builder_add_cstr(sb, "\"digest\":\"sha256:amd\",\"size\":100,");
+    str_builder_add_cstr(sb, "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":100,");
     str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},");
     str_builder_add_cstr(sb, "{");
     str_builder_add_cstr(sb, _rg_mt());
-    str_builder_add_cstr(sb, "\"digest\":\"sha256:arm\",\"size\":200,");
+    str_builder_add_cstr(sb, "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":200,");
     str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}");
     var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
     assert_neq(idx, 0, "index parses");
@@ -204,10 +288,10 @@ fn test_rg_oci_index_from_jv() {
     var want = platform_new("amd64", "linux", 0, 0);
     var sel: PlatformManifest = select_platform(idx, want);
     assert_neq(sel, 0, "amd64 selected");
-    assert_eq(streq(sel.digest, "sha256:amd"), 1, "picked the amd64 entry");
+    assert_eq(streq(sel.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "picked the amd64 entry");
     var want2 = platform_new("arm64", "linux", 0, 0);
     var sel2: PlatformManifest = select_platform(idx, want2);
-    assert_eq(streq(sel2.digest, "sha256:arm"), 1, "picked the arm64 entry");
+    assert_eq(streq(sel2.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "picked the arm64 entry");
     # a platform not in the index -> 0 (UnsupportedPlatform at the caller)
     assert_eq(select_platform(idx, platform_new("s390x", "linux", 0, 0)), 0, "absent platform -> 0");
     return 0;
@@ -221,7 +305,7 @@ fn test_rg_oci_index_hostile_entries() {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"schemaVersion\":2,\"manifests\":[");
     str_builder_add_cstr(sb, "{\"junk\":true},");
-    str_builder_add_cstr(sb, "{\"mediaType\":\"m\",\"digest\":\"sha256:good\",\"size\":10},");
+    str_builder_add_cstr(sb, "{\"mediaType\":\"m\",\"digest\":\"sha256:676f6fd000000000000000000000000000000000000000000000000000000000\",\"size\":10},");
     str_builder_add_cstr(sb, "\"not-an-object\"]}");
     var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
     assert_neq(idx, 0, "index still parses");
@@ -250,11 +334,11 @@ fn test_rg_manifest_schema_version_guard() {
     # returns 0 for a non-INT tag — so a registry sending "2" as a STRING
     # silently produced schema_version 0.
     var good: OciManifest = oci_manifest_from_jv(_rg_parse(
-    "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c\",\"size\":1},\"layers\":[]}"));
+    "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
     assert_neq(good, 0, "manifest parses");
     assert_eq(good.schema_version, 2, "int schemaVersion read");
     var bad: OciManifest = oci_manifest_from_jv(_rg_parse(
-    "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c\",\"size\":1},\"layers\":[]}"));
+    "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
     assert_neq(bad, 0, "still parses (config is what matters)");
     # the guard leaves the constructor default rather than clobbering it to 0
     assert_eq(bad.schema_version, 2, "string schemaVersion does not clobber the default");
@@ -291,13 +375,13 @@ fn test_rg_urls() {
     var c = registry_client_with_base_url("http://reg");
     var r = _rg_ref("ghcr.io", "acme/app", "v1");
     assert_eq(streq(_reg_manifest_url(c, r), "http://reg/v2/acme/app/manifests/v1"), 1, "manifest by tag");
-    assert_eq(streq(_reg_blob_url(c, r, "sha256:abc"), "http://reg/v2/acme/app/blobs/sha256:abc"), 1, "blob");
+    assert_eq(streq(_reg_blob_url(c, r, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"), "http://reg/v2/acme/app/blobs/sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1, "blob");
     assert_eq(streq(_reg_uploads_url(c, r), "http://reg/v2/acme/app/blobs/uploads/"), 1, "uploads (trailing slash)");
     assert_eq(streq(_reg_tags_url(c, r), "http://reg/v2/acme/app/tags/list"), 1, "tags");
-    assert_eq(streq(_reg_referrers_url(c, r, "sha256:d"), "http://reg/v2/acme/app/referrers/sha256:d"), 1, "referrers");
+    assert_eq(streq(_reg_referrers_url(c, r, "sha256:d000000000000000000000000000000000000000000000000000000000000000"), "http://reg/v2/acme/app/referrers/sha256:d000000000000000000000000000000000000000000000000000000000000000"), 1, "referrers");
     # a digest pins over the tag on the manifest URL
-    var pinned = image_ref_new("ghcr.io", "acme/app", "v1", "sha256:pin");
-    assert_eq(streq(_reg_manifest_url(c, pinned), "http://reg/v2/acme/app/manifests/sha256:pin"), 1,
+    var pinned = image_ref_new("ghcr.io", "acme/app", "v1", "sha256:70696e0000000000000000000000000000000000000000000000000000000000");
+    assert_eq(streq(_reg_manifest_url(c, pinned), "http://reg/v2/acme/app/manifests/sha256:70696e0000000000000000000000000000000000000000000000000000000000"), 1,
     "digest wins over tag");
     return 0;
 }
@@ -324,10 +408,10 @@ fn test_rg_location_and_digest_query() {
     assert_eq(streq(_reg_resolve_location("https://reg", "/v2/x/blobs/uploads/1"),
     "https://reg/v2/x/blobs/uploads/1"), 1, "relative location joined");
     # the query separator flips once the URL already carries one
-    assert_eq(streq(_reg_append_digest_query("https://reg/up/1", "sha256:a"),
-    "https://reg/up/1?digest=sha256:a"), 1, "first query param uses ?");
-    assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz", "sha256:a"),
-    "https://reg/up/1?_state=xyz&digest=sha256:a"), 1, "subsequent uses &");
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
+    "https://reg/up/1?digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "first query param uses ?");
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
+    "https://reg/up/1?_state=xyz&digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "subsequent uses &");
     return 0;
 }
 
@@ -669,6 +753,1001 @@ fn test_rg_token_url_carries_caller_scope() {
     return 0;
 }
 
+# ══ Inc-5: manifest fetch + platform resolve ═════════════
+
+fn _rg_manifest_json() {
+    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\",\"size\":7},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:6ca79aaa00000000000000000000000000000000000000000000000000000000\",\"size\":11}]}";
+}
+
+fn _rg_index_json() {
+    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}";
+}
+
+fn _rg_ctx_with_ct(ct) {
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", ct);
+    store64(ctx + RG_CTX_HDRS, h);
+    return ctx;
+}
+
+fn test_rg_fetch_manifest() {
+    test_group("rg_fetch_manifest");
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 200, _rg_manifest_json());
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var m = registry_fetch_manifest(c, ref);
+    assert_neq(m, 0, "manifest fetched");
+    assert_eq(registry_last_manifest_kind(), REG_MK_MANIFEST, "classified as a manifest");
+    var mm: OciManifest = m;
+    assert_eq(mm.schema_version, 2, "schemaVersion 2");
+    assert_eq(vec_len(mm.layers), 1, "one layer");
+    var cd: Descriptor = mm.config;
+    assert_eq(streq(cd.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "config digest");
+    return 0;
+}
+
+fn test_rg_fetch_manifest_index() {
+    test_group("rg_fetch_manifest_index");
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.index.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 200, _rg_index_json());
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var idx = registry_fetch_manifest(c, ref);
+    assert_neq(idx, 0, "index fetched");
+    assert_eq(registry_last_manifest_kind(), REG_MK_INDEX, "classified as an index");
+    var ii: OciIndex = idx;
+    assert_eq(vec_len(ii.manifests), 2, "two platform entries");
+    return 0;
+}
+
+fn test_rg_fetch_manifest_index_without_content_type() {
+    test_group("rg_fetch_manifest_index_without_content_type");
+    # DIVERGENCE from the oracle, deliberate: with no Content-Type the oracle
+    # parses an index AS a manifest, yielding zero layers and a silently broken
+    # pull. We fall back to the body shape.
+    var ctx = _rg_ctx_new();   # no Content-Type header at all
+    _rg_route(ctx, "GET", "/manifests/", 200, _rg_index_json());
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var got = registry_fetch_manifest(c, ref);
+    assert_neq(got, 0, "parsed");
+    assert_eq(registry_last_manifest_kind(), REG_MK_INDEX, "body-shape fallback detects the index");
+    return 0;
+}
+
+fn test_rg_fetch_manifest_digest_verified() {
+    test_group("rg_fetch_manifest_digest_verified");
+    var body = _rg_manifest_json();
+    var good = sha256_digest(body, strlen(body));
+    # Matching Docker-Content-Digest -> accepted.
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
+    sandhi_headers_add(h, "Docker-Content-Digest", good);
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "GET", "/manifests/", 200, body);
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_neq(registry_fetch_manifest(c, ref), 0, "matching digest accepted");
+
+    # Mismatching -> rejected. The oracle has NO coverage of this path.
+    var ctx2 = _rg_ctx_new();
+    var h2 = sandhi_headers_new();
+    sandhi_headers_add(h2, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
+    sandhi_headers_add(h2, "Docker-Content-Digest", "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    store64(ctx2 + RG_CTX_HDRS, h2);
+    _rg_route(ctx2, "GET", "/manifests/", 200, body);
+    var c2 = _rg_client(ctx2);
+    var ref2 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_fetch_manifest(c2, ref2), 0, "mismatching digest rejected");
+    assert_eq(registry_last_error(), STIVA_ERR_DIGEST_MISMATCH, "reports DIGEST_MISMATCH");
+    return 0;
+}
+
+fn test_rg_fetch_manifest_errors() {
+    test_group("rg_fetch_manifest_errors");
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 404, "not found");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_fetch_manifest(c, ref), 0, "404 -> 0");
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "REGISTRY error");
+
+    # 200 with a body that is not JSON.
+    var ctx2 = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx2, "GET", "/manifests/", 200, "<html>nope</html>");
+    var c2 = _rg_client(ctx2);
+    var ref2 = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_fetch_manifest(c2, ref2), 0, "non-JSON body -> 0");
+    return 0;
+}
+
+fn test_rg_resolve_manifest_from_index() {
+    test_group("rg_resolve_manifest_from_index");
+    # The index entry's digest must be the REAL hash of the child body, because
+    # the pinned refetch now verifies it (a caller-pinned digest outranks
+    # Docker-Content-Digest). Build the index around the served body.
+    var child = _rg_manifest_json();
+    var child_d = sha256_digest(child, strlen(child));
+    var idx = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"";
+    idx = _reg_cat2(idx, child_d);
+    idx = _reg_cat2(idx, "\",\"size\":528,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}]}");
+
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.index.v1+json");
+    _rg_route(ctx, "GET", _reg_cat2("/manifests/", child_d), 200, child);
+    _rg_route(ctx, "GET", "/manifests/", 200, idx);
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var m = registry_resolve_manifest(c, ref);
+    # Content-Type says "index" for BOTH responses, so the child is classified
+    # as an index too and the nested-index guard fires — which is what this
+    # pins. The digest check passes first, proving the pin was honoured.
+    assert_eq(m, 0, "nested index rejected");
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "REGISTRY error, not a digest failure");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 1), child_d), 1,
+    "second fetch pinned to the selected platform digest");
+    return 0;
+}
+
+fn test_rg_resolve_manifest_pinned_digest_enforced() {
+    test_group("rg_resolve_manifest_pinned_digest_enforced");
+    # Pinning by digest is the control you reach for against a compromised
+    # registry or a mutated tag. Serving different bytes than the pinned digest
+    # must fail, even when the registry sends no Docker-Content-Digest at all.
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 200, _rg_manifest_json());
+    var c = _rg_client(ctx);
+    var pinned = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", pinned);
+    assert_eq(registry_fetch_manifest(c, ref), 0, "wrong bytes for the pinned digest -> rejected");
+    assert_eq(registry_last_error(), STIVA_ERR_DIGEST_MISMATCH, "reports DIGEST_MISMATCH");
+
+    # And the honest case still resolves.
+    var body = _rg_manifest_json();
+    var real = sha256_digest(body, strlen(body));
+    var ctx2 = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx2, "GET", "/manifests/", 200, body);
+    var c2 = _rg_client(ctx2);
+    var ref2 = image_ref_new("reg.test", "library/alpine", "latest", real);
+    assert_neq(registry_fetch_manifest(c2, ref2), 0, "matching pinned digest accepted");
+    return 0;
+}
+
+fn test_rg_resolve_manifest_direct() {
+    test_group("rg_resolve_manifest_direct");
+    # A registry that answers with a plain manifest resolves in one fetch.
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 200, _rg_manifest_json());
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var m = registry_resolve_manifest(c, ref);
+    assert_neq(m, 0, "resolved");
+    assert_eq(_rg_log_len(ctx), 1, "single fetch, no platform round-trip");
+    return 0;
+}
+
+# ══ Inc-6: streaming blob fetch ══════════════════════════
+
+fn _rg_blob_store(name) {
+    var root = _reg_cat2("/tmp/stiva-rgblob-", name);
+    _stor_remove_dir_all(root);
+    return image_store_new(root);
+}
+
+fn test_rg_blob_stream_to_store() {
+    test_group("rg_blob_stream_to_store");
+    var payload = "hello-layer-payload";
+    var digest = sha256_digest(payload, strlen(payload));
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", "/blobs/", 200, payload);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("ok");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    var path = registry_fetch_blob_to_store(c, store, ref, digest, strlen(payload));
+    assert_neq(path, 0, "blob streamed");
+    assert_eq(file_exists(path), 1, "blob committed at its content-addressed path");
+    assert_eq(image_store_has_blob(store, digest), 1, "store sees the blob");
+    # The body was delivered in 3 chunks; a hash that only covered the last
+    # chunk would not match here.
+    var buf = alloc(256);
+    var n = file_read_all(path, buf, 255);
+    store8(buf + n, 0);
+    assert_eq(streq(buf, payload), 1, "bytes land intact across chunk boundaries");
+    # No tempfile left behind.
+    assert_eq(file_exists(_reg_cat2(path, ".dl")), 0, "tempfile cleaned up");
+    return 0;
+}
+
+fn test_rg_blob_digest_mismatch_leaves_nothing() {
+    test_group("rg_blob_digest_mismatch_leaves_nothing");
+    # THE important one: a corrupt blob must never become visible at the
+    # content-addressed path, because has_blob / GC roots / verify_integrity
+    # all trust that path.
+    var claimed = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", "/blobs/", 200, "not-the-claimed-content");
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("mismatch");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    assert_eq(registry_fetch_blob_to_store(c, store, ref, claimed, 0), 0, "mismatch rejected");
+    assert_eq(registry_last_error(), STIVA_ERR_DIGEST_MISMATCH, "reports DIGEST_MISMATCH");
+    assert_eq(image_store_has_blob(store, claimed), 0, "corrupt blob NOT visible to the store");
+    var p = _img_blob_path(image_store_root(store), claimed);
+    assert_eq(file_exists(p), 0, "no file at the content-addressed path");
+    assert_eq(file_exists(_reg_cat2(p, ".dl")), 0, "tempfile removed too");
+    return 0;
+}
+
+fn test_rg_blob_limit_enforced() {
+    test_group("rg_blob_limit_enforced");
+    # The descriptor's size is attacker-controlled, so it is a ceiling only.
+    # A registry streaming more than it declared is cut off.
+    var payload = "0123456789012345678901234567890123456789";
+    var digest = sha256_digest(payload, strlen(payload));
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", "/blobs/", 200, payload);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("limit");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    # Declare 1 byte; the ceiling is size + 64 KiB slack, so make the payload
+    # exceed it by declaring a negative-slack-proof tiny size is impossible —
+    # instead assert the happy path still works with an honest size, and that
+    # an absurdly small ceiling is enforced by the sink directly.
+    var sink = _reg_sink_new(0 - 1, alloc(144), 4);
+    sha256_init_into(load64(sink + REG_SINK_SHA));
+    assert_eq(_reg_blob_sink(sink, payload, 40), 0 - 1, "sink refuses past the ceiling");
+    assert_eq(load64(sink + REG_SINK_ERR), 2, "err 2 = limit exceeded");
+    # And an honest size streams fine.
+    assert_neq(registry_fetch_blob_to_store(c, store, ref, digest, strlen(payload)), 0,
+    "honest size streams");
+    return 0;
+}
+
+fn test_rg_blob_already_present_is_noop() {
+    test_group("rg_blob_already_present_is_noop");
+    var payload = "already-here";
+    var digest = sha256_digest(payload, strlen(payload));
+    var store = _rg_blob_store("present");
+    image_store_store_blob(store, digest, payload, strlen(payload));
+    var ctx = _rg_ctx_new();   # no routes at all — any request would 500
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_neq(registry_fetch_blob_to_store(c, store, ref, digest, 0), 0, "returns the path");
+    assert_eq(_rg_log_len(ctx), 0, "content-addressed hit -> zero requests");
+    return 0;
+}
+
+fn test_rg_blob_warm_cache_skips_probe() {
+    test_group("rg_blob_warm_cache_skips_probe");
+    # In a real pull the manifest fetch already primed this key, so a blob must
+    # cost ONE request. An unconditional challenge probe would double the
+    # request count of every layer in the image.
+    var payload = "warm-cache-body";
+    var digest = sha256_digest(payload, strlen(payload));
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/blobs/", 200, payload);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("warm");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    _reg_cache_token(c, _reg_cache_key("reg.test", _reg_pull_scope(ref)), "tok-warm");
+
+    assert_neq(registry_fetch_blob_to_store(c, store, ref, digest, strlen(payload)), 0,
+    "streamed");
+    assert_eq(_rg_log_len(ctx), 1, "exactly one request — no challenge probe");
+    assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-warm"), 1, "cached token on the stream");
+    return 0;
+}
+
+fn test_rg_blob_stale_token_retries_once() {
+    test_group("rg_blob_stale_token_retries_once");
+    # A cached token the registry has since rejected: the stream 401s with no
+    # usable challenge (sandhi never surfaces the download hop's headers), so
+    # the buffered state machine has to re-run and the stream retry once.
+    var payload = "after-reauth-body";
+    var digest = sha256_digest(payload, strlen(payload));
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "WWW-Authenticate",
+    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+    store64(ctx + RG_CTX_HDRS, h);
+    store64(ctx + RG_CTX_ACCEPT, "Bearer tok-fresh");   # only the fresh token works
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", "/token", 200, "{\"token\":\"tok-fresh\"}");
+    _rg_route(ctx, "GET", "/blobs/", 200, payload);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("stale");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var key = _reg_cache_key("reg.test", _reg_pull_scope(ref));
+    _reg_cache_token(c, key, "tok-stale");
+
+    var path = registry_fetch_blob_to_store(c, store, ref, digest, 0);
+    assert_neq(path, 0, "recovered after re-auth");
+    assert_eq(image_store_has_blob(store, digest), 1, "blob committed");
+    assert_eq(streq(_reg_get_cached_token(c, key), "tok-fresh"), 1, "cache refreshed");
+    # The retry is bounded: the second attempt is the last one.
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), "GET https://reg.test"), 1,
+    "first call is the stream, using the stale token");
+    assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-stale"), 1, "stale token tried first");
+    return 0;
+}
+
+fn test_rg_blob_short_write_aborts() {
+    test_group("rg_blob_short_write_aborts");
+    # A failing fd must abort the transfer rather than silently producing a
+    # truncated blob whose digest happens to be checked later.
+    var sink = _reg_sink_new(0 - 1, alloc(144), 0);   # fd -1 => every write fails
+    sha256_init_into(load64(sink + REG_SINK_SHA));
+    assert_eq(_reg_blob_sink(sink, "abc", 3), 0 - 1, "sink aborts on a write failure");
+    assert_eq(load64(sink + REG_SINK_ERR), 1, "err 1 = short write");
+    assert_eq(load64(sink + REG_SINK_WRITTEN), 0, "nothing counted as written");
+    return 0;
+}
+
+fn test_rg_blob_error_status() {
+    test_group("rg_blob_error_status");
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "/blobs/", 404, "");
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("404");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var d = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    assert_eq(registry_fetch_blob_to_store(c, store, ref, d, 0), 0, "404 -> 0");
+    assert_eq(file_exists(_reg_cat2(_img_blob_path(image_store_root(store), d), ".dl")), 0,
+    "no tempfile left after a failed fetch");
+    return 0;
+}
+
+# ══ Inc-7: the pull driver ═══════════════════════════════
+
+fn _rg_cfg_json() {
+    return "{\"architecture\":\"amd64\",\"os\":\"linux\",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[]}}";
+}
+
+fn _rg_layer_body() {
+    return "layer-one-uncompressed-bytes";
+}
+
+# Build a manifest whose descriptors carry the REAL digests of the bodies the
+# canned registry will serve. Anything else and the pull would fail on the
+# digest check rather than on whatever the test is actually probing.
+fn _rg_build_manifest(cfg_digest, cfg_size, lay_digest, lay_size) {
+    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    s = _reg_cat2(s, cfg_digest);
+    s = _reg_cat2(s, "\",\"size\":");
+    s = _reg_cat2(s, _reg_uint_str(cfg_size));
+    s = _reg_cat2(s, "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"");
+    s = _reg_cat2(s, lay_digest);
+    s = _reg_cat2(s, "\",\"size\":");
+    s = _reg_cat2(s, _reg_uint_str(lay_size));
+    return _reg_cat2(s, "}]}");
+}
+
+# A registry serving one single-arch image, plus the store to pull it into.
+# Returns a 3-word [ctx, client, store]; the manifest digest is recoverable
+# from the image afterwards.
+fn _rg_pull_setup(name) {
+    var cfg = _rg_cfg_json();
+    var lay = _rg_layer_body();
+    var cfg_d = sha256_digest(cfg, strlen(cfg));
+    var lay_d = sha256_digest(lay, strlen(lay));
+    var man = _rg_build_manifest(cfg_d, strlen(cfg), lay_d, strlen(lay));
+
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "GET", "/manifests/", 200, man);
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", cfg_d, 200, cfg);
+    _rg_route(ctx, "GET", lay_d, 200, lay);
+
+    var out = alloc(40);
+    store64(out + 0, ctx);
+    store64(out + 8, _rg_client(ctx));
+    store64(out + 16, _rg_blob_store(name));
+    store64(out + 24, cfg_d);
+    store64(out + 32, lay_d);
+    return out;
+}
+
+fn test_rg_pull_image() {
+    test_group("rg_pull_image");
+    var s = _rg_pull_setup("pull");
+    var ctx = load64(s + 0);
+    var c = load64(s + 8);
+    var store = load64(s + 16);
+    var cfg_d = load64(s + 24);
+    var lay_d = load64(s + 32);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    var im = image_store_pull(c, store, ref);
+    assert_neq(im, 0, "pull succeeded");
+    assert_eq(streq(_img_id(im), cfg_d), 1, "image id is the config digest");
+    assert_eq(image_store_has_blob(store, cfg_d), 1, "config blob stored");
+    assert_eq(image_store_has_blob(store, lay_d), 1, "layer blob stored");
+
+    # The manifest is stored under the digest the registry served, NOT under a
+    # re-serialization's digest. This is the divergence from the oracle that
+    # makes the local store a truthful OCI layout, so pin it hard.
+    var md = _img_manifest_digest(im);
+    assert_neq(md, 0, "manifest digest recorded on the image");
+    assert_eq(image_store_has_blob(store, md), 1, "manifest blob stored");
+    var lc = alloc(8);
+    var mbuf = _il_read_blob(store, md, lc);
+    assert_neq(mbuf, 0, "manifest blob readable");
+    assert_eq(streq(sha256_digest(mbuf, load64(lc)), md), 1,
+    "stored manifest bytes hash to the digest it is stored under");
+
+    # And it is listable.
+    var listed = image_store_list(store);
+    assert_eq(vec_len(listed), 1, "one image in the index");
+    return 0;
+}
+
+fn test_rg_pull_dedups_present_blobs() {
+    test_group("rg_pull_dedups_present_blobs");
+    var s = _rg_pull_setup("pulldedup");
+    var ctx = load64(s + 0);
+    var c = load64(s + 8);
+    var store = load64(s + 16);
+    var lay_d = load64(s + 32);
+    # Pre-seed the layer: a second pull of a shared base layer must not
+    # re-download it.
+    image_store_store_blob(store, lay_d, _rg_layer_body(), strlen(_rg_layer_body()));
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    assert_neq(image_store_pull(c, store, ref), 0, "pull succeeded");
+    var i = 0;
+    var n = _rg_log_len(ctx);
+    var saw_layer = 0;
+    while (i < n) {
+        if (_rg_contains(_rg_log_at(ctx, i), lay_d) == 1) { saw_layer = 1; }
+        i = i + 1;
+    }
+    assert_eq(saw_layer, 0, "already-present layer was never requested");
+    return 0;
+}
+
+# Build a manifest with one layer that optionally carries `urls`.
+fn _rg_manifest_with_urls(cfg_d, cfg_size, lay_d, lay_size, with_urls) {
+    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    s = _reg_cat2(s, cfg_d);
+    s = _reg_cat2(s, "\",\"size\":");
+    s = _reg_cat2(s, _reg_uint_str(cfg_size));
+    s = _reg_cat2(s, "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"");
+    s = _reg_cat2(s, lay_d);
+    s = _reg_cat2(s, "\",\"size\":");
+    s = _reg_cat2(s, _reg_uint_str(lay_size));
+    if (with_urls == 1) {
+        s = _reg_cat2(s, ",\"urls\":[\"http://169.254.169.254/latest/meta-data/\"]");
+    }
+    return _reg_cat2(s, "}]}");
+}
+
+fn _rg_foreign_ctx(with_urls) {
+    var cfg = _rg_cfg_json();
+    var lay = _rg_layer_body();
+    var cfg_d = sha256_digest(cfg, strlen(cfg));
+    var lay_d = sha256_digest(lay, strlen(lay));
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "GET", "/manifests/", 200,
+    _rg_manifest_with_urls(cfg_d, strlen(cfg), lay_d, strlen(lay), with_urls));
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", cfg_d, 200, cfg);
+    _rg_route(ctx, "GET", lay_d, 200, lay);
+    return ctx;
+}
+
+fn test_rg_pull_refuses_foreign_layer() {
+    test_group("rg_pull_refuses_foreign_layer");
+    # A descriptor carrying `urls` points at an arbitrary external host. The
+    # oracle fetches it (image.rs:186-190) — an SSRF primitive driven entirely
+    # by registry-controlled data — so we refuse.
+    #
+    # DIFFERENTIAL, deliberately: the two manifests below are byte-identical
+    # except for the `urls` key, and the layer IS fully routed and correctly
+    # hashed. So the with-urls pull can only fail because of the guard. An
+    # earlier version of this test used an unrouted layer digest, which meant it
+    # passed just as happily with the guard deleted.
+    var ok_ctx = _rg_foreign_ctx(0);
+    var ok_c = _rg_client(ok_ctx);
+    var ok_store = _rg_blob_store("foreignctl");
+    var ok_ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_neq(image_store_pull(ok_c, ok_store, ok_ref), 0,
+    "control: the identical manifest WITHOUT urls pulls fine");
+
+    var ctx = _rg_foreign_ctx(1);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("foreign");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(image_store_pull(c, store, ref), 0, "foreign layer refused");
+    assert_eq(vec_len(image_store_list(store)), 0, "nothing added to the index");
+    # The layer body was never fetched even though it is routed and valid.
+    var lay_d = sha256_digest(_rg_layer_body(), strlen(_rg_layer_body()));
+    assert_eq(image_store_has_blob(store, lay_d), 0, "the foreign layer was not downloaded");
+    return 0;
+}
+
+fn test_rg_pull_partial_failure_leaves_no_image() {
+    test_group("rg_pull_partial_failure_leaves_no_image");
+    # Config lands, layer 404s. A half-pulled image must never be listable.
+    var s = _rg_pull_setup("partial");
+    var ctx = load64(s + 0);
+    var c = load64(s + 8);
+    var store = load64(s + 16);
+    var cfg_d = load64(s + 24);
+    var lay_d = load64(s + 32);
+    # Shadow the layer route with a 404 by rebuilding the context's route table
+    # order: routes are first-match, so prepending is not possible — instead use
+    # a fresh client whose layer route 404s.
+    var ctx2 = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
+    store64(ctx2 + RG_CTX_HDRS, h);
+    var cfg = _rg_cfg_json();
+    var lay = _rg_layer_body();
+    _rg_route(ctx2, "GET", "/manifests/", 200,
+    _rg_build_manifest(cfg_d, strlen(cfg), lay_d, strlen(lay)));
+    _rg_route(ctx2, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx2, "GET", cfg_d, 200, cfg);
+    _rg_route(ctx2, "GET", lay_d, 404, "");
+    var c2 = _rg_client(ctx2);
+    var store2 = _rg_blob_store("partial2");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    assert_eq(image_store_pull(c2, store2, ref), 0, "pull failed");
+    assert_eq(vec_len(image_store_list(store2)), 0, "image NOT in the index");
+    # The blobs that did land stay — they are content-addressed, so the next
+    # attempt reuses them and `gc` sweeps them if it never comes.
+    assert_eq(image_store_has_blob(store2, cfg_d), 1, "config blob retained for retry");
+    return 0;
+}
+
+# ══ Inc-8: push ══════════════════════════════════════════
+
+# A registry that accepts uploads. HEAD answers 404 so nothing is skipped.
+fn _rg_push_ctx() {
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Location", "/v2/library/alpine/blobs/uploads/uuid-1");
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "HEAD", "/blobs/", 404, "");
+    _rg_route(ctx, "HEAD", "/manifests/", 404, "");
+    _rg_route(ctx, "POST", "/blobs/uploads/", 202, "");
+    _rg_route(ctx, "PUT", "/blobs/uploads/", 201, "");
+    _rg_route(ctx, "PATCH", "/blobs/uploads/", 202, "");
+    _rg_route(ctx, "PUT", "/manifests/", 201, "");
+    return ctx;
+}
+
+fn test_rg_push_blob_monolithic() {
+    test_group("rg_push_blob_monolithic");
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var data = "blob-payload";
+
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", data, strlen(data)), 1, "pushed");
+    # HEAD precheck, POST to open the session, PUT to upload.
+    assert_eq(_rg_log_len(ctx), 3, "three requests");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 0), "HEAD "), 1, "1: existence precheck");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 1), "POST "), 1, "2: open upload session");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 2), "PUT "), 1, "3: upload");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 2), "digest=sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 1,
+    "the PUT carries ?digest=");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 2), "/blobs/uploads/uuid-1"), 1,
+    "the PUT targets the Location the registry handed back");
+    return 0;
+}
+
+fn test_rg_push_blob_skips_existing() {
+    test_group("rg_push_blob_skips_existing");
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");   # already present
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "x", 1), 1, "reported success");
+    assert_eq(_rg_log_len(ctx), 1, "only the precheck — no upload");
+    return 0;
+}
+
+fn test_rg_push_blob_chunked() {
+    test_group("rg_push_blob_chunked");
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var data = "0123456789";
+
+    assert_eq(registry_push_blob_chunked(c, ref, "sha256:bbb0000000000000000000000000000000000000000000000000000000000000", data, 10, 4), 1, "pushed");
+    # HEAD, POST, then ceil(10/4)=3 PATCHes, then the finalize PUT.
+    assert_eq(_rg_log_len(ctx), 6, "HEAD + POST + 3 PATCH + PUT");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 2), "PATCH "), 1, "chunk 1 is a PATCH");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 4), "PATCH "), 1, "chunk 3 is a PATCH");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 5), "PUT "), 1, "finalize is a PUT");
+    assert_eq(_rg_contains(_rg_log_at(ctx, 5), "digest=sha256:bbb0000000000000000000000000000000000000000000000000000000000000"), 1,
+    "finalize carries ?digest=");
+    return 0;
+}
+
+fn test_rg_push_chunk_size_guard() {
+    test_group("rg_push_chunk_size_guard");
+    # A zero chunk size would loop forever building 0-length PATCHes.
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_push_blob_chunked(c, ref, "sha256:ccc0000000000000000000000000000000000000000000000000000000000000", "xyz", 3, 0), 0,
+    "zero chunk size refused");
+    assert_eq(_rg_log_len(ctx), 0, "no request issued");
+    return 0;
+}
+
+fn test_rg_push_manifest() {
+    test_group("rg_push_manifest");
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var body = "{\"schemaVersion\":2}";
+    assert_eq(registry_push_manifest(c, ref, body, strlen(body), 0), 1, "pushed");
+    var last = _rg_log_at(ctx, _rg_log_len(ctx) - 1);
+    assert_eq(_rg_contains(last, "PUT "), 1, "manifest goes up as a PUT");
+    assert_eq(_rg_contains(last, "/manifests/latest"), 1, "at the tag");
+    return 0;
+}
+
+fn test_rg_push_manifest_rejects_empty() {
+    test_group("rg_push_manifest_rejects_empty");
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_push_manifest(c, ref, 0, 0, 0), 0, "empty body refused");
+    assert_eq(_rg_log_len(ctx), 0, "no request issued");
+    return 0;
+}
+
+fn test_rg_push_uses_push_scope() {
+    test_group("rg_push_uses_push_scope");
+    # The upload legs are keyed on repository:<repo>:push,pull. If the existence
+    # precheck primed a PULL-scoped token instead (as the oracle does), the PUT
+    # would find a cold cache and go out unauthenticated.
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var pushkey = _reg_cache_key("reg.test", _reg_push_scope(ref));
+    _reg_cache_token(c, pushkey, "tok-push");
+
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
+    assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-push"), 1,
+    "the precheck uses the PUSH-scoped token");
+    assert_eq(streq(_rg_auth_at(ctx, 2), "Bearer tok-push"), 1,
+    "the upload PUT carries it too");
+    assert_eq(streq(_reg_push_scope(ref), "repository:library/alpine:push,pull"), 1,
+    "scope string matches the oracle");
+    return 0;
+}
+
+fn test_rg_push_roundtrip_preserves_manifest_bytes() {
+    test_group("rg_push_roundtrip_preserves_manifest_bytes");
+    # Pull an image, then push it. The manifest must go back up BYTE-FOR-BYTE,
+    # so its digest survives the round trip — the whole point of storing the
+    # served bytes rather than a re-serialization.
+    var s = _rg_pull_setup("roundtrip");
+    var c = load64(s + 8);
+    var store = load64(s + 16);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var im = image_store_pull(c, store, ref);
+    assert_neq(im, 0, "pulled");
+    var md = _img_manifest_digest(im);
+
+    var pctx = _rg_push_ctx();
+    var pc = _rg_client(pctx);
+    var target = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(image_store_push(pc, store, "reg.test/library/alpine:latest", target), 1,
+    "pushed");
+
+    # config + layer + manifest, each: HEAD, POST, PUT = 9, plus the manifest
+    # leg's own HEAD probe. Assert the shape rather than an exact count.
+    var lc = alloc(8);
+    var mbuf = _il_read_blob(store, md, lc);
+    assert_eq(streq(sha256_digest(mbuf, load64(lc)), md), 1,
+    "the manifest still hashes to its original digest after the round trip");
+    var last = _rg_log_at(pctx, _rg_log_len(pctx) - 1);
+    assert_eq(_rg_contains(last, "PUT "), 1, "manifest pushed last");
+    assert_eq(_rg_contains(last, "/manifests/"), 1, "to the manifest endpoint");
+    return 0;
+}
+
+fn test_rg_push_quiet_precheck() {
+    test_group("rg_push_quiet_precheck");
+    # The existence precheck 404s on every blob of a first push. That must not
+    # be reported as an error — it is the answer, and the caller acts on it.
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(registry_blob_exists(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 0, "absent");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed anyway");
+    assert_eq(registry_last_error(), STIVA_ERR_OK, "a successful push leaves no error set");
+    return 0;
+}
+
+fn test_rg_push_reauths_on_401_from_put() {
+    test_group("rg_push_reauths_on_401_from_put");
+    # A token can expire mid-upload (TTL is 270 s; a large layer outlasts that).
+    # The 401 from the PUT carries its own challenge, so the token is minted
+    # straight from that response — no extra probe request.
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Location", "/v2/library/alpine/blobs/uploads/uuid-1");
+    sandhi_headers_add(h, "WWW-Authenticate",
+    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+    store64(ctx + RG_CTX_HDRS, h);
+    store64(ctx + RG_CTX_ACCEPT, "Bearer tok-fresh");   # only the fresh token works
+    _rg_route(ctx, "HEAD", "/blobs/", 404, "");
+    _rg_route(ctx, "GET", "/token", 200, "{\"token\":\"tok-fresh\"}");
+    _rg_route(ctx, "POST", "/blobs/uploads/", 202, "");
+    _rg_route(ctx, "PUT", "/blobs/uploads/", 201, "");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    var key = _reg_cache_key("reg.test", _reg_push_scope(ref));
+    _reg_cache_token(c, key, "tok-stale");
+
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "recovered and pushed");
+    assert_eq(streq(_reg_get_cached_token(c, key), "tok-fresh"), 1, "cache refreshed");
+    return 0;
+}
+
+fn test_rg_same_origin() {
+    test_group("rg_same_origin");
+    assert_eq(_reg_same_origin("https://reg.test/v2/x", "https://reg.test"), 1, "same origin");
+    assert_eq(_reg_same_origin("https://reg.test:443/v2/x", "https://reg.test"), 0,
+    "explicit port differs textually — treated as a different origin");
+    assert_eq(_reg_same_origin("https://evil.test/v2/x", "https://reg.test"), 0, "different host");
+    assert_eq(_reg_same_origin("http://reg.test/v2/x", "https://reg.test"), 0,
+    "scheme downgrade is a different origin");
+    assert_eq(_reg_same_origin("https://reg.test.evil.com/x", "https://reg.test"), 0,
+    "prefix-extended host is NOT the same origin");
+    assert_eq(_reg_same_origin("/v2/relative", "https://reg.test"), 0, "no origin -> not same");
+    assert_eq(_reg_same_origin(0, "https://reg.test"), 0, "null is not same");
+    return 0;
+}
+
+fn test_rg_push_no_token_to_foreign_location() {
+    test_group("rg_push_no_token_to_foreign_location");
+    # A hostile registry answers the upload POST with an absolute Location on a
+    # host it controls. Withholding the token there is NOT enough — the body
+    # would still go to the attacker, and its 401 challenge would then be used
+    # to mint a token against ITS realm, sending the configured (long-lived,
+    # for Basic) registry credentials to a host the attacker chose. So the
+    # off-origin Location is refused outright, before any body is sent.
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Location", "https://evil.test/collect/uuid-1");
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "HEAD", "/blobs/", 404, "");
+    _rg_route(ctx, "POST", "/blobs/uploads/", 202, "");
+    _rg_route(ctx, "PUT", "evil.test", 201, "");
+    _rg_route(ctx, "GET", "/token", 200, "{\"token\":\"stolen\"}");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    _reg_cache_token(c, _reg_cache_key("reg.test", _reg_push_scope(ref)), "tok-secret");
+
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa00000000000000000000000000000000000000000000000000000000000", "data", 4), 0,
+    "push refused");
+    assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "reported as a registry error");
+    # HEAD + POST only. Nothing was sent to evil.test at all.
+    var i = 0;
+    var n = _rg_log_len(ctx);
+    var touched = 0;
+    while (i < n) {
+        if (_rg_contains(_rg_log_at(ctx, i), "evil.test") == 1) { touched = 1; }
+        i = i + 1;
+    }
+    assert_eq(touched, 0, "the foreign host was never contacted — no body, no token mint");
+    assert_eq(n, 2, "exactly the precheck and the session POST");
+    return 0;
+}
+
+fn test_rg_push_chunked_rejects_offorigin_relocation() {
+    test_group("rg_push_chunked_rejects_offorigin_relocation");
+    # Same attack, mid-session: the registry moves the upload off-origin on the
+    # first PATCH response. It must be refused there too, not once per chunk.
+    var ctx = _rg_ctx_new();
+    var h = sandhi_headers_new();
+    sandhi_headers_add(h, "Location", "https://evil.test/collect/uuid-9");
+    store64(ctx + RG_CTX_HDRS, h);
+    _rg_route(ctx, "HEAD", "/blobs/", 404, "");
+    _rg_route(ctx, "POST", "/blobs/uploads/", 202, "");
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    # The POST's own Location is already off-origin, so it is refused at the
+    # session-open step — the earliest possible point.
+    assert_eq(registry_push_blob_chunked(c, ref, "sha256:bbb00000000000000000000000000000000000000000000000000000000000", "0123456789", 10, 4), 0,
+    "refused");
+    var i = 0;
+    var touched = 0;
+    while (i < _rg_log_len(ctx)) {
+        if (_rg_contains(_rg_log_at(ctx, i), "evil.test") == 1) { touched = 1; }
+        i = i + 1;
+    }
+    assert_eq(touched, 0, "no chunk reached the foreign host");
+    return 0;
+}
+
+fn test_rg_push_token_still_sent_same_origin() {
+    test_group("rg_push_token_still_sent_same_origin");
+    # The guard must not break the normal case: a relative Location resolves
+    # against the API base, so it stays same-origin and keeps its token.
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    _reg_cache_token(c, _reg_cache_key("reg.test", _reg_push_scope(ref)), "tok-ok");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
+    var last = _rg_log_len(ctx) - 1;
+    assert_eq(streq(_rg_auth_at(ctx, last), "Bearer tok-ok"), 1,
+    "same-origin upload keeps its Authorization");
+    return 0;
+}
+
+fn test_rg_push_uploads_every_referenced_blob() {
+    test_group("rg_push_uploads_every_referenced_blob");
+    # A push that skipped the layer loop entirely would still end with a
+    # manifest PUT and still look like a success — leaving a manifest in the
+    # remote registry with dangling references, which is exactly what the
+    # config-then-layers-then-manifest ordering exists to prevent. So assert
+    # per-digest that each blob was actually uploaded.
+    var s = _rg_pull_setup("pushall");
+    var c = load64(s + 8);
+    var store = load64(s + 16);
+    var cfg_d = load64(s + 24);
+    var lay_d = load64(s + 32);
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_neq(image_store_pull(c, store, ref), 0, "pulled");
+
+    var pctx = _rg_push_ctx();
+    var pc = _rg_client(pctx);
+    var target = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(image_store_push(pc, store, "reg.test/library/alpine:latest", target), 1, "pushed");
+
+    var saw_cfg = 0;
+    var saw_lay = 0;
+    var saw_man = 0;
+    var i = 0;
+    var n = _rg_log_len(pctx);
+    while (i < n) {
+        var e = _rg_log_at(pctx, i);
+        if (_rg_contains(e, "PUT ") == 1) {
+            if (_rg_contains(e, _reg_cat2("digest=", cfg_d)) == 1) { saw_cfg = 1; }
+            if (_rg_contains(e, _reg_cat2("digest=", lay_d)) == 1) { saw_lay = 1; }
+            if (_rg_contains(e, "/manifests/") == 1) { saw_man = 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(saw_cfg, 1, "the config blob was uploaded, by digest");
+    assert_eq(saw_lay, 1, "the layer blob was uploaded, by digest");
+    assert_eq(saw_man, 1, "the manifest was uploaded");
+    return 0;
+}
+
+# ══ Digest validation (registry-controlled path traversal) ══
+
+fn test_rg_digest_is_valid() {
+    test_group("rg_digest_is_valid");
+    assert_eq(digest_is_valid("sha256:0000000000000000000000000000000000000000000000000000000000000000"), 1, "canonical form");
+    assert_eq(digest_is_valid("sha256:../../../../etc/shadow"), 0, "path traversal");
+    assert_eq(digest_is_valid("sha256:abc"), 0, "too short");
+    assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000000"), 0, "too long");
+    assert_eq(digest_is_valid("sha256:AAAA000000000000000000000000000000000000000000000000000000000000"), 0,
+    "uppercase rejected — one blob must have exactly one path");
+    assert_eq(digest_is_valid("sha512:0000000000000000000000000000000000000000000000000000000000000000"), 0, "wrong algorithm");
+    assert_eq(digest_is_valid("0000000000000000000000000000000000000000000000000000000000000000"), 0, "no prefix");
+    assert_eq(digest_is_valid(0), 0, "null");
+    assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000/g"), 0,
+    "slash rejected");
+    return 0;
+}
+
+fn test_rg_pull_rejects_traversal_digest() {
+    test_group("rg_pull_rejects_traversal_digest");
+    # THE critical one. A registry serving `"digest": "sha256:../../../<path>"`
+    # made _img_blob_path resolve outside the store: has_blob reported the
+    # victim file present, so the pull "succeeded" with no download and no
+    # verification, and a later push would upload that file to a registry.
+    # The descriptor parser now refuses it, so the manifest never parses.
+    var cfg = _rg_cfg_json();
+    var cfg_d = sha256_digest(cfg, strlen(cfg));
+    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    man = _reg_cat2(man, cfg_d);
+    man = _reg_cat2(man, "\",\"size\":");
+    man = _reg_cat2(man, _reg_uint_str(strlen(cfg)));
+    man = _reg_cat2(man, "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:../../../../tmp/stiva-traversal-victim\",\"size\":5}]}");
+
+    var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
+    _rg_route(ctx, "GET", "/manifests/", 200, man);
+    _rg_route(ctx, "HEAD", "/blobs/", 200, "");
+    _rg_route(ctx, "GET", cfg_d, 200, cfg);
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("traversal");
+    var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
+
+    assert_eq(image_store_pull(c, store, ref), 0, "traversal digest refused");
+    assert_eq(vec_len(image_store_list(store)), 0, "nothing added to the index");
+    return 0;
+}
+
+fn test_rg_blob_path_fails_closed() {
+    test_group("rg_blob_path_fails_closed");
+    assert_eq(_img_blob_path("/tmp/store", "sha256:../../../etc/passwd"), 0,
+    "_img_blob_path refuses a malformed digest");
+    assert_neq(_img_blob_path("/tmp/store", "sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
+    "and still builds a path for a valid one");
+    var store = _rg_blob_store("failclosed");
+    assert_eq(image_store_has_blob(store, "sha256:../../../etc/passwd"), 0,
+    "has_blob reports absent rather than probing outside the store");
+    assert_eq(image_store_store_blob(store, "sha256:../../x", "d", 1), 0, "store_blob refuses");
+    return 0;
+}
+
+fn test_rg_descriptor_rejects_bad_size() {
+    test_group("rg_descriptor_rejects_bad_size");
+    # A negative size disabled the download ceiling entirely (`if (size > 0)`),
+    # and i64max + 65536 wraps negative — both leave the transfer unbounded.
+    var neg = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":-1}";
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(neg, strlen(neg))), 0, "negative size rejected");
+    var huge = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":9223372036854775807}";
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(huge, strlen(huge))), 0, "i64max size rejected");
+    var okd = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":1024}";
+    assert_neq(descriptor_from_jv(bayan_json_v_parse_str(okd, strlen(okd))), 0, "a sane size parses");
+    return 0;
+}
+
+fn test_rg_push_manifest_targets_the_tag() {
+    test_group("rg_push_manifest_targets_the_tag");
+    # A digest-pinned target must still PUT at the tag, or the push creates a
+    # repository nothing can pull by name.
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var ref = image_ref_new("reg.test", "library/alpine", "v1",
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222");
+    var body = "{\"schemaVersion\":2}";
+    assert_eq(registry_push_manifest(c, ref, body, strlen(body), 0), 1, "pushed");
+    var last = _rg_log_at(ctx, _rg_log_len(ctx) - 1);
+    assert_eq(_rg_contains(last, "/manifests/v1"), 1, "PUT at the tag");
+    assert_eq(_rg_contains(last, "/manifests/sha256:"), 0, "NOT at the digest");
+    return 0;
+}
+
+fn test_rg_manifest_fetch_still_prefers_digest() {
+    test_group("rg_manifest_fetch_still_prefers_digest");
+    # The push change must not alter the FETCH side, where a digest rightly
+    # outranks the tag.
+    var c = _rg_client(_rg_ctx_new());
+    var ref = image_ref_new("reg.test", "library/alpine", "v1",
+    "sha256:3333333333333333333333333333333333333333333333333333333333333333");
+    assert_eq(_rg_contains(_reg_manifest_url(c, ref), "/manifests/sha256:3333"), 1,
+    "fetch URL pins to the digest");
+    return 0;
+}
+
+fn test_rg_push_missing_image() {
+    test_group("rg_push_missing_image");
+    var ctx = _rg_push_ctx();
+    var c = _rg_client(ctx);
+    var store = _rg_blob_store("pushmissing");
+    var target = image_ref_new("reg.test", "library/alpine", "latest", 0);
+    assert_eq(image_store_push(c, store, "reg.test/nope:latest", target), 0, "not found");
+    assert_eq(_rg_log_len(ctx), 0, "no request issued");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_rg_transport_seam();
@@ -701,6 +1780,48 @@ fn main() {
     test_rg_token_cache_expiry();
     test_rg_token_url_and_basic_auth();
     test_rg_token_from_body();
+    test_rg_fetch_manifest();
+    test_rg_fetch_manifest_index();
+    test_rg_fetch_manifest_index_without_content_type();
+    test_rg_fetch_manifest_digest_verified();
+    test_rg_fetch_manifest_errors();
+    test_rg_resolve_manifest_from_index();
+    test_rg_resolve_manifest_pinned_digest_enforced();
+    test_rg_resolve_manifest_direct();
+    test_rg_blob_stream_to_store();
+    test_rg_blob_digest_mismatch_leaves_nothing();
+    test_rg_blob_limit_enforced();
+    test_rg_blob_already_present_is_noop();
+    test_rg_blob_warm_cache_skips_probe();
+    test_rg_blob_stale_token_retries_once();
+    test_rg_blob_short_write_aborts();
+    test_rg_blob_error_status();
+    test_rg_pull_image();
+    test_rg_pull_dedups_present_blobs();
+    test_rg_pull_refuses_foreign_layer();
+    test_rg_pull_partial_failure_leaves_no_image();
+    test_rg_push_blob_monolithic();
+    test_rg_push_blob_skips_existing();
+    test_rg_push_blob_chunked();
+    test_rg_push_chunk_size_guard();
+    test_rg_push_manifest();
+    test_rg_push_manifest_rejects_empty();
+    test_rg_push_uses_push_scope();
+    test_rg_push_roundtrip_preserves_manifest_bytes();
+    test_rg_push_quiet_precheck();
+    test_rg_push_reauths_on_401_from_put();
+    test_rg_same_origin();
+    test_rg_push_no_token_to_foreign_location();
+    test_rg_push_chunked_rejects_offorigin_relocation();
+    test_rg_push_token_still_sent_same_origin();
+    test_rg_push_uploads_every_referenced_blob();
+    test_rg_digest_is_valid();
+    test_rg_pull_rejects_traversal_digest();
+    test_rg_blob_path_fails_closed();
+    test_rg_descriptor_rejects_bad_size();
+    test_rg_push_manifest_targets_the_tag();
+    test_rg_manifest_fetch_still_prefers_digest();
+    test_rg_push_missing_image();
     return assert_summary();
 }
 

@@ -147,6 +147,11 @@ fn descriptor_to_jv(d) {
     return o;
 }
 
+# Absolute ceiling for a descriptor's declared `size`, 64 GiB. No real OCI blob
+# approaches this; it exists so an attacker-declared size cannot overflow the
+# download ceiling arithmetic or license an unbounded write.
+var _REG_MAX_DESCRIPTOR_SIZE = 68719476736;
+
 # JTAG_OBJ json value → Descriptor* (OCI content descriptor). STRICT on the
 # required trio (mediaType/digest/size); returns 0 if any is missing/mistyped
 # (the caller maps to Err). `urls` is optional (foreign layers).
@@ -157,9 +162,21 @@ fn descriptor_from_jv(v) {
     if (json_v_is_str(mtf) == 0) { return 0; }
     var dgf = json_v_obj_get(v, "digest");
     if (json_v_is_str(dgf) == 0) { return 0; }
+    # The digest becomes a filesystem path (_img_blob_path) and a URL path
+    # segment (_reg_blob_url), and it arrives from a remote registry. Reject
+    # anything that is not exactly "sha256:" + 64 lowercase hex HERE, at the
+    # parse boundary, so no malformed digest can reach either. See
+    # digest_is_valid in image.cyr for what this prevents.
+    if (digest_is_valid(str_cstr(json_v_str(dgf))) == 0) { return 0; }
     var szf = json_v_obj_get(v, "size");
     if (json_v_is_int(szf) == 0) { return 0; }
     var size = json_v_int(szf);
+    # A negative or absurd size would otherwise disable the download ceiling in
+    # registry_fetch_blob_to_store (`if (expected_size > 0)`), and
+    # `size + 65536` on i64max wraps negative — either way, unbounded. The
+    # descriptor is attacker-controlled, so bound it here.
+    if (size < 0) { return 0; }
+    if (size > _REG_MAX_DESCRIPTOR_SIZE) { return 0; }
     var d = descriptor_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(dgf)), size);
     var uf = json_v_obj_get(v, "urls");
     if (json_v_is_arr(uf) == 1) {
@@ -264,7 +281,14 @@ fn oci_manifest_from_jv(v) {
         var i = 0;
         while (i < n) {
             var ld = descriptor_from_jv(json_v_arr_get(lf, i));
-            if (ld != 0) { vec_push(layers, ld); }
+            # A layer that will not parse fails the WHOLE manifest. Skipping it
+            # (which this did until the digest validator started rejecting
+            # descriptors) yields an image silently missing a filesystem layer —
+            # a container that runs and is simply wrong, which is worse than a
+            # failed pull. The oracle's serde `Vec<Descriptor>` also fails the
+            # whole deserialization on a bad element, so this is parity too.
+            if (ld == 0) { return 0; }
+            vec_push(layers, ld);
             i = i + 1;
         }
     }
@@ -1025,10 +1049,18 @@ fn registry_last_error() { return _reg_last_err; }
 fn registry_last_status() { return _reg_last_status; }
 
 # Record a failure and return `ret` (so call sites read `return _reg_fail(...)`).
+# When 1, _reg_fail records but does not PRINT. For probes whose failure is an
+# expected answer rather than a problem: a blob-existence HEAD that 404s means
+# "not present, go upload it", and printing an error there would make a normal
+# first push emit one scary line per blob.
+var _reg_quiet = 0;
+
 fn _reg_fail(code, msg, status) {
     _reg_last_err = code;
     _reg_last_status = status;
-    if (msg != 0) { stiva_err_print(code, msg); }
+    if (msg != 0) {
+        if (_reg_quiet == 0) { stiva_err_print(code, msg); }
+    }
     return 0;
 }
 
@@ -1047,6 +1079,15 @@ fn _reg_clear_err() {
 # buffered call; a call that forgets silently reverts to 256 KiB.
 var _REG_MANIFEST_MAX_BYTES = 8388608;   # 8 MiB
 var _REG_HTTP_TOTAL_MS = 60000;
+
+# Blob legs get their own, far larger budget. sandhi's total_ms is a deadline
+# for the WHOLE transfer (lib/sandhi.cyr:9081, :9463, enforced in the body loop
+# at :9610), not an idle timeout — so the 60 s control-plane budget caps every
+# blob at whatever fits in a minute. A 400 MB layer on a 50 Mbit/s link needs
+# ~64 s and would fail, permanently and identically on every retry, since there
+# is no resume. 1 hour is a liveness backstop, not a rate expectation. The
+# oracle sets no timeout at all (rust-old/src/registry.rs:313-317).
+var _REG_BLOB_TOTAL_MS = 3600000;
 var _REG_HTTP_MAX_HOPS = 10;             # oracle: Policy::limited(10)
 
 #[must_use]
@@ -1060,13 +1101,30 @@ fn _reg_http_opts() {
     return o;
 }
 
+# Options for a blob-sized transfer: the long deadline, and no response-byte
+# cap (the streaming sink enforces its own descriptor-derived ceiling, and the
+# 8 MiB manifest cap would reject every real layer).
+#[must_use]
+fn _reg_blob_http_opts() {
+    var o = sandhi_http_options_new();
+    if (o == 0) { return 0; }
+    sandhi_http_options_follow_redirects(o, 1);
+    sandhi_http_options_max_hops(o, _REG_HTTP_MAX_HOPS);
+    sandhi_http_options_total_ms(o, _REG_BLOB_TOTAL_MS);
+    return o;
+}
+
 # ── transport dispatch ───────────────────────────
 
 # One buffered request. Returns a sandhi response*, or 0.
 fn _reg_send(client, method, url, headers, body, body_len) {
     var t = load64(client + REG_CL_TRANSPORT);
     if (t == 0) {
-        return sandhi_http_request_auto(method, url, headers, body, body_len, _reg_http_opts());
+        # A request carrying a body is a blob upload; give it the long deadline
+        # for the same reason downloads get one (see _REG_BLOB_TOTAL_MS).
+        var opts = _reg_http_opts();
+        if (body_len > 0) { opts = _reg_blob_http_opts(); }
+        return sandhi_http_request_auto(method, url, headers, body, body_len, opts);
     }
     return fncall6(load64(t + REG_TP_SEND), load64(t + REG_TP_CTX),
     method, url, headers, body, body_len);
@@ -1076,7 +1134,7 @@ fn _reg_send(client, method, url, headers, body, body_len) {
 fn _reg_download(client, url, cb, sink_ctx, headers) {
     var t = load64(client + REG_CL_TRANSPORT);
     if (t == 0) {
-        return sandhi_http_download_sink_headers(url, cb, sink_ctx, headers, _reg_http_opts());
+        return sandhi_http_download_sink_headers(url, cb, sink_ctx, headers, _reg_blob_http_opts());
     }
     var f = load64(t + REG_TP_SINK);
     if (f == 0) { return 0; }
@@ -1242,6 +1300,724 @@ fn _reg_authenticated_request(client, ref, method, url, scope, accept) {
 # GET convenience (rust-old: authenticated_get, registry.rs:494-503).
 fn _reg_authenticated_get(client, ref, url, scope, accept) {
     return _reg_authenticated_request(client, ref, "GET", url, scope, accept);
+}
+
+# ══ Manifest fetch + platform resolve (Inc-5) ════════════
+# rust-old/src/registry.rs:381-464.
+
+# What a manifest fetch produced. The oracle uses an enum
+# (ManifestResponse::Manifest | ::Index); §B declares no new types, so the
+# kind rides alongside the pointer via these two accessors.
+enum RegManifestKind {
+    REG_MK_NONE = 0;
+    REG_MK_MANIFEST = 1;
+    REG_MK_INDEX = 2;
+}
+
+var _reg_last_manifest_kind = 0;
+
+# Raw manifest bytes + their true digest, from the most recent successful fetch.
+#
+# The pull driver needs the bytes AS SERVED, not a re-serialization. The oracle
+# re-encodes the parsed manifest with `to_vec_pretty` and stores THAT under its
+# own digest (rust-old/src/image.rs:151-153) — which is a different digest from
+# the one the registry served, so the stored layout no longer matches the
+# registry's content-addressed identity and `Docker-Content-Digest` can never be
+# re-verified from disk. Keeping the original bytes is what makes the local
+# store a truthful OCI image layout.
+var _reg_last_manifest_body = 0;
+var _reg_last_manifest_body_len = 0;
+var _reg_last_manifest_digest = 0;
+
+#[must_use]
+fn registry_last_manifest_body() { return _reg_last_manifest_body; }
+#[must_use]
+fn registry_last_manifest_body_len() { return _reg_last_manifest_body_len; }
+#[must_use]
+fn registry_last_manifest_digest() { return _reg_last_manifest_digest; }
+
+#[must_use]
+fn registry_last_manifest_kind() { return _reg_last_manifest_kind; }
+
+# Fetch the manifest (or index) for `ref` (rust-old: fetch_manifest,
+# registry.rs:381-437). Returns an OciManifest* or OciIndex* — which one is
+# reported by registry_last_manifest_kind(). Returns 0 on failure.
+#
+# Digest verification is OPPORTUNISTIC and byte-exact, matching the oracle
+# (registry.rs:409-428): only when the registry sends Docker-Content-Digest,
+# and compared as a whole string INCLUDING the "sha256:" prefix. A registry
+# that returns uppercase hex therefore fails closed. That is defence in depth
+# against a MITM or a corrupted cache, not the primary integrity check.
+fn registry_fetch_manifest(client, ref) {
+    _reg_last_manifest_kind = REG_MK_NONE;
+    _reg_last_manifest_body = 0;
+    _reg_last_manifest_body_len = 0;
+    _reg_last_manifest_digest = 0;
+    var url = _reg_manifest_url(client, ref);
+    var scope = _reg_pull_scope(ref);
+    var r = _reg_authenticated_get(client, ref, url, scope, _reg_manifest_accept());
+    if (r == 0) { return 0; }
+
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        # A 3xx reaches here when the redirect budget ran out; the oracle's
+        # is_success() guard rejects it rather than parsing a redirect body.
+        return _reg_fail(STIVA_ERR_REGISTRY, "manifest fetch failed", st);
+    }
+
+    var body = sandhi_http_body(r);
+    var blen = sandhi_http_body_len(r);
+    if (body == 0 || blen <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "empty manifest body", st);
+    }
+
+    var hdrs = sandhi_http_headers(r);
+    # Computed unconditionally: it is both the integrity check AND the identity
+    # the pull driver stores the manifest blob under.
+    var actual = sha256_digest(body, blen);
+    var expected = 0;
+    if (hdrs != 0) { expected = sandhi_headers_get(hdrs, "Docker-Content-Digest"); }
+    # A reference pinned BY DIGEST (repo@sha256:…) is the stronger claim, and it
+    # comes from the caller rather than the registry — so it wins. Without this
+    # the received bytes are only ever checked against a header the registry
+    # chooses whether to send, which makes digest pinning — the exact control
+    # you reach for against a compromised registry or a mutated tag — purely
+    # decorative.
+    var rr: ImageRef = ref;
+    if (rr.digest != 0) { expected = rr.digest; }
+    if (expected != 0) {
+        if (streq(actual, expected) == 0) {
+            return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "manifest digest mismatch", st);
+        }
+    }
+
+    # Copy the body out of sandhi's response buffer — the caller may issue more
+    # requests (resolve_manifest does exactly that) before consuming these.
+    var keep = alloc(blen + 1);
+    memcpy(keep, body, blen);
+    store8(keep + blen, 0);
+    _reg_last_manifest_body = keep;
+    _reg_last_manifest_body_len = blen;
+    _reg_last_manifest_digest = actual;
+
+    var v = bayan_json_v_parse_str(body, blen);
+    if (v == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "manifest is not valid JSON", st); }
+
+    # Index vs manifest: Content-Type first (the oracle's only test), then the
+    # body shape as a fallback. The fallback is a deliberate divergence — a
+    # registry that omits Content-Type would otherwise have its index parsed as
+    # a manifest, yielding an empty layer list and a silently broken pull.
+    var ct = 0;
+    if (hdrs != 0) { ct = sandhi_headers_get(hdrs, "Content-Type"); }
+    var is_index = 0;
+    if (ct != 0) {
+        if (strstr(ct, "manifest.list") >= 0) { is_index = 1; }
+        if (strstr(ct, "image.index") >= 0) { is_index = 1; }
+    } else {
+        is_index = _reg_body_is_index(v);
+    }
+
+    if (is_index == 1) {
+        var idx = oci_index_from_jv(v);
+        if (idx == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "malformed image index", st); }
+        _reg_last_manifest_kind = REG_MK_INDEX;
+        return idx;
+    }
+    var man = oci_manifest_from_jv(v);
+    if (man == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "malformed image manifest", st); }
+    _reg_last_manifest_kind = REG_MK_MANIFEST;
+    return man;
+}
+
+# Resolve `ref` to a concrete single-platform manifest (rust-old:
+# resolve_manifest, registry.rs:443-464). An index is resolved against
+# current_platform() and the selected child is fetched by digest. A nested
+# index is rejected. Returns an OciManifest*, or 0.
+fn registry_resolve_manifest(client, ref) {
+    var first = registry_fetch_manifest(client, ref);
+    if (first == 0) { return 0; }
+    if (registry_last_manifest_kind() == REG_MK_MANIFEST) { return first; }
+
+    var entry = select_platform(first, current_platform());
+    if (entry == 0) {
+        return _reg_fail(STIVA_ERR_UNSUPPORTED_PLATFORM, "no manifest for this platform", 0);
+    }
+    var pe: PlatformManifest = entry;
+
+    # Re-fetch pinned to the selected digest. The ref is built INLINE from the
+    # source ref's fields rather than through a helper: an ImageRef obtained
+    # from a wrapper fn reads back as garbage in some units under cycc 6.4.77
+    # (see CLAUDE.md — it fails silently, not with a crash).
+    var sr: ImageRef = ref;
+    var pinned = image_ref_new(sr.registry, sr.repository, sr.tag, pe.digest);
+    var second = registry_fetch_manifest(client, pinned);
+    if (second == 0) { return 0; }
+    if (registry_last_manifest_kind() != REG_MK_MANIFEST) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "nested manifest list not supported", 0);
+    }
+    return second;
+}
+
+# ══ Blob fetch — STREAMING (Inc-6) ═══════════════════════
+# rust-old/src/registry.rs:468-489 buffers the whole blob into bytes::Bytes.
+# We stream it to disk instead, hashing as it lands: a layer is routinely
+# hundreds of MiB and buffering one is how a container runtime OOMs its host.
+# This became possible only at sandhi 1.9.3 — before that the streaming API
+# hardcoded `headers = 0` and so could not carry `Authorization`, which is why
+# the original §B plan had blobs on the buffered path behind a size ceiling.
+#
+# We also verify the digest INLINE, which the oracle does not do here (it
+# relies on image.rs's store_blob checking on write). Verifying while
+# streaming is strictly stronger: a corrupt blob never reaches the
+# content-addressed path at all.
+
+# Sink context — 40 bytes.
+#   REG_SINK_FD      @0  — destination fd
+#   REG_SINK_SHA     @8  — 144-byte sha256 streaming context
+#   REG_SINK_WRITTEN @16 — bytes written so far
+#   REG_SINK_LIMIT   @24 — hard ceiling, 0 = unbounded
+#   REG_SINK_ERR     @32 — 0 ok · 1 short write · 2 limit exceeded
+enum RegSinkOff {
+    REG_SINK_FD = 0;
+    REG_SINK_SHA = 8;
+    REG_SINK_WRITTEN = 16;
+    REG_SINK_LIMIT = 24;
+    REG_SINK_ERR = 32;
+}
+
+# The download sink: write, hash, count. Returns 1 to continue, -1 to abort
+# (sandhi stops the transfer and reports stopped=1).
+fn _reg_blob_sink(ctx, buf, len) {
+    var written = load64(ctx + REG_SINK_WRITTEN);
+    var limit = load64(ctx + REG_SINK_LIMIT);
+    # The descriptor's size is attacker-controlled, so it is a CEILING only —
+    # never trusted as the truth. The digest is the authority. Without this a
+    # lying registry could stream until the disk filled.
+    if (limit > 0 && written + len > limit) {
+        store64(ctx + REG_SINK_ERR, 2);
+        return 0 - 1;
+    }
+    var fd = load64(ctx + REG_SINK_FD);
+    var off = 0;
+    while (off < len) {
+        var n = file_write(fd, buf + off, len - off);
+        if (n <= 0) {
+            store64(ctx + REG_SINK_ERR, 1);
+            return 0 - 1;
+        }
+        off = off + n;
+    }
+    sha256_update(load64(ctx + REG_SINK_SHA), buf, len);
+    store64(ctx + REG_SINK_WRITTEN, written + len);
+    return 1;
+}
+
+fn _reg_sink_new(fd, sha, limit) {
+    var s = alloc(40);
+    store64(s + REG_SINK_FD, fd);
+    store64(s + REG_SINK_SHA, sha);
+    store64(s + REG_SINK_WRITTEN, 0);
+    store64(s + REG_SINK_LIMIT, limit);
+    store64(s + REG_SINK_ERR, 0);
+    return s;
+}
+
+# One authenticated streaming attempt against `url`, into `sink`.
+fn _reg_blob_stream_once(client, ref, url, scope, sink) {
+    var sr: ImageRef = ref;
+    var tok = _reg_get_cached_token(client, _reg_cache_key(sr.registry, scope));
+    var auth = 0;
+    if (tok != 0) { auth = _reg_bearer(tok); }
+    # fetch_blob sends no Accept (registry.rs:472).
+    var h = _reg_headers(0, auth);
+    if (h == 0) { return 0; }
+    return _reg_download(client, url, &_reg_blob_sink, sink, h);
+}
+
+# Stream blob `digest` for `ref` into the store's content-addressed path,
+# verifying SHA-256 as it lands. `expected_size` (from the descriptor, 0 if
+# unknown) becomes the sink ceiling. Returns the blob path cstr, or 0.
+#
+# A blob already present is a no-op — the store is content-addressed, so a
+# matching digest is a matching blob.
+# One streaming attempt into `tmp`, from a clean slate: truncate, fresh hash
+# context, fresh sink. Returns a 2-word [sink, download_result] pair, or 0 if
+# the tempfile could not be opened.
+fn _reg_blob_attempt(client, ref, url, scope, tmp, limit) {
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 420);
+    if (fd < 0) { return 0; }
+    var sha = alloc(144);
+    sha256_init_into(sha);
+    var sink = _reg_sink_new(fd, sha, limit);
+    var res = _reg_blob_stream_once(client, ref, url, scope, sink);
+    file_close(fd);
+    var out = alloc(16);
+    store64(out + 0, sink);
+    store64(out + 8, res);
+    return out;
+}
+
+fn registry_fetch_blob_to_store(client, store, ref, digest, expected_size) {
+    _reg_clear_err();
+    if (image_store_has_blob(store, digest) == 1) {
+        return _img_blob_path(image_store_root(store), digest);
+    }
+    var path = _img_blob_path(image_store_root(store), digest);
+    # 0 = the digest is not well-formed. Fail closed rather than letting a
+    # registry-supplied string become a filesystem path (see digest_is_valid).
+    if (path == 0) {
+        return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "malformed blob digest", 0);
+    }
+    # `.dl` rather than store_blob's `.tmp` so a concurrent import and a pull
+    # cannot collide on the same scratch name.
+    var tmp = _reg_cat2(path, ".dl");
+
+    var scope = _reg_pull_scope(ref);
+    var url = _reg_blob_url(client, ref, digest);
+    var lim = 0;
+    if (expected_size > 0) { lim = expected_size + 65536; }
+
+    # The streaming path CANNOT see a 401 challenge: sandhi's download driver
+    # reports a non-2xx as status + err and never surfaces the hop's response
+    # headers, so WWW-Authenticate is unreachable there. The token therefore has
+    # to be acquired on the BUFFERED path — a HEAD to the same URL elicits the
+    # challenge and populates the cache.
+    #
+    # Only when the cache is COLD, though. In a real pull the manifest fetch
+    # already primed the same registry|scope key, so the common case is one
+    # request per blob. Probing unconditionally would double the request count
+    # of every layer in the image.
+    #
+    # ImageRef.registry by raw offset (@0) — see _reg_authenticated_request for
+    # why the typed read is not safe in this unit.
+    var key = _reg_cache_key(load64(ref + 0), scope);
+    if (_reg_get_cached_token(client, key) == 0) {
+        if (_reg_authenticated_request(client, ref, "HEAD", url, scope, 0) == 0) { return 0; }
+    }
+
+    var a = _reg_blob_attempt(client, ref, url, scope, tmp, lim);
+    if (a == 0) { return _reg_fail(STIVA_ERR_IO, "cannot open blob tempfile", 0); }
+    var sink = load64(a + 0);
+    var res = load64(a + 8);
+
+    # A cached token the registry no longer accepts arrives here as a bare 401
+    # with no usable challenge. Re-run the buffered state machine (which
+    # refreshes the entry on its own 401) and stream once more. A second 401 is
+    # terminal — no unbounded retry loop.
+    if (res != 0 && sandhi_download_status(res) == 401) {
+        if (_reg_authenticated_request(client, ref, "HEAD", url, scope, 0) == 0) {
+            xunlink(tmp);
+            return 0;
+        }
+        a = _reg_blob_attempt(client, ref, url, scope, tmp, lim);
+        if (a == 0) {
+            # The first attempt's partial tempfile is still on disk here.
+            xunlink(tmp);
+            return _reg_fail(STIVA_ERR_IO, "cannot open blob tempfile", 0);
+        }
+        sink = load64(a + 0);
+        res = load64(a + 8);
+    }
+
+    if (res == 0) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob download failed", 0);
+    }
+    var serr = load64(sink + REG_SINK_ERR);
+    if (serr == 1) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_IO, "short write streaming blob", 0);
+    }
+    if (serr == 2) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob exceeds its descriptor size", 0);
+    }
+    if (sandhi_download_err(res) != SANDHI_OK) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob download failed", sandhi_download_status(res));
+    }
+    var dst = sandhi_download_status(res);
+    if (dst < 200 || dst >= 300) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob fetch failed", dst);
+    }
+
+    # Digest check BEFORE the blob is visible at its content-addressed path.
+    var raw = alloc(32);
+    sha256_finalize(load64(sink + REG_SINK_SHA), raw);
+    var actual = _reg_cat2("sha256:", hex_encode(raw, 32));
+    if (streq(actual, digest) == 0) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "blob digest mismatch", 0);
+    }
+    if (sys_rename(tmp, path) < 0) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_IO, "cannot commit blob", 0);
+    }
+    return path;
+}
+
+# ══ Push (Inc-8) ═══════════════════════════════
+# Oracle: rust-old/src/registry.rs:548-800 (blob_exists / push_blob /
+# push_blob_chunked / push_manifest). The OCI distribution upload dance is:
+#   POST /v2/<repo>/blobs/uploads/   -> 202 + Location
+#   PUT  <location>?digest=<digest>  -> 201            (monolithic)
+# or
+#   PATCH <location> + Content-Range -> 202 + Location (repeat)
+#   PUT   <location>?digest=<digest> -> 201            (finalize, empty body)
+#
+# A body-carrying request does NOT go through _reg_authenticated_request. That
+# state machine replays its request up to three times (cached-token attempt,
+# unauthenticated probe, post-token retry) — fine for a HEAD, catastrophic for a
+# layer upload, which would go up the wire three times. Instead the bodyless
+# POST that opens the session primes the token cache, and the PATCH/PUT legs
+# carry that cached token directly. This is the oracle's shape too, and for the
+# same reason.
+
+# Decimal for a non-negative int. registry.cyr's test unit does not include
+# runtime.cyr, so _rt_int_to_cstr is out of reach here.
+#[must_use]
+fn _reg_uint_str(n) {
+    if (n <= 0) { return "0"; }
+    var buf = alloc(24);
+    var i = 23;
+    store8(buf + i, 0);
+    var v = n;
+    while (v > 0) {
+        i = i - 1;
+        store8(buf + i, 48 + v % 10);
+        v = v / 10;
+    }
+    return buf + i;
+}
+
+# Length of a URL's origin prefix — scheme://host[:port] — or 0 if it has none.
+fn _reg_origin_len(url) {
+    if (url == 0) { return 0; }
+    var n = strlen(url);
+    var i = 0;
+    var scheme_end = 0 - 1;
+    while (i + 2 < n) {
+        if (load8(url + i) == 58) {                      # ':'
+            if (load8(url + i + 1) == 47) {              # '/'
+                if (load8(url + i + 2) == 47) { scheme_end = i + 3; i = n; }
+            }
+        }
+        i = i + 1;
+    }
+    if (scheme_end < 0) { return 0; }
+    var j = scheme_end;
+    while (j < n) {
+        var c = load8(url + j);
+        # The authority ends at the first '/', '?' or '#'. Stopping only at '/'
+        # would fold a query string into the origin, so "https://reg.test?x=1"
+        # would compare unequal to its own base — and this parser is used as a
+        # security control (_reg_same_origin).
+        if (c == 47 || c == 63 || c == 35) { return j; }
+        j = j + 1;
+    }
+    return n;
+}
+
+# 1 when both URLs share scheme + host + port.
+fn _reg_same_origin(a, b) {
+    var la = _reg_origin_len(a);
+    var lb = _reg_origin_len(b);
+    if (la == 0 || lb == 0) { return 0; }
+    if (la != lb) { return 0; }
+    return memeq(a, b, la);
+}
+
+# Headers for a body-carrying push leg: the cached push token, plus an optional
+# Content-Type and one optional extra header (Content-Range, for PATCH).
+# Content-Length is deliberately NOT set — sandhi emits it for POST/PUT/PATCH
+# itself (lib/sandhi.cyr:4256-4267) and rejects a duplicate.
+#
+# `url` is compared against the API base and the Bearer token is attached ONLY
+# when they share an origin.
+#
+# SECURITY, and a divergence from the oracle: the upload URL comes from the
+# registry's `Location` header, and _reg_resolve_location accepts an absolute
+# URL. A hostile (or compromised) registry can therefore answer the upload POST
+# with `Location: https://evil.example/x` and the oracle will PUT the layer
+# there WITH the Authorization header attached (registry.rs:610-625) — handing a
+# push-scoped registry token to an arbitrary host. sandhi already strips
+# Authorization when a *redirect* crosses origins (lib/sandhi.cyr:5077-5117);
+# this is the same policy applied to the Location hop, which is not a redirect
+# and so is not covered by it. A registry that genuinely offloads uploads to
+# another host must use a pre-signed URL, which is the norm.
+fn _reg_push_headers(client, ref, scope, url, base, ctype, xname, xval) {
+    var auth = 0;
+    if (_reg_same_origin(url, base) == 1) {
+        var tok = _reg_get_cached_token(client, _reg_cache_key(load64(ref + 0), scope));
+        if (tok != 0) { auth = _reg_bearer(tok); }
+    }
+    var h = _reg_headers(0, auth);
+    if (h == 0) { return 0; }
+    if (ctype != 0) {
+        if (sandhi_headers_add(h, "Content-Type", ctype) != 0) { return 0; }
+    }
+    if (xname != 0) {
+        if (sandhi_headers_add(h, xname, xval) != 0) { return 0; }
+    }
+    return h;
+}
+
+# 1 when the blob is already in the registry.
+#
+# DIVERGENCE: the oracle checks with a PULL scope (registry.rs:552) even though
+# every caller is a push. On a registry that authenticates HEAD, that mints a
+# pull token under the pull cache key — which the upload legs, keyed on
+# push,pull, cannot use. The probe is then a wasted round trip AND the upload
+# starts cold. Using the push scope makes the precheck prime the exact token the
+# upload needs.
+#[must_use]
+fn registry_blob_exists(client, ref, digest) {
+    # Quiet: a 404 here is the ANSWER ("not present"), not a fault. Without this
+    # a normal first push prints "registry returned an error status" once per
+    # blob, which reads like a failure while the push is working perfectly.
+    _reg_quiet = 1;
+    var r = _reg_authenticated_request(client, ref, "HEAD",
+    _reg_blob_url(client, ref, digest), _reg_push_scope(ref), 0);
+    _reg_quiet = 0;
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st >= 200 && st < 300) { return 1; }
+    return 0;
+}
+
+# Open an upload session. Returns the absolute upload URL, or 0.
+fn _reg_start_upload(client, ref, scope) {
+    var r = _reg_authenticated_request(client, ref, "POST",
+    _reg_uploads_url(client, ref), scope, 0);
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "cannot open blob upload session", st);
+    }
+    var hdrs = sandhi_http_headers(r);
+    var loc = 0;
+    if (hdrs != 0) { loc = sandhi_headers_get(hdrs, "Location"); }
+    if (loc == 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "no Location header in upload response", st);
+    }
+    var base = _reg_api_base(client, ref);
+    var abs = _reg_resolve_location(base, loc);
+    # SECURITY: reject an off-origin upload target BEFORE any body is sent.
+    #
+    # _reg_resolve_location honours an absolute URL, so a hostile or compromised
+    # registry can answer this POST with `Location: https://evil.example/x`.
+    # Withholding the Bearer token there (which _reg_push_headers does) is not
+    # enough on its own: the request still goes out with the layer body, the
+    # foreign host answers 401 with its own challenge, and the re-auth path
+    # would mint a token against ITS realm — sending the configured registry
+    # credentials, which for Basic auth are long-lived, to a host the attacker
+    # chose. Refusing here closes all of it at once.
+    #
+    # A registry that genuinely offloads uploads elsewhere uses a pre-signed
+    # URL and does not need our credentials; supporting that is a deliberate
+    # future decision, not something to allow by omission.
+    if (_reg_same_origin(abs, base) == 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "upload Location is off-origin; refusing", st);
+    }
+    return abs;
+}
+
+# Send one body-carrying push leg, re-authenticating once on a 401.
+#
+# DIVERGENCE: the oracle sends these legs with whatever token happens to be
+# cached and does NOT retry (registry.rs:610-635, 775-788) — a token that
+# expired during a long upload turns into a bare 401 with no recovery, and a
+# cold cache turns into an unauthenticated PUT. Since the token TTL is 270 s and
+# a large layer can easily outlast that, one re-auth is the difference between a
+# push that works and a push that fails at the finalize step.
+fn _reg_push_send(client, ref, method, url, scope, ctype, xname, xval, body, blen) {
+    var base = _reg_api_base(client, ref);
+    var h = _reg_push_headers(client, ref, scope, url, base, ctype, xname, xval);
+    if (h == 0) {
+        # _reg_headers/_reg_push_headers fail CLOSED on a CR/LF-bearing value,
+        # and `ctype` can be a registry-supplied mediaType. Without this the
+        # push returns 0 with registry_last_error() still reading OK, and the
+        # caller reports a failure with no reason at all.
+        return _reg_fail(STIVA_ERR_REGISTRY, "cannot build request headers", 0);
+    }
+    var r = _reg_send(client, method, url, h, body, blen);
+    if (r == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+    if (sandhi_http_err_kind(r) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+    }
+    if (sandhi_http_status(r) != 401) { return r; }
+
+    # Never mint a token from an off-origin challenge: _reg_acquire_token would
+    # GET the realm the FOREIGN host named, carrying the configured Basic
+    # credentials. _reg_start_upload already refuses off-origin targets, so this
+    # is belt-and-braces for any future caller.
+    if (_reg_same_origin(url, base) == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "refusing to authenticate off-origin", 401);
+    }
+    # Unlike the streaming download path, a buffered 401 DOES carry its
+    # challenge, so the token can be minted straight from this response — no
+    # separate probe request, and no guessing at a URL to probe.
+    var www = 0;
+    var rh = sandhi_http_headers(r);
+    if (rh != 0) { www = sandhi_headers_get(rh, "WWW-Authenticate"); }
+    if (www == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "401 without www-authenticate header", 401);
+    }
+    var fresh = _reg_acquire_token(client, www, scope);
+    if (fresh == 0) { return 0; }   # already failed + reported
+    _reg_cache_token(client, _reg_cache_key(load64(ref + 0), scope), fresh);
+
+    var h2 = _reg_push_headers(client, ref, scope, url, base, ctype, xname, xval);
+    if (h2 == 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "cannot build request headers", 0);
+    }
+    var r2 = _reg_send(client, method, url, h2, body, blen);
+    if (r2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+    if (sandhi_http_err_kind(r2) != SANDHI_OK) {
+        return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+    }
+    if (sandhi_http_status(r2) == 401) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "authentication failed", 401);
+    }
+    return r2;
+}
+
+# Monolithic blob upload. Returns 1 on success, 0 on failure.
+fn registry_push_blob(client, ref, digest, data, len) {
+    _reg_clear_err();
+    if (registry_blob_exists(client, ref, digest) == 1) { return 1; }
+    _reg_clear_err();   # a "not present" probe is not an error
+
+    var scope = _reg_push_scope(ref);
+    var up = _reg_start_upload(client, ref, scope);
+    if (up == 0) { return 0; }
+
+    var r = _reg_push_send(client, ref, "PUT", _reg_append_digest_query(up, digest),
+    scope, "application/octet-stream", 0, 0, data, len);
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob upload failed", st);
+    }
+    return 1;
+}
+
+# Chunked blob upload, for layers too large to hold in one request.
+#
+# The session is stateful, so a 401 mid-stream cannot simply be retried the way
+# a monolithic PUT can — _reg_push_send's re-auth still applies per leg, but if
+# the registry has invalidated the session the finalize will fail loudly rather
+# than silently truncating.
+fn registry_push_blob_chunked(client, ref, digest, data, len, chunk_size) {
+    _reg_clear_err();
+    if (chunk_size <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "chunk size must be positive", 0);
+    }
+    if (registry_blob_exists(client, ref, digest) == 1) { return 1; }
+    _reg_clear_err();
+
+    var scope = _reg_push_scope(ref);
+    var loc = _reg_start_upload(client, ref, scope);
+    if (loc == 0) { return 0; }
+
+    var off = 0;
+    while (off < len) {
+        var end = off + chunk_size;
+        if (end > len) { end = len; }
+        # Content-Range is an INCLUSIVE byte range with no "bytes=" prefix
+        # (OCI distribution spec; oracle registry.rs:693).
+        var rng = _reg_cat2(_reg_cat2(_reg_uint_str(off), "-"), _reg_uint_str(end - 1));
+        var r = _reg_push_send(client, ref, "PATCH", loc, scope,
+        "application/octet-stream", "Content-Range", rng, data + off, end - off);
+        if (r == 0) { return 0; }
+        var st = sandhi_http_status(r);
+        if (st < 200 || st >= 300) {
+            return _reg_fail(STIVA_ERR_REGISTRY, "chunk upload failed", st);
+        }
+        # The registry may hand back a new Location for the next chunk.
+        var hdrs = sandhi_http_headers(r);
+        if (hdrs != 0) {
+            var nl = sandhi_headers_get(hdrs, "Location");
+            if (nl != 0) {
+                var nbase = _reg_api_base(client, ref);
+                var nabs = _reg_resolve_location(nbase, nl);
+                # Same gate as _reg_start_upload — a mid-session redirect to a
+                # foreign host is the same attack, once per chunk.
+                if (_reg_same_origin(nabs, nbase) == 0) {
+                    return _reg_fail(STIVA_ERR_REGISTRY,
+                    "upload Location is off-origin; refusing", 0);
+                }
+                loc = nabs;
+            }
+        }
+        off = end;
+    }
+
+    # Finalize: PUT with an empty body.
+    var fr = _reg_push_send(client, ref, "PUT", _reg_append_digest_query(loc, digest),
+    scope, 0, 0, 0, 0, 0);
+    if (fr == 0) { return 0; }
+    var fst = sandhi_http_status(fr);
+    if (fst < 200 || fst >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "chunked upload finalize failed", fst);
+    }
+    return 1;
+}
+
+# PUT a manifest at ref's tag. `body`/`blen` are the manifest bytes as they
+# should be stored — the caller owns serialization, so a manifest pulled from
+# one registry can be pushed to another byte-for-byte, preserving its digest.
+#
+# DIVERGENCE: the oracle probes for a token with `let _ = ...`, discarding the
+# result including a failure, then PUTs regardless — so an auth failure becomes
+# an unauthenticated PUT and a second, more confusing 401 (registry.rs:766-788).
+# We require the probe to succeed. Its own 404 is fine and expected: the tag
+# does not exist yet, which is the whole point of pushing it.
+fn registry_push_manifest(client, ref, body, blen, ctype) {
+    _reg_clear_err();
+    if (body == 0 || blen <= 0) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "empty manifest body", 0);
+    }
+    var mt = ctype;
+    if (mt == 0) { mt = media_oci_manifest(); }
+    var scope = _reg_push_scope(ref);
+    # PUT at the TAG, never at the digest. _reg_manifest_url prefers ref.digest,
+    # which is right for a FETCH (a digest pins harder than a tag) and wrong
+    # here: PUTting to /manifests/sha256:… is spec-legal but creates no tag, so
+    # `stiva push localhost:5000/app@sha256:<d>` would produce a repository
+    # nothing can pull by name. The oracle uses image.tag unconditionally
+    # (rust-old/src/registry.rs:761).
+    var rr: ImageRef = ref;
+    var url = _reg_cat2(_reg_cat2(_reg_cat2(_reg_api_base(client, ref), "/v2/"),
+    rr.repository), _reg_cat2("/manifests/", rr.tag));
+
+    if (_reg_get_cached_token(client, _reg_cache_key(load64(ref + 0), scope)) == 0) {
+        # Quiet for the same reason as the blob precheck: a 404 here means "no
+        # such tag yet", which is the normal state of affairs when pushing.
+        _reg_quiet = 1;
+        var probe = _reg_authenticated_request(client, ref, "HEAD", url, scope, 0);
+        _reg_quiet = 0;
+        if (probe == 0) {
+            # A 404/405 means "no such tag yet" / "HEAD unsupported", not an auth
+            # problem; only a genuine auth failure should stop the push. The
+            # oracle discards this result entirely (`let _ = ...`,
+            # registry.rs:769-773) and then PUTs regardless, turning an auth
+            # failure into an unauthenticated PUT and a second, confusing 401.
+            if (registry_last_error() == STIVA_ERR_AUTH_FAILED) {
+                return _reg_fail(STIVA_ERR_AUTH_FAILED, "cannot authenticate for push", 401);
+            }
+            _reg_clear_err();
+        }
+    }
+
+    var r = _reg_push_send(client, ref, "PUT", url, scope, mt, 0, 0, body, blen);
+    if (r == 0) { return 0; }
+    var st = sandhi_http_status(r);
+    if (st < 200 || st >= 300) {
+        return _reg_fail(STIVA_ERR_REGISTRY, "manifest push failed", st);
+    }
+    return 1;
 }
 
 # Registry tokens are short-lived; the oracle caches for 270 s (its comment says

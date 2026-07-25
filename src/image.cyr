@@ -20,10 +20,12 @@
 #   Image records from on-disk OCI manifest + config blobs. The legacy ad-hoc
 #   `images.json` index is RETIRED.
 #
-# What is DEFERRED (see the block at the bottom):
-#   * pull / push / verify_signature / fetch_foreign_layer are async and drive
-#     RegistryClient's network methods (the blocking registry client is the
-#     v3.0.x group-B work; the net/sandhi/tls HTTP stack already exists).
+# What moved to the NETWORK layer (see the block at the bottom):
+#   * pull / push landed with roadmap §B (v3.0.9) as image_store_pull /
+#     image_store_push in imagelayout.cyr — include order puts registry.cyr
+#     first, so the driver has to sit downstream of both.
+#   * verify_signature is §B Inc-9; fetch_foreign_layer is deliberately NOT
+#     ported (SSRF on registry-controlled data — see the §B Inc-7 divergence).
 #
 # Error mapping (mirrors error.cyr): Rust `Err(StivaError::X(String))`
 # becomes an integer sentinel here — parse() returns 0 (null) on an
@@ -335,9 +337,40 @@ fn _img_store_root(store) {
     return load64(store);
 }
 
-# Path "{root}/blobs/sha256/{hex}" for a `sha256:{hex}` digest.
+# 1 when `digest` is exactly "sha256:" + 64 lowercase hex digits.
+#
+# SECURITY, load-bearing: a digest becomes a FILESYSTEM PATH via _img_blob_path,
+# and once §B landed, digests arrive from a remote registry's manifest JSON. An
+# unvalidated `"digest": "sha256:../../../../etc/shadow"` turns the blob store
+# into an arbitrary-file-read (`has_blob` reports it present, so the pull
+# "succeeds" without ever downloading or verifying anything, and `push` then
+# uploads that file to a registry) and, via the `.dl`/`.tmp` scratch names, an
+# arbitrary-file-truncate. Lowercase-only is deliberate: the OCI image-spec
+# requires the lowercase form, and accepting both would make one blob addressable
+# by two distinct paths.
+#[must_use]
+fn digest_is_valid(digest) {
+    if (digest == 0) { return 0; }
+    if (strlen(digest) != 71) { return 0; }
+    if (memeq(digest, "sha256:", 7) == 0) { return 0; }
+    var i = 7;
+    while (i < 71) {
+        var c = load8(digest + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57) { ok = 1; }        # 0-9
+        if (c >= 97 && c <= 102) { ok = 1; }       # a-f
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Path "{root}/blobs/sha256/{hex}" for a `sha256:{hex}` digest, or 0 when the
+# digest is not a well-formed one. Fails CLOSED — see digest_is_valid. Callers
+# must treat 0 as "no such blob"; every one in-tree does.
 #[must_use]
 fn _img_blob_path(root, digest) {
+    if (digest_is_valid(digest) == 0) { return 0; }
     var hex = digest_hex(digest);
     var base = _img_cat2(root, "/blobs/sha256/");
     return _img_cat2(base, hex);
@@ -383,6 +416,7 @@ fn image_store_root(store) {
 #[must_use]
 fn image_store_has_blob(store, digest) {
     var path = _img_blob_path(_img_store_root(store), digest);
+    if (path == 0) { return 0; }
     return file_exists(path);
 }
 
@@ -394,6 +428,7 @@ fn image_store_has_blob(store, digest) {
 fn image_store_store_blob(store, digest, data, len) {
     sakshi_debug("storing blob", strlen("storing blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
+    if (path == 0) { return 0; }
 
     # Dedup: skip if already present.
     if (file_exists(path) == 1) { return path; }
@@ -416,6 +451,7 @@ fn image_store_store_blob(store, digest, data, len) {
 fn image_store_read_blob(store, digest, buf, maxlen) {
     sakshi_debug("reading blob", strlen("reading blob"));
     var path = _img_blob_path(_img_store_root(store), digest);
+    if (path == 0) { return 0 - 1; }
     if (file_exists(path) == 0) { return 0 - 1; }
     return file_read_all(path, buf, maxlen);
 }
@@ -425,6 +461,7 @@ fn image_store_read_blob(store, digest, buf, maxlen) {
 #[must_use]
 fn image_store_blob_size(store, digest) {
     var path = _img_blob_path(_img_store_root(store), digest);
+    if (path == 0) { return 0 - 1; }
     var fd = file_open(path, 0, 0);            # O_RDONLY
     if (fd < 0) { return 0 - 1; }
     var size = xlseek(fd, 0, 2);               # SEEK_END → byte length
@@ -570,16 +607,18 @@ fn image_ref_new(registry, repository, tag, digest) {
     return r;
 }
 
-# ── DEFERRED (async network layer) ──────────────
+# ── Network layer: where the rest of rust-old/src/image.rs went ──
 # gc / verify_integrity are ported: verify_integrity (re-read + re-hash every
 # blob) lives here; gc + remove + the index/import/tag layer moved to
-# imagelayout.cyr (A2). Still deferred from rust-old/src/image.rs:
+# imagelayout.cyr (A2).
 #
-#   async network (RegistryClient reqwest/tokio; not in ported registry):
-#     async fn pull(&self, reference: &ImageRef, client) -> Result<Image>
-#     async fn push(&self, image: &Image, target, client) -> Result<()>
-#     async fn verify_signature(&self, image, client) -> Result<bool>
-#     async fn fetch_foreign_layer(urls: &[String]) -> Result<Bytes>
+# The registry-driven half landed with roadmap §B (v3.0.9) and lives in
+# imagelayout.cyr, because include order puts registry.cyr BEFORE it:
+#   rust-old `async fn pull`  → image_store_pull(client, store, ref)
+#   rust-old `async fn push`  → image_store_push(client, store, ref_or_id, target)
 #
-# These are ported alongside the registry network layer for parity.
-# Tracked in the roadmap.
+# Still unported from rust-old/src/image.rs, both deliberate:
+#   `verify_signature` — roadmap §B Inc-9 (discovery / referrers).
+#   `fetch_foreign_layer` — NOT being ported. It follows a descriptor's `urls`
+#     to an arbitrary external host on registry-controlled data; image_store_pull
+#     refuses foreign layers instead. See the roadmap §B Inc-7 divergence note.

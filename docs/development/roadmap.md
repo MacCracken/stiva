@@ -216,10 +216,82 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
     > key, so every request re-authenticated. Caught only because a test rebuilt the key from a
     > literal and compared. Construct refs inline or as a direct call assigned to a local; never
     > through a helper. This also **retracts** v3.0.8's "the miscompile appears fixed" note.
-  - **Remaining:** Inc-5 manifest fetch/resolve ·
-    Inc-5 manifest fetch/resolve · Inc-6 blob fetch · Inc-7 the `image_store_pull` driver (lands in
-    `imagelayout.cyr` — include order: `registry.cyr` cannot call `image_store_add_to_index`) ·
-    Inc-8 push · Inc-9 discovery · Inc-10 facade + CLI + docs.
+  - **Inc-5 (manifest fetch + platform resolve)** — `registry_fetch_manifest` verifies
+    `Docker-Content-Digest` against the body before parsing (the oracle never checks it), then
+    classifies manifest-vs-index by `Content-Type`, reporting which via
+    `registry_last_manifest_kind()`. **Divergence:** when the header is absent the oracle parses
+    an index *as* a manifest and yields an image with zero layers — a silently broken pull; we
+    fall back to the body shape (`_reg_body_is_index`). `registry_resolve_manifest` picks the
+    entry for `current_platform()` and re-fetches **pinned to that child digest**, refusing a
+    nested index rather than recursing.
+  - **Inc-6 (streaming blob fetch)** — `registry_fetch_blob_to_store` streams to
+    `blobs/sha256/<hex>.dl` and hashes as it lands, so resident memory is one read buffer rather
+    than one layer. The digest is verified **before** the `sys_rename` that makes the blob visible
+    at its content-addressed path, so a corrupt blob is never reachable by `has_blob` / GC roots /
+    `verify_integrity` — stronger than the oracle, which buffers the whole blob and leaves the
+    check to `store_blob`. The descriptor's `size` is a **ceiling only, never the truth** (it is
+    attacker-controlled); the digest is the authority.
+    > **The awkward part is auth.** sandhi's download driver reports a non-2xx as status + err
+    > and never surfaces that hop's response headers, so `WWW-Authenticate` is **unreachable on
+    > the streaming path**. The token therefore has to come from the buffered state machine: a
+    > `HEAD` to the same URL elicits the challenge. That probe fires **only on a cold cache** —
+    > in a real pull the manifest fetch already primed the same `registry|scope` key, so a layer
+    > costs one request; probing unconditionally would double the request count of every layer in
+    > the image. A stale cached token surfaces as a bare 401 from the stream, which re-runs the
+    > buffered machine (it refreshes on its own 401) and retries the stream **once**.
+
+    `tests/registry.tcyr` 132 → 181 assertions; the canned transport gained a download hook that
+    delivers bodies in **three chunks** (a single-shot delivery would not distinguish a correct
+    streaming hash from one that only hashed the last buffer) and mirrors sandhi's three-way sink
+    contract exactly (`1` continue · `0` graceful stop · `<0` → `ERR_INTERNAL`). It is also
+    token-aware, since a static route table cannot make one URL answer 401 then 200 across a
+    re-auth.
+  - **Inc-7 (pull driver)** — `image_store_pull(client, store, ref)` in `imagelayout.cyr` (include
+    order: `registry.cyr` is included first, so it cannot call `image_store_add_to_index`; the
+    dependency only runs one way). Resolve → store the manifest → config blob → layers → `Image`
+    record → `add_to_index`. Three divergences from the oracle, all deliberate:
+    - **The manifest is stored under the digest the registry served, as received.** The oracle
+      re-serializes the parsed manifest with `to_vec_pretty` and stores *that* under its re-encoded
+      digest (`rust-old/src/image.rs:150-152`), so `index.json` points at bytes the registry never
+      served and `Docker-Content-Digest` can never be re-checked from disk. That is not a valid OCI
+      image layout. This is what the new `registry_last_manifest_body/_len/_digest` channel exists
+      for.
+    - **Foreign layers are refused, not fetched.** The oracle follows `descriptor.urls` to an
+      arbitrary external host (`image.rs:186-190`). That URL comes from the registry, so following
+      it is an SSRF primitive against whatever the daemon can reach — and the request has already
+      happened by the time the digest check could help.
+    - **Layers download sequentially** (the oracle uses `buffer_unordered(4)`); the runtime is
+      single-threaded run-to-completion, so parallel layer fetch stays v3.1.
+
+    A failed layer aborts *without* touching `index.json`, so a half-pulled image is never listable
+    or runnable; the blobs that landed stay content-addressed and are either reused by the next
+    attempt or swept by `gc`.
+  - **Inc-8 (push)** — transport primitives in `registry.cyr` (`registry_blob_exists`,
+    `_reg_start_upload`, `_reg_push_send`, `registry_push_blob`, `registry_push_blob_chunked`,
+    `registry_push_manifest`), driver `image_store_push` in `imagelayout.cyr`. Config → layers →
+    manifest last, because a manifest may only be PUT once everything it references is present.
+    Body-carrying legs deliberately bypass `_reg_authenticated_request`: that state machine replays
+    its request up to three times, which is fine for a HEAD and catastrophic for a layer upload.
+    Four divergences, each fixing an oracle defect:
+    - **`registry_blob_exists` uses the PUSH scope.** The oracle probes with `repository:<r>:pull`
+      (`registry.rs:555`), minting a token under the *pull* cache key that the upload legs — keyed
+      `push,pull` — cannot use: a wasted round trip *and* a cold upload.
+    - **One re-auth retry on a 401 from a body-carrying leg**, minted from the challenge that 401
+      itself carries. The oracle never retries (`registry.rs:610-635`, `775-788`); the token TTL is
+      270 s and a large layer outlasts it.
+    - **`push_manifest` requires its auth probe to succeed.** The oracle discards the result
+      (`let _ = …`, `registry.rs:769-773`) and PUTs regardless, turning an auth failure into an
+      unauthenticated PUT and a second, more confusing 401.
+    - **The upload `Location` only receives the Bearer token when it is same-origin with the API
+      base.** `_reg_resolve_location` accepts an absolute URL, so a hostile registry can answer the
+      upload POST with `Location: https://evil.example/x`; the oracle then PUTs the layer there
+      *with* the Authorization header (`registry.rs:610-625`), handing a push-scoped token to an
+      arbitrary host. sandhi already applies this policy to cross-origin *redirects*
+      (`lib/sandhi.cyr:5077-5117`); the Location hop is not a redirect, so it needs it explicitly.
+
+    `tests/registry.tcyr` 181 → 248 assertions.
+  - **Remaining:** Inc-9 discovery · Inc-10 facade + CLI + docs. `pull`/`push` are library-complete
+    but **not yet reachable from the CLI** — that wiring is Inc-10.
   - **Plan change at v3.0.8:** the brief specified blobs on the *buffered* path behind a
     descriptor-derived cap and a 256 MiB refuse-loudly ceiling, **because sandhi's streaming API
     could not authenticate** (`sandhi_http_download_sink_a` hardcoded `headers = 0`). sandhi 1.9.3

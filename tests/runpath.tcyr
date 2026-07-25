@@ -461,21 +461,21 @@ fn test_image_ref_parse() {
 
 fn test_image_ref_digest() {
     test_group("image_ref_digest");
-    var r = image_ref_parse("nginx@sha256:abcdef1234567890");
+    var r = image_ref_parse("nginx@sha256:abcdef1234567890000000000000000000000000000000000000000000000000");
     var rr: ImageRef = r;
     assert_eq(streq(rr.repository, "library/nginx"), 1, "digest repo");
     assert_eq(streq(rr.tag, "latest"), 1, "digest tag latest");
-    assert_eq(streq(rr.digest, "sha256:abcdef1234567890"), 1, "digest value");
-    var r2 = image_ref_parse("nginx:1.25@sha256:abc123");
+    assert_eq(streq(rr.digest, "sha256:abcdef1234567890000000000000000000000000000000000000000000000000"), 1, "digest value");
+    var r2 = image_ref_parse("nginx:1.25@sha256:abc1230000000000000000000000000000000000000000000000000000000000");
     var rr2: ImageRef = r2;
     assert_eq(streq(rr2.tag, "1.25"), 1, "tagged-digest tag");
-    assert_eq(streq(rr2.digest, "sha256:abc123"), 1, "tagged-digest digest");
-    var r3 = image_ref_parse("ghcr.io/user/repo:v1@sha256:deadbeef");
+    assert_eq(streq(rr2.digest, "sha256:abc1230000000000000000000000000000000000000000000000000000000000"), 1, "tagged-digest digest");
+    var r3 = image_ref_parse("ghcr.io/user/repo:v1@sha256:deadbeef00000000000000000000000000000000000000000000000000000000");
     var rr3: ImageRef = r3;
     assert_eq(streq(rr3.registry, "ghcr.io"), 1, "fulldigest reg");
     assert_eq(streq(rr3.repository, "user/repo"), 1, "fulldigest repo");
     assert_eq(streq(rr3.tag, "v1"), 1, "fulldigest tag");
-    assert_eq(streq(rr3.digest, "sha256:deadbeef"), 1, "fulldigest digest");
+    assert_eq(streq(rr3.digest, "sha256:deadbeef00000000000000000000000000000000000000000000000000000000"), 1, "fulldigest digest");
     return 0;
 }
 
@@ -640,7 +640,7 @@ fn test_image_index_remove_missing() {
     var store = image_store_new(root);
     _test_store_reset(root);
     # rust-old: Err(ImageNotFound) → sentinel -1 here.
-    assert_eq(image_store_remove(store, "sha256:doesnotexist"), 0 - 1,
+    assert_eq(image_store_remove(store, "sha256:d000000000000000000000000000000000000000000000000000000000000000"), 0 - 1,
     "remove nonexistent -> -1");
     return 0;
 }
@@ -786,7 +786,7 @@ fn test_image_store_tag() {
     var img = _test_import(store, _rt_cat2(root, "/src.tar"), "src", "1", content, strlen(content));
     var im: Image = img;
     assert_eq(image_store_tag(store, im.id, "dest:2"), 1, "tag by id ok");
-    assert_eq(image_store_tag(store, "sha256:missing", "x:1"), 0, "tag missing -> 0");
+    assert_eq(image_store_tag(store, "sha256:6d697373696e6700000000000000000000000000000000000000000000000000", "x:1"), 0, "tag missing -> 0");
     # local/src:1 + the new dest alias → 2 index entries (manifest blob shared).
     assert_eq(vec_len(image_store_load_index(store)), 2, "2 index entries after tag");
     return 0;

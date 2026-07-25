@@ -124,7 +124,7 @@ fn test_oci_state_serde() {
 fn test_build_state_json() {
     test_group("build_state_json");
     var cfg = container_config_default();
-    var c: Container = container_new("abc123", "test", "sha256:dead", "",
+    var c: Container = container_new("abc123", "test", "sha256:dead000000000000000000000000000000000000000000000000000000000000", "",
     CONTAINER_STATE_RUNNING, 42, 1000, 2000, cfg, 0 - 1);
     var s: OciState = build_state(c, "/run/bundle");
     assert_eq(streq(s.oci_version, "1.2.0"), 1, "oci_version 1.2.0");
@@ -960,10 +960,10 @@ fn test_registry_platform_eq() {
 
 fn test_registry_descriptor() {
     test_group("registry_descriptor");
-    var desc = descriptor_new(media_oci_manifest(), "sha256:abc", 1234);
+    var desc = descriptor_new(media_oci_manifest(), "sha256:abc0000000000000000000000000000000000000000000000000000000000000", 1234);
     var dd: Descriptor = desc;
     assert_eq(streq(dd.media_type, media_oci_manifest()), 1, "descriptor media_type");
-    assert_eq(streq(dd.digest, "sha256:abc"), 1, "descriptor digest");
+    assert_eq(streq(dd.digest, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1, "descriptor digest");
     assert_eq(dd.size, 1234, "descriptor size");
     return 0;
 }
@@ -979,32 +979,32 @@ fn test_registry_media_oci_types() {
 
 fn test_registry_descriptor_serde() {
     test_group("registry_descriptor_serde");
-    var d = descriptor_new(media_oci_config(), "sha256:cfg", 100);
+    var d = descriptor_new(media_oci_config(), "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
     var json = json_v_build(descriptor_to_jv(d));
     var cs = str_cstr(json);
     assert_eq(strstr(cs, "\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1, "has mediaType");
-    assert_eq(strstr(cs, "\"digest\":\"sha256:cfg\"") >= 0, 1, "has digest");
+    assert_eq(strstr(cs, "\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\"") >= 0, 1, "has digest");
     assert_eq(strstr(cs, "\"size\":100") >= 0, 1, "has size");
     assert_eq(strstr(cs, "urls") >= 0, 0, "no urls key when None");
     var back = descriptor_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
     var bb: Descriptor = back;
     assert_eq(streq(bb.media_type, media_oci_config()), 1, "media_type round-trip");
-    assert_eq(streq(bb.digest, "sha256:cfg"), 1, "digest round-trip");
+    assert_eq(streq(bb.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "digest round-trip");
     assert_eq(bb.size, 100, "size round-trip");
     assert_eq(bb.urls, 0, "urls None round-trip");
-    var badj = "{\"digest\":\"sha256:x\",\"size\":1}";
+    var badj = "{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}";
     assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing mediaType -> 0");
     # size must be an integer (strict) — a string size is rejected, not coerced to 0.
-    var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:y\",\"size\":\"123\"}";
+    var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:7900000000000000000000000000000000000000000000000000000000000000\",\"size\":\"123\"}";
     assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badsize, strlen(badsize))), 0, "string size -> 0");
     return 0;
 }
 
 fn test_registry_manifest_serde() {
     test_group("registry_manifest_serde");
-    var cfg = descriptor_new(media_oci_config(), "sha256:cfg", 100);
+    var cfg = descriptor_new(media_oci_config(), "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
     var layers = vec_new();
-    vec_push(layers, descriptor_new(media_oci_layer(), "sha256:lay", 200));
+    vec_push(layers, descriptor_new(media_oci_layer(), "sha256:6ca7900000000000000000000000000000000000000000000000000000000000", 200));
     var m = oci_manifest_new(cfg, layers);
     var mm: OciManifest = m;
     mm.media_type = media_oci_manifest();
@@ -1020,10 +1020,10 @@ fn test_registry_manifest_serde() {
     assert_eq(bm.schema_version, 2, "schema_version round-trip");
     assert_eq(streq(bm.media_type, media_oci_manifest()), 1, "media_type round-trip");
     var bcfg: Descriptor = bm.config;
-    assert_eq(streq(bcfg.digest, "sha256:cfg"), 1, "config digest round-trip");
+    assert_eq(streq(bcfg.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "config digest round-trip");
     assert_eq(vec_len(bm.layers), 1, "one layer round-trip");
     var blay: Descriptor = vec_get(bm.layers, 0);
-    assert_eq(streq(blay.digest, "sha256:lay"), 1, "layer digest round-trip");
+    assert_eq(streq(blay.digest, "sha256:6ca7900000000000000000000000000000000000000000000000000000000000"), 1, "layer digest round-trip");
     assert_eq(blay.size, 200, "layer size round-trip");
     var badj = "{\"schemaVersion\":2,\"layers\":[]}";
     assert_eq(oci_manifest_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing config -> 0");
@@ -1127,8 +1127,8 @@ fn test_build_sha256_digest() {
 fn test_build_cache_key_env() {
     test_group("build_cache_key_env");
     var step = build_step_env("KEY", "VAL");
-    var key = build_cache_key("sha256:base", 0, step);
-    var input = "sha256:base:0:{\"type\":\"env\",\"key\":\"KEY\",\"value\":\"VAL\"}";
+    var key = build_cache_key("sha256:ba00000000000000000000000000000000000000000000000000000000000000", 0, step);
+    var input = "sha256:ba00000000000000000000000000000000000000000000000000000000000000:0:{\"type\":\"env\",\"key\":\"KEY\",\"value\":\"VAL\"}";
     assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "env key == manual hash");
     return 0;
 }
@@ -1138,8 +1138,8 @@ fn test_build_cache_key_run() {
     var cmd = vec_new();
     vec_push(cmd, "echo");
     vec_push(cmd, "hi");
-    var key = build_cache_key("sha256:b", 2, build_step_run(cmd));
-    var input = "sha256:b:2:{\"type\":\"run\",\"command\":[\"echo\",\"hi\"]}";
+    var key = build_cache_key("sha256:b000000000000000000000000000000000000000000000000000000000000000", 2, build_step_run(cmd));
+    var input = "sha256:b000000000000000000000000000000000000000000000000000000000000000:2:{\"type\":\"run\",\"command\":[\"echo\",\"hi\"]}";
     assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "run key == manual hash");
     return 0;
 }
@@ -1148,10 +1148,10 @@ fn test_build_cache_key_distinct() {
     test_group("build_cache_key_distinct");
     var s1 = build_step_env("A", "1");
     var s2 = build_step_env("A", "2");
-    var k1 = build_cache_key("sha256:x", 0, s1);
-    assert_eq(streq(k1, build_cache_key("sha256:x", 0, s1)), 1, "deterministic");
-    assert_eq(streq(k1, build_cache_key("sha256:x", 0, s2)), 0, "value change -> different key");
-    assert_eq(streq(k1, build_cache_key("sha256:x", 1, s1)), 0, "index change -> different key");
+    var k1 = build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s1);
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s1)), 1, "deterministic");
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s2)), 0, "value change -> different key");
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 1, s1)), 0, "index change -> different key");
     assert_eq(strstr(k1, "sha256:") >= 0, 1, "sha256 prefix");
     return 0;
 }
@@ -1887,7 +1887,7 @@ fn test_container_serde_round_trip() {
     var cfg: ContainerConfig = container_config_default();
     cfg.memory_limit = 256 * 1024 * 1024;
     cfg.user = "nobody";
-    var c: Container = container_new("abc-123", "web", "sha256:img",
+    var c: Container = container_new("abc-123", "web", "sha256:696d670000000000000000000000000000000000000000000000000000000000",
     "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
     1000, 2000, cfg, 0);
     assert_eq(streq(c.id, "abc-123"), 1, "id");

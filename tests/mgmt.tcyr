@@ -672,7 +672,7 @@ fn test_agent_build_registration_from_container() {
     vec_push(ports, "8080:80");
     var cfg = _agent_test_config(ports);
     var c = _agent_test_container("abc123def456", "web-server",
-    "sha256:img", "docker.io/library/nginx:latest",
+    "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
     CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);
@@ -691,7 +691,7 @@ fn test_agent_build_registration_no_name() {
     var cfg = _agent_test_config(ports);
     # name = 0 (None) → falls back to first 12 chars of id.
     var c = _agent_test_container("abc123def456", 0,
-    "sha256:img", "docker.io/library/nginx:latest",
+    "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
     CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);

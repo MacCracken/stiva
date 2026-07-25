@@ -56,14 +56,14 @@ fn test_oci_config_object_fields() {
 fn test_oci_config_build_shape() {
     test_group("oci_config_build_shape");
     var diffs = vec_new();
-    vec_push(diffs, "sha256:aaa");
-    vec_push(diffs, "sha256:bbb");
+    vec_push(diffs, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000");
+    vec_push(diffs, "sha256:bbb0000000000000000000000000000000000000000000000000000000000000");
     var v = oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0);
     var j = str_cstr(json_v_build(v));
     assert_eq(strstr(j, "\"architecture\":\"amd64\"") >= 0, 1, "architecture");
     assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "os");
     assert_eq(strstr(j, "\"config\":{}") >= 0, 1, "empty config sub-object");
-    assert_eq(strstr(j, "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\",\"sha256:bbb\"]}") >= 0, 1, "rootfs diff_ids");
+    assert_eq(strstr(j, "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\"]}") >= 0, 1, "rootfs diff_ids");
     assert_eq(strstr(j, "created") >= 0, 0, "no created when 0");
     assert_eq(strstr(j, "history") >= 0, 0, "no history when absent");
     var j2 = str_cstr(json_v_build(oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0)));
@@ -129,17 +129,17 @@ fn test_platform_passthrough() {
     var root = "/tmp/stiva_plat";
     _stor_remove_dir_all(root);
     var store = image_store_new(root);
-    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:x\"]}}";
+    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:7800000000000000000000000000000000000000000000000000000000000000\"]}}";
     var cdig = sha256_digest(cfg, strlen(cfg));
     image_store_store_blob(store, cdig, cfg, strlen(cfg));
     var img = image_new(cdig, image_ref_new("local", "arm-app", "v1", 0), 10, vec_new(), 0);
-    _img_set_manifest_digest(img, "sha256:mani");
+    _img_set_manifest_digest(img, "sha256:6da6e69000000000000000000000000000000000000000000000000000000000");
     var j = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img, 100)));
     assert_eq(strstr(j, "\"architecture\":\"arm64\"") >= 0, 1, "config arm64 carried into descriptor");
     assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "config os carried");
     # a missing config blob falls back to the host platform (amd64).
-    var img2 = image_new("sha256:nonexistent", image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
-    _img_set_manifest_digest(img2, "sha256:mani2");
+    var img2 = image_new("sha256:6e6f6ee78697374e6e7400000000000000000000000000000000000000000000", image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
+    _img_set_manifest_digest(img2, "sha256:6da6e69200000000000000000000000000000000000000000000000000000000");
     var d2 = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img2, 100)));
     assert_eq(strstr(d2, "\"architecture\":\"amd64\"") >= 0, 1, "missing config → host platform fallback");
     return 0;
@@ -787,7 +787,7 @@ fn test_docker_archive_load() {
     var d = "/tmp/stiva_dka_src";
     _stor_remove_dir_all(d);
     sys_mkdir(d, 493);
-    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa\"]}}";
+    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\"]}}";
     file_write_all(_stor_cat2(d, "/config.json"), cfg, strlen(cfg));
     var lay = "fake-layer-bytes";
     file_write_all(_stor_cat2(d, "/layer.tar"), lay, strlen(lay));
@@ -843,7 +843,7 @@ fn test_prepare_layers_missing_blob() {
     var store = image_store_new(root);
     assert(store != 0, "store created");
     var layers = vec_new();
-    vec_push(layers, layer_new("sha256:doesnotexist", 0, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    vec_push(layers, layer_new("sha256:d000000000000000000000000000000000000000000000000000000000000000", 0, "application/vnd.oci.image.layer.v1.tar+gzip"));
     assert_eq(prepare_layers(store, layers), 0, "missing blob => 0");
     return 0;
 }

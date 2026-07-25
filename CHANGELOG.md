@@ -5,6 +5,160 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.9] — 2026-07-25 — §B increments 3–8: pull and push, end to end · toolchain 6.4.78
+
+### Security — a registry-controlled digest was an unvalidated filesystem path
+Found by adversarial review of Inc-7/Inc-8, and probe-confirmed before fixing. `digest_hex`
+stripped `sha256:` and returned the remainder verbatim; `_img_blob_path` concatenated it onto
+`{root}/blobs/sha256/`; `descriptor_from_jv` required only that `digest` be a JSON *string*. Inc-7
+is the first path that routes **registry-controlled** digests there, which made a manifest
+declaring `"digest": "sha256:../../../../etc/shadow"` into:
+
+- **An arbitrary-file read.** `image_store_has_blob` reported the traversal target present, so
+  `_il_pull_blob` returned success **without downloading and without any digest verification** —
+  `registry_fetch_blob_to_store`, which does all the checking, was never reached. The pull then
+  *succeeded* and committed the image to `index.json`. A subsequent `stiva push` uploaded that
+  file to the target registry.
+- **An arbitrary-file truncate.** With the traversal target absent, the `.dl` scratch path was
+  opened `O_WRONLY|O_CREAT|O_TRUNC`, filled with attacker bytes, and unlinked.
+
+Fixed at both ends: `digest_is_valid` (exactly `sha256:` + 64 **lowercase** hex — accepting both
+cases would give one blob two addressable paths) now gates `descriptor_from_jv`, and
+`_img_blob_path` fails **closed**, returning 0 for anything malformed. Every caller was audited to
+treat 0 as "no such blob".
+
+Two more holes closed in the same pass:
+
+- **An off-origin upload `Location` handed over the registry credentials.** `_reg_resolve_location`
+  honours an absolute URL, so a hostile registry could answer the upload POST with
+  `Location: https://evil.example/x`. Withholding the Bearer token there is *not* sufficient: the
+  body still goes to the attacker, whose 401 challenge then drives `_reg_acquire_token` to
+  authenticate against **its** realm — sending the configured registry credentials, long-lived
+  under Basic auth, to a host the attacker chose. Probe measured 2× body amplification plus the
+  credential leak. Off-origin upload targets are now refused outright, before any body is sent, at
+  session-open *and* on the per-chunk `Location` update, with the re-auth branch gated as well.
+- **A caller-pinned digest was never enforced.** The received manifest bytes were only ever
+  compared against `Docker-Content-Digest` — a header the registry *chooses* whether to send.
+  A reference pinned by digest (`repo@sha256:…`) now outranks it, so digest pinning, the exact
+  control you reach for against a compromised registry or a mutated tag, is no longer decorative.
+
+### Fixed — three defects that predate this release
+- **`oci_manifest_from_jv` silently dropped unparseable layers.** `if (ld != 0) { vec_push(…) }`
+  meant a manifest with a bad layer descriptor produced an image *quietly missing a filesystem
+  layer* — a container that runs and is simply wrong, which is worse than a failed pull. Serde
+  fails the whole deserialization on a bad element, so failing the manifest is also parity. Found
+  only because the traversal regression test refused to go red.
+- **A 60 s deadline capped every blob transfer.** sandhi's `total_ms` is a deadline for the
+  *entire* stream, not an idle timeout. The 60 s control-plane budget therefore capped every layer
+  at whatever fits in a minute: a 400 MB layer on a 50 Mbit/s link needs ~64 s and would fail —
+  permanently and identically on every retry, since there is no resume. Blob legs now get their
+  own budget.
+- **A descriptor's `size` could switch the download ceiling off.** A negative size skipped the
+  `expected_size > 0` guard entirely, and `i64max + 65536` wraps negative — either way unbounded.
+  `descriptor_from_jv` now rejects negative and absurd sizes.
+
+### Added — roadmap §B increments 7–8: pull and push
+- **Inc-7 — `image_store_pull`** in `imagelayout.cyr` (include order puts `registry.cyr` first, so
+  the driver has to sit downstream). Resolve → store the manifest → config → layers → `Image`
+  record → `add_to_index`. Three deliberate divergences:
+  - **The manifest is stored under the digest the registry served, as received.** The oracle
+    re-serializes it with `to_vec_pretty` and stores *that* under its re-encoded digest
+    (`rust-old/src/image.rs:150-152`), so `index.json` points at bytes the registry never served
+    and `Docker-Content-Digest` can never be re-checked from disk — not a valid OCI image layout.
+  - **Foreign layers are refused, not fetched.** The oracle follows `descriptor.urls` to an
+    arbitrary external host (`image.rs:186-190`): an SSRF primitive on registry-controlled data,
+    and the request has already happened by the time a digest check could help.
+  - **Layers download sequentially** (the oracle uses `buffer_unordered(4)`); the runtime is
+    single-threaded run-to-completion, so parallel fetch stays v3.1.
+
+  A failed layer aborts *without* touching `index.json`, so a half-pulled image is never listable
+  or runnable; landed blobs stay content-addressed for the next attempt or for `gc`.
+- **Inc-8 — push.** Transport primitives in `registry.cyr`, driver `image_store_push` in
+  `imagelayout.cyr`. Config → layers → manifest last, because a manifest may only be PUT once
+  everything it references is present. Body-carrying legs deliberately bypass
+  `_reg_authenticated_request`: that state machine replays its request up to three times, which is
+  fine for a HEAD and catastrophic for a layer upload. Beyond the security fixes above, three
+  oracle defects corrected:
+  - `registry_blob_exists` uses the **push** scope; the oracle probes with `:pull`
+    (`registry.rs:555`), minting a token under a cache key the upload legs cannot use.
+  - **One re-auth retry** on a 401 from a body-carrying leg, minted from the challenge that 401
+    itself carries. The oracle never retries, and the token TTL is 270 s — a large layer outlasts it.
+  - `push_manifest` **requires its auth probe to succeed**; the oracle discards the result
+    (`let _ = …`) and PUTs anyway, turning an auth failure into an unauthenticated PUT.
+  - The manifest PUT targets the **tag**, not the digest. `_reg_manifest_url` prefers the digest,
+    which is right for a fetch and wrong here: PUTting to `/manifests/sha256:…` is spec-legal but
+    creates no tag, so the push would produce a repository nothing can pull by name.
+
+`pull` and `push` are **library-complete but not yet wired to the CLI** — that is Inc-10.
+
+### Changed — cyrius pin 6.4.77 → 6.4.78
+Purely a compiler bump: `cyrius lib sync` produced a byte-identical `lib/`, and `cyrius.lock` is
+unchanged, so 6.4.78 vendors the same stdlib. Full suite green on it; the pin-drift build warning
+is gone.
+
+### Tests — 1459 → 1656
+`tests/registry.tcyr` 85 → 282. The canned transport gained a download hook delivering bodies in
+**three chunks** (a single-shot delivery cannot distinguish a correct streaming hash from one that
+only hashed the last buffer), mirrors sandhi's three-way sink contract exactly, and is token-aware
+so one URL can answer 401 then 200 across a re-auth.
+
+Two tests were rewritten after mutation testing showed them **vacuous** — the review neutered the
+foreign-layer guard and the push layer loop and the suite stayed green. The SSRF test is now
+*differential*: two byte-identical manifests differing only in the `urls` key, with the layer fully
+routed and correctly hashed, so the guard is the only possible reason to fail. The push test now
+asserts per-digest that each blob was uploaded, since a push that skipped every layer still ended
+with a manifest PUT and still looked like success. Both mutations now fail, verified.
+
+Every short fixture digest across the suite was normalized to a well-formed 64-hex form, since
+`descriptor_from_jv` now rejects anything else.
+
+### Added — roadmap §B increments 3–6: the registry client can now authenticate, resolve a manifest, and stream a layer
+
+- **Inc-3 — transport seam.** `RegTransportOff` (SEND@0/SINK@8/CTX@16) with `_reg_send` /
+  `_reg_download` dispatching to sandhi or to an injected transport, plus a
+  `registry_last_error()` / `registry_last_status()` channel (the pointer-return idiom has no
+  payload slot for a status code). `_reg_http_opts` overrides two sandhi defaults that are simply
+  wrong for a registry: `follow_redirects = 0` (registries 307 to CDNs) and a 256 KiB response cap
+  (multi-arch indexes exceed it). `_reg_headers` fails **closed** on a CR/LF-bearing value —
+  a registry-supplied token reaches `Authorization`, so header smuggling is reachable by hostile
+  input.
+- **Inc-4 — bearer state machine.** `_reg_acquire_token` + `_reg_authenticated_request`'s four
+  phases: cached-token attempt → unauthenticated probe → challenge + token → retry once, second
+  401 terminal. The canned transport makes the oracle's wiremock cases portable to a suite that
+  never opens a socket, with a request log so tests assert what was actually **sent**: a valid
+  cached token costs exactly 1 request, a stale one costs 4.
+- **Inc-5 — manifest fetch + platform resolve.** `registry_fetch_manifest` verifies
+  `Docker-Content-Digest` against the received bytes *before* parsing, then classifies
+  manifest-vs-index, reporting which via `registry_last_manifest_kind()`.
+  **Divergence from the oracle:** with no `Content-Type`, the oracle parses an index *as* a
+  manifest and produces an image with zero layers — a pull that fails silently; we fall back to
+  the body shape. `registry_resolve_manifest` selects the `current_platform()` entry and re-fetches
+  **pinned to that child digest**, refusing a nested index rather than recursing.
+- **Inc-6 — streaming blob fetch.** `registry_fetch_blob_to_store` streams a blob to
+  `blobs/sha256/<hex>.dl`, hashing as it lands, so resident memory is one read buffer rather than
+  one layer — this is what sandhi 1.9.3 unblocked, and it replaces the buffered-with-a-ceiling
+  design the original §B brief was forced into. The SHA-256 is verified **before** the `rename`
+  that publishes the blob at its content-addressed path, so a corrupt blob is never visible to
+  `has_blob` / GC roots / `verify_integrity`. Stronger than the oracle, which buffers the whole
+  blob and defers the check to `store_blob`. The descriptor's `size` is treated as a **ceiling
+  only, never as truth** — it is attacker-controlled; the digest is the authority.
+
+  Auth on the streaming path is the awkward part, and worth recording: sandhi's download driver
+  reports a non-2xx as status + err and **never surfaces that hop's response headers**, so
+  `WWW-Authenticate` is unreachable there. The token has to be acquired on the buffered path (a
+  `HEAD` elicits the challenge), and that probe fires **only when the token cache is cold** — in a
+  real pull the manifest fetch already primed the same `registry|scope` key, so a layer costs one
+  request. Probing unconditionally would double the request count of every layer in the image. A
+  stale cached token arrives as a bare 401 from the stream, which re-runs the buffered machine and
+  retries the stream **once**.
+
+> **cycc landmine found in Inc-4, and it retracts v3.0.8's "appears fixed" note.** An `ImageRef`
+> obtained from a **wrapper function** reads back as garbage in the 6-module `tests/registry.tcyr`
+> unit under 6.4.77: `image_ref_new` writes `"reg.test"`, the wrapper's caller sees `0@!Z`. It did
+> not crash — it silently built a junk token-cache key, so every request re-authenticated. It was
+> caught only because a test rebuilt the key from a literal and compared. Construct refs inline, or
+> as a direct call assigned to a local; never through a helper.
+
 ## [3.0.8] — 2026-07-24 — §B foundations · toolchain 6.4.77 unblocks the registry client
 
 ### Changed — cyrius pin 6.4.76 → 6.4.77, which finally lands the sandhi DNS + download fixes
