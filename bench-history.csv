@@ -40,3 +40,8 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-07-25T19:33:44Z,71a5d50,main,oci_manifest_to_jv+serialize,15289.0000
 2026-07-25T19:33:44Z,71a5d50,main,compose_yaml_to_toml,29063.0000
 2026-07-25T19:33:44Z,71a5d50,main,compose_400_reverse_sorted_keys,1342000.0000
+2026-07-25T20:12:08Z,4ea6bec,main,noop,2.0000
+2026-07-25T20:12:08Z,4ea6bec,main,oci_config_build+serialize,6981.0000
+2026-07-25T20:12:08Z,4ea6bec,main,oci_manifest_to_jv+serialize,15266.0000
+2026-07-25T20:12:08Z,4ea6bec,main,compose_yaml_to_toml,29242.0000
+2026-07-25T20:12:08Z,4ea6bec,main,compose_400_reverse_sorted_keys,1326000.0000

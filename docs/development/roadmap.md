@@ -377,6 +377,21 @@ Net-new/OCI-spec-driven (rust-old had only the ad-hoc `images.json`). Staged: **
   - **Deferred to v3.1:** detached `run -d` (kavach `sandbox_spawn`); daemon `wait`/`exec`/CRIU
     (`checkpoint`/`restore`); the blocking registry client behind facade `pull`/`push`/`build` (§B).
 
+**T1. Tier-1 CLI sweep — ✅ DONE at v3.0.11.** Six verbs whose logic was already ported but which
+the binary would not call: `kill` / `restart` / `rename` (the manager had all three),
+`top` (`container_top`'s /proc walk), `cp` (`copy_into_container` / `copy_from_container`), and
+`completions`. **29 of 35 verbs live.** New handlers use cmdit's validators
+(`cmdit_require_positionals`, `cmdit_range`) rather than hand-rolled positional checks; the older
+handlers still hand-roll and should migrate opportunistically.
+- **cmdit 1.1.0 → 1.2.0** was needed for `completions`: cmdit owned the verb table but exposed no
+  accessor, so a consumer could not generate completions from the verbs it had just registered and
+  would have had to keep a second, drifting list. Added `cmdit_verb_count` / `_name_at` /
+  `_help_at` / `_is_alias` / `_canonical_at` + `cmdit_completions(h, shell)` for bash/zsh/fish.
+- **`scripts/cli-smoke.sh`** — 40 assertions, the first coverage `src/main.cyr` has had. It cannot
+  be included in a `.tcyr` unit (it ends in `syscall(60, …)`), so the CLI handlers were previously
+  covered by nothing; the §C name-vs-id bug is what that costs. The suite found a real defect on
+  its first run (`completions` writing its error to stdout, where the script goes).
+
 **D. `exec` (nsenter) + CRIU** — fork+exec host tools:
 - [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
 

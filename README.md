@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.10: single-node OCI runtime (group A complete, §B complete)
+## Status — v3.0.11: single-node OCI runtime (group A complete, §B complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -69,23 +69,24 @@ stiva prune                                          # remove stopped containers
 See [docs/cli.md](docs/cli.md) for every command, including which are live, which
 are planned for the v3.0.x line, and which are the blocked v3.1 residue.
 
-## Live commands (23 of 35)
+## Live commands (29 of 35)
 
 `run` · `ps` · `stop` · `rm` · `inspect` · `images` · `rmi` · `tag` · `import` ·
 `export` · `stats` · `pause` · `unpause` · `logs` · `wait` · `gc` · `prune` · `info` ·
 `pull` / `push` (OCI distribution, streaming + digest-verified) ·
+`kill` · `restart` · `rename` · `top` · `cp` · `completions` (bash/zsh/fish) ·
 `convert` (Dockerfile → Stivafile) · `save` / `load` (oci-archive; `load` also reads
 docker-archive).
 
-Every other verb (12) is registered (visible in `--help`) but prints a clear
-"not yet wired" message — its module logic is ported. Most such verbs are planned
-for the v3.0.x line (blocking glue over the sync core: `pull`/`push`, `build`, `exec`,
-`top`/`cp`/`kill`, `checkpoint`/`restore`, `restart`/`rename`, `events`/`diff`,
-`completions`); only a small residue is blocked on external landings (v3.1).
+Every other verb (6) is registered (visible in `--help`) but prints a clear
+"not yet wired" message — its module logic is ported. The remaining six are
+`build`, `exec`, `checkpoint`, `restore`, `events`, `diff` — blocking glue over
+the sync core, on the v3.0.x line, except the interactive half of `exec`, which
+is blocked on an external landing (v3.1).
 
 ## Capabilities
 
-| Category | Live (v3.0.9) | v3.0.x (planned) | v3.1 (blocked) |
+| Category | Live (v3.0.11) | v3.0.x (planned) | v3.1 (blocked) |
 |----------|---------------|------------------|----------------|
 | **Images** | import, tag, list, rmi, gc, export; **OCI image-layout store** (oci-layout + index.json + blobs); **`save`/`load` as oci-archive** + **`docker-archive` read**; per-image platform passthrough; blob integrity verify; Stivafile parse + build-cache key | registry pull/push over HTTP (blocking client), full multi-stage build layers | — |
 | **Containers** | **`ContainerManager` + `Stiva` facade**; run (foreground), ps, stop, rm, inspect, stats, pause/unpause, logs (snapshot), wait, rename, restart, update — all **routed through the manager**, with **lifecycle events over majra pub/sub**; state persistence | non-interactive `exec` (nsenter), streaming `logs -f`, CRIU checkpoint/restore, top/cp wiring | detached `run -d` (needs kavach sandbox_spawn), interactive `exec -it` (needs cyrius coroutines) |

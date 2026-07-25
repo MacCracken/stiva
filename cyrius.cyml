@@ -177,9 +177,12 @@ tag = "1.5.0"
 modules = ["dist/agnodrm.cyr"]
 
 # CLI / argument parsing (getopt-long + verb dispatch) — src/main.cyr registers
-# stiva's 33 subcommands as cmdit verbs instead of hand-rolling argv parsing.
+# stiva's 35 subcommands as cmdit verbs instead of hand-rolling argv parsing.
+# 1.2.0 adds the verb-table accessors + cmdit_completions that `stiva
+# completions` is built on: without them the completion script would have to be
+# a hand-kept list, drifting from the verbs the moment one is added.
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
 path = "../cmdit"
-tag = "1.1.0"
+tag = "1.2.0"
 modules = ["dist/cmdit.cyr"]

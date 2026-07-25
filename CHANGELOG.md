@@ -5,6 +5,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.11] — 2026-07-25 — Tier-1 CLI sweep: 6 verbs wired · cmdit 1.2.0 · main.cyr gets coverage
+
+### Added — six verbs whose logic was already ported, now reachable
+`kill`, `restart`, `rename`, `top`, `cp`, `completions`. **29 of 35** verbs now execute
+end-to-end. Every one of these was pure wiring — `container_manager_signal`/`_restart`/`_rename`,
+`container_top`, and `copy_into_container`/`copy_from_container` were all ported and tested; the
+binary simply would not call them.
+
+These handlers use cmdit's own validators (`cmdit_require_positionals`, `cmdit_range`) instead of
+the hand-rolled positional-count checks the older handlers use, so usage text and the error
+taxonomy come from one place: `stiva kill c1 -s 99` now reports `--signal: value out of range`
+from the parser rather than failing somewhere downstream.
+
+- `kill` takes a signal **number** (1–64, default 15 = SIGTERM), matching the oracle
+  (`rust-old/src/main.rs:135-142`).
+- `cp` requires **exactly one** side to be `<container>:<path>`. Both sides or neither is refused
+  rather than guessed — a container-to-container or host-to-host copy is not what the verb means,
+  and picking one silently would do the wrong thing.
+- `completions` writes the script to **stdout** and every diagnostic to **stderr**. That
+  distinction is load-bearing: the output is meant to be redirected into a completions file, and a
+  usage line mixed into it becomes a syntax error inside the user's shell config. `_cli_eputs` was
+  added for it; the first cut of this verb wrote its error to stdout and the new smoke suite
+  caught it.
+
+### Changed — cmdit 1.1.0 → 1.2.0 (verb introspection + shell completions)
+> **Release ordering:** `cyrius.cyml` now pins `[deps.cmdit] tag = "1.2.0"` and `cyrius.lock`
+> carries its hash, so **cmdit 1.2.0 must be pushed and tagged before stiva 3.0.11 builds from a
+> clean clone**. Local builds resolve through the `path = "../cmdit"` override and will not warn.
+
+`completions` is driven by **cmdit's own verb table**, not a hand-kept list, so the generated
+script cannot drift from the CLI: adding a verb updates the completions with no second edit.
+cmdit had the table but exposed no accessor, so this needed upstream work — `cmdit_verb_count` /
+`_name_at` / `_help_at` / `_is_alias` / `_canonical_at`, plus `cmdit_completions(h, shell)`
+emitting bash, zsh, or fish. See the cmdit 1.2.0 CHANGELOG; the generated output is
+syntax-checked against real `bash -n` and `zsh -n`.
+
+### Fixed
+- **`kill` on a non-running container failed silently.** `container_manager_signal`'s comment
+  claims "detail printed by require_pid", but `container_manager_require_pid` prints only for a
+  *missing* container — a container that exists in the wrong state returns a bare code. The verb
+  exited 1 having said nothing at all.
+
+### Added — `scripts/cli-smoke.sh`, the first coverage `src/main.cyr` has ever had
+40 assertions over the live verbs. `main.cyr` ends in `var exit_code = main(); syscall(60, …)`, so
+it cannot be included in a `.tcyr` unit — any test file that included it would run the CLI and exit
+before reaching its own assertions. Every other module is covered by `cyrius tests tests/`; the CLI
+handlers were covered by nothing. That gap is not theoretical: v3.0.7 shipped `logs` and
+`get_rootfs` resolving the container *name* where they needed the *id*, and only an ad-hoc binary
+run caught it. This suite makes that repeatable, and it found the stdout-pollution bug above on its
+first run.
+
+### Known — unrelated defect surfaced while smoke-testing `cp`
+`container_manager_create` unpacks image layers via `prepare_layers`, then falls back to an
+**empty** `{croot}/rootfs` when the overlay mount is unavailable — the normal case for an
+unprivileged user — discarding the unpacked layers entirely. A container then runs with no
+filesystem. This is **exact parity** with the oracle (`rust-old/src/container.rs:366-369`,
+`unwrap_or_else(|| container_root.join("rootfs"))`), so it is inherited rather than a port
+divergence, and it is out of scope for a CLI-wiring increment. Filed separately.
+
 ## [3.0.10] — 2026-07-25 — §B COMPLETE: discovery + `stiva pull` / `stiva push` are live
 
 ### Added — roadmap §B Inc-9: discovery

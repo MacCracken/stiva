@@ -7,13 +7,13 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.4.78** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.10
+- **Version**: SemVer, currently 3.0.11
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.10 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.11 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
@@ -28,7 +28,10 @@ streams a layer to disk, and drives a full `image_store_pull` / `image_store_pus
 registry-controlled path-traversal fix in the blob store (see the 3.0.9 CHANGELOG). `pull`/`push`
 are library-complete but NOT yet CLI-wired — that is §B Inc-10**; **v3.0.10 = roadmap §B COMPLETE —
 Inc-9 discovery (tags/catalog/referrers/verify-signature) + Inc-10 facade & CLI, so `stiva pull`
-and `stiva push` are LIVE (23 of 35 verbs), plus a digest-aware image index**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
+and `stiva push` are LIVE (23 of 35 verbs), plus a digest-aware image index**; **v3.0.11 = the
+Tier-1 CLI sweep — `kill`/`restart`/`rename`/`top`/`cp`/`completions` wired over already-ported
+logic (29 of 35 verbs), cmdit 1.2.0 adds verb introspection + shell completions, and
+`scripts/cli-smoke.sh` gives `src/main.cyr` its first coverage**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 21 live** (run/ps/stop/rm/inspect/images/
 rmi/tag/import/export/stats/pause/unpause/logs/wait/gc/prune/info/convert + **save/load**).
 **1739 tests** across the `.tcyr` files (stiva 664 · registry 326 · runpath 217 · store 197 ·

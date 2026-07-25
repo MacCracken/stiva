@@ -1,7 +1,7 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`); **23 of 35 execute end-to-end today**, and the rest print a clear "not yet
+`--help`); **29 of 35 execute end-to-end today**, and the rest print a clear "not yet
 wired" message (their module logic is ported — only the wiring over the sync core
 remains). The **Status** column marks each:
 
@@ -46,11 +46,11 @@ remains). The **Status** column marks each:
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
 | `stiva run <IMAGE> -d ...` | v3.1 (blocked) | Detached `run -d` (needs kavach sandbox_spawn) |
 | `stiva exec <ID> <CMD...>` | v3.0.x (planned) / v3.1 (blocked) | Execute command in a running container (nsenter; non-interactive is v3.0.x, `-it` needs cyrius stackless coroutines) |
-| `stiva top <ID>` | v3.0.x (planned) | List processes inside a running container (`/proc` walk is ported) |
-| `stiva cp <SRC> <DST>` | v3.0.x (planned) | Copy files host↔container (the copy logic is ported) |
-| `stiva kill <ID> [-s SIGNAL]` | v3.0.x (planned) | Send a signal (needs a live PID) |
-| `stiva restart <ID>` | v3.0.x (planned) | Restart a container |
-| `stiva rename <ID> <NAME>` | v3.0.x (planned) | Rename a container |
+| `stiva top <ID>` | **Live** | List processes inside a running container (`/proc` walk over the descendants of the container PID) |
+| `stiva cp <SRC> <DST>` | **Live** | Copy files host↔container. Exactly one side is `<container>:<path>`; both or neither is refused rather than guessed |
+| `stiva kill <ID> [-s SIGNAL]` | **Live** | Send a signal (number, 1–64, default 15 = SIGTERM). Requires a running container |
+| `stiva restart <ID>` | **Live** | Restart a container (stop then start; needs the runtime spec from the creating process) |
+| `stiva rename <ID> <NAME>` | **Live** | Rename a container |
 
 ### Operations
 
@@ -65,7 +65,7 @@ remains). The **Status** column marks each:
 | `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
 | `stiva events` | v3.0.x (planned) | Stream container lifecycle events |
 | `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image |
-| `stiva completions <SHELL>` | v3.0.x (planned) | Generate shell completions (bash, zsh, fish) |
+| `stiva completions <SHELL>` | **Live** | Generate shell completions (bash, zsh, fish) on **stdout**, from cmdit's own verb table — so the script cannot drift from the CLI |
 | `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
 | `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` tarball into the store (`docker-archive` → v3.0.3) |
 
