@@ -38,7 +38,7 @@ subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
 sync core — the **v3.0.x line** (buildable now, e.g. non-interactive `exec` and CRIU),
 with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
-**1846 tests** across `tests/*.tcyr`.
+**1967 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (1846 tests)
+cyrius tests tests/                      # run the test suite (1967 tests)
 ```
 
 ### CLI
@@ -153,7 +153,7 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 1846 tests
+cyrius tests tests/                            # 1967 tests
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)

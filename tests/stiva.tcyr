@@ -2203,22 +2203,10 @@ fn test_mcp_result_resource() {
 }
 
 # mcp_handle_build (rust-old mcp.rs: handle_build — a fully-sync handler).
-fn test_mcp_handle_build() {
-    test_group("mcp_handle_build");
-    var params = json_v_obj_new();
-    json_v_obj_set(params, str_from("spec"),
-    json_v_str_new(str_from("[image]\nbase = \"alpine\"\nname = \"myapp\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hi\"]\n")));
-    var r = mcp_handle_build(params);
-    assert_eq(mcp_result_success(r), 1, "build ok");
-    var text = content_part_text_of(vec_get(mcp_result_content(r), 0));
-    assert_eq(strstr(text, "alpine") >= 0, 1, "reports base");
-    assert_eq(strstr(text, "myapp") >= 0, 1, "reports name");
-    assert_eq(strstr(text, "parsed") >= 0, 1, "status parsed");
-    # missing spec -> error result
-    var r2 = mcp_handle_build(json_v_obj_new());
-    assert_eq(mcp_result_success(r2), 0, "missing spec -> err");
-    return 0;
-}
+# NOTE: `test_mcp_handle_build` moved to tests/mgmt.tcyr with the §F work.
+# `mcp_handle_build` used to live in mcp.cyr and only PARSE the spec (its result
+# said status "parsed"); it now takes a `Stiva` and performs a real build, so it
+# belongs with the other live-dispatch handler tests, which need the facade.
 
 # mcp_handle_ansamblu (rust-old mcp.rs: handle_ansamblu — fully sync).
 fn test_mcp_handle_ansamblu() {
@@ -2484,7 +2472,6 @@ fn main() {
     test_mcp_tool_list_has_nine_tools();
     test_mcp_tool_schemas_are_valid();
     test_mcp_result_ok();
-    test_mcp_handle_build();
     test_mcp_handle_ansamblu();
     test_mcp_result_err();
     test_mcp_result_resource();

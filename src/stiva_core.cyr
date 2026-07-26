@@ -120,6 +120,15 @@ fn stiva_registry_client(s) {
     return ss.registry_client;
 }
 
+# The facade's ImageStore — the sibling of stiva_registry_client above. Exposed
+# so a caller that already holds a `Stiva` (the CLI, the MCP handlers, tests)
+# does not have to construct a second store over the same root.
+#[must_use]
+fn stiva_image_store(s) {
+    var ss: Stiva = s;
+    return ss.image_store;
+}
+
 # The audit log handle, or 0 (rust-old: audit()).
 #[must_use]
 fn stiva_audit(s) {
@@ -276,6 +285,33 @@ fn stiva_prune(s) {
     }
     image_store_gc(ss.image_store);
     return removed;
+}
+
+# ══ Build (§F) ══════════════════════
+
+# Build an image from Stivafile TOML CONTENT (rust-old: Stiva::build,
+# lib.rs:294 — which also takes the content, not a path; reading the file is the
+# caller's job). Returns the Image*, or 0 with the detail already printed.
+#
+# Audited either way. NET-NEW, like push's audit: see AUDIT_OP_BUILD.
+fn stiva_build(s, toml_content, context_dir) {
+    var ss: Stiva = s;
+    if (toml_content == 0) { return 0; }
+    var spec = parse_build_spec(toml_content);
+    if (spec == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "invalid build spec");
+        _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_BUILD, "", AUDIT_RESULT_FAILED, 0));
+        return 0;
+    }
+    var sp: BuildSpec = spec;
+    var idef: ImageDef = sp.image;
+    var target = _img_cat3(_img_cat2("local/", idef.name), ":", idef.tag);
+
+    var im = build_image(spec, ss.image_store, ss.registry_client, context_dir);
+    var res = AUDIT_RESULT_FAILED;
+    if (im != 0) { res = AUDIT_RESULT_SUCCESS; }
+    _stiva_emit_audit(s, audit_entry_image(AUDIT_OP_BUILD, target, res, 0));
+    return im;
 }
 
 # ══ Registry verbs (§B Inc-10) ══════════════════════════
@@ -498,6 +534,20 @@ fn _mcp_uri(prefix, id) {
     return _img_cat2(prefix, id);
 }
 
+# stiva_build (oracle mcp.rs:handle_build). MOVED here from mcp.cyr, where it
+# could only ever parse the spec — a real build needs the store and the registry
+# client, and those live on the facade.
+fn mcp_handle_build(s, params) {
+    var spec = _mcp_param_str(params, "spec");
+    if (spec == 0) { return mcp_result_err("missing required parameter: spec"); }
+    var ctx = _mcp_param_str(params, "context_dir");
+    if (ctx == 0) { ctx = "."; }
+    var im = stiva_build(s, spec, ctx);
+    if (im == 0) { return mcp_result_err("build failed"); }
+    return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
+    str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+}
+
 # stiva_pull (oracle mcp.rs:271).
 fn mcp_handle_pull(s, params) {
     var image = _mcp_param_str(params, "image");
@@ -673,7 +723,7 @@ fn mcp_handle_tool(s, name, params) {
     if (streq(name, "stiva_stop") == 1) { return mcp_handle_stop(s, params); }
     if (streq(name, "stiva_push") == 1) { return mcp_handle_push(s, params); }
     if (streq(name, "stiva_inspect") == 1) { return mcp_handle_inspect(s, params); }
-    if (streq(name, "stiva_build") == 1) { return mcp_handle_build(params); }
+    if (streq(name, "stiva_build") == 1) { return mcp_handle_build(s, params); }
     if (streq(name, "stiva_ansamblu") == 1) { return mcp_handle_ansamblu(params); }
     if (streq(name, "stiva_run") == 1) {
         return mcp_result_err(

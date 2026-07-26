@@ -1463,13 +1463,19 @@ fn _tar_write_long(buf, typeflag, s) {
     return 512 + _tar_round512(slen + 1);
 }
 
-# Assemble + write a USTAR tar from a vec of TarEntry* to `out_path`. Pass 1
+# Assemble a USTAR tar from a vec of TarEntry* into ONE heap buffer. Pass 1
 # tallies the archive size (including any GNU long-name/long-link pseudo-entries);
-# pass 2 assembles the whole archive in one heap buffer (see the IN-MEMORY CAVEAT)
-# and writes it. Returns 1 on success, 0 on failure with
-# stiva_err_print(STIVA_ERR_STORAGE, detail). Shared by create_tar (the rootfs
-# walk) and the oci-archive save path (a hand-built entry list).
-fn _stor_write_tar(entries, out_path) {
+# pass 2 fills the buffer (see the IN-MEMORY CAVEAT). Returns the buffer and
+# stores its byte length in `out_len`.
+#
+# The two trailing all-zero blocks are never written explicitly — `alloc` hands
+# back zeroed memory and pass 2 stops short of them. Do not "optimise" that into
+# an uninitialised allocator without memset'ing the tail: a tar whose end-of-
+# archive marker is garbage is silently truncated by every reader.
+#
+# Split out of `_stor_write_tar` so a builder can gzip the bytes directly
+# (§F `build`) instead of round-tripping through a temp file.
+fn _stor_tar_bytes(entries, out_len) {
     var nf = vec_len(entries);
     var total = 0;
     var i = 0;
@@ -1514,7 +1520,18 @@ fn _stor_write_tar(entries, out_path) {
         k = k + 1;
     }
 
-    var wrote = file_write_all(out_path, buf, total);
+    store64(out_len, total);
+    return buf;
+}
+
+# Assemble + write a USTAR tar from a vec of TarEntry* to `out_path`. Returns 1
+# on success, 0 on failure with stiva_err_print(STIVA_ERR_STORAGE, detail).
+# Shared by create_tar (the rootfs walk) and the oci-archive save path (a
+# hand-built entry list).
+fn _stor_write_tar(entries, out_path) {
+    var len_cell = alloc(8);
+    var buf = _stor_tar_bytes(entries, len_cell);
+    var wrote = file_write_all(out_path, buf, load64(len_cell));
     if (wrote < 0) {
         stiva_err_print(STIVA_ERR_STORAGE, "tar: cannot write output archive");
         return 0;

@@ -27,7 +27,7 @@ remains). The **Status** column marks each:
 | `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
 | `stiva pull <IMAGE>` | **Live** | Pull from a registry. Resolves multi-arch indexes to this platform, streams each layer straight to disk, and verifies every digest before the blob becomes visible. Prints the image ID |
 | `stiva push <IMAGE> [TARGET]` | **Live** | Push a local image to a registry. Uploads the config, then every layer, then the manifest — a manifest is only valid once everything it references is present. `TARGET` re-tags on the way out; omitted, it pushes to the image's own reference |
-| `stiva build [-f FILE] [-c CONTEXT]` | v3.0.x (planned) | Build from `Stivafile` (parse is done; the layer build is blocking) |
+| `stiva build [-f FILE] [-c CONTEXT]` | **Live** | Build an OCI image from a `Stivafile`. Resolves the base locally first (then the registry), builds one gzip layer per `copy` step, and writes a full OCI config + manifest + `index.json` entry. Prints the image ID. `run` and `from_stage` steps are refused — see below |
 
 ### Containers
 
@@ -189,12 +189,23 @@ user = "nobody"
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `run` | `command: [String]` | Execute a command |
-| `copy` | `source`, `destination` | Copy from build context |
+| `copy` | `source`, `destination` | Copy from the build context. Produces one gzip layer. `source` must be relative to the context and free of `..` |
 | `env` | `key`, `value` | Set environment variable |
-| `workdir` | `path` | Set working directory |
+| `workdir` | `path` | Set working directory (a `[config].workdir` overrides it) |
 | `label` | `key`, `value` | Add metadata label |
-| `from_stage` | `stage`, `source`, `destination` | Copy from named build stage (multi-stage) |
+| `run` | `command: [String]` | Parsed, but **refused by `build`** — see below |
+| `from_stage` | `stage`, `source`, `destination` | Parsed, but **refused by `build`** — see below |
+
+> **`run` and `from_stage` are refused rather than faked.** Both parse, so an existing `Stivafile`
+> still validates, but `stiva build` fails on them with a reason instead of producing an image.
+>
+> The Rust oracle's `run` step does not execute anything: it writes a marker file
+> `.stiva/run/<idx>.cmd` containing the argv, and its own doc comment calls that a placeholder.
+> Emitting that layer would produce an image asserting a command ran when none did — a lie the user
+> cannot see in the output. Its `from_stage` copies from `<context>/<stage_name>` if that directory
+> happens to exist and skips silently otherwise, and the `stages` table it implies is parsed and then
+> never read. Executing `run` steps for real needs an exec-into-an-intermediate-rootfs design, not
+> just an exec primitive.
 
 ## Examples
 

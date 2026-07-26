@@ -315,7 +315,52 @@ fn main(): i64 {
     _stor_remove_dir_all(ul_src);
     _stor_remove_dir_all(ul_dst);
     sys_unlink(ul_tar);
-    sys_unlink(ul_blob);    return 0;
+    sys_unlink(ul_blob);
+
+    # ── §F: one COPY layer, end to end ────────────────────
+    # tar collect + assemble + gzip + blob store — the whole per-step cost of a
+    # `stiva build`. Measured because the path holds ~3x the context size in
+    # heap (collect reads every file, the tar buffer copies them, gzip needs a
+    # destination) and there is no free, so a regression here compounds across
+    # steps rather than staying flat.
+    var bl_root = "/tmp/stiva-bench-buildlayer";
+    var bl_ctx = "/tmp/stiva-bench-buildctx";
+    _stor_remove_dir_all(bl_root);
+    _stor_remove_dir_all(bl_ctx);
+    var bl_store = image_store_new(bl_root);
+    _stor_mkdir_p(_stor_cat2(bl_ctx, "/payload"));
+    var bl_buf = alloc(4096);
+    var bx = 987654321;
+    var bz = 0;
+    while (bz < 4096) {
+        bx = (bx * 1103515245 + 12345) & 2147483647;
+        store8(bl_buf + bz, (bx >> 16) & 255);
+        bz = bz + 1;
+    }
+    var bf = 0;
+    while (bf < 20) {
+        var bsb = str_builder_new();
+        str_builder_add_cstr(bsb, bl_ctx);
+        str_builder_add_cstr(bsb, "/payload/f");
+        str_builder_add_int(bsb, bf);
+        file_write_all(str_cstr(str_builder_build(bsb)), bl_buf, 4096);
+        bf = bf + 1;
+    }
+    var bbl = bench_new("build_copy_layer_20_files_4kib");
+    bench_batch_start(bbl);
+    var bi = 0;
+    while (bi < 100) {
+        var bl_len = alloc(8);
+        var bl_diff = alloc(8);
+        var bl_gz = build_copy_layer(bl_ctx, "payload", "/payload", bl_len, bl_diff);
+        if (bl_gz != 0) { store_layer(bl_store, bl_gz, load64(bl_len)); }
+        bi = bi + 1;
+    }
+    bench_batch_stop(bbl, 100);
+    bench_report(bbl);
+    _stor_remove_dir_all(bl_ctx);
+    _stor_remove_dir_all(bl_root);
+    return 0;
 }
 
 var r = main();

@@ -5,6 +5,93 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — `stiva build` is live (roadmap §F). 31 of 35 verbs
+`build_image` in `src/build.cyr` turns a `Stivafile` into a real OCI image: base resolve → per-step
+layer → OCI config → manifest → `index.json`. Verified on the binary, not just in tests — a static
+binary present *only* in the layer the build produced executes inside a container started from the
+built image.
+
+**The crux, settled by reading the oracle rather than the roadmap: `build` does not need `exec`.**
+`grep -n "Sandbox|Command|exec|kavach" rust-old/src/build.rs` returns 7 hits and **all 7 are prose**
+(doc comments and tracing strings). The oracle never executes a RUN step, so §F was never gated on
+§D.
+
+Five deliberate divergences, each fixing a defect rather than porting it:
+
+1. **`rootfs.diff_ids` are the UNCOMPRESSED tar digests.** The oracle (`build.rs:401`) maps
+   `all_layers.iter().map(|l| l.digest)` — the *compressed* blob digests. The OCI image-spec defines
+   diff_ids over the uncompressed layer, so every image the oracle builds fails validation in any
+   other tool. Asserted against a second source: the test gunzips the stored blob and re-hashes it,
+   rather than reading back the value the driver wrote (the cycc 20/21 lesson — an assertion that
+   reads a value the way the code under test does will match the same garbage).
+2. **A manifest blob is written.** The oracle stores only a config blob then calls `add_to_index`
+   (`build.rs:429-452`). In this store that produces an image that silently **vanishes**:
+   `image_store_load_index` reconstructs every `Image` from its manifest blob and skips any
+   descriptor whose manifest is missing. The build would report success and `stiva images` would not
+   list it. The test asserts via an index *reload*, not by checking a field we just set.
+3. **`architecture` and `os` are emitted.** The oracle's `OciImageConfig` (`build.rs:197-203`) has
+   exactly two fields, `config` and `rootfs`. Both platform keys are required by the image-spec.
+4. **RUN steps are refused, not faked.** `build_run_layer` (`build.rs:475`) runs nothing — it writes
+   a marker file `.stiva/run/<idx>.cmd` containing the argv, and its own doc comment admits it is a
+   placeholder. Shipping that layer would produce an image asserting a command ran when none did,
+   which the user cannot detect from the output. Refusing is the honest failure.
+5. **`from_stage` is refused.** The oracle's (`build.rs:353-389`) copies from
+   `<context>/<stage_name>` if that directory happens to exist and skips silently otherwise, and
+   `spec.stages` is parsed then **never read** by `build_image`. There is no multi-stage build to
+   port.
+
+Plus one hardening divergence: **a COPY `source` may not be absolute or contain a `..` component.**
+The oracle joins it straight onto the context dir, so a `Stivafile` from an untrusted repository can
+copy `/etc/shadow` into an image the user then pushes to a public registry. The check is
+component-wise, so a file legitimately named `..foo` or `a..b` still works.
+
+Supporting changes:
+- **`_stor_tar_bytes`** split out of `_stor_write_tar` (`src/storage.cyr`) so a builder can gzip the
+  archive directly instead of round-tripping through a temp file.
+- **`_il_config_diff_ids`** (`src/imagelayout.cyr`) — the tree's only *reader* of `diff_ids`. A
+  derived image's config must carry `base.diff_ids ++ new.diff_ids`, and the base's are recoverable
+  only from its config blob. A base whose diff_ids cannot be read is refused rather than producing a
+  config that omits every inherited layer.
+- **A layer-digest → diff_id sidecar** under `{root}/cache/diffid/`. A cached layer's uncompressed
+  digest is not recoverable without gunzipping the blob; the oracle never faced this because its
+  diff_ids are the compressed digests it already had. Every cache failure mode — truncated entry,
+  blob swept by `gc`, missing sidecar — is a **miss, never an error**, so a stale cache costs a
+  rebuild rather than requiring the user to know about `rm -rf {root}/cache`.
+- **`AUDIT_OP_BUILD`** — net-new, appended so every existing code and wire name is unchanged. The
+  oracle's `Stiva::build` (`lib.rs:294`) audits nothing; a trail that records the pull of a base and
+  the push of the result but not the build between them has a gap exactly where provenance matters.
+- **`mcp_handle_build` MOVED** from `mcp.cyr` to `stiva_core.cyr` as `mcp_handle_build(s, params)`.
+  It could only ever parse the spec where it was — its result literally said `status: "parsed"` —
+  because a real build needs the store and registry client, and include order puts `mcp.cyr`
+  upstream of the facade. Same migration, same reason, as pull/push/ps/stop/inspect.
+- **`stiva_image_store`** accessor, the sibling of `stiva_registry_client`.
+- CLI `-f/--file` and `-c/--context` are finally **registered**; `docs/cli.md` has documented them
+  since before the verb existed. Same three read guards as `convert` (directory, read error, 1 MiB
+  ceiling) — a silently truncated `Stivafile` builds a plausible-but-wrong image.
+
+**Base resolution is local-first**, then the registry: the oracle pulls unconditionally
+(`build.rs:272`), so a build against a base already in the store needs the network and races the
+registry's mutable tag.
+
+### Found — kavach's OCI backend never reports the container's exit code
+Not introduced here; surfaced while verifying the above. `stiva run <image> /definitely-not-here`
+reports **exit_code=0** on any host with `runc` installed. `oci_exec` passes only a *byte count* to
+`backend_capture_finish`, which sets `exit_code = 0` on every non-negative path — runc's wait status
+is never retrieved. It is the same defect kavach 3.9.1 fixed for the PROCESS backend
+(`confine_last_exit()`), applied to only one of the two backends — and the OCI one is what gets
+*selected* whenever runc is present. Consequences: `stiva wait` always yields 0, `state.json`'s
+`exit_status` is wrong, and `on-failure` restart policies can never observe a failure. Filed as
+`kavach/docs/development/issues/2026-07-26-oci-backend-never-reports-the-container-exit-code.md`.
+
+### Tests — 1906 → 1967 unit, smoke 69 → 75
+`build.cyr` now also lands in `tests/registry.tcyr`: its driver needs exactly that 6-module include
+set, the canned transport there is the only way to exercise a remote base without a network, and it
+puts the driver in the unit shape the cycc 20/21 miscompile is known to bite — which the 26-module
+unit would not prove. `test_mcp_handle_build` moved from `tests/stiva.tcyr` to `tests/mgmt.tcyr`
+with the handler. New benchmark `build_copy_layer_20_files_4kib` ≈ **2.7 ms** (tar collect +
+assemble + gzip + sha256 + blob store), measured because the path holds ~3× the context size in
+heap with no `free`, so a regression compounds across steps rather than staying flat.
+
 ## [3.0.14] — 2026-07-25 — `run -d` is live · containers run their own filesystem (§K)
 
 ### Added — detached `run -d`, the first item off the v3.1 blocked list

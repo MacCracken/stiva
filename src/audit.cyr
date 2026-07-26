@@ -35,6 +35,13 @@ enum AuditOperation {
     AUDIT_OP_PUSH = 7;
     AUDIT_OP_CHECKPOINT = 8;
     AUDIT_OP_RESTORE = 9;
+    # NET-NEW, not parity — the oracle's AuditOperation (rust-old/src/audit.rs:17)
+    # stops at Restore and its `Stiva::build` (lib.rs:294) audits nothing. An
+    # audit trail that records the pull of a base image and the push of the
+    # result, but not the build that turned one into the other, has a gap
+    # exactly where provenance matters. Appended, so every existing code and
+    # wire name is unchanged.
+    AUDIT_OP_BUILD = 10;
 }
 
 # Display string for an operation (rust-old: impl Display for AuditOperation).
@@ -50,6 +57,7 @@ fn audit_op_name(op) {
     if (op == AUDIT_OP_PUSH) { return "push"; }
     if (op == AUDIT_OP_CHECKPOINT) { return "checkpoint"; }
     if (op == AUDIT_OP_RESTORE) { return "restore"; }
+    if (op == AUDIT_OP_BUILD) { return "build"; }
     return "unknown";
 }
 
@@ -70,6 +78,7 @@ fn audit_op_serde(op) {
     if (op == AUDIT_OP_PUSH) { return "Push"; }
     if (op == AUDIT_OP_CHECKPOINT) { return "Checkpoint"; }
     if (op == AUDIT_OP_RESTORE) { return "Restore"; }
+    if (op == AUDIT_OP_BUILD) { return "Build"; }
     return "Create";
 }
 
@@ -87,6 +96,7 @@ fn audit_op_from_serde(s) {
     if (streq(s, "Push") == 1) { return AUDIT_OP_PUSH; }
     if (streq(s, "Checkpoint") == 1) { return AUDIT_OP_CHECKPOINT; }
     if (streq(s, "Restore") == 1) { return AUDIT_OP_RESTORE; }
+    if (streq(s, "Build") == 1) { return AUDIT_OP_BUILD; }
     return 0 - 1;
 }
 

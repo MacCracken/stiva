@@ -19,6 +19,12 @@ include "src/image.cyr"
 include "src/registry.cyr"
 include "src/storage.cyr"
 include "src/imagelayout.cyr"
+# build.cyr lives here, not only in stiva.tcyr, for two reasons: its driver
+# needs exactly this 6-module set and nothing more, and the canned transport
+# below is the only way to exercise `build`'s pull-a-remote-base branch without
+# a network. It also puts the driver in the 6-module unit shape the cycc 20/21
+# miscompile is known to bite, which the 26-module unit would not prove.
+include "src/build.cyr"
 
 # Substring-present helper (this stdlib strstr returns a 0-based INDEX, -1 absent).
 fn _rg_contains(hay, needle) {
@@ -2042,6 +2048,342 @@ fn test_rg_index_dedup_tag_still_moves() {
     return 0;
 }
 
+# ══ §F build driver ══════════════════════════════════════
+#
+# These assert the FIVE divergences from the oracle, not merely that build_image
+# returned non-zero. Each divergence exists because the oracle's behaviour is
+# broken, so a test that only checks "a build happened" would pass against the
+# broken version too.
+
+# Write `content` to {dir}/{name}, creating {dir}. Returns the full path.
+fn _bld_t_file(dir, name, content) {
+    _stor_mkdir_p(dir);                     # sys_mkdir alone only makes one level
+    var p = _stor_cat2(_stor_cat2(dir, "/"), name);
+    file_write_all(p, content, strlen(content));
+    return p;
+}
+
+# A minimal single-layer base image in `store`, named local/base:v1, whose
+# config carries one KNOWN diff_id so inheritance is checkable.
+fn _bld_t_base(store) {
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    var tc = alloc(8);
+    var tarbuf = _stor_tar_bytes(entries, tc);
+    var tarlen = load64(tc);
+    var diff_id = sha256_digest(tarbuf, tarlen);
+
+    var gzcap = tarlen + tarlen / 50 + 8192;
+    var gzbuf = alloc(gzcap);
+    var gzlen = _stor_gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
+    var layer_digest = sha256_digest(gzbuf, gzlen);
+    image_store_store_blob(store, layer_digest, gzbuf, gzlen);
+
+    var diffs = vec_new();
+    vec_push(diffs, diff_id);
+    var cfg_s = json_v_build(oci_config_build("amd64", "linux", 0, json_v_obj_new(), diffs, 0));
+    var config_digest = sha256_digest(str_data(cfg_s), str_len(cfg_s));
+    image_store_store_blob(store, config_digest, str_data(cfg_s), str_len(cfg_s));
+
+    var ldescs = vec_new();
+    vec_push(ldescs, descriptor_new(media_oci_layer(), layer_digest, gzlen));
+    var man = oci_manifest_new(descriptor_new(media_oci_config(), config_digest, str_len(cfg_s)), ldescs);
+    var mm: OciManifest = man;
+    mm.media_type = media_oci_manifest();
+    var man_s = json_v_build(oci_manifest_to_jv(man));
+    var manifest_digest = sha256_digest(str_data(man_s), str_len(man_s));
+    image_store_store_blob(store, manifest_digest, str_data(man_s), str_len(man_s));
+
+    var layers = vec_new();
+    vec_push(layers, layer_new(layer_digest, gzlen, media_oci_layer()));
+    var img = image_new(config_digest, image_ref_new("local", "base", "v1", 0), gzlen, layers, 0);
+    _img_set_manifest_digest(img, manifest_digest);
+    image_store_add_to_index(store, img);
+    return img;
+}
+
+# Read an image's stored config blob back as a parsed bayan value.
+fn _bld_t_config_jv(store, image) {
+    var p = _img_blob_path(image_store_root(store), _img_id(image));
+    var cc = alloc(8);
+    var buf = _img_read_file(p, cc);
+    if (buf == 0) { return 0; }
+    return bayan_json_v_parse_str(buf, load64(cc));
+}
+
+fn test_bld_copy_dir_end_to_end() {
+    test_group("build: copy a directory end to end");
+    var root = "/tmp/stiva-bld-e2e";
+    var ctx = "/tmp/stiva-bld-e2e-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+    var base = _bld_t_base(store);
+    assert(base != 0, "base image built");
+
+    _bld_t_file(_stor_cat2(ctx, "/app"), "start.sh", "#!/bin/sh\nexec true\n");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"myapp\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\n";
+    var spec = parse_build_spec(src);
+    assert(spec != 0, "spec parsed");
+
+    var img = build_image(spec, store, 0, ctx);
+    assert(img != 0, "build succeeded");
+    if (img == 0) { return 0; }
+
+    # DIVERGENCE 2: the manifest blob must exist, or the image vanishes from the
+    # index on reload. Assert via the reload, not by checking a field we set.
+    var listed = image_store_list(store);
+    var found = 0;
+    var i = 0;
+    while (i < vec_len(listed)) {
+        if (streq(image_ref_full_ref(_image_reference(vec_get(listed, i))), "local/myapp:v1") == 1) { found = 1; }
+        i = i + 1;
+    }
+    assert_eq(found, 1, "built image survives an index reload (manifest blob was written)");
+
+    # Two layers: the base's, then ours.
+    assert_eq(vec_len(_img_layers(img)), 2, "base layer + copy layer");
+    return 0;
+}
+
+fn test_bld_diff_ids_are_uncompressed() {
+    test_group("build: diff_ids are UNCOMPRESSED digests (oracle uses compressed)");
+    var root = "/tmp/stiva-bld-diffid";
+    var ctx = "/tmp/stiva-bld-diffid-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f.txt", "hello\n");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"d\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var img = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(img != 0, "build ok");
+    if (img == 0) { return 0; }
+
+    var diffs = _il_config_diff_ids(store, img);
+    assert_eq(vec_len(diffs), 2, "one diff_id per layer");
+    if (vec_len(diffs) != 2) { return 0; }
+
+    # The decisive assertion: reconstruct the expected diff_id from a SECOND
+    # source — gunzip the stored layer blob and hash the result — rather than
+    # reading back the value the driver wrote. Per the cycc 20/21 lesson, an
+    # assertion that reads a value the same way the code under test does will
+    # happily match the same garbage.
+    var layers = _img_layers(img);
+    var top: Layer = vec_get(layers, 1);
+    var bp = _img_blob_path(image_store_root(store), top.digest);
+    var bc = alloc(8);
+    var gz = _img_read_file(bp, bc);
+    assert(gz != 0, "layer blob readable");
+    if (gz == 0) { return 0; }
+    var outcap = 1048576;
+    var out = alloc(outcap);
+    var n = gzip_decompress(gz, load64(bc), out, outcap);
+    assert(n > 0, "layer blob gunzips");
+    if (n <= 0) { return 0; }
+
+    assert_eq(streq(vec_get(diffs, 1), sha256_digest(out, n)), 1,
+        "diff_id == sha256 of the UNCOMPRESSED tar");
+    assert_eq(streq(vec_get(diffs, 1), top.digest), 0,
+        "and is NOT the compressed blob digest the oracle would have stored");
+    return 0;
+}
+
+fn test_bld_config_has_platform_and_fields() {
+    test_group("build: config carries architecture/os (oracle omits both)");
+    var root = "/tmp/stiva-bld-cfg";
+    var ctx = "/tmp/stiva-bld-cfg-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f", "x");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"c\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"A\"\nvalue = \"1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/w\"\n\n[[steps]]\ntype = \"label\"\nkey = \"k\"\nvalue = \"v\"\n\n[config]\nentrypoint = [\"/e\"]\nexpose = [80, 443]\nuser = \"nobody\"\n";
+    var img = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(img != 0, "build ok");
+    if (img == 0) { return 0; }
+
+    var cv = _bld_t_config_jv(store, img);
+    assert(cv != 0, "config blob parses");
+    if (cv == 0) { return 0; }
+    assert_eq(streq(_il_jv_str_field(cv, "architecture"), "amd64"), 1, "architecture present");
+    assert_eq(streq(_il_jv_str_field(cv, "os"), "linux"), 1, "os present");
+
+    var co = json_v_obj_get(cv, "config");
+    assert(co != 0, "config sub-object");
+    if (co == 0) { return 0; }
+    assert_eq(streq(_il_jv_str_field(co, "User"), "nobody"), 1, "User");
+    assert_eq(streq(_il_jv_str_field(co, "WorkingDir"), "/w"), 1, "WorkingDir from the workdir step");
+    var env = json_v_obj_get(co, "Env");
+    assert_eq(json_v_arr_len(env), 1, "one env var");
+    assert_eq(streq(str_cstr(json_v_str(json_v_arr_get(env, 0))), "A=1"), 1, "Env is K=V");
+    var ports = json_v_obj_get(co, "ExposedPorts");
+    assert(ports != 0, "ExposedPorts present");
+    assert(json_v_obj_get(ports, "80/tcp") != 0, "80/tcp");
+    assert(json_v_obj_get(ports, "443/tcp") != 0, "443/tcp");
+    var labels = json_v_obj_get(co, "Labels");
+    assert_eq(streq(_il_jv_str_field(labels, "k"), "v"), 1, "label");
+    return 0;
+}
+
+fn test_bld_spec_workdir_beats_step() {
+    test_group("build: [config].workdir wins over a workdir step");
+    var root = "/tmp/stiva-bld-wd";
+    var ctx = "/tmp/stiva-bld-wd-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    _bld_t_file(ctx, "f", "x");
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"w\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/from-step\"\n\n[config]\nworkdir = \"/from-config\"\n";
+    var img = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(img != 0, "build ok");
+    if (img == 0) { return 0; }
+    var co = json_v_obj_get(_bld_t_config_jv(store, img), "config");
+    assert_eq(streq(_il_jv_str_field(co, "WorkingDir"), "/from-config"), 1, "spec config wins");
+    return 0;
+}
+
+fn test_bld_refuses_run_and_from_stage() {
+    test_group("build: run and from_stage are refused, not faked");
+    var root = "/tmp/stiva-bld-refuse";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+
+    var run_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hi\"]\n";
+    assert_eq(build_image(parse_build_spec(run_src), store, 0, "/tmp"), 0, "run step refused");
+
+    var fs_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"from_stage\"\nstage = \"s\"\nsource = \"a\"\ndestination = \"/b\"\n";
+    assert_eq(build_image(parse_build_spec(fs_src), store, 0, "/tmp"), 0, "from_stage refused");
+
+    # Neither may leave a half-built image behind.
+    var listed = image_store_list(store);
+    var i = 0;
+    var leaked = 0;
+    while (i < vec_len(listed)) {
+        if (streq(image_ref_full_ref(_image_reference(vec_get(listed, i))), "local/r:v1") == 1) { leaked = 1; }
+        i = i + 1;
+    }
+    assert_eq(leaked, 0, "no image indexed for a refused build");
+    return 0;
+}
+
+fn test_bld_source_traversal_refused() {
+    test_group("build: a copy source may not escape the build context");
+    assert_eq(_bld_source_is_safe("app"), 1, "plain relative");
+    assert_eq(_bld_source_is_safe("app/sub/x"), 1, "nested relative");
+    assert_eq(_bld_source_is_safe("..foo"), 1, "a name STARTING with .. is fine");
+    assert_eq(_bld_source_is_safe("a..b"), 1, "a name CONTAINING .. is fine");
+    assert_eq(_bld_source_is_safe("x/..foo/y"), 1, "..foo as a component is fine");
+    assert_eq(_bld_source_is_safe(".."), 0, "bare ..");
+    assert_eq(_bld_source_is_safe("../etc/shadow"), 0, "leading ..");
+    assert_eq(_bld_source_is_safe("a/../../etc"), 0, "interior ..");
+    assert_eq(_bld_source_is_safe("a/.."), 0, "trailing ..");
+    assert_eq(_bld_source_is_safe("/etc/shadow"), 0, "absolute");
+    assert_eq(_bld_source_is_safe(""), 0, "empty");
+    assert_eq(_bld_source_is_safe(0), 0, "null");
+
+    # And the driver actually enforces it.
+    var root = "/tmp/stiva-bld-trav";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"t\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"../../../etc/hostname\"\ndestination = \"/x\"\n";
+    assert_eq(build_image(parse_build_spec(src), store, 0, "/tmp/stiva-bld-trav-ctx"), 0, "traversal refused");
+    return 0;
+}
+
+fn test_bld_dest_prefix() {
+    test_group("build: destination prefix normalisation");
+    assert_eq(streq(_bld_dest_prefix("/app"), "app"), 1, "leading slash stripped");
+    assert_eq(streq(_bld_dest_prefix("///app"), "app"), 1, "repeated leading slashes");
+    assert_eq(streq(_bld_dest_prefix("/app/"), "app"), 1, "trailing slash stripped");
+    assert_eq(streq(_bld_dest_prefix("app/sub"), "app/sub"), 1, "already relative");
+    assert_eq(streq(_bld_dest_prefix("/"), ""), 1, "root");
+    assert_eq(streq(_bld_dest_prefix(0), ""), 1, "null");
+    return 0;
+}
+
+fn test_bld_cache_reuse() {
+    test_group("build: the layer cache is reused and carries the diff_id");
+    var root = "/tmp/stiva-bld-cache";
+    var ctx = "/tmp/stiva-bld-cache-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f", "cached\n");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"k\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var a = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(a != 0, "first build ok");
+    if (a == 0) { return 0; }
+    var b = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(b != 0, "second build ok");
+    if (b == 0) { return 0; }
+
+    # Identical inputs must yield an identical config digest — which they only
+    # can if the cached layer produced the SAME diff_id, since diff_ids are part
+    # of the config bytes. This is the assertion that would fail if the sidecar
+    # were missing or wrong.
+    assert_eq(streq(_img_id(a), _img_id(b)), 1, "rebuild is byte-identical (cached diff_id matched)");
+
+    # A missing sidecar must degrade to a rebuild, not an error.
+    var la = _img_layers(a);
+    var top: Layer = vec_get(la, 1);
+    xunlink(_bld_diffid_path(store, top.digest));
+    var c = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(c != 0, "build still succeeds with the sidecar gone");
+    if (c != 0) {
+        assert_eq(streq(_img_id(a), _img_id(c)), 1, "and rebuilding reproduces the same image");
+    }
+    return 0;
+}
+
+fn test_bld_cache_ignores_garbage_entry() {
+    test_group("build: a garbage cache entry is a miss, not an escape");
+    var root = "/tmp/stiva-bld-badcache";
+    var ctx = "/tmp/stiva-bld-badcache-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    var base = _bld_t_base(store);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f", "g\n");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"g\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var good = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(good != 0, "baseline build ok");
+    if (good == 0) { return 0; }
+
+    # Overwrite the step's cache entry with a traversal attempt. The key is
+    # rebuilt exactly as the driver does — base id as the step-0 running digest.
+    var sp2: BuildSpec = parse_build_spec(src);
+    var key = build_cache_key(_img_id(base), 0, vec_get(sp2.steps, 0));
+    record_build_cache(store, key, "sha256:../../../../etc/passwd");
+
+    var again = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(again != 0, "build still succeeds");
+    if (again != 0) {
+        assert_eq(streq(_img_id(again), _img_id(good)), 1, "and produces the same image (the entry was ignored)");
+    }
+    return 0;
+}
+
+fn test_bld_missing_base_without_client() {
+    test_group("build: an absent base with no registry client fails cleanly");
+    var root = "/tmp/stiva-bld-nobase";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var src = "[image]\nbase = \"local/absent:v9\"\nname = \"n\"\ntag = \"v1\"\n";
+    assert_eq(build_image(parse_build_spec(src), store, 0, "/tmp"), 0, "no base, no client -> failure");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_rg_transport_seam();
@@ -2128,6 +2470,16 @@ fn main() {
     test_rg_verify_signature();
     test_rg_index_dedup_digest_aware();
     test_rg_index_dedup_tag_still_moves();
+    test_bld_copy_dir_end_to_end();
+    test_bld_diff_ids_are_uncompressed();
+    test_bld_config_has_platform_and_fields();
+    test_bld_spec_workdir_beats_step();
+    test_bld_refuses_run_and_from_stage();
+    test_bld_source_traversal_refused();
+    test_bld_dest_prefix();
+    test_bld_cache_reuse();
+    test_bld_cache_ignores_garbage_entry();
+    test_bld_missing_base_without_client();
     return assert_summary();
 }
 

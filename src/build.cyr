@@ -394,7 +394,8 @@ fn store_layer(store, data, len) {
 # Multi-stage `[[stages]]` are NOT reconstructed here: bayan's section model is
 # flat (it cannot re-nest a stage's own `[[steps]]` under its stage table the
 # way serde does), and the tar.gz stage BUILDER that consumes them stays
-# deferred. `stages` therefore parses to an empty vec — matching the oracle's
+# deferred (docs/development/roadmap.md §F). `stages` therefore parses to an
+# empty vec — matching the oracle's
 # `#[serde(default)]` when no stages are present, which is every case the
 # parse tests exercise.
 
@@ -524,31 +525,497 @@ fn parse_build_spec(toml_str) {
     }
 
     # ── stages: flat bayan model cannot re-nest per-stage steps; the
-    # consuming tar.gz stage builder is deferred → empty vec (serde default).
+    # consuming tar.gz stage builder is deferred (roadmap.md §F) → empty vec
+    # (serde default). `build_image` below refuses `from_stage` outright.
     sakshi_debug("build spec parsed", strlen("build spec parsed"));
     return build_spec_new(image, steps, config, vec_new());
 }
 
-# ── DEFERRED (land with tar/gzip layer builder + async net) ──
-# rust-old/src/build.rs also defines, coupled to a tar.gz layer builder
-# (flate2 + tar) and to async RegistryClient network (build_cache_key +
-# build_step_to_jv are now ported above via bayan JSON):
+# ══ §F — the build driver ═══════════════
+# (rust-old: build_image :255, build_copy_layer :514)
 #
-#   tar.gz layer builders (flate2 GzEncoder + tar::Builder/Header; not in
-#   the ported base):
-#     fn build_run_layer(command: &[String], step_index) -> Result<Vec<u8>>
-#     fn build_copy_layer(context_dir, source, destination) -> Result<Vec<u8>>
-#     fn append_dir_recursive<W: Write>(archive, src_dir, dest_prefix)
-#         -> Result<(), StivaError>
-#   (these also serialize the OCI image config JSON: struct OciImageConfig,
-#    OciContainerConfig, OciRootFs — all serde-derived, defer with the JSON
-#    codec.)
+# `build_image` composes machinery that already exists: the tar writer and gzip
+# encoder from storage.cyr, the OCI config/manifest assembly and index from
+# imagelayout.cyr, the blob store from image.cyr, and the registry client from
+# registry.cyr. Nothing here needs a sandbox — see the RUN note below.
 #
-#   async build driver (drives ImageStore::pull over the network — deferred
-#   in image.cyr with the registry network layer — plus the tar/json above):
-#     async fn build_image(spec, image_store, registry_client, context_dir)
-#         -> Result<Image, StivaError>
+# FIVE DELIBERATE DIVERGENCES from the oracle, each fixing a defect rather than
+# reproducing it. They are the reason a built image is valid where the oracle's
+# would not be:
 #
-# These are ported alongside the TOML codec, the JSON codec, the tar/gzip
-# layer builder, and the async registry network layer for parity. Tracked
-# in the roadmap.
+#  1. `rootfs.diff_ids` are the UNCOMPRESSED tar digests. The oracle
+#     (build.rs:401) maps `all_layers.iter().map(|l| l.digest)` — the COMPRESSED
+#     blob digests. The OCI image-spec defines diff_ids over the uncompressed
+#     layer, so every image the oracle builds fails validation in any other tool
+#     and cannot have its rootfs verified. Group A already got this right for
+#     `import` (imagelayout.cyr `image_import`); this matches it.
+#
+#  2. A MANIFEST BLOB IS WRITTEN. The oracle stores only a config blob and calls
+#     add_to_index (build.rs:429-452). In this store that produces an image that
+#     silently VANISHES: `image_store_load_index` reconstructs every Image from
+#     its manifest blob and skips any descriptor whose manifest is missing. The
+#     build would report success and `stiva images` would not list it.
+#
+#  3. `architecture` and `os` ARE EMITTED. The oracle's `OciImageConfig`
+#     (build.rs:197-203) has exactly two fields, `config` and `rootfs` — both
+#     platform keys are absent, and both are REQUIRED by the image-spec.
+#
+#  4. RUN STEPS ARE REFUSED, not faked. The oracle's `build_run_layer`
+#     (build.rs:475) does not run anything: it writes a marker file
+#     `.stiva/run/<idx>.cmd` containing the argv, and its own doc comment admits
+#     this is a placeholder. Emitting that layer would produce an image
+#     asserting a command ran when none did — a lie the user cannot detect from
+#     the output. Refusing is the honest failure. (Executing them for real needs
+#     an exec-into-an-intermediate-rootfs design, not just §D's exec primitive.)
+#
+#  5. `from_stage` IS REFUSED. The oracle's (build.rs:353-389) copies from
+#     `<context>/<stage_name>` if that directory happens to exist and silently
+#     skips otherwise; `spec.stages` is parsed and then never read by
+#     build_image at all. There is no multi-stage build to port.
+#
+# Plus one hardening divergence: a COPY `source` may not be absolute or contain
+# a `..` component. The oracle joins it straight onto the context dir, so a
+# Stivafile from an untrusted repository can copy `/etc/shadow` into an image
+# the user then pushes to a public registry.
+
+# Ceiling on ONE layer's UNCOMPRESSED tar bytes, refused loudly rather than
+# discovered as an OOM. 256 MiB.
+#
+# WHAT THIS DOES NOT BOUND, stated precisely because the number reads more
+# protective than it is: `_stor_tar_collect` has already read every file in the
+# context into the arena by the time this is checked, so the check bounds the
+# tar assembly buffer and the gzip destination — two of the three full-size
+# allocations — but not the collect pass itself. See storage.cyr's IN-MEMORY
+# CAVEAT. There is also no `free`, so a multi-step build accumulates.
+var _BLD_MAX_LAYER_BYTES = 268435456;
+
+# Total payload bytes across a TarEntry vec (headers excluded — this bounds the
+# data, and the per-entry 512-byte headers are bounded by the entry count).
+#[must_use]
+fn _bld_entries_bytes(entries) {
+    var total = 0;
+    var n = vec_len(entries);
+    var i = 0;
+    while (i < n) {
+        var e: TarEntry = vec_get(entries, i);
+        total = total + e.size;
+        i = i + 1;
+    }
+    return total;
+}
+
+# Reject a COPY `source` that escapes the build context: absolute, empty, or
+# carrying a `..` path component. Returns 1 when the path is safe.
+#
+# Component-wise, not a substring scan — a file legitimately named `..foo` or
+# `a..b` must not be refused.
+#[must_use]
+fn _bld_source_is_safe(source) {
+    if (source == 0) { return 0; }
+    var n = strlen(source);
+    if (n == 0) { return 0; }
+    if (load8(source) == 47) { return 0; }         # absolute
+    var i = 0;
+    var start = 0;
+    while (i <= n) {
+        var c = 0;
+        if (i < n) { c = load8(source + i); }
+        if (c == 47 || i == n) {
+            if (i - start == 2) {
+                if (load8(source + start) == 46) {
+                    if (load8(source + start + 1) == 46) { return 0; }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Strip a leading '/' from a COPY destination (rust-old build.rs:531-534 —
+# tar member names are relative). Also strips a trailing '/' so the caller
+# controls where separators go.
+#[must_use]
+fn _bld_dest_prefix(destination) {
+    if (destination == 0) { return ""; }
+    var s = destination;
+    while (load8(s) == 47) { s = s + 1; }
+    var n = strlen(s);
+    while (n > 0) {
+        if (load8(s + n - 1) != 47) { break; }
+        n = n - 1;
+    }
+    return _img_slice(s, 0, n);
+}
+
+# Build one COPY step's gzip layer. Returns the gzip buffer (its length in
+# `out_len`, the UNCOMPRESSED tar digest in `out_diff`), or 0 on failure with
+# the detail already printed.
+#
+# The uncompressed digest is captured here rather than recomputed later because
+# it is the ONLY point at which the uncompressed bytes exist — the blob store
+# holds the compressed layer, so a diff_id derived after the fact would have to
+# gunzip it back.
+fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
+    if (_bld_source_is_safe(source) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+            _img_cat2("copy source must be relative to the build context and free of '..': ", source));
+        return 0;
+    }
+    var src_path = _img_cat3(context_dir, "/", source);
+    var sb = alloc(144);
+    if (sys_lstat(src_path, sb) != 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("copy source not found: ", src_path));
+        return 0;
+    }
+    var st_mode = load64(sb + 24) & 65535;
+    var typ = st_mode & 61440;                      # S_IFMT
+    var perms = st_mode & 4095;
+    var uid = (load64(sb + 24) >> 32) & 4294967295;
+    var gid = load64(sb + 32) & 4294967295;
+
+    var dest_prefix = _bld_dest_prefix(destination);
+    var entries = vec_new();
+    if (typ == 16384) {                             # S_IFDIR
+        # `_stor_tar_collect` emits CHILDREN only, so the destination directory
+        # itself needs an explicit entry — without it `copy ./app -> /app`
+        # produces `app/start.sh` with no `app/` member, and a reader that
+        # creates parents implicitly loses the directory's real mode.
+        if (strlen(dest_prefix) > 0) {
+            vec_push(entries, _tar_entry_new(_img_cat2(dest_prefix, "/"), 53, perms, uid, gid, 0, 0));
+        }
+        _stor_tar_collect(src_path, dest_prefix, entries);
+    } else {
+        if (typ != 32768) {                         # S_IFREG
+            stiva_err_print(STIVA_ERR_INVALID_STATE,
+                _img_cat2("copy source is neither a regular file nor a directory: ", src_path));
+            return 0;
+        }
+        if (strlen(dest_prefix) == 0) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE, "copy destination cannot be the rootfs root for a file source");
+            return 0;
+        }
+        var fc = alloc(8);
+        var data = _img_read_file(src_path, fc);
+        if (data == 0) {
+            stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("cannot read copy source: ", src_path));
+            return 0;
+        }
+        vec_push(entries, _tar_entry_new(dest_prefix, 48, perms, uid, gid, load64(fc), data));
+    }
+
+    if (vec_len(entries) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, _img_cat2("copy source produced no entries: ", src_path));
+        return 0;
+    }
+    if (_bld_entries_bytes(entries) > _BLD_MAX_LAYER_BYTES) {
+        stiva_err_print(STIVA_ERR_STORAGE, "copy layer exceeds the 256 MiB per-layer ceiling");
+        return 0;
+    }
+
+    var tc = alloc(8);
+    var tarbuf = _stor_tar_bytes(entries, tc);
+    var tarlen = load64(tc);
+    store64(out_diff, sha256_digest(tarbuf, tarlen));
+
+    var gzcap = tarlen + tarlen / 50 + 8192;
+    var gzbuf = alloc(gzcap);
+    # Streaming encoder, never the batch `gzip_compress` — the latter duplicates
+    # bytes at every 1 MiB block boundary (see `_stor_gzip_compress`).
+    var gzlen = _stor_gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
+    if (gzlen < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to gzip copy layer");
+        return 0;
+    }
+    store64(out_len, gzlen);
+    return gzbuf;
+}
+
+# Resolve the base image named by `base`. LOCAL FIRST, then the registry.
+#
+# DIVERGENCE: the oracle pulls unconditionally (build.rs:272), so a build
+# against a base already in the store still needs the network and still races
+# the registry's mutable tag. Local-first makes an offline rebuild reproducible
+# and matches how the facade's `run` resolves. A pull still happens when the
+# base is absent AND a client was supplied.
+fn _bld_resolve_base(store, client, base) {
+    var im = image_store_find(store, base);
+    if (im != 0) { return im; }
+    var ref = image_ref_parse(base);
+    if (ref == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_REFERENCE, base);
+        return 0;
+    }
+    # `base` as written ("alpine:3.19") and its canonical form
+    # ("docker.io/library/alpine:3.19") are both legitimate index keys.
+    im = image_store_find(store, image_ref_full_ref(ref));
+    if (im != 0) { return im; }
+    if (client == 0) {
+        stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND,
+            _img_cat2("base image not in the local store and no registry client is configured: ", base));
+        return 0;
+    }
+    return image_store_pull(client, store, ref);
+}
+
+# ── layer digest → diff_id sidecar ───────────────────────
+#
+# A cached layer is reusable only if its UNCOMPRESSED digest is also known, and
+# that is not recoverable from the stored blob without gunzipping it. The oracle
+# never faced this because its diff_ids are the compressed digests it already
+# has — which is the spec bug divergence 1 fixes.
+#
+# Keyed by LAYER digest rather than by cache key, because the mapping is a
+# property of the blob: two different steps that happen to produce identical
+# bytes share one entry, and it stays valid when a cache key is invalidated.
+
+# "{root}/cache/diffid/{hex}", or 0 for a malformed layer digest (fails closed,
+# like `_img_blob_path` — this string comes back off disk).
+#[must_use]
+fn _bld_diffid_path(store, layer_digest) {
+    if (digest_is_valid(layer_digest) == 0) { return 0; }
+    var dir = _img_cat2(image_store_root(store), "/cache/diffid/");
+    return _img_cat2(dir, digest_hex(layer_digest));
+}
+
+# Record a layer's uncompressed digest. Returns 0 on success, -1 on failure —
+# best-effort, exactly like `record_build_cache`: a failure here costs a rebuild
+# next time, never correctness.
+fn _bld_record_diff_id(store, layer_digest, diff_id) {
+    var path = _bld_diffid_path(store, layer_digest);
+    if (path == 0) { return 0 - 1; }
+    var root = image_store_root(store);
+    sys_mkdir(_img_cat2(root, "/cache"), 493);            # 0o755, idempotent
+    sys_mkdir(_img_cat2(root, "/cache/diffid"), 493);
+    if (file_write_all(path, diff_id, strlen(diff_id)) < 0) { return 0 - 1; }
+    return 0;
+}
+
+# A layer's recorded uncompressed digest, or 0 when absent/malformed.
+#[must_use]
+fn _bld_cached_diff_id(store, layer_digest) {
+    var path = _bld_diffid_path(store, layer_digest);
+    if (path == 0) { return 0; }
+    if (file_exists(path) == 0) { return 0; }
+    var buf = alloc(128);
+    var n = file_read_all(path, buf, 127);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);                                   # file_read_all does not NUL-terminate
+    if (digest_is_valid(buf) == 0) { return 0; }
+    return buf;
+}
+
+# Reuse a cached layer for `cache_key`, or 0 for a miss. The blob size lands in
+# `out_size` and its uncompressed digest in `out_diff`.
+#
+# EVERY failure mode here is a MISS, never an error: a truncated cache file, a
+# blob swept by `gc`, a missing diff_id sidecar, an entry written before the
+# sidecar existed. The worst case is rebuilding a layer that was already cached,
+# which is the correct outcome for a cache we cannot fully trust. Making any of
+# these fatal would turn `rm -rf {root}/cache` into required user knowledge.
+#
+# Two guards the oracle does not have — it trusts the cache file verbatim
+# (build.rs:286-299), so a hand-edited entry becomes a blob path.
+# `_img_blob_path` already fails closed on a malformed digest, so this was a
+# silent miss rather than an escape; validating here makes it a deliberate one.
+#
+# It does NOT re-hash the blob. Verifying content on every hit would re-read
+# every layer of every build; that is `verify_integrity`'s job, and the store
+# root is stiva-owned.
+fn _bld_cache_hit(store, cache_key, out_size, out_diff) {
+    var buf = alloc(128);
+    var n = check_build_cache(store, cache_key, buf, 127);
+    if (n <= 0) { return 0; }
+    # `check_build_cache` returns a byte count and does NOT NUL-terminate.
+    store8(buf + n, 0);
+    if (digest_is_valid(buf) == 0) { return 0; }
+    if (image_store_has_blob(store, buf) == 0) { return 0; }
+    var diff_id = _bld_cached_diff_id(store, buf);
+    if (diff_id == 0) { return 0; }
+    var path = _img_blob_path(image_store_root(store), buf);
+    if (path == 0) { return 0; }
+    var sb = alloc(144);
+    if (sys_lstat(path, sb) != 0) { return 0; }
+    store64(out_size, load64(sb + 48));                   # st_size
+    store64(out_diff, diff_id);
+    return buf;
+}
+
+# Build an image from a parsed BuildSpec (rust-old: build_image).
+#
+#   spec        BuildSpec*
+#   store       ImageStore*
+#   client      RegistryClient*, or 0 for a strictly-local build
+#   context_dir cstr — the directory COPY sources resolve against
+#
+# Returns the Image*, or 0 on failure with the detail already printed.
+fn build_image(spec, store, client, context_dir) {
+    if (spec == 0 || store == 0) { return 0; }
+    var sp: BuildSpec = spec;
+    var idef: ImageDef = sp.image;
+    sakshi_info("starting image build", strlen("starting image build"));
+
+    # ── 1. Base image ──
+    var base = _bld_resolve_base(store, client, idef.base);
+    if (base == 0) { return 0; }
+    var base_diff_ids = _il_config_diff_ids(store, base);
+    var base_layers = _img_layers(base);
+    # A base with layers but no readable diff_ids would yield a config whose
+    # rootfs omits every inherited layer — an image that unpacks to more than it
+    # claims. Refuse rather than emit it.
+    if (vec_len(base_layers) > 0) {
+        if (vec_len(base_diff_ids) != vec_len(base_layers)) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE,
+                "base image config has no usable rootfs.diff_ids; cannot derive from it");
+            return 0;
+        }
+    }
+
+    # ── 2. Steps ──
+    var new_layers = vec_new();
+    var new_diff_ids = vec_new();
+    var env_vars = vec_new();
+    var labels = vec_new();                         # alternating k, v
+    var step_workdir = 0;
+    # The cache key chains: each step's key covers the digest of the layer the
+    # previous step produced, so an early change invalidates everything after it
+    # (rust-old: `running_digest`).
+    var running_digest = _img_id(base);
+
+    var steps = sp.steps;
+    var nsteps = vec_len(steps);
+    var idx = 0;
+    while (idx < nsteps) {
+        var st: BuildStep = vec_get(steps, idx);
+        var kind = st.kind;
+
+        if (kind == BUILD_STEP_RUN) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE,
+                _img_cat2("run steps are not executed by this build: the oracle emitted a marker file ",
+                "rather than running the command, so the layer would assert work that never happened"));
+            return 0;
+        }
+        if (kind == BUILD_STEP_FROM_STAGE) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE,
+                "from_stage is not supported: multi-stage builds are not implemented");
+            return 0;
+        }
+
+        if (kind == BUILD_STEP_ENV) {
+            vec_push(env_vars, _img_cat3(st.key, "=", st.value));
+        }
+        if (kind == BUILD_STEP_WORKDIR) {
+            step_workdir = st.source;
+        }
+        if (kind == BUILD_STEP_LABEL) {
+            vec_push(labels, st.key);
+            vec_push(labels, st.value);
+        }
+
+        if (kind == BUILD_STEP_COPY) {
+            var cache_key = build_cache_key(running_digest, idx, vec_get(steps, idx));
+            var size_cell = alloc(8);
+            var cdiff_cell = alloc(8);
+            var cached = _bld_cache_hit(store, cache_key, size_cell, cdiff_cell);
+            if (cached != 0) {
+                sakshi_info("using cached layer", strlen("using cached layer"));
+                vec_push(new_layers, layer_new(cached, load64(size_cell), media_oci_layer()));
+                vec_push(new_diff_ids, load64(cdiff_cell));
+                running_digest = cached;
+            } else {
+                var len_cell = alloc(8);
+                var diff_cell = alloc(8);
+                var gz = build_copy_layer(context_dir, st.source, st.destination, len_cell, diff_cell);
+                if (gz == 0) { return 0; }
+                var gzlen = load64(len_cell);
+                var diff_id = load64(diff_cell);
+                var digest = store_layer(store, gz, gzlen);
+                if (digest == 0) {
+                    stiva_err_print(STIVA_ERR_STORAGE, "failed to store copy layer blob");
+                    return 0;
+                }
+                var _rc = record_build_cache(store, cache_key, digest);
+                var _rd = _bld_record_diff_id(store, digest, diff_id);
+                vec_push(new_layers, layer_new(digest, gzlen, media_oci_layer()));
+                vec_push(new_diff_ids, diff_id);
+                running_digest = digest;
+            }
+        }
+        idx = idx + 1;
+    }
+
+    # ── 3. OCI image config ──
+    var all_layers = vec_new();
+    var all_diff_ids = vec_new();
+    var bi = 0;
+    var bn = vec_len(base_layers);
+    while (bi < bn) {
+        vec_push(all_layers, vec_get(base_layers, bi));
+        vec_push(all_diff_ids, vec_get(base_diff_ids, bi));
+        bi = bi + 1;
+    }
+    var ni = 0;
+    var nn = vec_len(new_layers);
+    while (ni < nn) {
+        vec_push(all_layers, vec_get(new_layers, ni));
+        vec_push(all_diff_ids, vec_get(new_diff_ids, ni));
+        ni = ni + 1;
+    }
+
+    var bc: BuildConfig = sp.config;
+    var exposed = vec_new();
+    var ei = 0;
+    var en = vec_len(bc.expose);
+    while (ei < en) {
+        var pb = str_builder_new();
+        str_builder_add_int(pb, vec_get(bc.expose, ei));
+        str_builder_add_cstr(pb, "/tcp");
+        vec_push(exposed, str_cstr(str_builder_build(pb)));
+        ei = ei + 1;
+    }
+    # [config].workdir wins over a `workdir` step (rust-old build.rs:412-416).
+    var workdir = bc.workdir;
+    if (workdir == 0) { workdir = step_workdir; }
+
+    var arch = normalize_arch("x86_64");
+    var cfg_obj = oci_config_object_jv(env_vars, 0, bc.entrypoint, workdir, bc.user, exposed, labels);
+    var cfg_s = json_v_build(oci_config_build(arch, "linux", 0, cfg_obj, all_diff_ids, 0));
+    var config_digest = sha256_digest(str_data(cfg_s), str_len(cfg_s));
+    if (image_store_store_blob(store, config_digest, str_data(cfg_s), str_len(cfg_s)) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store config blob");
+        return 0;
+    }
+
+    # ── 4. OCI manifest blob (absent in the oracle — divergence 2) ──
+    var layer_descs = vec_new();
+    var total_size = 0;
+    var li = 0;
+    var ln = vec_len(all_layers);
+    while (li < ln) {
+        var lay: Layer = vec_get(all_layers, li);
+        vec_push(layer_descs, descriptor_new(lay.media_type, lay.digest, lay.size_bytes));
+        total_size = total_size + lay.size_bytes;
+        li = li + 1;
+    }
+    var man = oci_manifest_new(descriptor_new(media_oci_config(), config_digest, str_len(cfg_s)), layer_descs);
+    var mm: OciManifest = man;
+    mm.media_type = media_oci_manifest();
+    var man_s = json_v_build(oci_manifest_to_jv(man));
+    var manifest_digest = sha256_digest(str_data(man_s), str_len(man_s));
+    if (image_store_store_blob(store, manifest_digest, str_data(man_s), str_len(man_s)) == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "failed to store manifest blob");
+        return 0;
+    }
+
+    # ── 5. Image record + index ──
+    var out_ref = image_ref_new("local", idef.name, idef.tag, config_digest);
+    var image = image_new(config_digest, out_ref, total_size, all_layers, 0);
+    _img_set_manifest_digest(image, manifest_digest);
+    if (image_store_add_to_index(store, image) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "failed to update image index");
+        return 0;
+    }
+    sakshi_info("build complete", strlen("build complete"));
+    return image;
+}

@@ -1177,6 +1177,60 @@ fn test_mg_mcp_missing_params() {
     return 0;
 }
 
+# mcp_handle_build (§F). Moved here from tests/stiva.tcyr: the handler used to
+# live in mcp.cyr and only PARSE the spec — its result literally said
+# status "parsed" — so it needed no facade. It now takes a `Stiva` and performs
+# a real build, which is why it sits with the other live-dispatch handlers.
+#
+# Driven through `mcp_handle_tool` rather than by calling the handler directly,
+# so the dispatch entry (which had to change from `mcp_handle_build(params)` to
+# `mcp_handle_build(s, params)`) is covered too.
+fn test_mg_mcp_build() {
+    test_group("mg_mcp_build");
+    var root = "/tmp/stiva-mg-mcp-build";
+    var ctx = "/tmp/stiva-mg-mcp-build-ctx";
+    _stor_remove_dir_all(ctx);
+    var s = _mg_stiva(_mg_ctx_new(), root);
+    assert(s != 0, "facade built");
+    if (s == 0) { return 0; }
+
+    # A one-layer base to derive from, via the ordinary import path.
+    _stor_mkdir_p(ctx);
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    _stor_write_tar(entries, _stor_cat2(ctx, "/base.tar"));
+    assert(image_import(stiva_image_store(s), _stor_cat2(ctx, "/base.tar"), "base", "v1") != 0, "base imported");
+
+    file_write_all(_stor_cat2(ctx, "/f.txt"), "payload\n", 8);
+
+    var spec = "[image]\\nbase = \\\"local/base:v1\\\"\\nname = \\\"mcpapp\\\"\\ntag = \\\"v1\\\"\\n\\n[[steps]]\\ntype = \\\"copy\\\"\\nsource = \\\"f.txt\\\"\\ndestination = \\\"/f.txt\\\"\\n";
+    var pb = str_builder_new();
+    str_builder_add_cstr(pb, "{\"spec\":\"");
+    str_builder_add_cstr(pb, spec);
+    str_builder_add_cstr(pb, "\",\"context_dir\":\"");
+    str_builder_add_cstr(pb, ctx);
+    str_builder_add_cstr(pb, "\"}");
+    var params = _mg_mcp_params(str_cstr(str_builder_build(pb)));
+    assert(params != 0, "params parsed");
+    if (params == 0) { return 0; }
+
+    var r = mcp_handle_tool(s, "stiva_build", params);
+    assert_eq(mcp_result_success(r), 1, "build succeeded through MCP dispatch");
+    if (mcp_result_success(r) == 1) {
+        # A real build reports the resulting IMAGE, not a parse summary — the
+        # old handler's "parsed" status is exactly what must no longer appear.
+        var text = _mg_mcp_text(r);
+        assert_eq(strstr(text, "mcpapp") >= 0, 1, "names the built image");
+        assert_eq(strstr(text, "parsed") >= 0, 0, "no longer a parse-only summary");
+        # And it is genuinely in the store.
+        assert(image_store_find(stiva_image_store(s), "local/mcpapp:v1") != 0, "image is in the index");
+    }
+
+    assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_build", _mg_mcp_params("{}"))), 0,
+    "missing spec -> err");
+    return 0;
+}
+
 fn test_mg_mcp_pull_and_inspect_image() {
     test_group("mg_mcp_pull_and_inspect_image");
     var ctx = _mg_pull_ctx();
@@ -1475,6 +1529,7 @@ fn main() {
     test_mg_mcp_dispatch_unknown_tool();
     test_mg_mcp_advertised_but_unavailable();
     test_mg_mcp_missing_params();
+    test_mg_mcp_build();
     test_mg_mcp_pull_and_inspect_image();
     test_mg_mcp_ps_shape();
     test_mg_mcp_resources();

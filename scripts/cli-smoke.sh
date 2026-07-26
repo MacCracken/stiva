@@ -309,6 +309,71 @@ names="$(run ps | awk -F'\t' 'NR>1 {print $4}')"
 assert_absent "and ps no longer reports it Running" "detached1" "$names"
 fi
 
+group "build"
+# A base to derive from, then a Stivafile that copies a file into it. The
+# decisive check is that the built image RUNS the copied payload — an image
+# whose layer never made it into the rootfs still lists fine in `images`.
+mkdir -p "$WORK/bctx/payload"
+printf 'from-the-build-layer\n' > "$WORK/bctx/payload/marker.txt"
+cat > "$WORK/Stivafile" <<'STIVAFILE'
+[image]
+base = "local/smokebase:v1"
+name = "smokebuilt"
+tag = "v1"
+
+[[steps]]
+type = "copy"
+source = "payload"
+destination = "/payload"
+
+[[steps]]
+type = "env"
+key = "SMOKE"
+value = "yes"
+
+[config]
+workdir = "/payload"
+STIVAFILE
+mkdir -p "$WORK/bbase/etc"
+printf 'smoke\n' > "$WORK/bbase/etc/os-release"
+tar -cf "$WORK/bbase.tar" -C "$WORK/bbase" . 2>/dev/null
+run import "$WORK/bbase.tar" smokebase v1 >/dev/null 2>&1
+
+out="$(run build -f "$WORK/Stivafile" -c "$WORK/bctx")"
+assert_contains "build prints the image id" "sha256:" "$out"
+out="$(run images)"
+assert_contains "and the image is listed" "local/smokebuilt:v1" "$out"
+
+# The copied file must be present in a container created from the built image.
+run run --name builtc local/smokebuilt:v1 /bin/true >/dev/null 2>&1
+BCID="$(run ps -a | awk -F'\t' '$4=="builtc" || $2=="builtc" {print $1}' | head -1)"
+if [ -z "$BCID" ]; then BCID="$(run ps -a | tail -1 | awk '{print $1}')"; fi
+if [ -f "$ROOT/containers/$BCID/rootfs/payload/marker.txt" ]; then
+    ok "the built layer's file is present in the container rootfs"
+else
+    bad "the built layer's file is present in the container rootfs" "no marker.txt under $BCID"
+fi
+
+# A missing spec file must fail, not build an empty image.
+out="$(run build -f "$WORK/nope.toml" -c "$WORK/bctx")"
+assert_absent "a missing Stivafile does not print an image id" "sha256:" "$out"
+
+# RUN steps are refused rather than silently emitting a marker-file layer.
+cat > "$WORK/Stivafile.run" <<'STIVAFILE'
+[image]
+base = "local/smokebase:v1"
+name = "smokerun"
+tag = "v1"
+
+[[steps]]
+type = "run"
+command = ["echo", "hi"]
+STIVAFILE
+out="$(run build -f "$WORK/Stivafile.run" -c "$WORK/bctx")"
+assert_contains "a run step is refused with a reason" "not executed" "$out"
+out="$(run images)"
+assert_absent "and no image is indexed for it" "local/smokerun:v1" "$out"
+
 group "deferred verbs still say so"
 out="$(run exec c2 /bin/true)"
 assert_contains "exec reports not-yet-wired" "not yet wired" "$out"

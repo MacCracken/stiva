@@ -448,9 +448,29 @@ handlers still hand-roll and should migrate opportunistically.
 
   (`handle_run` → v3.1; multiplexed streaming → v3.1.)
 
-**F. `build` completion**:
-- [ ] `build`'s OCI config/manifest JSON assembly + gzip layer tar (the remaining v3.0.x build item).
-  zstd **decode** is no longer blocked — see §G below; encode is still gzip-only.
+**F. `build` completion — ✅ DONE (Unreleased).** `build_image` + `build_copy_layer` in
+`src/build.cyr`, wired through `stiva_build` → `_cli_build` → live `mcp_handle_build`. **31 of 35
+verbs.** Verified on the binary: a static binary present only in the layer the build produced
+executes inside a container started from the built image.
+- **§F was never gated on §D.** The oracle does not execute RUN steps —
+  `grep -n "Sandbox|Command|exec|kavach" rust-old/src/build.rs` returns 7 hits and all 7 are prose.
+  `build_run_layer` (`build.rs:475`) writes a marker file `.stiva/run/<idx>.cmd` and says so in its
+  own doc comment. This page had the dependency right; the reason is worth recording because the
+  natural assumption is the opposite.
+- Five divergences, all fixing oracle defects — UNCOMPRESSED diff_ids (`build.rs:401` uses
+  compressed, which is spec-wrong and fails cross-tool validation); a **mandatory manifest blob**
+  (without it `image_store_load_index` silently drops the image and the build "succeeds" invisibly);
+  `architecture`/`os` emitted (the oracle's `OciImageConfig` has neither, both spec-required); RUN
+  and `from_stage` refused rather than faked. Plus a `..`/absolute reject on COPY `source`, since a
+  `Stivafile` from an untrusted repo could otherwise copy `/etc/shadow` into a pushable image.
+  Full reasoning in the CHANGELOG.
+- Base resolution is **local-first** then registry; the oracle pulls unconditionally
+  (`build.rs:272`), needing the network for a base already on disk and racing the mutable tag.
+- Net-new supporting pieces: `_stor_tar_bytes` (in-memory tar), `_il_config_diff_ids` (the tree's
+  only diff_ids *reader*), a `{root}/cache/diffid/` sidecar (a cached layer's uncompressed digest is
+  not recoverable without gunzipping it), `AUDIT_OP_BUILD`, `stiva_image_store`.
+- **Still gzip-only** on encode. zstd **decode** landed at §G; zstd encode is out of scope.
+- **Multi-stage builds remain unimplemented** and are NOT a parity gap — the oracle's is a sham.
 
 **Order:** **A** (OCI layout) first — the store-format prerequisite; **B** (pull writes into it)
 alongside **C** (the manager spine, zero deps); **D**/**E** compose on **C**; **F** folds into

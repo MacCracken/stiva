@@ -153,6 +153,47 @@ fn oci_config_json(cfg_v) {
     return json_v_build(cfg_v);
 }
 
+# Read an image's `rootfs.diff_ids` back out of its stored config blob, as a
+# vec<cstr> of UNCOMPRESSED layer digests. Empty vec when the blob is missing,
+# unparseable, or carries no diff_ids.
+#
+# Every other diff_ids site in this tree WRITES them; this is the only reader.
+# It exists because a derived image's config must carry
+# `base.diff_ids ++ new.diff_ids` — and the base's are recoverable only from its
+# config blob, since the `Image` record holds compressed layer digests and the
+# uncompressed ones appear nowhere else on disk.
+#
+# An empty result is NOT distinguishable from "the base genuinely has no
+# layers", which is why the caller (§F build) refuses to build on a base whose
+# config it could not read rather than silently emitting a config whose
+# diff_ids omit every inherited layer — an image that unpacks to a rootfs the
+# manifest says should have more in it.
+fn _il_config_diff_ids(store, image) {
+    var out = vec_new();
+    if (store == 0 || image == 0) { return out; }
+    var cfg_path = _img_blob_path(image_store_root(store), _img_id(image));
+    if (cfg_path == 0) { return out; }
+    if (file_exists(cfg_path) == 0) { return out; }
+    var cc = alloc(8);
+    var cbuf = _img_read_file(cfg_path, cc);
+    if (cbuf == 0) { return out; }
+    var cv = bayan_json_v_parse_str(cbuf, load64(cc));
+    if (cv == 0) { return out; }
+    var rootfs = json_v_obj_get(cv, "rootfs");
+    if (rootfs == 0) { return out; }
+    var arr = json_v_obj_get(rootfs, "diff_ids");
+    if (arr == 0) { return out; }
+    if (json_v_is_arr(arr) == 0) { return out; }
+    var n = json_v_arr_len(arr);
+    var i = 0;
+    while (i < n) {
+        var e = json_v_arr_get(arr, i);
+        if (json_v_is_str(e) == 1) { vec_push(out, str_cstr(json_v_str(e))); }
+        i = i + 1;
+    }
+    return out;
+}
+
 # ── oci-layout marker + index.json store (A2) ──
 #
 # The store root becomes a valid OCI image layout: an `oci-layout` marker, a
