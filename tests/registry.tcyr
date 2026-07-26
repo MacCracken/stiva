@@ -2102,6 +2102,23 @@ fn _bld_t_base(store) {
     return img;
 }
 
+# Find `needle` within the first `hlen` bytes of `hay`, returning 1/0.
+#
+# NOT strstr: a tar is mostly NUL padding and the first header block contains
+# NULs, so a cstr search stops long before the file payload and reports "absent"
+# for content that is plainly there.
+fn _bld_t_memfind(hay, hlen, needle) {
+    var nlen = strlen(needle);
+    if (nlen == 0) { return 1; }
+    if (nlen > hlen) { return 0; }
+    var i = 0;
+    while (i <= hlen - nlen) {
+        if (memeq(hay + i, needle, nlen) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Read an image's stored config blob back as a parsed bayan value.
 fn _bld_t_config_jv(store, image) {
     var p = _img_blob_path(image_store_root(store), _img_id(image));
@@ -2345,6 +2362,100 @@ fn test_bld_cache_reuse() {
     return 0;
 }
 
+fn test_bld_cache_invalidates_on_context_change() {
+    test_group("build: editing the context invalidates the cached layer");
+    var root = "/tmp/stiva-bld-stale";
+    var ctx = "/tmp/stiva-bld-stale-ctx";
+    _stor_remove_dir_all(root);
+    _stor_remove_dir_all(ctx);
+    var store = image_store_new(root);
+    _bld_t_base(store);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f", "VERSION-ONE\n");
+
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"s\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var a = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(a != 0, "first build ok");
+    if (a == 0) { return 0; }
+
+    # Same path, same step JSON, DIFFERENT content and a different size. Before
+    # the fingerprint the cache key was identical, so this rebuilt the old bytes
+    # and the edit never reached the image — the defect that surfaced in the
+    # wild as runc reporting a missing file the user could see in their context.
+    _bld_t_file(_stor_cat2(ctx, "/app"), "f", "VERSION-TWO-IS-LONGER\n");
+    var b = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(b != 0, "rebuild ok");
+    if (b == 0) { return 0; }
+
+    assert_eq(streq(_img_id(a), _img_id(b)), 0, "the rebuilt image differs from the first");
+
+    # And prove it by CONTENT, not just by id: gunzip the new top layer and look
+    # for the new bytes. An id difference alone could come from anything.
+    var top: Layer = vec_get(_img_layers(b), 1);
+    var bc = alloc(8);
+    var gz = _img_read_file(_img_blob_path(image_store_root(store), top.digest), bc);
+    assert(gz != 0, "new layer blob readable");
+    if (gz == 0) { return 0; }
+    var out = alloc(262144);
+    var n = gzip_decompress(gz, load64(bc), out, 262144);
+    assert(n > 0, "new layer gunzips");
+    if (n > 0) {
+        assert_eq(_bld_t_memfind(out, n, "VERSION-TWO-IS-LONGER"), 1, "the layer carries the EDITED content");
+        assert_eq(_bld_t_memfind(out, n, "VERSION-ONE\n"), 0, "and not the stale content");
+    }
+
+    # A rebuild must MOVE the tag, not append a second entry under the same
+    # reference. It appended one while the output ref carried a digest: the
+    # digest-aware dedup read that as a pinned add, so the tag never moved and
+    # `image_store_find` (first-match-wins) kept resolving the ORIGINAL image —
+    # a rebuild that changed nothing anyone could reach.
+    var listed = image_store_list(store);
+    var same_ref = 0;
+    var li = 0;
+    while (li < vec_len(listed)) {
+        if (streq(image_ref_full_ref(_image_reference(vec_get(listed, li))), "local/s:v1") == 1) {
+            same_ref = same_ref + 1;
+        }
+        li = li + 1;
+    }
+    assert_eq(same_ref, 1, "exactly one index entry for the rebuilt tag");
+    assert_eq(streq(_img_id(image_store_find(store, "local/s:v1")), _img_id(b)), 1,
+    "and resolving the tag yields the REBUILT image");
+
+    # An unchanged context must still hit the cache, or the fingerprint has made
+    # the cache useless rather than correct.
+    var c = build_image(parse_build_spec(src), store, 0, ctx);
+    assert(c != 0, "third build ok");
+    if (c != 0) {
+        assert_eq(streq(_img_id(b), _img_id(c)), 1, "an unchanged context still reproduces the same image");
+    }
+    return 0;
+}
+
+fn test_bld_source_fingerprint_discriminates() {
+    test_group("build: the copy-source fingerprint discriminates");
+    var ctx = "/tmp/stiva-bld-fp-ctx";
+    _stor_remove_dir_all(ctx);
+    _bld_t_file(_stor_cat2(ctx, "/d"), "a", "one");
+    var fp1 = _bld_source_fingerprint(ctx, "d");
+    assert_eq(streq(fp1, _bld_source_fingerprint(ctx, "d")), 1, "stable across calls");
+
+    # A second file changes the entry count.
+    _bld_t_file(_stor_cat2(ctx, "/d"), "b", "two");
+    var fp2 = _bld_source_fingerprint(ctx, "d");
+    assert_eq(streq(fp1, fp2), 0, "an added file changes it");
+
+    # A size change with the same name.
+    _bld_t_file(_stor_cat2(ctx, "/d"), "b", "two-but-longer");
+    assert_eq(streq(fp2, _bld_source_fingerprint(ctx, "d")), 0, "a size change changes it");
+
+    # An absent source is a value, not an error — a source that disappears must
+    # not collide with one that is merely empty.
+    assert_eq(streq(_bld_source_fingerprint(ctx, "nope"), "absent"), 1, "absent source");
+    _stor_mkdir_p(_stor_cat2(ctx, "/empty"));
+    assert_eq(streq(_bld_source_fingerprint(ctx, "empty"), "absent"), 0, "an empty dir is not 'absent'");
+    return 0;
+}
+
 fn test_bld_cache_ignores_garbage_entry() {
     test_group("build: a garbage cache entry is a miss, not an escape");
     var root = "/tmp/stiva-bld-badcache";
@@ -2478,6 +2589,8 @@ fn main() {
     test_bld_source_traversal_refused();
     test_bld_dest_prefix();
     test_bld_cache_reuse();
+    test_bld_cache_invalidates_on_context_change();
+    test_bld_source_fingerprint_discriminates();
     test_bld_cache_ignores_garbage_entry();
     test_bld_missing_base_without_client();
     return assert_summary();

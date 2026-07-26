@@ -39,7 +39,7 @@ rotated via the existing `container_should_rotate`/`rotate_logs` pair), which is
 `stiva events` possible: the majra hub is per-ContainerManager and in-process, so a one-shot CLI
 could only ever subscribe to its own empty bus. 30 of 35 verbs**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
 net-new `imagelayout.cyr`) + a **35-verb CLI, 31 live**.
-**1967 tests** across the `.tcyr` files (stiva 659 · registry 384 · mgmt 302 · store 275 · runpath 231 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
+**1983 tests** across the `.tcyr` files (stiva 659 · registry 400 · mgmt 302 · store 275 · runpath 231 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -238,7 +238,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1967 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 1983 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -273,7 +273,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1967 Cyrius tests** across `tests/*.tcyr` (stiva 659 · registry 384 · mgmt 302 · store 275 · runpath 231 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
+**1983 Cyrius tests** across `tests/*.tcyr` (stiva 659 · registry 400 · mgmt 302 · store 275 · runpath 231 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
 across files because a monolith hits the cycc identifier-dedup cap — split by **include
 set**, not by test count.
 

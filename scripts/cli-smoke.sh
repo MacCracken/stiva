@@ -354,6 +354,33 @@ else
     bad "the built layer's file is present in the container rootfs" "no marker.txt under $BCID"
 fi
 
+# THE edit-rebuild-run loop. Two separate defects made this silently reuse the
+# old bytes: a cache key that did not cover the source content, and an output
+# ref carrying a digest, which made the digest-aware index dedup append a second
+# entry under the same tag instead of moving it (so `run` kept resolving the
+# original). Both are invisible in unit tests of a single build.
+BUILT_ID_1="$(run build -f "$WORK/Stivafile" -c "$WORK/bctx" | tail -1)"
+printf 'edited-in-place\n' > "$WORK/bctx/payload/marker.txt"
+BUILT_ID_2="$(run build -f "$WORK/Stivafile" -c "$WORK/bctx" | tail -1)"
+if [ -n "$BUILT_ID_1" ] && [ "$BUILT_ID_1" != "$BUILT_ID_2" ]; then
+    ok "editing the context produces a different image"
+else
+    bad "editing the context produces a different image" "both builds gave $BUILT_ID_1"
+fi
+count="$(run images | grep -c 'local/smokebuilt:v1' || true)"
+if [ "$count" = "1" ]; then
+    ok "and the tag MOVES rather than duplicating"
+else
+    bad "and the tag MOVES rather than duplicating" "$count index entries for local/smokebuilt:v1"
+fi
+run run --name builtc2 local/smokebuilt:v1 /bin/true >/dev/null 2>&1
+BCID2="$(run ps -a | tail -1 | awk '{print $1}')"
+if grep -q 'edited-in-place' "$ROOT/containers/$BCID2/rootfs/payload/marker.txt" 2>/dev/null; then
+    ok "and a container from the rebuilt tag sees the EDITED file"
+else
+    bad "and a container from the rebuilt tag sees the EDITED file" "stale or missing marker.txt"
+fi
+
 # A missing spec file must fail, not build an empty image.
 out="$(run build -f "$WORK/nope.toml" -c "$WORK/bctx")"
 assert_absent "a missing Stivafile does not print an image id" "sha256:" "$out"

@@ -11611,6 +11611,169 @@ fn _bld_entries_bytes(entries) {
     return total;
 }
 
+# ── copy-source fingerprint (cache invalidation) ──────────
+#
+# `build_cache_key` hashes `base_digest : index : step_json`, and a copy step's
+# JSON is `{"type":"copy","source":"app","destination":"/app"}` — the source's
+# CONTENT appears nowhere in it. So editing a file in the build context does not
+# invalidate the cache and the next build silently ships the previous layer.
+#
+# That is inherited (`rust-old/src/build.rs:615` has the same shape) and it is
+# not theoretical: it was caught here by a rebuilt binary that never reached the
+# image, surfacing much later as runc reporting `stat /app/x: no such file or
+# directory` for a file the user could see in their context.
+#
+# The fingerprint is METADATA ONLY — path, mode, uid, gid, size, mtime to the
+# nanosecond — so it costs one lstat per entry and never reads file contents.
+# Reading them would cost as much as rebuilding the layer, which is what the
+# cache exists to avoid.
+#
+# LIMIT, stated because a cache that is quietly wrong is worse than none: an
+# edit that preserves path, size, mode, ownership AND nanosecond mtime will not
+# invalidate. Deleting `{root}/cache` forces a full rebuild.
+#
+# The combiner is order-INDEPENDENT (sum + xor + count over a per-entry FNV-1a)
+# because `getdents64` order is filesystem-dependent; a sort would be stable but
+# costs a full materialisation of the entry list for something that only feeds a
+# cache key.
+var _BLD_FNV_OFFSET = 14695981039346656037;
+var _BLD_FNV_PRIME = 1099511628211;
+
+#[must_use]
+fn _bld_fnv1a(s, len) {
+    var h = _BLD_FNV_OFFSET;
+    var i = 0;
+    while (i < len) {
+        h = h ^ load8(s + i);
+        h = h * _BLD_FNV_PRIME;
+        i = i + 1;
+    }
+    return h;
+}
+
+# Walk `abs_dir`, folding each entry's metadata into the 3-cell accumulator
+# `acc` (sum @0, xor @8, count @16). Recurses into real directories only —
+# never through a symlink, matching `_stor_tar_collect`.
+fn _bld_fp_walk(abs_dir, rel_prefix, acc, depth) {
+    if (depth > 64) { return 0; }
+    var fd = sys_open(abs_dir, 65536, 0);          # O_DIRECTORY
+    if (fd < 0) { return 0; }
+    var buf = alloc(4096);
+    var sb = alloc(144);
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var reclen = load16(buf + pos + 16);
+                var name = buf + pos + 19;
+                var skip = 0;
+                if (load8(name) == 46) {
+                    if (load8(name + 1) == 0) { skip = 1; }
+                    if (load8(name + 1) == 46) { if (load8(name + 2) == 0) { skip = 1; } }
+                }
+                if (skip == 0) {
+                    var named = _stor_dup(name);
+                    var abs_child = _stor_join(abs_dir, named);
+                    var rel_child = named;
+                    if (strlen(rel_prefix) > 0) {
+                        rel_child = _stor_cat2(_stor_cat2(rel_prefix, "/"), named);
+                    }
+                    if (sys_lstat(abs_child, sb) == 0) {
+                        var mode = load64(sb + 24) & 65535;
+                        var uid = (load64(sb + 24) >> 32) & 4294967295;
+                        var gid = load64(sb + 32) & 4294967295;
+                        var size = load64(sb + 48);
+                        var mts = load64(sb + 88);             # st_mtime.tv_sec
+                        var mtn = load64(sb + 96);             # st_mtime.tv_nsec
+                        var eb = str_builder_new();
+                        str_builder_add_cstr(eb, rel_child);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, mode);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, uid);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, gid);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, size);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, mts);
+                        str_builder_add_cstr(eb, "|");
+                        str_builder_add_int(eb, mtn);
+                        var es = str_builder_build(eb);
+                        var h = _bld_fnv1a(str_data(es), str_len(es));
+                        store64(acc, load64(acc) + h);
+                        store64(acc + 8, load64(acc + 8) ^ h);
+                        store64(acc + 16, load64(acc + 16) + 1);
+                        if ((mode & 61440) == 16384) {         # S_IFDIR
+                            _bld_fp_walk(abs_child, rel_child, acc, depth + 1);
+                        }
+                    }
+                }
+                pos = pos + reclen;
+            }
+        }
+    }
+    sys_close(fd);
+    return 0;
+}
+
+# "<sum>:<xor>:<count>" for the copy source at `context_dir/source`, or "absent"
+# when it cannot be stat'ed. A source that appears and a source that vanishes
+# must yield different keys, so "absent" is a value rather than an error.
+#[must_use]
+fn _bld_source_fingerprint(context_dir, source) {
+    var path = _img_cat3(context_dir, "/", source);
+    var sb = alloc(144);
+    if (sys_lstat(path, sb) != 0) { return "absent"; }
+    var acc = alloc(24);
+    store64(acc, 0);
+    store64(acc + 8, 0);
+    store64(acc + 16, 0);
+    var mode = load64(sb + 24) & 65535;
+    if ((mode & 61440) == 16384) {
+        _bld_fp_walk(path, "", acc, 0);
+    } else {
+        var eb = str_builder_new();
+        str_builder_add_int(eb, mode);
+        str_builder_add_cstr(eb, "|");
+        str_builder_add_int(eb, load64(sb + 48));              # size
+        str_builder_add_cstr(eb, "|");
+        str_builder_add_int(eb, load64(sb + 88));              # mtime sec
+        str_builder_add_cstr(eb, "|");
+        str_builder_add_int(eb, load64(sb + 96));              # mtime nsec
+        var es = str_builder_build(eb);
+        var h = _bld_fnv1a(str_data(es), str_len(es));
+        store64(acc, h);
+        store64(acc + 8, h);
+        store64(acc + 16, 1);
+    }
+    var ob = str_builder_new();
+    str_builder_add_int(ob, load64(acc));
+    str_builder_add_cstr(ob, ":");
+    str_builder_add_int(ob, load64(acc + 8));
+    str_builder_add_cstr(ob, ":");
+    str_builder_add_int(ob, load64(acc + 16));
+    return str_cstr(str_builder_build(ob));
+}
+
+# The cache key for a COPY step: the oracle's key with the source fingerprint
+# folded in. Kept as a separate function from `build_cache_key` so the oracle's
+# key stays byte-identical for the step types whose JSON really does capture
+# everything that affects the layer.
+#[must_use]
+fn build_copy_cache_key(base_digest, step_index, step, context_dir, source) {
+    var base = build_cache_key(base_digest, step_index, step);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, base);
+    str_builder_add_cstr(sb, ":");
+    str_builder_add_cstr(sb, _bld_source_fingerprint(context_dir, source));
+    var input = str_builder_build(sb);
+    return sha256_digest(str_data(input), str_len(input));
+}
+
 # Reject a COPY `source` that escapes the build context: absolute, empty, or
 # carrying a `..` path component. Returns 1 when the path is safe.
 #
@@ -11921,7 +12084,10 @@ fn build_image(spec, store, client, context_dir) {
         }
 
         if (kind == BUILD_STEP_COPY) {
-            var cache_key = build_cache_key(running_digest, idx, vec_get(steps, idx));
+            # Content-aware: the step JSON alone would let an edited context
+            # reuse the previous layer. See _bld_source_fingerprint.
+            var cache_key = build_copy_cache_key(running_digest, idx, vec_get(steps, idx),
+            context_dir, st.source);
             var size_cell = alloc(8);
             var cdiff_cell = alloc(8);
             var cached = _bld_cache_hit(store, cache_key, size_cell, cdiff_cell);
@@ -12016,7 +12182,20 @@ fn build_image(spec, store, client, context_dir) {
     }
 
     # ── 5. Image record + index ──
-    var out_ref = image_ref_new("local", idef.name, idef.tag, config_digest);
+    # The output reference is a TAG, so its digest slot stays EMPTY.
+    #
+    # The oracle sets `digest: Some(config_digest)` (build.rs:441). Under this
+    # store's digest-aware index dedup that makes every build a PINNED add,
+    # which replaces only an entry with the same manifest digest — so a rebuild
+    # appends a second `local/<name>:<tag>` instead of moving the tag, and
+    # `run`/`find` (first-match-wins) keep resolving the ORIGINAL image. The
+    # rebuild appears to succeed and changes nothing, which is precisely how it
+    # was found: an edited context produced a new image that nothing could
+    # reach.
+    #
+    # A tag is a mutable pointer and must move on rebuild. Nothing is lost: the
+    # image's own id IS the config digest. `image_import` already does this.
+    var out_ref = image_ref_new("local", idef.name, idef.tag, 0);
     var image = image_new(config_digest, out_ref, total_size, all_layers, 0);
     _img_set_manifest_digest(image, manifest_digest);
     if (image_store_add_to_index(store, image) == 0) {

@@ -908,7 +908,14 @@ individually — there is no monolithic "async milestone" gating them together.
   and mentions samay nowhere; treat the bridge as a one-shot proof of concept with nothing
   behind it. Do **not** ship a half-isolated interim over `persistent_spawn` — it threads no
   policy, and kavach's own roadmap says so. Once the symbol exists, the stiva side is ~10 lines.
-**K. Container filesystem entry — ✅ DONE at v3.0.14 (kavach 3.9.1).** Closed on both backends:
+**K. Container filesystem entry — ✅ DONE at v3.0.14 (kavach 3.9.1), and its exit-code sibling
+closed at kavach 3.9.2.** The "failed `execve` no longer reports exit 0" fix in 3.9.1 covered the
+PROCESS backend only; the OCI backend — the one *selected* whenever runc is installed — still
+reported 0 for every container. Found in the §F pass and fixed in kavach 3.9.2, along with two
+follow-ons: runc's own diagnostics were quarantined by kavach's secret scanner, and container
+stderr had been bypassing the externalization gate entirely.
+
+**K (v3.0.14 entry).** Closed on both backends:
 the process backend enters via `unshare(CLONE_NEWUSER|CLONE_NEWNS)` + `chroot`, and the OCI
 backend now points `root.path` at the real rootfs with rootless mappings, a minimal `/proc` +
 `/dev` mount list, and real argv instead of `/bin/sh -c`. Four separate defects were stacked

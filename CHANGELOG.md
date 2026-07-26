@@ -73,17 +73,44 @@ Supporting changes:
 (`build.rs:272`), so a build against a base already in the store needs the network and races the
 registry's mutable tag.
 
-### Found — kavach's OCI backend never reports the container's exit code
-Not introduced here; surfaced while verifying the above. `stiva run <image> /definitely-not-here`
-reports **exit_code=0** on any host with `runc` installed. `oci_exec` passes only a *byte count* to
-`backend_capture_finish`, which sets `exit_code = 0` on every non-negative path — runc's wait status
-is never retrieved. It is the same defect kavach 3.9.1 fixed for the PROCESS backend
-(`confine_last_exit()`), applied to only one of the two backends — and the OCI one is what gets
-*selected* whenever runc is present. Consequences: `stiva wait` always yields 0, `state.json`'s
-`exit_status` is wrong, and `on-failure` restart policies can never observe a failure. Filed as
-`kavach/docs/development/issues/2026-07-26-oci-backend-never-reports-the-container-exit-code.md`.
+### Fixed — two defects that made a rebuild silently ship the previous image
+Both were found by running the binary, not by unit tests, and each alone was enough to make
+`stiva build` useless in the edit-rebuild-run loop it exists for. Together they presented as an
+edited file simply never reaching the image.
 
-### Tests — 1906 → 1967 unit, smoke 69 → 75
+**1. The build cache did not cover the source content.** `build_cache_key` hashes
+`base_digest : index : step_json`, and a copy step's JSON is
+`{"type":"copy","source":"app","destination":"/app"}` — the source's *content* appears nowhere in
+it, so editing the context did not invalidate the cache. Inherited (`rust-old/src/build.rs:615`
+has the same shape). `build_copy_cache_key` now folds in `_bld_source_fingerprint`, a
+**metadata-only** walk (path, mode, uid, gid, size, mtime to the nanosecond) — one `lstat` per
+entry, never a file read, because reading contents would cost as much as rebuilding the layer the
+cache exists to skip. The combiner is order-independent (sum + xor + count over a per-entry FNV-1a)
+since `getdents64` order is filesystem-dependent. *Limit, stated because a quietly-wrong cache is
+worse than none:* an edit preserving path, size, mode, ownership **and** nanosecond mtime will not
+invalidate; deleting `{root}/cache` forces a full rebuild.
+
+**2. The output reference carried a digest, so a rebuild appended instead of replacing.** The
+oracle sets `digest: Some(config_digest)` (`build.rs:441`). Under this store's digest-aware index
+dedup that reads as a **pinned** add, which replaces only an entry with the same manifest digest —
+so a rebuild left *two* `local/<name>:<tag>` entries and `image_store_find` (first-match-wins) kept
+resolving the **original**. The rebuild reported a new image id that nothing could reach. A tag is
+a mutable pointer, so its digest slot now stays empty, matching `image_import`. Nothing is lost:
+the image's own id *is* the config digest.
+
+### Changed — kavach 3.9.1 → 3.9.2
+Fixes the OCI backend never reporting the container's exit code: `stiva run <image> /nope` used to
+print `exit_code=0` on any host with `runc` installed, because `oci_exec` passed only a *byte count*
+to `backend_capture_finish`. `stiva wait` therefore always yielded 0, `state.json`'s `exit_status`
+was wrong across restarts, and `on-failure` restart policies could never observe a failure. It was
+the same defect kavach 3.9.1 fixed for the PROCESS backend, applied to only one of the two — and
+the OCI one is what gets *selected* whenever runc is present. Authored from here; see kavach's
+3.9.2 CHANGELOG, which also covers two follow-ons found in the same pass: runc's own diagnostics
+were being quarantined by kavach's secret scanner (so every runtime error read
+"externalization blocked" instead of its cause), and container **stderr had been bypassing the
+externalization gate entirely** because it went to `/dev/null`.
+
+### Tests — 1906 → 1983 unit, smoke 69 → 78
 `build.cyr` now also lands in `tests/registry.tcyr`: its driver needs exactly that 6-module include
 set, the canned transport there is the only way to exercise a remote base without a network, and it
 puts the driver in the unit shape the cycc 20/21 miscompile is known to bite — which the 26-module
