@@ -45,7 +45,7 @@ remains). The **Status** column marks each:
 | `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
 | `stiva run -d <IMAGE> [CMD...]` | **Live** | Detached run over kavach 3.9.0 `sandbox_spawn`. Returns the container id immediately; state survives into other stiva processes, and `stop` signals the recorded pid when the in-memory handle is gone. **See the rootfs caveat below.** |
-| `stiva exec <ID> <CMD...>` | v3.0.x (planned) / v3.1 (blocked) | Execute command in a running container (nsenter; non-interactive is v3.0.x, `-it` needs cyrius stackless coroutines) |
+| `stiva exec [-e K=V]... [-w DIR] <CONTAINER> <CMD> [ARGS...]` | **Live** | Run a command inside a running container via `nsenter`. stdout and stderr stay separate, and the command's exit code becomes stiva's. Non-interactive only — `-i`/`-t` are not offered |
 | `stiva top <ID>` | **Live** | List processes inside a running container (`/proc` walk over the descendants of the container PID) |
 | `stiva cp <SRC> <DST>` | **Live** | Copy files host↔container. Exactly one side is `<container>:<path>`; both or neither is refused rather than guessed |
 | `stiva kill <ID> [-s SIGNAL]` | **Live** | Send a signal (number, 1–64, default 15 = SIGTERM). Requires a running container |
@@ -81,6 +81,22 @@ remains). The **Status** column marks each:
 > These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
 > (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired yet — passing them is a
 > usage error. They arrive with the `ContainerManager` work on the v3.0.x line.
+
+## `stiva exec` Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-e, --env <K=V>` | — | Environment variable, **repeatable**. A bare `NAME` is a usage error |
+| `-w, --workdir <DIR>` | the container's cwd | Working directory inside the container |
+
+> **Rootless containers work, with a caveat.** When the container owns its own user namespace,
+> `exec` enters the **mount** and **user** namespaces (plus the container's root) but not the
+> network, UTS or IPC ones — joining those needs `CAP_SYS_ADMIN` in the owning user namespace,
+> which is exactly what an unprivileged exec cannot have. A command that inspects the container's
+> network from inside `exec` therefore sees the host's. Privileged containers get the full set.
+>
+> **`exec -it` is not offered.** There is no pty helper in the dependency tree at all, so the
+> interactive half has no substrate — it is not merely waiting on the async work.
 
 ## `stiva build` Flags
 

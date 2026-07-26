@@ -1600,6 +1600,35 @@ fn container_manager_signal(mgr, id, signal) {
     return send_signal(pid, signal);
 }
 
+# Exec a command inside a running container (rust-old: exec, container.rs:702).
+# `command` is a vec of cstrs, `env` a vec of "K=V" cstrs or 0, `workdir` a cstr
+# or 0. Returns a ContainerExecResult*, or 0 with the detail already printed.
+#
+# RUNNING only, not RUNNING-or-PAUSED: nsenter into a frozen container's
+# namespaces succeeds and then the exec'd process blocks in the freezer with no
+# way out, so the caller hangs forever. `top` accepts PAUSED because reading
+# /proc is safe against a frozen process; running a command is not.
+fn container_manager_exec(mgr, id, command, env, workdir) {
+    var mm: ContainerManager = mgr;
+    # Resolve first, so the two failures are distinguishable. `require_pid`
+    # collapses them: it returns -1 both for a container that does not exist
+    # (having printed "container not found") and for one that exists in the
+    # wrong state (printing nothing), so branching on its return alone leaves a
+    # stopped container failing SILENTLY.
+    if (container_manager_get(mgr, id) == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return 0;
+    }
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    var pid = container_manager_require_pid(mgr, id, allowed, 1);
+    if (pid <= 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "container is not running");
+        return 0;
+    }
+    return exec_in_container(mm.root, pid, command, env, workdir);
+}
+
 # Pause a running container via the cgroup freezer (rust-old: pause, :732).
 fn container_manager_pause(mgr, id) {
     var mm: ContainerManager = mgr;

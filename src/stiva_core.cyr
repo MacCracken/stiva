@@ -239,6 +239,48 @@ fn stiva_signal(s, id, signal) {
     return r;
 }
 
+# Exec a command inside a running container (rust-old: Stiva::exec, lib.rs).
+# Returns a ContainerExecResult*, or 0 with the detail printed.
+#
+# Audited, like the oracle: AUDIT_OP_EXEC exists precisely for this, and running
+# an arbitrary command inside a container is the operation the trail most needs.
+# The command itself goes in the metadata — an exec entry that records only "an
+# exec happened" is not an audit trail.
+fn stiva_exec(s, id, command, env, workdir) {
+    var ss: Stiva = s;
+    var res = container_manager_exec(ss.containers, id, command, env, workdir);
+    var result = AUDIT_RESULT_FAILED;
+    if (res != 0) { result = AUDIT_RESULT_SUCCESS; }
+    var e = audit_entry_container(AUDIT_OP_EXEC, id, result, 0);
+    var md = json_v_obj_new();
+    var arr = json_v_arr_new();
+    if (command != 0) {
+        var i = 0;
+        while (i < vec_len(command)) {
+            json_v_arr_push(arr, json_v_str_new(str_from(vec_get(command, i))));
+            i = i + 1;
+        }
+    }
+    json_v_obj_set(md, str_from("command"), arr);
+    # Deliberately NOT the env: `stiva exec -e AWS_SECRET_ACCESS_KEY=…` would
+    # write the secret into an append-only audit log that outlives the container.
+    # The key NAMES are the useful part and carry no secret.
+    var keys = json_v_arr_new();
+    if (env != 0) {
+        var j = 0;
+        while (j < vec_len(env)) {
+            var kv = vec_get(env, j);
+            var eq = _img_find(kv, 61);          # '='
+            if (eq > 0) { json_v_arr_push(keys, json_v_str_new(str_from(_img_slice(kv, 0, eq)))); }
+            j = j + 1;
+        }
+    }
+    json_v_obj_set(md, str_from("env_keys"), keys);
+    audit_entry_with_metadata(e, str_cstr(json_v_build(md)));
+    _stiva_emit_audit(s, e);
+    return res;
+}
+
 # The remaining lifecycle verbs are pure delegation (not audited by the
 # oracle): restart/pause/unpause/rename/update, and the read ops
 # stats/wait/logs/log_tail/get_rootfs.
@@ -548,6 +590,48 @@ fn mcp_handle_build(s, params) {
     str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
 }
 
+# stiva_exec (oracle mcp.rs). `command` is a JSON array of strings; `env` an
+# optional array of "K=V"; `workdir` an optional string.
+fn mcp_handle_exec(s, params) {
+    var id = _mcp_param_str(params, "id");
+    if (id == 0) { return mcp_result_err("missing required parameter: id"); }
+    var cmd_v = json_v_obj_get(params, "command");
+    if (cmd_v == 0) { return mcp_result_err("missing required parameter: command"); }
+    if (json_v_is_arr(cmd_v) == 0) { return mcp_result_err("command must be an array of strings"); }
+    var command = vec_new();
+    var i = 0;
+    while (i < json_v_arr_len(cmd_v)) {
+        var el = json_v_arr_get(cmd_v, i);
+        if (json_v_is_str(el) == 1) { vec_push(command, str_cstr(json_v_str(el))); }
+        i = i + 1;
+    }
+    if (vec_len(command) == 0) { return mcp_result_err("command must be a non-empty array of strings"); }
+
+    var env = vec_new();
+    var env_v = json_v_obj_get(params, "env");
+    if (env_v != 0) {
+        if (json_v_is_arr(env_v) == 1) {
+            var j = 0;
+            while (j < json_v_arr_len(env_v)) {
+                var ev = json_v_arr_get(env_v, j);
+                if (json_v_is_str(ev) == 1) { vec_push(env, str_cstr(json_v_str(ev))); }
+                j = j + 1;
+            }
+        }
+    }
+    var workdir = _mcp_param_str(params, "workdir");
+
+    var res = stiva_exec(s, id, command, env, workdir);
+    if (res == 0) { return mcp_result_err(_img_cat2("exec failed: ", id)); }
+    var rr: ContainerExecResult = res;
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("exit_code"), json_v_int_new(rr.exit_code));
+    json_v_obj_set(o, str_from("stdout"), json_v_str_new(str_from(rr.stdout)));
+    json_v_obj_set(o, str_from("stderr"), json_v_str_new(str_from(rr.stderr)));
+    json_v_obj_set(o, str_from("duration_ms"), json_v_int_new(rr.duration_ms));
+    return mcp_result_ok(str_cstr(json_v_build_pretty(o, 2)));
+}
+
 # stiva_pull (oracle mcp.rs:271).
 fn mcp_handle_pull(s, params) {
     var image = _mcp_param_str(params, "image");
@@ -710,12 +794,11 @@ fn mcp_read_resource(s, uri) {
 
 # Tool dispatch by name (oracle mcp.rs:256).
 #
-# `stiva_run` and `stiva_exec` stay advertised in tool_list() but report why they
-# are unavailable rather than being dropped from the schema: the schema is the
-# contract a client caches, and silently shrinking it is worse than a precise
-# error. Both are gated on work that is not done, not on anything a caller can
-# fix — `run` needs kavach `sandbox_spawn` for the detached mode the oracle uses
-# (mcp.rs:291-334 sets detach=true), and `exec` needs roadmap §D.
+# `stiva_run` stays advertised in tool_list() but reports why it is unavailable
+# rather than being dropped from the schema: the schema is the contract a client
+# caches, and silently shrinking it is worse than a precise error. It is gated on
+# the detached mode the oracle's MCP run uses (mcp.rs:291-334 sets detach=true).
+# `stiva_exec` is LIVE as of §D.
 fn mcp_handle_tool(s, name, params) {
     if (name == 0) { return mcp_result_err("missing tool name"); }
     if (streq(name, "stiva_pull") == 1) { return mcp_handle_pull(s, params); }
@@ -729,8 +812,6 @@ fn mcp_handle_tool(s, name, params) {
         return mcp_result_err(
         "stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)");
     }
-    if (streq(name, "stiva_exec") == 1) {
-        return mcp_result_err("stiva_exec is not available in this build: exec is roadmap section D");
-    }
+    if (streq(name, "stiva_exec") == 1) { return mcp_handle_exec(s, params); }
     return mcp_result_err(_img_cat2("unknown tool: ", name));
 }

@@ -905,6 +905,151 @@ fn test_require_pid_empty_allowed_list() {
     return 0;
 }
 
+# ══ §D exec ══════════════════════════════════════════════
+#
+# `_exec_capture2` is tested directly rather than only through
+# `exec_in_container`, because nsenter into a live container needs a live
+# container — while every property that can go wrong (the stdout/stderr SPLIT,
+# the exit status, the deadlock) belongs to the primitive and is testable with
+# an ordinary child process, no root and no namespaces.
+
+fn _t_exec_stub(path, body) {
+    sys_unlink(path);
+    file_write_all(path, body, strlen(body));
+    sys_chmod(path, 493);                      # 0755
+    return path;
+}
+
+fn _t_exec_args(path) {
+    var v = vec_new();
+    vec_push(v, path);
+    return v;
+}
+
+fn test_exec_capture2_splits_streams() {
+    test_group("exec_capture2_splits_streams");
+    var stub = _t_exec_stub("/tmp/stiva-t-exec-split",
+    "#!/bin/sh\necho to-stdout\necho to-stderr >&2\nexit 7\n");
+    var err_path = "/tmp/stiva-t-exec-split.err";
+    var buf = alloc(65536);
+    var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, 65535, err_path);
+    assert(n > 0, "stdout captured");
+    store8(buf + n, 0);
+    # THE assertion no existing code in this tree could satisfy: every exec path
+    # before §D returned stderr = "" (kavach's confine_capture dup2s one fd onto
+    # both 1 and 2; lib/process.cyr's exec_capture sends fd 2 to /dev/null).
+    assert_eq(strstr(buf, "to-stdout") >= 0, 1, "stdout holds the stdout line");
+    assert_eq(strstr(buf, "to-stderr") >= 0, 0, "and NOT the stderr line");
+    var err = _rt_take_file(err_path, 65535);
+    assert_eq(strstr(err, "to-stderr") >= 0, 1, "stderr holds the stderr line");
+    assert_eq(strstr(err, "to-stdout") >= 0, 0, "and NOT the stdout line");
+    assert_eq(rt_last_exec_exit(), 7, "the child's real exit code");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_exec_capture2_large_stderr_does_not_deadlock() {
+    test_group("exec_capture2_large_stderr_does_not_deadlock");
+    # THE test that matters. A child writing well past a pipe buffer to stderr
+    # BEFORE its first stdout byte deadlocks any single-threaded parent that
+    # drains two pipes — proven by execution while designing this: the
+    # sequential shape hung until killed, the concurrent one passed. Sending
+    # stderr to a FILE removes the second pipe entirely, so there is nothing to
+    # deadlock against.
+    #
+    # This test HANGS rather than fails if that regresses, which is the honest
+    # signal — a deadlock is not an assertion failure.
+    var stub = _t_exec_stub("/tmp/stiva-t-exec-bigerr",
+    "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
+    var err_path = "/tmp/stiva-t-exec-bigerr.err";
+    var buf = alloc(65536);
+    var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, 65535, err_path);
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "done-stdout") >= 0, 1, "stdout arrives after ~82 KiB of stderr");
+    assert_eq(rt_last_exec_exit(), 3, "and the exit code survives");
+    var err = _rt_take_file(err_path, 131072);
+    assert(strlen(err) > 65536, "the whole stderr was captured");
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_exec_capture2_env_and_workdir() {
+    test_group("exec_capture2_env_and_workdir");
+    var stub = _t_exec_stub("/tmp/stiva-t-exec-env",
+    "#!/bin/sh\necho \"V=$STIVA_T_VAR\"\npwd\n");
+    var err_path = "/tmp/stiva-t-exec-env.err";
+    var env = vec_new();
+    vec_push(env, "STIVA_T_VAR=hello");
+    # PATH is deliberately absent: the child gets EXACTLY this environment, so a
+    # test that passed only because the parent's env leaked through would be
+    # measuring nothing.
+    var wd = "/tmp";
+    var buf = alloc(4096);
+    var n = _exec_capture2(_t_exec_args(stub), env, wd, buf, 4095, err_path);
+    assert(n > 0, "captured output");
+    store8(buf + n, 0);
+    assert_eq(strstr(buf, "V=hello") >= 0, 1, "env reached the child");
+    assert_eq(strstr(buf, "/tmp") >= 0, 1, "workdir took effect");
+    _rt_take_file(err_path, 4096);
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_exec_capture2_missing_binary() {
+    test_group("exec_capture2_missing_binary");
+    var buf = alloc(1024);
+    var n = _exec_capture2(_t_exec_args("/definitely/not/here"), 0, 0, buf, 1023,
+    "/tmp/stiva-t-exec-missing.err");
+    assert_eq(n, 0, "no output from a binary that never executed");
+    assert_eq(rt_last_exec_exit(), 127, "a failed execve is 127, not 0");
+    _rt_take_file("/tmp/stiva-t-exec-missing.err", 1024);
+    return 0;
+}
+
+fn test_exec_capture2_signalled_child() {
+    test_group("exec_capture2_signalled_child");
+    var stub = _t_exec_stub("/tmp/stiva-t-exec-sig", "#!/bin/sh\nkill -9 $$\n");
+    var buf = alloc(1024);
+    _exec_capture2(_t_exec_args(stub), 0, 0, buf, 1023, "/tmp/stiva-t-exec-sig.err");
+    # 128 + signal, matching kavach's confine_capture, so an exit status means
+    # the same thing whichever side produced it.
+    assert_eq(rt_last_exec_exit(), 137, "SIGKILL -> 128 + 9");
+    _rt_take_file("/tmp/stiva-t-exec-sig.err", 1024);
+    sys_unlink(stub);
+    return 0;
+}
+
+fn test_exec_capture2_empty_args() {
+    test_group("exec_capture2_empty_args");
+    var buf = alloc(64);
+    assert_eq(_exec_capture2(vec_new(), 0, 0, buf, 63, "/tmp/stiva-t-exec-empty.err"), 0 - 1,
+    "an empty argv is refused, not forked");
+    return 0;
+}
+
+fn test_exec_in_container_empty_command() {
+    test_group("exec_in_container_empty_command");
+    # The oracle's only test for this function (rust-old/src/runtime.rs:1745).
+    assert_eq(exec_in_container("/tmp", 1, vec_new(), 0, 0), 0, "empty command -> failure");
+    assert_eq(exec_in_container("/tmp", 1, 0, 0, 0), 0, "null command -> failure");
+    return 0;
+}
+
+fn test_cm_exec_requires_running() {
+    test_group("cm_exec_requires_running");
+    var root = "/tmp/stiva-t-cm-exec";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    assert(mgr != 0, "manager created");
+    if (mgr == 0) { return 0; }
+    var cmd = vec_new();
+    vec_push(cmd, "/bin/true");
+    # No such container at all.
+    assert_eq(container_manager_exec(mgr, "nosuchid", cmd, 0, 0), 0, "unknown container -> 0");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_container_log_tail();
@@ -955,6 +1100,14 @@ fn main() {
     test_image_index_remove_shared_blob();
     test_image_index_corrupt_guard();
     test_require_pid_empty_allowed_list();
+    test_exec_capture2_splits_streams();
+    test_exec_capture2_large_stderr_does_not_deadlock();
+    test_exec_capture2_env_and_workdir();
+    test_exec_capture2_missing_binary();
+    test_exec_capture2_signalled_child();
+    test_exec_capture2_empty_args();
+    test_exec_in_container_empty_command();
+    test_cm_exec_requires_running();
     return assert_summary();
 }
 

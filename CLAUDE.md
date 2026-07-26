@@ -7,13 +7,13 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.4.78** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.14
+- **Version**: SemVer, currently 3.0.15
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
 - **Recipes**: [zugot](https://github.com/MacCracken/zugot) — takumi build recipes
 
-## ✅ Porting Status — v3.0.14 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
+## ✅ Porting Status — v3.0.15 RELEASED: Rust → Cyrius (single-node runtime; **group A complete**, v3.0.x continues, small blocked residue → v3.1)
 
 Stiva has been ported from Rust to the **Cyrius** language (AGNOS ecosystem port
 pattern). **v3.0.0 = a working single-node OCI runtime**; **v3.0.1–v3.0.4 = group A
@@ -38,8 +38,8 @@ COMPLETE — lifecycle events are now PERSISTED to `{root}/events.jsonl` (JSONL,
 rotated via the existing `container_should_rotate`/`rotate_logs` pair), which is what made
 `stiva events` possible: the majra hub is per-ContainerManager and in-process, so a one-shot CLI
 could only ever subscribe to its own empty bus. 30 of 35 verbs**. All 16 Rust modules → **26** Cyrius `src/*.cyr` domain modules (incl. the
-net-new `imagelayout.cyr`) + a **35-verb CLI, 31 live**.
-**1983 tests** across the `.tcyr` files (stiva 659 · registry 400 · mgmt 302 · store 275 · runpath 231 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
+net-new `imagelayout.cyr`) + a **35-verb CLI, 32 live**.
+**2003 tests** across the `.tcyr` files (stiva 659 · registry 400 · runpath 251 · mgmt 302 · store 275 · convert 116; run via `cyrius tests tests/`), `dist/stiva.cyr` built, pin **6.4.78**.
 
 **Group A — OCI image-layout + transfer — is COMPLETE (v3.0.1–v3.0.4)**: the local store
 is now a valid **OCI image layout** (`oci-layout` + `index.json` + `blobs/sha256/`, the
@@ -188,7 +188,7 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — 35 registered verbs, **31 live** (19 at v3.0.0 + `save`/`load` at v3.0.2 + `pull`/`push` at v3.0.10 + the Tier-1 sweep at v3.0.11 + `events` at v3.0.13; `convert` gained its compose format at v3.0.6, and `logs` a `--scan` flag then `-f`); the remaining 4 (`exec`, `checkpoint`, `restore`, `diff`) print a "not yet wired" message — mostly **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
+CLI binary: `stiva` — 35 registered verbs, **32 live** (19 at v3.0.0 + `save`/`load` at v3.0.2 + `pull`/`push` at v3.0.10 + the Tier-1 sweep at v3.0.11 + `events` at v3.0.13; `convert` gained its compose format at v3.0.6, and `logs` a `--scan` flag then `-f`); the remaining 3 (`checkpoint`, `restore`, `diff`) print a "not yet wired" message — mostly **v3.0.x (planned)** blocking glue over the sync core, a small residue is **v3.1 (blocked)** (see `docs/cli.md`).
 
 ## kavach Integration
 
@@ -238,7 +238,7 @@ Stiva uses these kavach features — keep them wired:
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 1983 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2003 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -273,7 +273,7 @@ docs/ (when earned):
 
 ## Testing
 
-**1983 Cyrius tests** across `tests/*.tcyr` (stiva 659 · registry 400 · mgmt 302 · store 275 · runpath 231 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
+**2003 Cyrius tests** across `tests/*.tcyr` (stiva 659 · registry 400 · runpath 251 · mgmt 302 · store 275 · convert 116), each mirroring the matching rust-old `#[cfg(test)]` cases. The suite is split
 across files because a monolith hits the cycc identifier-dedup cap — split by **include
 set**, not by test count.
 

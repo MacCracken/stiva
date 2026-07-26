@@ -5,6 +5,82 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.15] — 2026-07-26 — `build` and `exec` are live (§F, §D)
+
+### Added — `stiva exec` is live (roadmap §D). 32 of 35 verbs
+Non-interactive exec into a running container, over `nsenter`, exactly as the oracle does it
+(`rust-old/src/runtime.rs:491-561`) — this path deliberately does not touch kavach, because
+entering an existing container's namespaces is `execve("nsenter", …)` in a forked child and kavach
+has no API for it.
+
+**Not over kavach's `persistent_spawn`, despite the roadmap suggesting it.** That path runs
+`check_command` with the default runtime guard, whose blocklist rejects base names `sh`, `bash`,
+`dash`, `python`, `node` — so `stiva exec <ctr> /bin/sh`, the canonical use, would be *refused*. It
+also threads an empty envp, has no working-directory hook, and sends stderr to `/dev/null`.
+
+**`_exec_capture2` — the first dual-stream capture in the tree.** Every exec path before this
+returned `stderr = ""`: kavach's `confine_capture` `dup2`s one fd onto both 1 and 2, and the
+stdlib's `exec_capture` sends fd 2 to `/dev/null`. stdout comes back over a pipe, stderr into a
+temp file, and **the asymmetry is the design**: draining two pipes from one thread deadlocks the
+moment either fills — a child writing 64 KiB to stderr before its first stdout byte blocks forever
+against a parent reading stdout. The usual fix is `poll`/`epoll`, but stiva has no `sys_poll`
+wrapper on any arch and `epoll_event` is packed differently on x86_64 (data at +4, stride 12) than
+aarch64 (+8, stride 16) — while the AGNOS wrappers take a different *arity* again, so an epoll
+drain would not compile for the v3.2 AGNOS target and would introduce this tree's first `#ifdef`.
+A regular file never blocks its writer. `test_exec_capture2_large_stderr_does_not_deadlock` pushes
+~82 KiB of stderr ahead of stdout; it hangs rather than fails if this regresses, which is the
+honest signal.
+
+**Three nsenter divergences, without which exec cannot work in the mode stiva actually runs in.**
+The oracle's fixed `-p -m -n -u -i` assumes a privileged daemon; unprivileged, every one of those
+flags fails with `reassociate to namespaces failed: Operation not permitted`. Determined by
+experiment against a live rootless container, not by reading:
+- **`-U --preserve-credentials` when the target owns a different user namespace.**
+  `--preserve-credentials` is required, not cosmetic: without it nsenter calls `setgroups()` on
+  entry, which an unprivileged user namespace denies. With it we keep our own credentials and gain
+  no capabilities inside — which is precisely why the network, UTS and IPC namespaces are *not*
+  entered: joining them needs `CAP_SYS_ADMIN` in the owning user namespace. Mount + user + root is
+  the reachable set, and it is the set exec needs. The privileged path still uses the oracle's full
+  flag set; `_rt_userns_differs` picks between them by comparing `/proc/<pid>/ns/user` symlink
+  targets, so an unreadable link falls back to *parity*.
+- **`-r`**, because kavach's process backend `chroot`s rather than `pivot_root`s: entering the
+  mount namespace alone leaves our root at `/` and `/app/x` reports "No such file or directory"
+  for a binary plainly in the image.
+- **`--wd=/proc/<pid>/root<dir>`** rather than `--wd=<dir>`, because nsenter resolves `--wd`
+  *before* `-r` takes effect — a plain `--wd=/app` dies with "cannot open /app" for a directory
+  that exists only in the container. Omitting the flag entirely is also wrong: the cwd then stays
+  the caller's, which does not exist under the new root, and `getcwd()` inside fails.
+
+Hardening beyond the oracle: `NO_NEW_PRIVS` before `execve` (the oracle sets it at container launch
+but not here, and an exec is the same trust boundary), and stdin from `/dev/null` so the child
+cannot steal the user's terminal.
+
+`exec -it` is **not** offered, and the blocker is nearer than the coroutine work: there is no pty
+helper anywhere in `lib/` or `src/` (`openpty`/`posix_openpt`/`/dev/ptmx`/`TIOCSCTTY` all return
+nothing), so `-t` has no substrate even if the runtime could suspend mid-body.
+
+CLI: `-e/--env` is registered with **`cmdit_repeat`**, not `cmdit_str` — `-e A=1 -e B=2` through a
+single-value flag silently drops `A=1`. A bare `NAME` with no `=` is a usage error rather than
+being passed through, since `execve` rejects the whole envp for one malformed entry. stdout goes to
+stdout and stderr to stderr (the point of capturing them apart), and **the command's exit code
+becomes stiva's**, the way `docker exec` behaves.
+
+Also live: `stiva_exec` on the facade — audited under `AUDIT_OP_EXEC` with the command in the
+metadata, but deliberately **not** the env values: `-e AWS_SECRET_ACCESS_KEY=…` would otherwise
+write the secret into an append-only log that outlives the container. The key *names* are recorded.
+MCP `stiva_exec` is live too, replacing the stub that reported the tool unavailable.
+
+`container_manager_exec` resolves the container before calling `require_pid`, which collapses
+"no such container" and "wrong state" into one `-1` — branching on that alone left a stopped
+container failing **silently**, caught by the smoke suite.
+
+### Tests — 1983 → 2003 unit, smoke 78 → 87
+New benchmark `exec_capture2_trivial_child` ≈ **29 ms** (fork + two redirections + drain + waitpid
+against a shell stub — process-creation bound, tracked because every `stiva exec` pays it once).
+The smoke fixture now builds **two** static payloads; it was capped at one because layers over
+1 MiB were written as corrupt gzip, which the 3.0.14 encoder fix resolved — so the second payload
+also regression-tests that fix on a real image.
+
 ### Added — `stiva build` is live (roadmap §F). 31 of 35 verbs
 `build_image` in `src/build.cyr` turns a `Stivafile` into a real OCI image: base resolve → per-step
 layer → OCI config → manifest → `index.json`. Verified on the binary, not just in tests — a static

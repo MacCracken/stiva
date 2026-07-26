@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.14: single-node OCI runtime (group A complete, §B complete)
+## Status — v3.0.15: single-node OCI runtime (group A, §B, §C, §D, §E, §F, §G complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -38,7 +38,7 @@ subsystems at 85–100% parity with the Rust oracle. The runtime is single-node
 run-to-completion; the remaining surface is synchronous/blocking work over the ported
 sync core — the **v3.0.x line** (buildable now, e.g. non-interactive `exec` and CRIU),
 with a small externally-blocked residue in **v3.1** (see [below](#whats-next)).
-**1983 tests** across `tests/*.tcyr`.
+**2003 tests** across `tests/*.tcyr`.
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (1983 tests)
+cyrius tests tests/                      # run the test suite (2003 tests)
 ```
 
 ### CLI
@@ -153,7 +153,7 @@ single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm) wired in
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 1983 tests
+cyrius tests tests/                            # 2003 tests
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)

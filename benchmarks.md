@@ -1,26 +1,27 @@
 # Benchmarks
 
-Latest: **2026-07-26T19:24:13Z** — commit `ea072a4`
+Latest: **2026-07-26T19:53:12Z** — commit `c4c0934`
 
-Tracking: `3808225` (baseline) → `3dfd1d5` (mid) → `ea072a4` (current)
+Tracking: `3808225` (baseline) → `3dfd1d5` (mid) → `c4c0934` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`3dfd1d5`) | Current (`ea072a4`) |
+| Benchmark | Baseline (`3808225`) | Mid (`3dfd1d5`) | Current (`c4c0934`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 7.195 µs | 6.972 µs **-3%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.858 µs | 15.378 µs |
-| `compose_yaml_to_toml` | — | 32.539 µs | 29.125 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.383 ms | 1.353 ms |
-| `flatten_layers_2x60_files_4kib` | — | 1.484 ms | 1.413 ms |
-| `event_json_build` | — | — | 5.960 µs |
-| `event_log_append` | — | — | 7.759 µs |
-| `event_ts_parse` | — | — | 1.593 µs |
-| `gzip_compress_2mib` | — | — | 38.957 ms |
-| `gzip_decompress_2mib` | — | — | 9.060 ms |
-| `unpack_layer_gz_20_files_4kib` | — | — | 1.001 ms |
-| `build_copy_layer_20_files_4kib` | — | — | 2.743 ms |
+| `oci_config_build+serialize` | 7.203 µs | 6.937 µs **-4%** | 6.898 µs **-4%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.437 µs | 15.268 µs **-4%** |
+| `compose_yaml_to_toml` | — | 29.119 µs | 29.030 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.334 ms | 1.341 ms |
+| `flatten_layers_2x60_files_4kib` | — | 1.358 ms | 1.381 ms |
+| `event_json_build` | — | — | 5.945 µs |
+| `event_log_append` | — | — | 7.731 µs |
+| `event_ts_parse` | — | — | 1.578 µs |
+| `gzip_compress_2mib` | — | — | 38.811 ms |
+| `gzip_decompress_2mib` | — | — | 9.082 ms |
+| `unpack_layer_gz_20_files_4kib` | — | — | 1.011 ms |
+| `build_copy_layer_20_files_4kib` | — | — | 2.764 ms |
+| `exec_capture2_trivial_child` | — | — | 28.353 ms |
 
 ---
 

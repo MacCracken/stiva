@@ -69,12 +69,18 @@ mkdir -p "$WORK/rootfs/bin"
 echo 'hello-from-the-image' > "$WORK/rootfs/greeting.txt"
 HAVE_PAYLOAD=0
 if command -v cc >/dev/null 2>&1; then
-    # ONE binary only: two static binaries push the layer past ~1 MB, which
-    # currently fails to unpack (a pre-existing defect, tracked separately).
     # `sleeper` doubles as the short-run payload — invoked with an argument it
-    # exits immediately, so it serves both groups.
+    # exits immediately, so it serves both the run and detach groups.
+    #
+    # A SECOND binary is fine now. It was not before: two static binaries push
+    # the layer past 1 MiB, and every layer over that boundary was written as
+    # corrupt gzip until the batch-encoder defect was fixed (see the 3.0.14
+    # CHANGELOG). Two payloads here therefore also regression-test that fix on
+    # a real image.
     printf '#include <unistd.h>\nint main(int argc,char**argv){if(argc<2)sleep(30);return 0;}\n' > "$WORK/s.c"
-    if cc -static -o "$WORK/rootfs/bin/sleeper" "$WORK/s.c" 2>/dev/null; then
+    printf '#include <unistd.h>\nint main(void){write(1,"to-stdout\\n",10);write(2,"to-stderr\\n",10);return 3;}\n' > "$WORK/e.c"
+    if cc -static -o "$WORK/rootfs/bin/sleeper" "$WORK/s.c" 2>/dev/null \
+       && cc -static -o "$WORK/rootfs/bin/errw" "$WORK/e.c" 2>/dev/null; then
         HAVE_PAYLOAD=1
     fi
 fi
@@ -401,9 +407,50 @@ assert_contains "a run step is refused with a reason" "not executed" "$out"
 out="$(run images)"
 assert_absent "and no image is indexed for it" "local/smokerun:v1" "$out"
 
-group "deferred verbs still say so"
-out="$(run exec c2 /bin/true)"
-assert_contains "exec reports not-yet-wired" "not yet wired" "$out"
+group "exec"
+# Usage/validation cases run everywhere. The live-exec cases need nsenter AND a
+# detached container, so they are gated — but the gate is NOT silent: a skip is
+# reported, because a quietly-skipped test reads identically to a passing one.
+out="$(run exec)"
+assert_contains "exec with no args prints usage" "usage: exec" "$out"
+out="$(run exec c2)"
+assert_contains "exec with no command prints usage" "usage: exec" "$out"
+# NOTE: `$STIVA` directly, not the `run` helper — `run` pipes through grep, so
+# `$?` would be grep's status, and it folds 2>&1, which would defeat every
+# stream-separation assertion below.
+"$STIVA" exec -e JUSTNAME c2 /bin/true >/dev/null 2>&1
+assert_exit "a bare --env NAME is a usage error" 2 "$?"
+out="$(run exec definitely-no-such-container /bin/true 2>&1)"
+assert_contains "exec on an unknown container says so" "not found" "$out"
+
+if [ "$HAVE_PAYLOAD" -eq 0 ] || ! command -v nsenter >/dev/null 2>&1; then
+    printf '  skip exec-into-a-live-container (needs nsenter + an in-image payload)\n'
+else
+    run run -d --name execsmoke local/demo:v1 /bin/sleeper >/dev/null 2>&1
+    sleep 1
+    # The decisive case: run a binary that exists in the IMAGE. If exec were
+    # execing on the host this would still pass for /bin/sh, which is why the
+    # unit tests assert the primitive and this asserts the plumbing.
+    # The image holds only the static payloads built above, so exec runs one of
+    # those rather than a shell — which is also the stronger test: /bin/sleeper
+    # exists ONLY in the image, so an exec that leaked to the host would fail.
+    out="$(run exec execsmoke /bin/errw 2>/dev/null)"
+    assert_contains "exec runs an IMAGE-only binary inside the container" "to-stdout" "$out"
+    # Streams must be separate — the whole point of the dual-capture primitive.
+    # Again `$STIVA` directly: the `run` helper merges them.
+    outonly="$("$STIVA" exec execsmoke /bin/errw 2>/dev/null)"
+    erronly="$("$STIVA" exec execsmoke /bin/errw 2>&1 >/dev/null | grep -v '^\[[0-9]*\] \[')"
+    assert_contains "stdout carries the stdout line" "to-stdout" "$outonly"
+    assert_absent "stdout does not carry stderr" "to-stderr" "$outonly"
+    assert_contains "stderr carries the stderr line" "to-stderr" "$erronly"
+    # The container's exit code becomes stiva's, the way docker exec behaves.
+    "$STIVA" exec execsmoke /bin/errw >/dev/null 2>&1
+    assert_exit "the command's exit code is stiva's exit code" 3 "$?"
+    run stop execsmoke >/dev/null 2>&1
+    # A stopped container must refuse, not hang or exec on the host.
+    out="$(run exec execsmoke /bin/true 2>&1)"
+    assert_contains "exec on a stopped container refuses" "not running" "$out"
+fi
 
 printf '\n────────────────────────────\n'
 printf '  %d passed, %d failed\n' "$PASS" "$FAIL"

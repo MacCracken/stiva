@@ -70,7 +70,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.14 — OCI container runtime (Cyrius port)";
+    return "3.0.15 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -1278,6 +1278,67 @@ fn _cli_stiva(root) {
     return stiva_new(cfg);
 }
 
+# `stiva exec [-e K=V]... [-w DIR] <CONTAINER> <CMD> [ARGS...]` — §D.
+#
+# Non-interactive only. `-i`/`-t` are NOT registered: `-t` has no substrate at
+# all (there is no pty helper anywhere in lib/ or src/), and offering `-i`
+# without it would imply an interactive session this cannot provide.
+fn _cli_exec(h, root) {
+    var vh = cmdit_new("stiva exec");
+    # `-e` is REPEATABLE. cmdit_str holds ONE value, so `-e A=1 -e B=2` would
+    # silently drop A=1 — the oracle takes `env: &[(String, String)]`, a list.
+    var f_env = cmdit_repeat(vh, 101, "env", "Environment variable K=V (repeatable)");
+    var f_workdir = cmdit_str(vh, 119, "workdir", 0, "Working directory inside the container");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 2) {
+        _cli_puts("stiva exec: usage: exec [-e K=V]... [-w DIR] <container> <command> [args...]\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var id = cmdit_positional(vh, 0);
+
+    var command = vec_new();
+    var i = 1;
+    while (i < cmdit_positional_count(vh)) {
+        vec_push(command, cmdit_positional(vh, i));
+        i = i + 1;
+    }
+
+    var env = vec_new();
+    var ne = cmdit_repeat_count(vh, f_env);
+    var j = 0;
+    while (j < ne) {
+        var kv = cmdit_repeat_get(vh, f_env, j);
+        # Refuse a bare NAME: the oracle takes (key, value) pairs, so there is no
+        # "inherit from my environment" form to fall back on, and passing it
+        # through would put a NAME with no '=' into envp, which execve rejects
+        # for the whole process rather than for that one entry.
+        if (_img_find(kv, 61) <= 0) {
+            _cli_eputs("stiva exec: --env expects KEY=VALUE, got: ");
+            _cli_eputs(kv);
+            _cli_eputs("\n");
+            return CMDIT_EXIT_USAGE;
+        }
+        vec_push(env, kv);
+        j = j + 1;
+    }
+
+    var s = _cli_stiva(root);
+    if (s == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    var res = stiva_exec(s, id, command, env, cmdit_get_str(vh, f_workdir));
+    if (res == 0) { return CMDIT_EXIT_RUN; }        # detail already printed
+    var rr: ContainerExecResult = res;
+    # stdout to stdout, stderr to stderr — the point of capturing them
+    # separately. `stiva exec c ls | wc -l` must not count diagnostics.
+    _cli_puts(rr.stdout);
+    _cli_eputs(rr.stderr);
+    # The container's exit code IS this process's exit code, the way `docker
+    # exec` behaves — a script wrapping `stiva exec` needs to branch on it.
+    return rr.exit_code;
+}
+
 # `stiva build [-f Stivafile] [-c .]` — §F. The two flags have been documented
 # at docs/cli.md:85-89 since before the verb existed; this is where they finally
 # get registered.
@@ -1498,6 +1559,7 @@ fn main() {
     if (v == V_CP) { return _cli_cp(h, _cli_root(h, f_root)); }
     if (v == V_COMPLETIONS) { return _cli_completions(h); }
     if (v == V_BUILD) { return _cli_build(h, _cli_root(h, f_root)); }
+    if (v == V_EXEC) { return _cli_exec(h, _cli_root(h, f_root)); }
     # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
     return _cli_deferred(_cli_verb_name(v));
 }

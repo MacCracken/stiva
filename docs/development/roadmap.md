@@ -392,8 +392,32 @@ handlers still hand-roll and should migrate opportunistically.
   covered by nothing; the §C name-vs-id bug is what that costs. The suite found a real defect on
   its first run (`completions` writing its error to stdout, where the script goes).
 
-**D. `exec` (nsenter) + CRIU** — fork+exec host tools:
-- [ ] `_exec_capture2` dual-pipe primitive (child `close(3..)`/NO_NEW_PRIVS; parent `poll()`-drain + `waitpid`) → `exec_in_container`; CRIU `checkpoint`/`pre_dump`/`restore`/`restore_lazy` (gated by the ported `criu_available()`). (Interactive `exec -it` → v3.1.)
+**D. `exec` (nsenter) — ✅ DONE. CRIU — deliberately NOT done, see below.**
+- [x] `_exec_capture2` + `exec_in_container` + `container_manager_exec` + `stiva_exec` + live MCP
+  `stiva_exec` + `_cli_exec`. **32 of 35 verbs.** Verified against a live rootless container.
+  - **The dual-PIPE shape in the original entry is wrong and was not built.** Draining two pipes
+    from one thread deadlocks when either fills, and the `poll()` it prescribes has no wrapper on
+    any arch here; epoll's event struct is arch-dependent (and a different arity again on AGNOS),
+    so it would not compile for v3.2. stderr goes to a temp FILE instead — files never block their
+    writer. Same shape as kavach 3.9.2's `_oci_run`.
+  - **The oracle's nsenter flags do not work unprivileged**, i.e. in stiva's normal mode. Three
+    divergences (`-U --preserve-credentials`, `-r`, `--wd=/proc/<pid>/root<dir>`) were required,
+    each found by experiment against a live container. Full reasoning in the CHANGELOG.
+  - **The roadmap's "`exec -i` over kavach `persistent_send`/`persistent_read`" suggestion is
+    false in practice**: `persistent_spawn` blocklists `sh`/`bash`/`python` by base name, so the
+    canonical `stiva exec <ctr> /bin/sh` would be refused, and it has no envp, no workdir, and no
+    stderr.
+- [ ] **CRIU `checkpoint`/`restore` — recommend NOT porting.** Not effort-blocked; blocked on the
+  containers being checkpointable at all. `NS_PID` is never set by any caller and `build_sandbox`
+  never forwards the spec's namespace list, so `RUNTIME_NS_PID` (`src/runtime.cyr:519`) is
+  decorative and **every stiva container runs in the HOST pid namespace** — verified by comparing
+  `/proc/<pid>/ns/pid` against our own on a live container: identical. `criu restore` would have to
+  re-claim the exact host PIDs via `ns_last_pid`, which is racy by construction and fails outright
+  when the pid is taken. It is also untestable in CI (criu needs root and a kernel config the
+  runner does not have). Fixing the PID-namespace gap in kavach is the prerequisite, and it is a
+  larger piece of work than the CRIU port it would unblock.
+
+(Interactive `exec -it` stays out — no pty helper exists anywhere in `lib/`.)
 
 **E. MCP live dispatch + streaming poll-loops** — ✅ COMPLETE at v3.0.13:
 - [x] `mcp_handle_tool` + `mcp_handle_pull`/`ps`/`stop`/`push`/`inspect` + `mcp_list_resources` /

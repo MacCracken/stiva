@@ -360,6 +360,31 @@ fn main(): i64 {
     bench_report(bbl);
     _stor_remove_dir_all(bl_ctx);
     _stor_remove_dir_all(bl_root);
+
+    # ── §D: the exec capture primitive ────────────────────
+    # fork + two redirections + drain + waitpid, against a trivial child, so the
+    # number is the PRIMITIVE's overhead rather than the payload's. Worth
+    # tracking because every `stiva exec` pays it once and the stderr-to-file
+    # design trades a second pipe for two extra filesystem operations.
+    var ex_stub = "/tmp/stiva-bench-exec-stub";
+    var ex_body = "#!/bin/sh\nexit 0\n";
+    sys_unlink(ex_stub);
+    file_write_all(ex_stub, ex_body, strlen(ex_body));
+    sys_chmod(ex_stub, 493);
+    var ex_args = vec_new();
+    vec_push(ex_args, ex_stub);
+    var ex_buf = alloc(4096);
+    var bex = bench_new("exec_capture2_trivial_child");
+    bench_batch_start(bex);
+    var ex_i = 0;
+    while (ex_i < 200) {
+        _exec_capture2(ex_args, 0, 0, ex_buf, 4095, "/tmp/stiva-bench-exec.err");
+        ex_i = ex_i + 1;
+    }
+    bench_batch_stop(bex, 200);
+    bench_report(bex);
+    sys_unlink("/tmp/stiva-bench-exec.err");
+    sys_unlink(ex_stub);
     return 0;
 }
 
