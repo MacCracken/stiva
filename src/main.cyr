@@ -70,7 +70,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.13 — OCI container runtime (Cyrius port)";
+    return "3.0.14 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -239,7 +239,7 @@ fn _cli_run(h, root) {
     var f_name = cmdit_str(vh, 0, "name", 0, "Container name");
     var f_backend = cmdit_str(vh, 0, "backend", 0, "Sandbox backend: process|oci|noop|gvisor|...");
     var f_workdir = cmdit_str(vh, 119, "workdir", 0, "Working directory inside the container");
-    var f_detach = cmdit_bool(vh, 100, "detach", "Run detached (deferred to v3.1)");
+    var f_detach = cmdit_bool(vh, 100, "detach", "Run detached; prints the container id and returns");
     var vr = cmdit_parse_verb(vh, h);
     if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
     if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
@@ -247,12 +247,6 @@ fn _cli_run(h, root) {
     if (cmdit_positional_count(vh) < 1) {
         _cli_puts("stiva run: missing <image>\n");
         return CMDIT_EXIT_USAGE;
-    }
-    if (cmdit_get_bool(vh, f_detach) == 1) {
-        _cli_puts("stiva run --detach: detached containers are deferred to v3.1\n");
-        _cli_puts("  (kavach's spawn primitive can't yet thread the seccomp/cgroup/secret\n");
-        _cli_puts("   policy — a half-isolated daemon won't ship; run foreground for now)\n");
-        return CMDIT_EXIT_RUN;
     }
     var image_ref = cmdit_positional(vh, 0);
 
@@ -278,6 +272,7 @@ fn _cli_run(h, root) {
     if (wd != 0) { cc.workdir = wd; }
     var nm = cmdit_get_str(vh, f_name);
     if (nm != 0) { cc.name = nm; }
+    cc.detach = cmdit_get_bool(vh, f_detach);
 
     # Through the manager (rust-old: Stiva::run → create + start one-shot):
     # unpack → overlay → spec → CREATED record → exec_container → STOPPED, with
@@ -288,6 +283,15 @@ fn _cli_run(h, root) {
     if (rec == 0) { return CMDIT_EXIT_RUN; }          # detail printed by create
     var rc: Container = rec;
     if (container_manager_start(mgr, rc.id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
+
+    # Detached: the container is still running, so there is nothing to wait for
+    # and no output to relay. Print the id and return, the way `docker run -d`
+    # does — the caller reaches the output through `stiva logs`.
+    if (cc.detach == 1) {
+        _cli_puts(rc.id);
+        _cli_puts("\n");
+        return CMDIT_EXIT_OK;
+    }
 
     var res = container_manager_wait(mgr, rc.id);      # cached ContainerExecResult*
     if (res != 0) {

@@ -847,6 +847,12 @@ fn build_sandbox(spec) {
     config_timeout_ms(cfg, sp.timeout_ms);
     if (sp.agent_id != 0) { config_agent_id(cfg, sp.agent_id); }
     if (sp.domainname != 0) { config_domainname(cfg, sp.domainname); }
+    # The container's own filesystem. Without this kavach execs the command on
+    # the HOST — a binary present only in the image never runs, and one that
+    # happens to exist on the host runs the host's copy. Needs kavach >= 3.9.1
+    # for the SandboxConfig.rootfs field; before that stiva could not express it
+    # through the API at all (roadmap §K).
+    if (sp.rootfs != 0) { config_rootfs(cfg, sp.rootfs); }
     # TODO(v3.1): scan_policy + secret injection — no SandboxConfig setter in dist.
 
     var sb = sandbox_create(cfg);
@@ -901,6 +907,40 @@ fn _rt_join(v, sep) {
 # gate QUARANTINE}; the oracle only distinguishes ok/err, so a generic
 # STIVA_ERR_SANDBOX is faithful. The kavach ExecResult is copied field-by-field
 # through accessors (NOT aliased across the module boundary).
+# Spawn a container DETACHED under the same policy the one-shot path uses, with
+# stdout+stderr appended to `log_path`. Returns the kavach SpawnedProcess*, or 0.
+#
+# The counterpart of exec_container: same build_sandbox, so the container gets
+# the identical seccomp/landlock/namespace/cgroup treatment — only the waiting
+# differs. Needs kavach >= 3.9.0 for `sandbox_spawn`; that symbol not existing
+# is what kept `run -d` on the v3.1 blocked list.
+#
+# The sandbox is NOT destroyed here. sandbox_destroy tears down the isolation
+# the child is still living inside, so it belongs with the reap — see
+# container_manager_reap.
+fn spawn_container(spec, log_path) {
+    var sp: RuntimeSpec = spec;
+    var command = _rt_join(sp.command, " ");
+    var lm = _rt_cat2("spawning detached container via kavach: ", command);
+    sakshi_info(lm, strlen(lm));
+
+    var sb = build_sandbox(spec);
+    if (sb == 0) { return 0; }   # error already printed by build_sandbox
+
+    var handle = sandbox_spawn(sb, command, log_path);
+    if (handle == 0) {
+        # kavach prints the specific reason (guard violation, a policy it
+        # cannot honour, fork failure), so do not paper over it with a generic
+        # message here.
+        sakshi_error("detached spawn failed", strlen("detached spawn failed"));
+        stiva_err_print(STIVA_ERR_SANDBOX, "detached spawn failed");
+        return 0;
+    }
+    var lc = _rt_cat2("container spawned, pid=", _rt_int_to_cstr(spawned_pid(handle)));
+    sakshi_info(lc, strlen(lc));
+    return handle;
+}
+
 fn exec_container(spec) {
     var sp: RuntimeSpec = spec;
     var command = _rt_join(sp.command, " ");

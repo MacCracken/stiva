@@ -5,6 +5,162 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.14] — 2026-07-25 — `run -d` is live · containers run their own filesystem (§K)
+
+### Added — detached `run -d`, the first item off the v3.1 blocked list
+kavach **3.9.0** shipped `sandbox_spawn` (authored from here — see its CHANGELOG, which also
+carries a defect that made **every seccomp filter kavach ever built a zero-filled buffer**, so
+`security_load_seccomp` had never once succeeded). stiva now wires it:
+
+- `spawn_container` in `runtime.cyr` — the detached counterpart of `exec_container`, same
+  `build_sandbox`, so identical policy treatment; only the waiting differs.
+- The detach branch in `container_manager_start`, `container_manager_reap`, and `wait`/`stop`
+  routed through the handle.
+- `stiva run -d` returns the container id immediately. **30 of 35** verbs live.
+
+**The record survives the spawning process.** `container_fixup_after_restart` rewrote
+RUNNING→STOPPED for *every* record loaded from disk — correct while nothing could outlive the
+process, wrong the moment something can. It now probes liveness, guarded against **pid reuse** by a
+new persisted `start_ticks` (`/proc/<pid>/stat` field 22, captured at spawn): a recycled pid would
+otherwise read as a live container and `stop` would signal an innocent process. `start_ticks` is
+appended at offset 80 so no existing field offset moves.
+
+**`stop` works cross-process.** `internals` is in-memory, so a second `stiva` has no
+`SpawnedProcess` handle and falls back to signalling the recorded pid — SIGTERM, grace, SIGKILL,
+polling the starttime-checked probe, since after reparenting to init it cannot `waitpid`. Without
+this the record read `Stopped` while the container kept running, which the smoke suite now asserts
+against directly.
+
+### Known — the container filesystem is never entered (pre-existing, now documented)
+Found while verifying `run -d`, and it affects the **foreground path identically**, so detach did
+not introduce it:
+
+```
+stiva run local/demo:v1 /bin/ticker    # /bin/ticker exists only in the image
+# exit 0, no output — nothing ran
+```
+
+The command execs on the **host**. Layers are unpacked and `{croot}/rootfs` is materialized;
+nothing chroots into it. A command that happens to exist on the host (`/bin/sleep`) runs, which is
+why this has looked healthy. Two separable defects: the missing rootfs entry, and a failed
+`execve` in the child being swallowed into **exit 0**.
+
+Blocked one layer upstream, structurally identical to the device-passthrough gap: kavach 3.9.0's
+`SandboxConfig` has **no rootfs field**, so stiva cannot express "run inside this filesystem"
+through the API under any wiring. Tracked as roadmap **§K** with the two-step sequence, and called
+out in `docs/cli.md` so the limitation is not discovered the hard way. Until it closes, treat
+`run`/`run -d` as process supervision with image-derived configuration rather than filesystem
+isolation.
+
+### Filed — the remaining v3.1.0 gate
+`cyrius/docs/development/issues/2026-07-25-stiva-stackless-coroutines-interactive-exec.md`.
+cyrius parks stackless coroutines as an *Unpinned follow-on* with "No live consumer; pull forward
+on a real suspend-across-await need" — stiva is that consumer (interactive `exec -it`, multiplexed
+streaming), and the roadmap has carried "has not filed; filing is the unblock lever" as an open
+action for weeks. Now on record, with the shipped workarounds documented so other consumers can
+reuse them. A decline is an acceptable outcome; an indefinitely-held slot is not.
+
+### Tests — 1804 → 1886 unit, smoke 64 → 69
+The detached lifecycle is covered end-to-end by the smoke suite, since `main.cyr` is not unit
+testable: id returned immediately, a NEW process still sees it Running, the process is genuinely
+alive, cross-process `stop` actually kills it, and `ps` stops reporting it.
+
+### Fixed — `stiva run` executes INSIDE the container rootfs
+The defect documented as "Known" in 3.0.14. `stiva run local/demo:v1 /bin/hello`, where the binary
+exists only in the image, now prints its output instead of exiting 0 having run nothing.
+
+The stiva side is one line — `config_rootfs(cfg, sp.rootfs)` in `build_sandbox`; `RuntimeSpec`
+always carried the rootfs, it simply never reached kavach. Everything else was upstream, in
+**kavach 3.9.1**, and it was four defects stacked behind one another, each only visible once the
+previous fell:
+
+1. `SandboxConfig` had **no rootfs field**, so this could not be expressed at all.
+2. The OCI backend (selected whenever `runc`/`crun` exists — i.e. most hosts) built its bundle
+   around a fresh **empty** `/tmp` directory and ignored the sandbox.
+3. That bundle declared **no user namespace or id mappings**, so an unprivileged runc refused
+   outright, and **no `/proc` or `/dev` mounts**, without which runc panics in its own init.
+4. `process.args` was `/bin/sh -c <string>`, making every container depend on the **image**
+   shipping a shell — fatal for distroless, scratch, or a single static binary.
+
+Plus `runc` being invoked with an empty environment, defaulting its state root to `/run/runc` and
+dying with `permission denied` — into `/dev/null`, because the capture discards stderr. Fixed with
+an explicit `--root`. A failed `execve` also no longer reports exit 0.
+
+Each of these individually produced the same symptom: a container that ran nothing and reported
+success. That is why it survived so long — every test used a binary that happened to exist on the
+host too.
+
+### Fixed — layers larger than 1 MiB were written as corrupt gzip (every real image)
+
+`stiva import` of a rootfs tar bigger than ~1 MiB produced an image whose layer blob could not be
+unpacked. `stiva run` then failed with `layer unpack error: sha256:…`, leaving
+`{root}/layers/<digest>/` **created but empty**. 849 KB worked, 1.69 MB did not. With §K closed in
+3.0.14 — containers now run their own filesystem — every real base image is far above that line,
+so this was the difference between the runtime working on toy tarballs and working at all.
+
+The failure was on the **write** side, not the read side. `unpack_layer` and `_stor_extract_tar`
+are unchanged and were never at fault; they were handed a malformed blob.
+
+**Root cause — sankoch's batch gzip encoder (cyrius 6.4.78).**
+`_deflate_compress_level_inner` (`lib/sankoch.cyr:4814`) splits input into 1 MiB outer blocks
+(`DEFLATE_BLOCK_SIZE`, `:4792`) and resumes each next block at `block_end`. But the per-block
+encoders — `_deflate_compress_fixed_block` (`:4845`, levels 1–3) and
+`_deflate_compress_dynamic_block` (`:5100`, levels 4–9) — deliberately match against the **full**
+`src`, so a match beginning just below the boundary carries up to `LZ77_MAX_MATCH` (258) bytes
+across it. The chunker discards that overshoot and the following block re-encodes the same bytes.
+The stream therefore decodes to `src_len + overshoot`, the gzip trailer's CRC-32 no longer matches
+the output, and `gzip_decompress` returns `-ERR_CHECKSUM_MISMATCH` (-5) — which `unpack_layer`
+folds into its `-1` sentinel, hence the bare `layer unpack error`.
+
+Measured on a 2 MB input: **220 bytes duplicated at offset 1048576**, decoded length 2000220. GNU
+`gunzip` rejects that same stream at that same offset (`differ: char 1048797`), so it is a
+genuinely malformed stream and not a sankoch decoder disagreement — and the sankoch **decoder is
+correct**: a stream from GNU `gzip` round-trips byte-exact. Both Huffman paths are affected, so
+dropping the compression level was not an escape.
+
+Pre-existing, not a 3.0.13/3.0.14 regression: reproduced against `git show HEAD:src/storage.cyr`
+as well as the working tree.
+
+**Fix.** New `_stor_gzip_compress` (`src/storage.cyr`) drives sankoch's **streaming** encoder
+(`gzip_enc_init` / `gzip_enc_write` / `gzip_enc_finish`) instead. That path is not affected:
+`_denc_consume` (`lib/sankoch.cyr:5373`) stores the offset its LZ77 loop actually reached back into
+the encoder ctx, so an overshoot carries into the next consume rather than being re-encoded. Both
+of stiva's compress call sites moved onto it — `image_import` and `_il_docker_add_layer`, both in
+`src/imagelayout.cyr`. `gzip_enc_init` takes sankoch's mutex and `gzip_enc_finish` is what releases
+it, so the helper always runs finish, including after a write error.
+
+**Trade.** Compressing 2 MiB costs 42.7 ms streaming vs 33.3 ms batch (~28% slower), paid once per
+`import` / archive `load` — never on the container-start path. Compressed output is marginally
+**smaller** (4904 vs 4943 bytes on that 2 MB input): RFC 1951 caps back-references at 32 KiB
+regardless, so the 1 MiB outer chunk never bought extra match reach to lose.
+
+**Existing images are not repaired by this.** A layer blob written by an affected stiva is corrupt
+on disk and stays corrupt — its digest is over the bad bytes. Re-run `stiva import` (or re-`pull`)
+for anything imported before this change. Layers **pulled from a registry** were never affected;
+they come from a correct encoder, and stiva only ever verified and stored them.
+
+**Filed upstream** as
+`cyrius/docs/development/issues/2026-07-25-sankoch-batch-gzip-duplicates-bytes-at-block-boundary.md`
+— the batch chunker has to resume at the position its block encoder actually reached, not at
+`block_end`. The workaround here should be revisited, and the throughput reclaimed, once that lands.
+
+### Added — multi-megabyte layer coverage
+Three regression tests in `tests/store.tcyr`, each sized to cross the 1 MiB block boundary at least
+twice so a single-boundary escape cannot pass: `gzip_compress_multi_mb_roundtrip` (the codec alone —
+2.5 MiB in, exact length and bytes out), `unpack_layer_multi_mb` (a 2.5 MiB five-file layer blob,
+every file byte-compared after extraction), and `image_import_multi_mb` (the user-visible path —
+`image_import` a 2 MiB rootfs tar, then `prepare_layers`, then byte-compare). All three were
+confirmed to **fail** (8 assertions) against the batch encoder before the fix. Store file:
+221 → 255 assertions; suite total **1886**.
+
+Two benchmarks in `tests/stiva.bcyr` — `gzip_compress_2mib` (42.9 ms) and `gzip_decompress_2mib`
+(10.1 ms) — so the codec has a trend line rather than a one-off number, and the cost of the
+streaming switch stays visible.
+
+### Changed — kavach 3.9.0 → 3.9.1
+`config_rootfs`, the shared `src/confine.cyr` child-confinement sequence, rootless OCI, and the
+`--root` fix. See its CHANGELOG.
+
 ## [3.0.13] — 2026-07-25 — §E complete (`stiva events`) · security: image-controlled writes escaped the rootfs
 
 ### Added — lifecycle events are written to disk

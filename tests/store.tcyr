@@ -428,6 +428,69 @@ fn _t_build_tar(out, name, data, dlen) {
     return total + 1024;
 }
 
+# Build a multi-file USTAR archive into `out`: `nfiles` regular files named
+# "bin/f<N>" (single digit — callers stay under 10), each `fsize` bytes, with
+# content byte j = 'A' + ((j + 7*N) % 26) so a duplicated or dropped run shows
+# up as a content mismatch rather than silently matching the periodic filler.
+# Returns the total archive length. `out` needs nfiles*(fsize+512)+1024 bytes.
+fn _t_build_multi_tar(out, nfiles, fsize) {
+    var pos = 0;
+    var f = 0;
+    while (f < nfiles) {
+        var i = 0;
+        while (i < 512) { store8(out + pos + i, 0); i = i + 1; }
+        memcpy(out + pos, "bin/f", 5);                # name @0
+        store8(out + pos + 5, 48 + f);
+        _t_write_octal(out + pos + 100, 7, 493);      # mode 0755 @100
+        store8(out + pos + 107, 0);
+        _t_write_octal(out + pos + 124, 11, fsize);   # size @124
+        store8(out + pos + 124 + 11, 0);
+        store8(out + pos + 156, 48);                  # typeflag '0' @156
+        pos = pos + 512;
+
+        var j = 0;
+        while (j < fsize) {
+            store8(out + pos + j, 65 + ((j + 7 * f) % 26));
+            j = j + 1;
+        }
+        var blocks = (fsize + 511) / 512;
+        var pad = (blocks * 512) - fsize;
+        var k = 0;
+        while (k < pad) { store8(out + pos + fsize + k, 0); k = k + 1; }
+        pos = pos + (blocks * 512);
+        f = f + 1;
+    }
+    var z = 0;                                        # two zero EOF blocks
+    while (z < 1024) { store8(out + pos + z, 0); z = z + 1; }
+    return pos + 1024;
+}
+
+# The "/bin/f<N>" path _t_build_multi_tar writes, as a fresh cstr.
+fn _t_multi_name(f) {
+    var s = alloc(8);
+    memcpy(s, "/bin/f", 6);
+    store8(s + 6, 48 + f);
+    store8(s + 7, 0);
+    return s;
+}
+
+# Fill `buf` with the `fsize` content bytes _t_build_multi_tar wrote for file `f`.
+fn _t_multi_expect(buf, f, fsize) {
+    var j = 0;
+    while (j < fsize) { store8(buf + j, 65 + ((j + 7 * f) % 26)); j = j + 1; }
+    return 0;
+}
+
+# First index at which `a` and `b` differ over `n` bytes, or -1 if identical.
+fn _t_diff_at(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 # _stor_parse_octal decodes ASCII octal, ignoring non-octal padding.
 fn test_stor_parse_octal() {
     test_group("stor_parse_octal");
@@ -467,6 +530,127 @@ fn test_unpack_layer_gz_roundtrip() {
     var n = file_read_all(out, rbuf, 64);
     store8(rbuf + n, 0);
     assert_eq(streq(rbuf, "hello from layer"), 1, "content round-trips");
+    return 0;
+}
+
+# ── Multi-megabyte layers (regression) ──────────────────────────────────────
+# sankoch's BATCH `gzip_compress` splits input into 1 MiB DEFLATE blocks and
+# resumes each next block at the chunk boundary — but the per-block encoder has
+# already run PAST it whenever an LZ77 match straddles the boundary, so up to
+# LZ77_MAX_MATCH (258) bytes get emitted TWICE. The stream then decodes long
+# and its CRC-32 fails (GNU gunzip rejects it identically), so `unpack_layer`
+# returned -1 for every layer whose uncompressed tar exceeded ~1 MiB — i.e.
+# every real base image — leaving the layer dir created but EMPTY.
+# `_stor_gzip_compress` (storage.cyr) uses the streaming encoder instead, which
+# carries the overshoot forward correctly. All three tests below are sized to
+# cross the 1 MiB boundary at least twice, so a single-boundary escape cannot
+# slip through.
+
+# The codec in isolation: 2.5 MiB in, 2.5 MiB out, byte-exact.
+fn test_gzip_compress_multi_mb_roundtrip() {
+    test_group("gzip_compress_multi_mb_roundtrip");
+    var n = 2621440;                       # 2.5 MiB — two 1 MiB block boundaries
+    var src = alloc(n);
+    var i = 0;
+    while (i < n) { store8(src + i, 65 + (i % 26)); i = i + 1; }
+
+    var gzcap = n + n / 50 + 8192;
+    var gz = alloc(gzcap);
+    var glen = _stor_gzip_compress(src, n, gz, gzcap);
+    assert(glen > 0, "streaming gzip compressed 2.5 MiB");
+
+    var outcap = n + 65536;
+    var out = alloc(outcap);
+    var dlen = gzip_decompress(gz, glen, out, outcap);
+    assert_eq(dlen, n, "decompressed length is exact (no duplicated boundary bytes)");
+    if (dlen == n) {
+        assert_eq(_t_diff_at(out, src, n), 0 - 1, "decompressed bytes identical");
+    }
+    return 0;
+}
+
+# unpack_layer on a 2.5 MiB layer blob: succeeds, and every file is byte-exact.
+fn test_unpack_layer_multi_mb() {
+    test_group("unpack_layer_multi_mb");
+    var dir = "/tmp/stiva-unpack-bigtar";
+    _stor_remove_dir_all(dir);
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/layer.tar.gz");
+    var dest = _stor_cat2(dir, "/unpacked");
+    sys_mkdir(dest, 493);
+
+    var nfiles = 5;
+    var fsize = 524288;                    # 512 KiB each → 2.5 MiB of payload
+    var tar = alloc(nfiles * (fsize + 512) + 1024);
+    var tlen = _t_build_multi_tar(tar, nfiles, fsize);
+    assert(tlen > 2097152, "tar spans more than two 1 MiB DEFLATE blocks");
+
+    var gzcap = tlen + tlen / 50 + 8192;
+    var gz = alloc(gzcap);
+    var glen = _stor_gzip_compress(tar, tlen, gz, gzcap);
+    assert(glen > 0, "gzip ok");
+    file_write_all(blob, gz, glen);
+
+    assert_eq(unpack_layer(blob, dest), 0, "multi-MB layer unpacks");
+
+    var expect = alloc(fsize);
+    var lc = alloc(8);
+    var f = 0;
+    while (f < nfiles) {
+        _t_multi_expect(expect, f, fsize);
+        var got = _stor_read_file(_stor_cat2(dest, _t_multi_name(f)), lc);
+        if (got == 0) {
+            assert_eq(0, 1, "extracted file is readable");
+        } else {
+            assert_eq(load64(lc), fsize, "extracted file is full length");
+            assert_eq(_t_diff_at(got, expect, fsize), 0 - 1, "extracted bytes identical");
+        }
+        f = f + 1;
+    }
+    return 0;
+}
+
+# The user-visible path: `stiva import` a 2 MiB rootfs tar, then prepare its
+# layers (what `stiva run` does). image_import gzips the tar itself, so this
+# also pins the imagelayout.cyr compress call site.
+fn test_image_import_multi_mb() {
+    test_group("image_import_multi_mb");
+    var root = "/tmp/stiva-import-bigtar";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    assert(store != 0, "store created");
+
+    var nfiles = 4;
+    var fsize = 524288;                    # 2 MiB of payload
+    var tar = alloc(nfiles * (fsize + 512) + 1024);
+    var tlen = _t_build_multi_tar(tar, nfiles, fsize);
+    var tpath = "/tmp/stiva-import-bigtar.tar";
+    xunlink(tpath);
+    file_write_all(tpath, tar, tlen);
+
+    var img = image_import(store, tpath, "bigdemo", "v1");
+    assert(img != 0, "import ok");
+
+    var dirs = prepare_layers(store, _img_layers(img));
+    assert(dirs != 0, "prepare_layers ok (the imported layer blob decompresses)");
+    if (dirs != 0) {
+        assert_eq(vec_len(dirs), 1, "one layer dir");
+        var d0 = vec_get(dirs, 0);
+        var expect = alloc(fsize);
+        var lc = alloc(8);
+        var f = 0;
+        while (f < nfiles) {
+            _t_multi_expect(expect, f, fsize);
+            var got = _stor_read_file(_stor_cat2(d0, _t_multi_name(f)), lc);
+            if (got == 0) {
+                assert_eq(0, 1, "imported layer file is readable");
+            } else {
+                assert_eq(load64(lc), fsize, "imported layer file is full length");
+                assert_eq(_t_diff_at(got, expect, fsize), 0 - 1, "imported layer file byte-exact");
+            }
+            f = f + 1;
+        }
+    }
     return 0;
 }
 
@@ -1225,6 +1409,9 @@ fn main() {
     test_mount_volumes_empty();
     test_stor_parse_octal();
     test_unpack_layer_gz_roundtrip();
+    test_gzip_compress_multi_mb_roundtrip();
+    test_unpack_layer_multi_mb();
+    test_image_import_multi_mb();
     test_unpack_layer_missing_blob();
     test_unpack_layer_not_gzip();
     test_unpack_layer_zstd_roundtrip();

@@ -61,8 +61,23 @@ run () { "$STIVA" "$@" 2>&1 | grep -vE '^\[[0-9]+\] \[(INFO|DEBUG|WARN)\]'; }
 group () { printf '\n=== %s ===\n' "$1"; }
 
 # ── fixture: a tiny image ────────────────────────────────
+# Since v3.0.14 containers run INSIDE their rootfs, so a payload must exist in
+# the IMAGE — a host path like /bin/sleep is no longer reachable. Build static
+# binaries into the fixture; skip the run-dependent groups if there is no
+# compiler rather than pretending to test them.
 mkdir -p "$WORK/rootfs/bin"
 echo 'hello-from-the-image' > "$WORK/rootfs/greeting.txt"
+HAVE_PAYLOAD=0
+if command -v cc >/dev/null 2>&1; then
+    # ONE binary only: two static binaries push the layer past ~1 MB, which
+    # currently fails to unpack (a pre-existing defect, tracked separately).
+    # `sleeper` doubles as the short-run payload — invoked with an argument it
+    # exits immediately, so it serves both groups.
+    printf '#include <unistd.h>\nint main(int argc,char**argv){if(argc<2)sleep(30);return 0;}\n' > "$WORK/s.c"
+    if cc -static -o "$WORK/rootfs/bin/sleeper" "$WORK/s.c" 2>/dev/null; then
+        HAVE_PAYLOAD=1
+    fi
+fi
 tar -cf "$WORK/rf.tar" -C "$WORK/rootfs" .
 
 group "version + help"
@@ -112,7 +127,11 @@ if [ -z "$out" ]; then ok "unsupported shell writes nothing to stdout"
 else bad "unsupported shell writes nothing to stdout" "got: $out"; fi
 
 group "run + ps"
-run run --name c1 local/demo:v1 /bin/true >/dev/null 2>&1
+if [ "$HAVE_PAYLOAD" -eq 1 ]; then
+    run run --name c1 local/demo:v1 "/bin/sleeper now" >/dev/null 2>&1
+else
+    run run --name c1 local/demo:v1 /nonexistent >/dev/null 2>&1
+fi
 out="$(run ps --all)"
 assert_contains "ps --all shows the container" "c1" "$out"
 assert_contains "ps --all shows its image" "local/demo:v1" "$out"
@@ -250,6 +269,45 @@ else
     ok "STIVA_EVENTS=off writes no event log"
 fi
 rm -rf "$OFF_ROOT"
+
+group "run -d (detached)"
+if [ "$HAVE_PAYLOAD" -eq 0 ]; then
+    printf '  skip (no static compiler for an in-image payload)\n'
+else
+# The whole point of detach: the call returns while the process keeps running,
+# and the state survives into a DIFFERENT stiva process. /bin/sleep is a host
+# binary on purpose — see the rootfs caveat in docs/cli.md.
+out="$(run run -d --name detached1 local/demo:v1 /bin/sleeper)"
+DID="$(printf '%s' "$out" | tail -1)"
+case "$DID" in
+    [0-9a-f]*) ok "run -d returns a container id immediately" ;;
+    *)         bad "run -d returns a container id immediately" "got: $out" ;;
+esac
+sleep 1
+names="$(run ps | awk -F'\t' 'NR>1 {print $4}')"
+assert_contains "a NEW process still sees it Running" "detached1" "$names"
+DPID="$(python3 -c "
+import json,sys
+d=json.load(open('$ROOT/state.json'))
+cs = d if isinstance(d, list) else d.get('containers', [])
+print(next((c['pid'] for c in cs if c.get('name')=='detached1'), 0))" 2>/dev/null || echo 0)"
+if [ "${DPID:-0}" -gt 0 ] && kill -0 "$DPID" 2>/dev/null; then
+    ok "the detached process is genuinely alive"
+else
+    bad "the detached process is genuinely alive" "pid=$DPID"
+fi
+# stop from a different process has no in-memory handle — it must fall back to
+# signalling the recorded pid, or the record says Stopped while the process runs.
+run stop detached1 >/dev/null 2>&1
+sleep 1
+if [ "${DPID:-0}" -gt 0 ] && kill -0 "$DPID" 2>/dev/null; then
+    bad "cross-process stop actually kills the process" "pid $DPID still alive"
+else
+    ok "cross-process stop actually kills the process"
+fi
+names="$(run ps | awk -F'\t' 'NR>1 {print $4}')"
+assert_absent "and ps no longer reports it Running" "detached1" "$names"
+fi
 
 group "deferred verbs still say so"
 out="$(run exec c2 /bin/true)"

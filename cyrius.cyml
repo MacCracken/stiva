@@ -122,7 +122,7 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 path = "../kavach"
-tag = "3.8.3"
+tag = "3.9.1"
 modules = ["dist/kavach.cyr"]
 
 # ── samay + ai-hwaccel — declared, pinned, and DEFAULT-OFF ────────

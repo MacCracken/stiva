@@ -44,7 +44,7 @@ remains). The **Status** column marks each:
 | `stiva logs <ID> [-n LINES] [-f] [--scan]` | **Live** | Show last N lines, or `-f` to follow until the container stops (polls the log file — the lifecycle bus is process-local). `--scan` runs the output through kavach's externalization gate first; it cannot be combined with `-f` |
 | `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
-| `stiva run <IMAGE> -d ...` | v3.1 (blocked) | Detached `run -d` (needs kavach sandbox_spawn) |
+| `stiva run -d <IMAGE> [CMD...]` | **Live** | Detached run over kavach 3.9.0 `sandbox_spawn`. Returns the container id immediately; state survives into other stiva processes, and `stop` signals the recorded pid when the in-memory handle is gone. **See the rootfs caveat below.** |
 | `stiva exec <ID> <CMD...>` | v3.0.x (planned) / v3.1 (blocked) | Execute command in a running container (nsenter; non-interactive is v3.0.x, `-it` needs cyrius stackless coroutines) |
 | `stiva top <ID>` | **Live** | List processes inside a running container (`/proc` walk over the descendants of the container PID) |
 | `stiva cp <SRC> <DST>` | **Live** | Copy files host↔container. Exactly one side is `<container>:<path>`; both or neither is refused rather than guessed |
@@ -331,3 +331,18 @@ skip it entirely; `stiva events` then reports that no events are recorded.
 | 0 | Success |
 | 1 | Error (message printed to stderr) |
 | N | Container exit code (for `stiva exec` and `stiva wait`) |
+
+## Container filesystem
+
+As of **v3.0.14** (kavach 3.9.1) `stiva run` executes the command **inside the container's
+rootfs**. A binary present only in the image runs; a missing one reports a real failure instead of
+exiting 0.
+
+Backend notes: with `runc`/`crun` installed the OCI backend is selected and the container runs
+rootless (user namespace + uid/gid mappings, `/proc` and a `/dev` tmpfs mounted, argv exec'd
+directly rather than through `/bin/sh`). Without one, the process backend enters the rootfs via
+`unshare(CLONE_NEWUSER|CLONE_NEWNS)` + `chroot`.
+
+**Known limitation:** layers whose uncompressed tar exceeds roughly 1 MB currently fail to unpack
+(`layer unpack error`) — a pre-existing defect in `_stor_extract_tar`, unrelated to the rootfs
+work, and tracked separately. It rules out most real base images today.

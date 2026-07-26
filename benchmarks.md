@@ -1,22 +1,24 @@
 # Benchmarks
 
-Latest: **2026-07-25T23:53:23Z** — commit `d1d5079`
+Latest: **2026-07-26T03:00:00Z** — commit `8b70d84`
 
-Tracking: `3808225` (baseline) → `71a5d50` (mid) → `d1d5079` (current)
+Tracking: `3808225` (baseline) → `4ea6bec` (mid) → `8b70d84` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`71a5d50`) | Current (`d1d5079`) |
+| Benchmark | Baseline (`3808225`) | Mid (`4ea6bec`) | Current (`8b70d84`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 7.176 µs | 6.840 µs **-5%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.797 µs | 15.096 µs **-5%** |
-| `compose_yaml_to_toml` | — | 29.348 µs | 28.742 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.385 ms | 1.318 ms |
-| `flatten_layers_2x60_files_4kib` | — | — | 1.382 ms |
-| `event_json_build` | — | — | 5.955 µs |
-| `event_log_append` | — | — | 7.803 µs |
-| `event_ts_parse` | — | — | 1.583 µs |
+| `oci_config_build+serialize` | 7.203 µs | 6.981 µs **-3%** | 7.252 µs |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.266 µs **-4%** | 15.969 µs |
+| `compose_yaml_to_toml` | — | 29.242 µs | 30.217 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.326 ms | 1.414 ms |
+| `flatten_layers_2x60_files_4kib` | — | — | 1.508 ms |
+| `event_json_build` | — | — | 6.198 µs |
+| `event_log_append` | — | — | 8.306 µs |
+| `event_ts_parse` | — | — | 1.680 µs |
+| `gzip_compress_2mib` | — | — | 41.391 ms |
+| `gzip_decompress_2mib` | — | — | 9.732 ms |
 
 ---
 

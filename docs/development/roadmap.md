@@ -861,7 +861,25 @@ individually — there is no monolithic "async milestone" gating them together.
 > What remains is below. **State each gate by symbol, not by version number** — the version
 > form has already produced one false positive.
 
-- [ ] **Detached `run -d`** — `spawn_container`/`DaemonHandle`/live daemon log capture, and MCP
+- [x] **Detached `run -d` — ✅ DONE at v3.0.14.** kavach **3.9.0** shipped `sandbox_spawn` +
+  `SpawnedProcess` + `spawned_wait/_try_wait/_kill/_terminate` (authored from stiva; see kavach's
+  3.9.0 CHANGELOG, which also fixes a defect that made **every seccomp filter kavach ever built a
+  zero-filled buffer** — `security_load_seccomp` had never once succeeded).
+  stiva side: `spawn_container` in `runtime.cyr`, the detach branch in
+  `container_manager_start`, `container_manager_reap`, and cross-process stop.
+  - **The record now survives the spawning process.** `container_fixup_after_restart` used to
+    rewrite RUNNING→STOPPED for every record loaded from disk — correct when nothing could outlive
+    the process, wrong once something can. It now probes liveness, guarded against **pid reuse** by
+    a `start_ticks` field (`/proc/<pid>/stat` field 22, captured at spawn and persisted): a
+    recycled pid would otherwise read as a live container and `stop` would signal an innocent
+    process.
+  - **`stop` works cross-process.** `internals` is in-memory, so a second `stiva` has no
+    `SpawnedProcess` handle; it falls back to signalling the recorded pid (SIGTERM → grace →
+    SIGKILL, polling the starttime-checked probe, since after reparenting to init it cannot
+    `waitpid`). Without this the record read Stopped while the container kept running.
+  - **Still open, and NOT introduced by this work:** see §K.
+
+- [ ] ~~**Detached `run -d`**~~ (superseded — kept for the reasoning below) — `spawn_container`/`DaemonHandle`/live daemon log capture, and MCP
   `handle_run`. **Blocked on kavach growing a policy-threaded detached spawn**
   (`sandbox_spawn` + `spawned_wait`/`try_wait`/`kill`). *The old "blocked on kavach ≥ 3.8.0"
   wording is now a false positive: kavach shipped **3.8.0 and 3.8.1** (samay integration, then a
@@ -870,12 +888,35 @@ individually — there is no monolithic "async milestone" gating them together.
   and mentions samay nowhere; treat the bridge as a one-shot proof of concept with nothing
   behind it. Do **not** ship a half-isolated interim over `persistent_spawn` — it threads no
   policy, and kavach's own roadmap says so. Once the symbol exists, the stiva side is ~10 lines.
+**K. Container filesystem entry — ✅ DONE at v3.0.14 (kavach 3.9.1).** Closed on both backends:
+the process backend enters via `unshare(CLONE_NEWUSER|CLONE_NEWNS)` + `chroot`, and the OCI
+backend now points `root.path` at the real rootfs with rootless mappings, a minimal `/proc` +
+`/dev` mount list, and real argv instead of `/bin/sh -c`. Four separate defects were stacked
+behind each other — see the kavach 3.9.1 CHANGELOG. A failed `execve` also no longer reports
+exit 0. **Newly surfaced and NOT part of this:** layers over ~1 MB fail to unpack
+(`_stor_extract_tar`), verified pre-existing against HEAD; tracked separately and now the
+practical blocker for real images.
+
+**K (original report, kept for the reasoning).** The container filesystem is never entered — `run` execs on the HOST.** Found while
+verifying `run -d`, and it affects the **foreground path identically**, so it predates detach.
+`stiva run local/demo:v1 /bin/ticker` (a binary present only in the image) exits **0** having run
+nothing; a command that happens to exist on the host runs, which is why the path has looked
+healthy. The layers ARE unpacked and `{croot}/rootfs` IS materialized — nothing chroots into it.
+**Blocked one layer upstream, exactly like §J:** kavach 3.9.0's `SandboxConfig` carries
+`backend / policy / timeout_ms / inner_backend / agent_id / hostname / domainname / workdir` and
+**no rootfs field**, so stiva cannot express this through the API under any wiring. Sequence:
+**(1)** kavach — a rootfs field on `SandboxConfig` + a mount-namespace/`pivot_root` entry in the
+process backend; **(2)** stiva — pass the container rootfs through `build_sandbox`. A second,
+separable defect: a failed `execve` in the child is swallowed and surfaces as exit 0, so the
+failure is silent even when the cause is obvious.
+
 - [ ] **Interactive `exec -it`** (TTY) + a **true multiplexed streaming server** (`select!` over
   many streams inside one task). **Blocked on cyrius stackless coroutines** (mid-body
-  suspend/resume — the run-to-completion model can't express them). *Action required from
-  stiva:* cyrius parks this in `roadmap-future.md:116` as an "**Unpinned follow-on** … No live
-  consumer; pull forward on a real suspend-across-await need." **stiva is that consumer and has
-  not filed.** Filing is the unblock lever, not waiting. Nuance: non-TTY single-stream `exec -i`
+  suspend/resume — the run-to-completion model can't express them). **FILED 2026-07-25** as
+  `cyrius/docs/development/issues/2026-07-25-stiva-stackless-coroutines-interactive-exec.md`,
+  which is what `roadmap-future.md:116` was waiting for ("No live consumer; pull forward on a real
+  suspend-across-await need"). Awaiting triage — accept-and-pin, or a decline stiva can design
+  around permanently. Nuance: non-TTY single-stream `exec -i`
   is buildable today over kavach `persistent_send`/`persistent_read` in a blocking poll loop —
   it is the `-t` half that has no substrate (no pty helper exists anywhere in `lib/`).
 - [ ] **True concurrent layer downloads** (`buffer_unordered`) — needs a multi-threaded async

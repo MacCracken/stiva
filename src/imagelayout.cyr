@@ -563,7 +563,10 @@ fn image_import(store, tar_path, name, tag) {
 
     var gzcap = tarlen + tarlen / 50 + 8192;
     var gzbuf = alloc(gzcap);
-    var gzlen = gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
+    # Streaming encoder, NOT the batch `gzip_compress` — the latter corrupts any
+    # input past 1 MiB (see `_stor_gzip_compress` in storage.cyr), which is every
+    # real rootfs tar.
+    var gzlen = _stor_gzip_compress(tarbuf, tarlen, gzbuf, gzcap);
     if (gzlen < 0) {
         stiva_err_print(STIVA_ERR_STORAGE, "failed to gzip import tar");
         return 0;
@@ -822,7 +825,9 @@ fn _il_docker_add_layer(store, dir, lname, layer_descs, layers) {
     var ulen = load64(llc);
     var gzcap = ulen + ulen / 50 + 8192;
     var gzbuf = alloc(gzcap);
-    var gzlen = gzip_compress(lbuf, ulen, gzbuf, gzcap);
+    # Streaming encoder — see `_stor_gzip_compress` (storage.cyr) for why the
+    # batch `gzip_compress` cannot be used on a layer tar.
+    var gzlen = _stor_gzip_compress(lbuf, ulen, gzbuf, gzcap);
     if (gzlen < 0) { return 0; }
     var ldigest = sha256_digest(gzbuf, gzlen);
     if (image_store_store_blob(store, ldigest, gzbuf, gzlen) == 0) { return 0; }

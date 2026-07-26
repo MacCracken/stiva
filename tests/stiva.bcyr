@@ -219,6 +219,41 @@ fn main(): i64 {
     bench_batch_stop(bet, 200000);
     bench_report(bet);
     _stor_remove_dir_all(ev_root);
+
+    # The gzip layer codec. `_stor_gzip_compress` is what every `import` / every
+    # docker-archive `load` pays per layer, and it is on the streaming encoder
+    # rather than the batch one (the batch path corrupts anything past 1 MiB —
+    # see storage.cyr). The streaming encoder consumes through a 64 KiB sliding
+    # window instead of addressing the whole input, so the cost of that
+    # correctness fix is exactly what this measures.
+    #
+    # 2 MiB, sized to cross the batch encoder's 1 MiB block boundary twice.
+    # Iteration counts are low because each one moves megabytes; the CSV trend,
+    # not the absolute number, is the guard.
+    var gz_n = 2097152;
+    var gz_src = alloc(gz_n);
+    var gzi = 0;
+    while (gzi < gz_n) { store8(gz_src + gzi, 65 + (gzi % 26)); gzi = gzi + 1; }
+    var gz_cap = gz_n + gz_n / 50 + 8192;
+    var gz_buf = alloc(gz_cap);
+
+    var bgz = bench_new("gzip_compress_2mib");
+    bench_batch_start(bgz);
+    var gc = 0;
+    while (gc < 20) { _stor_gzip_compress(gz_src, gz_n, gz_buf, gz_cap); gc = gc + 1; }
+    bench_batch_stop(bgz, 20);
+    bench_report(bgz);
+
+    # And the inverse, which `unpack_layer` pays on every container start whose
+    # layer is not already unpacked.
+    var gz_len = _stor_gzip_compress(gz_src, gz_n, gz_buf, gz_cap);
+    var gz_out = alloc(gz_n + 65536);
+    var bgd = bench_new("gzip_decompress_2mib");
+    bench_batch_start(bgd);
+    var gd = 0;
+    while (gd < 20) { gzip_decompress(gz_buf, gz_len, gz_out, gz_n + 65536); gd = gd + 1; }
+    bench_batch_stop(bgd, 20);
+    bench_report(bgd);
     return 0;
 }
 

@@ -646,6 +646,71 @@ fn _stor_extract_tar(tar, tar_len, dest) {
     return 0;
 }
 
+# ── gzip compression (streaming — the batch encoder is unusable) ──────────
+#
+# UPSTREAM BUG — sankoch's batch `gzip_compress` / `deflate_compress*` writes a
+# MALFORMED stream for any input larger than DEFLATE_BLOCK_SIZE (1 MiB).
+#
+# `_deflate_compress_level_inner` (lib/sankoch.cyr:4814) chunks the input into
+# 1 MiB outer blocks and resumes each next block at `block_end`. But the
+# per-block encoders — `_deflate_compress_fixed_block` (:4845, levels 1-3) and
+# `_deflate_compress_dynamic_block` (:5100, levels 4-9) — legitimately run PAST
+# `block_end`: they match against the FULL `src`, so a match starting just
+# below the boundary carries up to LZ77_MAX_MATCH (258) bytes over it. That
+# overshoot is discarded by the chunker and re-emitted by the following block,
+# so the stream decodes to `src_len + overshoot` bytes and the gzip trailer's
+# CRC-32 no longer matches — `gzip_decompress` returns -ERR_CHECKSUM_MISMATCH
+# (-5), which `unpack_layer` maps to its -1 sentinel. Measured on a 2 MB input:
+# 220 bytes duplicated at offset 1048576, decoded length 2000220. GNU `gunzip`
+# rejects the very same stream at the very same offset, so this is a genuinely
+# malformed stream, not a decoder disagreement — and the sankoch DECODER is
+# correct (streams from GNU gzip round-trip byte-exact).
+#
+# The STREAMING encoder is not affected: `_denc_consume` (:5373) stores the
+# offset its LZ77 loop actually reached back into the encoder ctx, so an
+# overshoot carries into the next consume instead of being re-encoded. It is
+# also byte-compatible with GNU gunzip, and compresses marginally SMALLER than
+# the batch path (4904 vs 4943 bytes on that same 2 MB input) — RFC 1951 caps
+# back-references at 32 KiB regardless, so the 1 MiB outer chunk never bought
+# any extra match reach to lose.
+#
+# Every gzip layer blob stiva WRITES therefore goes through here. Layers stiva
+# READS are unaffected (they come from a correct encoder), so
+# `_stor_unpack_gz_bytes` below is unchanged.
+#
+# Feed size for `gzip_enc_write`. The encoder copies input through a 64 KiB
+# sliding window and consumes it as it goes, so this bounds nothing but the
+# per-call loop; 256 KiB keeps the call count low without a large working set.
+var _STOR_GZ_FEED = 262144;
+
+# Compress `src[0..src_len)` into `dst` as a gzip stream, at the same level 6
+# the batch `gzip_compress` used. Returns the byte length written (>= 0), or a
+# negative sankoch ERR_* on failure. `dst_cap` must be >= 18 (10-byte header +
+# 8-byte trailer).
+#
+# `gzip_enc_init` takes sankoch's mutex and `gzip_enc_finish` is what RELEASES
+# it, so finish MUST run even after a write error — hence the sticky `werr`
+# rather than an early return.
+#[must_use]
+fn _stor_gzip_compress(src, src_len, dst, dst_cap) {
+    if (src_len < 0) { return 0 - 1; }
+    var ctx = gzip_enc_init(6, dst, dst_cap);
+    if (ctx == 0) { return 0 - 1; }        # bad args / OOM (lock already released)
+
+    var off = 0;
+    var werr = 0;
+    while (off < src_len && werr == 0) {
+        var take = _STOR_GZ_FEED;
+        if (off + take > src_len) { take = src_len - off; }
+        werr = gzip_enc_write(ctx, src + off, take);
+        off = off + take;
+    }
+
+    var out = gzip_enc_finish(ctx);        # releases the mutex on every path
+    if (werr < 0) { return werr; }
+    return out;
+}
+
 # Decompress a gzip'd tar `file` and extract it into `dest` (rust-old:
 # unpack_tar_gz — flate2 GzDecoder + tar::Archive). `blob` is the raw
 # gzip bytes, `blob_len` its length. Returns 0 on success, negative on

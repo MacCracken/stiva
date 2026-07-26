@@ -11,7 +11,7 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 [nein](https://github.com/MacCracken/nein) (nftables networking), and
 [bote](https://github.com/MacCracken/bote) (MCP integration).
 
-## Status — v3.0.13: single-node OCI runtime (group A complete, §B complete)
+## Status — v3.0.14: single-node OCI runtime (group A complete, §B complete)
 
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as
 the parity oracle). **v3.0.0 was a working single-node OCI runtime**; **v3.0.1–v3.0.4
@@ -75,6 +75,7 @@ are planned for the v3.0.x line, and which are the blocked v3.1 residue.
 `export` · `stats` · `pause` · `unpause` · `logs` · `wait` · `gc` · `prune` · `info` ·
 `pull` / `push` (OCI distribution, streaming + digest-verified) ·
 `kill` · `restart` · `rename` · `top` · `cp` · `completions` (bash/zsh/fish) ·
+`run -d` (detached, over kavach 3.9.0) ·
 `convert` (Dockerfile → Stivafile) · `save` / `load` (oci-archive; `load` also reads
 docker-archive) · `events` (lifecycle stream over a persisted JSONL log).
 
