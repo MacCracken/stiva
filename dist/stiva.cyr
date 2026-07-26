@@ -8881,6 +8881,48 @@ fn _stor_gzip_compress(src, src_len, dst, dst_cap) {
     return out;
 }
 
+# ── Decompression ceilings — SHARED by both layer codecs ────────────────
+# Layer blobs are attacker-influenced: `stiva pull` fetches them from an
+# arbitrary registry and `stiva load` reads them out of an untrusted
+# oci-archive / docker-archive. Neither decode path may size its output buffer
+# from the blob alone, so both bound it here, the same way.
+#
+# Two ceilings, because a bomb reaches each path differently:
+#   * zstd DECLARES its output size — Frame_Content_Size is read straight out
+#     of the attacker-supplied frame header, so honouring it blindly is
+#     allocation amplification: a 100-byte blob can declare 1 TiB.
+#   * gzip declares nothing, so its buffer is a guess that doubles on
+#     ERR_BUFFER_TOO_SMALL. That reacts to actual decoded output rather than a
+#     forged header — which defeats amplification from a *small* blob, but does
+#     NOT bound the loop: a blob that genuinely decodes large walks the buffer
+#     up one doubling at a time, unbounded. Same DoS, reached in steps.
+# The ceilings terminate both.
+#
+# _STOR_MAX_OUT is absolute (large ML base layers run to single-digit GiB).
+# _STOR_MAX_RATIO bounds output against the compressed length, floored at
+# _STOR_MIN_OUT so a legitimately tiny blob is not rejected for a ratio it
+# cannot avoid — the guessed cap starts at 1 MiB, and a blob small enough for
+# the floor to bind decodes to at most ~1 MiB anyway.
+#
+# Real layers clear both by orders of magnitude. Note deflate's own maximum is
+# 1032:1, so on the gzip path the ratio only rejects a near-pure run of one
+# repeated byte and _STOR_MAX_OUT is the operative bound; zstd's RLE has no
+# such limit, which is why the ratio carries that path.
+var _STOR_MAX_OUT = 8589934592;         # 8 GiB absolute
+var _STOR_MAX_RATIO = 1000;             # vs. the compressed length
+var _STOR_MIN_OUT = 1048576;            # 1 MiB — ratio floor + initial cap
+
+# Largest output buffer either codec may allocate for `blob_len` compressed
+# bytes: the ratio bound, floored at _STOR_MIN_OUT and capped at the absolute
+# ceiling. A grow-retry loop cannot free its rejected buffers (lib/alloc.cyr
+# exposes no bare `free`), so cumulative allocation across a full doubling run
+# is bounded at ~2x this, and peak live at exactly this.
+fn _stor_decomp_limit(blob_len) {
+    var lim = blob_len * _STOR_MAX_RATIO;
+    if (lim < _STOR_MIN_OUT) { lim = _STOR_MIN_OUT; }
+    if (lim > _STOR_MAX_OUT) { lim = _STOR_MAX_OUT; }
+    return lim;}
+
 # Decompress a gzip'd tar `file` and extract it into `dest` (rust-old:
 # unpack_tar_gz — flate2 GzDecoder + tar::Archive). `blob` is the raw
 # gzip bytes, `blob_len` its length. Returns 0 on success, negative on
@@ -8888,11 +8930,15 @@ fn _stor_gzip_compress(src, src_len, dst, dst_cap) {
 #
 # The decompressed size is unknown up front; we size the output buffer
 # generously (32x the compressed size, min 1 MiB) and retry doubling on
-# ERR_BUFFER_TOO_SMALL. gzip's trailer ISIZE could size it exactly, but a
-# growth loop is simpler and codec-agnostic.
+# ERR_BUFFER_TOO_SMALL, up to _stor_decomp_limit. gzip's trailer ISIZE could
+# size it exactly, but it is as attacker-controlled as zstd's FCS and a growth
+# loop is codec-agnostic. Hitting the ceiling returns -2: the blob decodes to
+# more than we are willing to hold, i.e. a decompression bomb.
 fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
+    var limit = _stor_decomp_limit(blob_len);
     var cap = blob_len * 32;
-    if (cap < 1048576) { cap = 1048576; }   # >= 1 MiB
+    if (cap < _STOR_MIN_OUT) { cap = _STOR_MIN_OUT; }   # >= 1 MiB
+    if (cap > limit) { cap = limit; }
     var dlen = 0 - 1;
     var tries = 0;
     var out = 0;
@@ -8901,9 +8947,11 @@ fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
         out = alloc(cap);
         dlen = gzip_decompress(blob, blob_len, out, cap);
         if (dlen == (0 - 2)) {              # ERR_BUFFER_TOO_SMALL → grow + retry
+            if (cap >= limit) { return 0 - 2; }     # ceiling → decompression bomb
             cap = cap * 2;
+            if (cap > limit) { cap = limit; }
             tries = tries + 1;
-            if (tries > 24) { return 0 - 2; }   # runaway guard
+            if (tries > 24) { return 0 - 2; }   # backstop; the ceiling above binds first
         } else {
             rgo = 0;
         }
@@ -8911,16 +8959,6 @@ fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
     if (dlen < 0) { return dlen; }          # gzip decode failed (not gzip, corrupt, …)
     return _stor_extract_tar(out, dlen, dest);
 }
-
-# Ceilings for the zstd output buffer. zstd's Frame_Content_Size is read
-# straight out of the attacker-supplied frame header, so honouring it blindly
-# is an allocation-amplification DoS — a 100-byte blob can declare a 1 TiB
-# content size. The gzip path is NOT exposed this way: its grow-loop reacts to
-# actual decoded output rather than a declared number, so the guard is
-# zstd-only. 8 GiB absolute (large ML base layers run to single-digit GiB) and
-# a 1000:1 ratio, both of which real layers clear by orders of magnitude.
-var _STOR_ZSTD_MAX_OUT = 8589934592;
-var _STOR_ZSTD_MAX_RATIO = 1000;
 
 # Decompress a zstd'd tar `blob` and extract it into `dest` (rust-old:
 # unpack_tar_zstd — zstd::stream::Decoder + tar::Archive). Returns 0 on
@@ -8935,27 +8973,28 @@ var _STOR_ZSTD_MAX_RATIO = 1000;
 # (fcs_flag 0 on a multi-frame input), where a corrupt blob simply costs a few
 # wasted attempts before failing.
 fn _stor_unpack_zstd_bytes(blob, blob_len, dest) {
+    var limit = _stor_decomp_limit(blob_len);
     var cap = zstd_frame_content_size(blob, blob_len);
     if (cap > 0) {
-        if (cap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
-        if (cap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
+        if (cap > limit) { return 0 - 1; }      # declared size over the ceiling
         var out1 = alloc(cap);
         var dlen1 = zstd_decompress(blob, blob_len, out1, cap);
         if (dlen1 < 0) { return dlen1; }
         return _stor_extract_tar(out1, dlen1, dest);
     }
 
-    # Frame declares no content size — grow-retry, bounded by the same ceilings.
+    # Frame declares no content size — grow-retry, bounded by the same ceiling.
     var gcap = blob_len * 32;
-    if (gcap < 1048576) { gcap = 1048576; }     # >= 1 MiB
+    if (gcap < _STOR_MIN_OUT) { gcap = _STOR_MIN_OUT; }     # >= 1 MiB
+    if (gcap > limit) { gcap = limit; }
     var tries = 0;
     while (tries < 12) {
-        if (gcap > _STOR_ZSTD_MAX_OUT) { return 0 - 1; }
-        if (gcap > blob_len * _STOR_ZSTD_MAX_RATIO) { return 0 - 1; }
         var out = alloc(gcap);
         var dlen = zstd_decompress(blob, blob_len, out, gcap);
         if (dlen >= 0) { return _stor_extract_tar(out, dlen, dest); }
+        if (gcap >= limit) { return 0 - 1; }    # ceiling → bomb (or a corrupt frame)
         gcap = gcap * 2;
+        if (gcap > limit) { gcap = limit; }
         tries = tries + 1;
     }
     return 0 - 1;

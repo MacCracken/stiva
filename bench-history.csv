@@ -110,3 +110,15 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-07-26T03:00:00Z,8b70d84,main,event_ts_parse,1680.0000
 2026-07-26T03:00:00Z,8b70d84,main,gzip_compress_2mib,41391000.0000
 2026-07-26T03:00:00Z,8b70d84,main,gzip_decompress_2mib,9732000.0000
+2026-07-26T03:24:39Z,d01cc81,main,noop,2.0000
+2026-07-26T03:24:39Z,d01cc81,main,oci_config_build+serialize,7141.0000
+2026-07-26T03:24:39Z,d01cc81,main,oci_manifest_to_jv+serialize,15784.0000
+2026-07-26T03:24:39Z,d01cc81,main,compose_yaml_to_toml,30127.0000
+2026-07-26T03:24:39Z,d01cc81,main,compose_400_reverse_sorted_keys,1402000.0000
+2026-07-26T03:24:39Z,d01cc81,main,flatten_layers_2x60_files_4kib,1504000.0000
+2026-07-26T03:24:39Z,d01cc81,main,event_json_build,6143.0000
+2026-07-26T03:24:39Z,d01cc81,main,event_log_append,7997.0000
+2026-07-26T03:24:39Z,d01cc81,main,event_ts_parse,1628.0000
+2026-07-26T03:24:39Z,d01cc81,main,gzip_compress_2mib,40482000.0000
+2026-07-26T03:24:39Z,d01cc81,main,gzip_decompress_2mib,9435000.0000
+2026-07-26T03:24:39Z,d01cc81,main,unpack_layer_gz_20_files_4kib,1073000.0000

@@ -744,17 +744,120 @@ fn test_unpack_layer_zstd_fcs_bomb() {
     file_write_all(blob, buf, 13);
     assert_eq(unpack_layer(blob, dir), 0 - 1, "1 TiB FCS rejected");
 
-    # 1 MiB declared from a 13-byte blob — under the absolute ceiling but a
-    # ~80000:1 ratio, so the ratio guard is what rejects this one.
-    var buf2 = alloc(13);
+    # 512 MiB declared from a 2000-byte blob — three orders under the absolute
+    # ceiling, so the ratio guard is what rejects this one. The blob is padded
+    # past _STOR_MIN_OUT / _STOR_MAX_RATIO (1049 bytes) on purpose: below that
+    # the 1 MiB floor sets the limit and the ratio never binds, so a 13-byte
+    # blob could not isolate it. Only the 13-byte header is read.
+    var n2 = 2000;
+    var buf2 = alloc(n2);
     store8(buf2, 0x28); store8(buf2 + 1, 0xB5); store8(buf2 + 2, 0x2F); store8(buf2 + 3, 0xFD);
     store8(buf2 + 4, 0xE0);
-    store8(buf2 + 5, 0); store8(buf2 + 6, 0); store8(buf2 + 7, 16); store8(buf2 + 8, 0);
+    store8(buf2 + 5, 0); store8(buf2 + 6, 0); store8(buf2 + 7, 0); store8(buf2 + 8, 32);
     store8(buf2 + 9, 0); store8(buf2 + 10, 0); store8(buf2 + 11, 0); store8(buf2 + 12, 0);
-    assert_eq(zstd_frame_content_size(buf2, 13), 1048576, "header declares 1 MiB");
+    var i2 = 13;
+    while (i2 < n2) { store8(buf2 + i2, 0x41); i2 = i2 + 1; }
+    assert_eq(zstd_frame_content_size(buf2, n2), 536870912, "header declares 512 MiB");
+    assert_eq(_stor_decomp_limit(n2), 2000000, "limit is the ratio bound, not the ceiling");
     var blob2 = _stor_cat2(dir, "/ratio.tar.zst");
-    file_write_all(blob2, buf2, 13);
+    file_write_all(blob2, buf2, n2);
     assert_eq(unpack_layer(blob2, dir), 0 - 1, "1000:1 ratio exceeded -> rejected");
+    return 0;
+}
+
+# The shared decompression bound both codecs size their output buffer against.
+# Covers each of its three regimes independently — the gzip path cannot reach
+# the ratio regime end-to-end (deflate's own maximum is 1032:1, so a real gzip
+# blob can only ever land ~3% over a 1000:1 bound), so it is pinned here.
+fn test_stor_decomp_limit() {
+    test_group("stor_decomp_limit");
+    # Floor: a tiny blob is not held to the ratio — it could not clear it, and
+    # the guessed starting cap is 1 MiB regardless.
+    assert_eq(_stor_decomp_limit(0), 1048576, "0 -> 1 MiB floor");
+    assert_eq(_stor_decomp_limit(13), 1048576, "13 B -> 1 MiB floor");
+    assert_eq(_stor_decomp_limit(1048), 1048576, "just under the crossover -> floor");
+    # Ratio: 1000:1 against the compressed length.
+    assert_eq(_stor_decomp_limit(1049), 1049000, "1049 B -> ratio bound");
+    assert_eq(_stor_decomp_limit(1048576), 1048576000, "1 MiB -> 1000 MiB");
+    # Absolute: 8 GiB, whatever the ratio would allow.
+    assert_eq(_stor_decomp_limit(8589935), 8589934592, "ratio clamped to 8 GiB");
+    assert_eq(_stor_decomp_limit(1073741824), 8589934592, "1 GiB blob -> 8 GiB");
+    return 0;
+}
+
+# DoS guard, gzip side: the grow-retry loop must stop at _stor_decomp_limit
+# instead of doubling its buffer until the process dies. Mirrors
+# test_unpack_layer_zstd_fcs_bomb — the same attack, reached one doubling at a
+# time rather than through a forged header, which is why the loop reacting to
+# real decoded output does not by itself make gzip safe.
+#
+# The ceiling is driven by lowering the constant rather than by a blob that
+# genuinely decodes past 8 GiB: deflate caps out at 1032:1, so an honest gzip
+# bomb would have to BE ~8 GiB. Lowering the ceiling exercises the identical
+# code path at a size a test can hold.
+#
+# The payload is 512 KiB and MUST stay under 1 MiB: sankoch 2.6.x's
+# `gzip_compress` emits a stream that decodes LONGER than its input once a
+# compressible payload passes ~1 MiB (1049000 zero bytes -> a blob zlib expands
+# to 1049195, CRC mismatch), so a larger fixture would fail on the encoder, not
+# on anything this test is about.
+fn test_unpack_layer_gz_bomb() {
+    test_group("unpack_layer_gz_bomb");
+    var dir = "/tmp/stiva-unpack-gz-bomb";
+    _stor_remove_dir_all(dir);
+    sys_mkdir(dir, 493);
+    var blob = _stor_cat2(dir, "/bomb.tar.gz");
+    var dest = _stor_cat2(dir, "/unpacked");
+    sys_mkdir(dest, 493);
+
+    # 512 KiB of tar — one real file, the rest zero padding — behind a ~550-byte
+    # blob. A blob three orders smaller than its output is the shape of every
+    # decompression bomb.
+    var raw = 524288;
+    var tar = alloc(raw);
+    var i = 0;
+    while (i < raw) { store8(tar + i, 0); i = i + 1; }
+    _t_build_tar(tar, "etc/bomb.txt", "boom", 4);
+    var gz = alloc(65536);
+    var glen = gzip_compress(tar, raw, gz, 65536);
+    assert(glen > 0, "gzip compressed");
+    file_write_all(blob, gz, glen);
+    var out = _stor_cat2(dest, "/etc/bomb.txt");
+    var rbuf = alloc(64);
+
+    # Ceiling below the decoded size: rejected, and nothing is extracted.
+    var saved_out = _STOR_MAX_OUT;
+    _STOR_MAX_OUT = 262144;                 # 256 KiB
+    assert_eq(_stor_decomp_limit(glen), 262144, "ceiling clamps the limit");
+    assert_eq(unpack_layer(blob, dest), 0 - 1, "decodes past the ceiling -> rejected");
+    assert(file_read_all(out, rbuf, 64) <= 0, "nothing extracted");
+    _STOR_MAX_OUT = saved_out;
+
+    # The very same blob under the real ceiling unpacks — so the rejection above
+    # was the ceiling, not a malformed input.
+    assert_eq(unpack_layer(blob, dest), 0, "same blob unpacks under the real ceiling");
+    var n = file_read_all(out, rbuf, 64);
+    store8(rbuf + n, 0);
+    assert_eq(streq(rbuf, "boom"), 1, "content round-trips");
+
+    # Bounding the loop must not break its reason for existing. Drop the floor
+    # so the first buffer is far too small, and the grow-retry has to double
+    # (64K -> 128K -> 256K -> 512K) and clamp to the limit to get there.
+    _stor_remove_dir_all(dest);
+    sys_mkdir(dest, 493);
+    var saved_min = _STOR_MIN_OUT;
+    _STOR_MIN_OUT = 65536;
+    assert(glen * 32 < 65536, "initial cap is the lowered floor, so the loop must grow");
+    assert_eq(unpack_layer(blob, dest), 0, "grow-retry still reaches the decoded size");
+    n = file_read_all(out, rbuf, 64);
+    store8(rbuf + n, 0);
+    assert_eq(streq(rbuf, "boom"), 1, "content round-trips after growing");
+    _STOR_MIN_OUT = saved_min;
+
+    # Leave the policy exactly as it was found — every later test reads it.
+    assert_eq(_STOR_MAX_OUT, 8589934592, "ceiling restored");
+    assert_eq(_STOR_MAX_RATIO, 1000, "ratio restored");
+    assert_eq(_STOR_MIN_OUT, 1048576, "floor restored");
     return 0;
 }
 
@@ -1417,6 +1520,8 @@ fn main() {
     test_unpack_layer_zstd_roundtrip();
     test_unpack_layer_zstd_corrupt();
     test_unpack_layer_zstd_fcs_bomb();
+    test_stor_decomp_limit();
+    test_unpack_layer_gz_bomb();
     test_tar_perms_roundtrip();
     test_tar_extract_rejects_traversal();
     test_tar_hardening();

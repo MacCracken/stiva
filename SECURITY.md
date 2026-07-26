@@ -13,7 +13,10 @@ The primary security-relevant surface areas are:
 - **File descriptor hygiene** — inherited fds are closed (3..1024) in pre_exec
   to prevent CVE-2024-21626-class escapes via `/proc/self/fd/N`.
 - **Overlay filesystem** — layer unpacking from tar archives (gzip + zstd).
-  Malicious tar entries (symlink attacks, path traversal) could escape the rootfs.
+  Malicious tar entries (symlink attacks, path traversal) could escape the rootfs,
+  and a decompression bomb could exhaust memory before a single entry is read —
+  both codecs bound their output at 8 GiB absolute and 1000:1 against the
+  compressed length.
 - **Network isolation** — veth pairs, bridge networks, nftables rules, network
   policies. Misconfigured rules could leak traffic between containers.
 - **Registry authentication** — bearer tokens cached in memory, credentials

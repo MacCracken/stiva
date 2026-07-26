@@ -254,7 +254,68 @@ fn main(): i64 {
     while (gd < 20) { gzip_decompress(gz_buf, gz_len, gz_out, gz_n + 65536); gd = gd + 1; }
     bench_batch_stop(bgd, 20);
     bench_report(bgd);
-    return 0;
+    # unpack_layer — inflate a gzip layer blob and extract its tar. Paid once
+    # per layer on every `pull` and `load`, and until now unbenchmarked, which
+    # is awkward for a path that just grew a decompression ceiling: the guard
+    # costs a helper call plus two compares per grow-retry iteration, and that
+    # has to stay invisible next to the inflate + per-file writes it protects.
+    #
+    # 20 files of 4 KiB of PSEUDO-RANDOM bytes, not the 'A' filler used above:
+    # a compressible fixture would price the memset-fast side of inflate and
+    # would also sit near the 1000:1 ratio bound, where the fixture, not the
+    # code, decides the result. Real layers are mostly incompressible.
+    #
+    # Like flatten_layers this is I/O bound (it writes 20 files per iteration),
+    # so the absolute number tracks the host filesystem; the CSV trend is the
+    # guard. The dest is not cleared between iterations — the second and later
+    # passes overwrite, which is what re-pulling an existing layer does.
+    var ul_src = "/tmp/stiva_bench_unpack_src";
+    var ul_dst = "/tmp/stiva_bench_unpack_dst";
+    var ul_tar = "/tmp/stiva_bench_unpack.tar";
+    var ul_blob = "/tmp/stiva_bench_unpack.tar.gz";
+    _stor_remove_dir_all(ul_src);
+    _stor_remove_dir_all(ul_dst);
+    sys_mkdir(ul_src, 493);
+    var rnd = alloc(4096);
+    var rx = 123456789;
+    var rz = 0;
+    while (rz < 4096) {
+        rx = (rx * 1103515245 + 12345) & 2147483647;
+        store8(rnd + rz, (rx >> 16) & 255);
+        rz = rz + 1;
+    }
+    var uf = 0;
+    while (uf < 20) {
+        var usb = str_builder_new();
+        str_builder_add_cstr(usb, ul_src);
+        str_builder_add_cstr(usb, "/f");
+        str_builder_add_int(usb, uf);
+        file_write_all(str_cstr(str_builder_build(usb)), rnd, 4096);
+        uf = uf + 1;
+    }
+    create_tar(ul_src, ul_tar);
+    var ul_len_cell = alloc(8);
+    var ul_tarbuf = _stor_read_file(ul_tar, ul_len_cell);
+    var ul_tarlen = load64(ul_len_cell);
+    var ul_gzcap = ul_tarlen + ul_tarlen / 50 + 8192;
+    var ul_gz = alloc(ul_gzcap);
+    # _stor_gzip_compress, not the batch gzip_compress: this fixture is well
+    # under 1 MiB so the batch encoder would be correct today, but it corrupts
+    # anything past that boundary, and a fixture that grows should not silently
+    # start measuring a malformed blob.
+    var ul_gzlen = _stor_gzip_compress(ul_tarbuf, ul_tarlen, ul_gz, ul_gzcap);
+    file_write_all(ul_blob, ul_gz, ul_gzlen);
+    sys_mkdir(ul_dst, 493);
+    var bul = bench_new("unpack_layer_gz_20_files_4kib");
+    bench_batch_start(bul);
+    var ui = 0;
+    while (ui < 100) { unpack_layer(ul_blob, ul_dst); ui = ui + 1; }
+    bench_batch_stop(bul, 100);
+    bench_report(bul);
+    _stor_remove_dir_all(ul_src);
+    _stor_remove_dir_all(ul_dst);
+    sys_unlink(ul_tar);
+    sys_unlink(ul_blob);    return 0;
 }
 
 var r = main();

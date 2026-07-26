@@ -31,27 +31,6 @@ polling the starttime-checked probe, since after reparenting to init it cannot `
 this the record read `Stopped` while the container kept running, which the smoke suite now asserts
 against directly.
 
-### Known — the container filesystem is never entered (pre-existing, now documented)
-Found while verifying `run -d`, and it affects the **foreground path identically**, so detach did
-not introduce it:
-
-```
-stiva run local/demo:v1 /bin/ticker    # /bin/ticker exists only in the image
-# exit 0, no output — nothing ran
-```
-
-The command execs on the **host**. Layers are unpacked and `{croot}/rootfs` is materialized;
-nothing chroots into it. A command that happens to exist on the host (`/bin/sleep`) runs, which is
-why this has looked healthy. Two separable defects: the missing rootfs entry, and a failed
-`execve` in the child being swallowed into **exit 0**.
-
-Blocked one layer upstream, structurally identical to the device-passthrough gap: kavach 3.9.0's
-`SandboxConfig` has **no rootfs field**, so stiva cannot express "run inside this filesystem"
-through the API under any wiring. Tracked as roadmap **§K** with the two-step sequence, and called
-out in `docs/cli.md` so the limitation is not discovered the hard way. Until it closes, treat
-`run`/`run -d` as process supervision with image-derived configuration rather than filesystem
-isolation.
-
 ### Filed — the remaining v3.1.0 gate
 `cyrius/docs/development/issues/2026-07-25-stiva-stackless-coroutines-interactive-exec.md`.
 cyrius parks stackless coroutines as an *Unpinned follow-on* with "No live consumer; pull forward
@@ -59,11 +38,6 @@ on a real suspend-across-await need" — stiva is that consumer (interactive `ex
 streaming), and the roadmap has carried "has not filed; filing is the unblock lever" as an open
 action for weeks. Now on record, with the shipped workarounds documented so other consumers can
 reuse them. A decline is an acceptable outcome; an indefinitely-held slot is not.
-
-### Tests — 1804 → 1886 unit, smoke 64 → 69
-The detached lifecycle is covered end-to-end by the smoke suite, since `main.cyr` is not unit
-testable: id returned immediately, a NEW process still sees it Running, the process is genuinely
-alive, cross-process `stop` actually kills it, and `ps` stops reporting it.
 
 ### Fixed — `stiva run` executes INSIDE the container rootfs
 The defect documented as "Known" in 3.0.14. `stiva run local/demo:v1 /bin/hello`, where the binary
@@ -157,9 +131,49 @@ Two benchmarks in `tests/stiva.bcyr` — `gzip_compress_2mib` (42.9 ms) and `gzi
 (10.1 ms) — so the codec has a trend line rather than a one-off number, and the cost of the
 streaming switch stays visible.
 
+### Security — the gzip layer path had no decompression-bomb ceiling
+`_stor_unpack_zstd_bytes` has enforced two ceilings since zstd decode landed — 8 GiB absolute and
+1000:1 against the compressed length — and the comment above them argued the gzip path "is NOT
+exposed this way" because its grow-loop reacts to actual decoded output rather than a declared
+frame size. That is true of **allocation amplification from a forged header**, and it is the wrong
+conclusion: it does not bound the loop. `_stor_unpack_gz_bytes` started at `max(blob_len * 32,
+1 MiB)`, doubled on `ERR_BUFFER_TOO_SMALL`, and gave up only after **24 doublings** — so a blob
+that genuinely decodes large walked the buffer toward ~16 TiB one allocation at a time, reaching
+the same DoS in steps instead of in one jump. Layer blobs are attacker-influenced: `stiva pull`
+takes them from an arbitrary registry, `stiva load` from an untrusted oci-archive/docker-archive.
+
+Both codecs now size their output against one shared bound, `_stor_decomp_limit(blob_len)` —
+`_STOR_MAX_RATIO` (1000:1), floored at `_STOR_MIN_OUT` (1 MiB) and capped at `_STOR_MAX_OUT`
+(8 GiB). The gzip loop clamps each doubling to it and returns `-2` on reaching it; the zstd path
+checks its declared `Frame_Content_Size` against it and clamps its own fallback grow-retry. Peak
+live allocation is now exactly the limit and cumulative allocation across a full doubling run is
+~2x it, where before both were unbounded. The `tries > 24` counter is kept as a backstop, but the
+ceiling binds first (1 MiB → 8 GiB is 13 doublings).
+
+Two notes on the shape of the bound:
+
+- **The 1 MiB floor is load-bearing, and fixes a latent false-reject on the zstd side.** The
+  guessed starting cap is 1 MiB, so applying a bare ratio would reject blobs that cannot clear it —
+  a 30-byte zstd frame declaring 20 KiB of zeros (RLE reaches such ratios trivially) was rejected
+  outright before this change, as was any FCS-less zstd blob under 1049 bytes.
+- **On the gzip path the absolute ceiling is the operative bound.** deflate's own maximum is
+  1032:1, so the ratio can only reject a near-pure run of one repeated byte — a legitimate layer
+  that is essentially all zeros and larger than 1 MiB is now refused. zstd has no such limit, which
+  is why the ratio carries that path.
+
 ### Changed — kavach 3.9.0 → 3.9.1
 `config_rootfs`, the shared `src/confine.cyr` child-confinement sequence, rootless OCI, and the
 `--root` fix. See its CHANGELOG.
+
+### Tests — 1804 → 1906 unit, smoke 64 → 69
+Multi-megabyte layer coverage and the gzip-bomb ceiling tests came in from the two spun-out
+worktrees (`claude/elated-lewin-92e770`, `claude/adoring-mendel-c90f1a`); their storage.cyr changes
+are complementary — one fixes the ENCODE path, the other bounds the DECODE path — and were merged
+by hand where they touched the same region.
+
+The detached lifecycle is covered end-to-end by the smoke suite, since `main.cyr` is not unit
+testable: id returned immediately, a NEW process still sees it Running, the process is genuinely
+alive, cross-process `stop` actually kills it, and `ps` stops reporting it.
 
 ## [3.0.13] — 2026-07-25 — §E complete (`stiva events`) · security: image-controlled writes escaped the rootfs
 
