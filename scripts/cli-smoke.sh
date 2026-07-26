@@ -120,9 +120,12 @@ assert_contains "ps --all shows its image" "local/demo:v1" "$out"
 group "rename"
 out="$(run rename c1 c2)"
 assert_contains "rename echoes the new name" "c2" "$out"
-out="$(run ps --all)"
-assert_contains "ps reflects the rename" "c2" "$out"
-assert_absent  "the old name is gone" "c1" "$out"
+# Assert on the NAME column only. Matching the whole `ps` table for "c1" is
+# flaky: the row carries a 32-hex container ID, and "c1" is a valid hex bigram
+# — measured ~11% false failures per run.
+names="$(run ps --all | awk -F'\t' 'NR>1 {print $4}')"
+assert_contains "ps reflects the rename" "c2" "$names"
+assert_absent  "the old name is gone" "c1" "$names"
 "$STIVA" rename c2 >/dev/null 2>&1; rc=$?
 assert_exit "rename with one arg exits USAGE" 2 "$rc"
 
@@ -138,8 +141,19 @@ assert_contains "kill rejects an out-of-range signal" "out of range" "$out"
 out="$(run kill)"
 assert_contains "kill with no container reports it" "missing required argument" "$out"
 
+group "cp guards"
+# A ':' is legal in a Linux filename, so an unambiguous host path must never be
+# read as <container>:<path>.
+out="$(run cp /tmp/nonexistent-a:b/f.txt "$WORK/out.txt")"
+assert_absent "an absolute host path with ':' is not split" "container not found" "$out"
+out="$(run cp c2:../../../../../../../tmp/ESCAPED "$WORK/e.txt")"
+assert_contains "cp refuses a container path with .." "escapes the container root" "$out"
+out="$(run cp "$WORK/in0.txt" "c2:")"
+assert_contains "cp refuses an empty container path" "empty path" "$out"
+
 group "cp"
 echo 'from-the-host' > "$WORK/in.txt"
+echo x > "$WORK/in0.txt"
 out="$(run cp "$WORK/in.txt" c2:/incoming.txt)"
 assert_contains "cp host->container echoes the destination" "incoming.txt" "$out"
 out="$(run cp c2:/incoming.txt "$WORK/back.txt")"

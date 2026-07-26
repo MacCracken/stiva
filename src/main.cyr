@@ -501,22 +501,33 @@ fn _cli_import(h, root) {
 # TODO(v3.1)), so it is an explicit opt-in flag here rather than a silent
 # record-driven default. Off by default — scanning changes what `logs` prints,
 # and that must never happen behind the operator's back.
-# How long to wait between polls while following, and how long to keep polling
-# after the container has stopped before concluding the writer is done.
+# Poll interval while following, and how long the log must stay QUIET before
+# the follow concludes the writer is done. 2 s is a deliberate trade: long
+# enough not to cut off a writer between two lines, short enough that a script
+# calling `logs -f` on a finished container is not left waiting.
 var _CLI_FOLLOW_POLL_MS = 200;
-var _CLI_FOLLOW_DRAIN_MS = 600;
+var _CLI_FOLLOW_QUIET_MS = 2000;
 
-# `logs -f` — print the log, then poll for growth until the container is no
-# longer Running, exactly as `docker logs -f` terminates.
+# `logs -f` — print the log, then keep printing as it grows, stopping once it
+# has been quiet for _CLI_FOLLOW_QUIET_MS.
 #
-# This polls the FILE, deliberately, rather than subscribing to the lifecycle
-# bus: the bus is an in-process `pubsub_new()` created per ContainerManager
-# (src/container.cyr:896) and is never persisted, so a second process sees an
-# empty one. The log is on disk and therefore actually observable across
-# processes. `--scan` is not offered here — the externalization gate works on a
-# complete output, and redacting a stream a chunk at a time could split a secret
+# Termination is QUIESCENCE-based, not container-state-based, and that is not a
+# shortcut. `container_fixup_after_restart` (src/container.cyr:181) rewrites
+# RUNNING/PAUSED to STOPPED for every record loaded from disk — a stale pid from
+# a dead process is worse than none — so a fresh CLI process can never observe a
+# container as Running. A state-based loop therefore exits on its first pass
+# having followed nothing, which is exactly what the first version of this did.
+# Once `run -d` lands (v3.1) and there is a live pid to probe, state becomes the
+# better signal and should replace this.
+#
+# It polls the FILE rather than the lifecycle bus because the bus is a
+# per-ContainerManager in-process `pubsub_new()` (src/container.cyr:896), never
+# persisted, so a second process sees an empty one.
+#
+# `--scan` is refused alongside `--follow`: the externalization gate scans a
+# COMPLETE output, and redacting a stream a chunk at a time could split a secret
 # across two reads and pass both halves.
-fn _cli_logs_follow(mgr, id, scan) {
+fn _cli_logs_follow(mgr, id, scan, tail_n) {
     if (scan == 1) {
         _cli_eputs("stiva logs: --scan cannot be combined with --follow\n");
         _cli_eputs("  the gate scans a complete output; a chunked stream could split a secret across reads\n");
@@ -527,11 +538,21 @@ fn _cli_logs_follow(mgr, id, scan) {
         stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
         return CMDIT_EXIT_RUN;
     }
-    var buf = alloc(65536);
     var off = 0;
-    var drained_ms = 0;
+    # `-n N` with `-f` prints the last N lines first and then follows from the
+    # end, the way docker does — rather than silently ignoring -n, which is what
+    # short-circuiting to the follow loop used to do.
+    if (tail_n > 0) {
+        var head = container_manager_log_tail(mgr, id, tail_n);
+        if (head != 0) { _cli_puts(head); }
+        off = _cli_file_size(path);
+        if (off < 0) { off = 0; }
+    }
+    var buf = alloc(65536);
+    var quiet_ms = 0;
     var going = 1;
     while (going == 1) {
+        var grew = 0;
         var fd = file_open(path, 0, 0);           # O_RDONLY; absent until first write
         if (fd >= 0) {
             xlseek(fd, off, 0);                   # SEEK_SET — resume where we stopped
@@ -542,25 +563,27 @@ fn _cli_logs_follow(mgr, id, scan) {
                 else {
                     sys_write(1, buf, n);
                     off = off + n;
+                    grew = 1;
                 }
             }
             file_close(fd);
         }
-        # Stop once the container is no longer Running AND a further drain
-        # window produced nothing — the writer may still be flushing its last
-        # bytes as the state flips.
-        var c = container_manager_get(mgr, id);
-        var running = 0;
-        if (c != 0) {
-            var cc: Container = c;
-            if (cc.state == CONTAINER_STATE_RUNNING) { running = 1; }
-        }
-        if (running == 1) { drained_ms = 0; }
-        else { drained_ms = drained_ms + _CLI_FOLLOW_POLL_MS; }
-        if (drained_ms >= _CLI_FOLLOW_DRAIN_MS) { going = 0; }
+        if (grew == 1) { quiet_ms = 0; }
+        else { quiet_ms = quiet_ms + _CLI_FOLLOW_POLL_MS; }
+        if (quiet_ms >= _CLI_FOLLOW_QUIET_MS) { going = 0; }
         else { sleep_ms(_CLI_FOLLOW_POLL_MS); }
     }
     return CMDIT_EXIT_OK;
+}
+
+# Byte length of `path`, or -1.
+#[must_use]
+fn _cli_file_size(path) {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var sz = xlseek(fd, 0, 2);                    # SEEK_END
+    file_close(fd);
+    return sz;
 }
 
 fn _cli_logs(h, root) {
@@ -582,7 +605,7 @@ fn _cli_logs(h, root) {
         return CMDIT_EXIT_RUN;
     }
     if (cmdit_get_bool(vh, f_follow) == 1) {
-        return _cli_logs_follow(mgr, id, cmdit_get_bool(vh, f_scan));
+        return _cli_logs_follow(mgr, id, cmdit_get_bool(vh, f_scan), cmdit_get_int(vh, f_tail));
     }
     var out = container_manager_log_tail(mgr, id, cmdit_get_int(vh, f_tail));
     if (out == 0) { return CMDIT_EXIT_OK; }
@@ -979,10 +1002,14 @@ fn _cli_kill(h, root) {
     }
     var id = cmdit_positional(vh, 0);
     var mgr = container_manager_new(root, image_store_new(root));
+    # require_pid already prints for a MISSING container, so only the
+    # wrong-state case needs a message here — printing unconditionally added a
+    # second, false line ("not running") after a correct "not found".
+    if (container_manager_get(mgr, id) == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return CMDIT_EXIT_RUN;
+    }
     if (container_manager_signal(mgr, id, cmdit_get_int(vh, f_sig)) != STIVA_ERR_OK) {
-        # container_manager_require_pid prints only for a MISSING container; a
-        # container that exists but is not Running returns a bare code, so
-        # without this the verb exits 1 having said nothing at all.
         stiva_err_print(STIVA_ERR_RUNTIME, "cannot signal: container is not running");
         return CMDIT_EXIT_RUN;
     }
@@ -1044,9 +1071,14 @@ fn _cli_top(h, root) {
         return CMDIT_EXIT_USAGE;
     }
     var mgr = container_manager_new(root, image_store_new(root));
-    # require_pid gates on Running/Paused; a stopped one-shot container has no
-    # process tree to walk, which is a clear error rather than an empty table.
-    var pid = container_manager_require_pid(mgr, cmdit_positional(vh, 0), 0, 0);
+    # The allowed list must be a REAL vec. _container_state_allowed loops
+    # `i < n` and returns 0 when n is 0, so passing (0, 0) means "no state is
+    # allowed" — the inverse of the intent — and `top` failed for every
+    # container in every state. Every other caller passes a populated vec.
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    vec_push(allowed, CONTAINER_STATE_PAUSED);
+    var pid = container_manager_require_pid(mgr, cmdit_positional(vh, 0), allowed, 2);
     if (pid <= 0) {
         stiva_err_print(STIVA_ERR_RUNTIME, "container is not running");
         return CMDIT_EXIT_RUN;
@@ -1102,6 +1134,27 @@ fn _cli_cp(h, root) {
         _cli_puts("stiva cp: one side must be <container>:<path>\n");
         return CMDIT_EXIT_USAGE;
     }
+    # An empty container-side path ("c1:") would join to the rootfs root and
+    # splat a directory's contents over it.
+    if (src_colon >= 0 && load8(src + src_colon + 1) == 0) {
+        _cli_puts("stiva cp: empty path after ':'\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    if (dst_colon >= 0 && load8(dst + dst_colon + 1) == 0) {
+        _cli_puts("stiva cp: empty path after ':'\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    # The container-side path is joined onto the rootfs, so `..` would walk out
+    # of it. copy_into_container / copy_from_container do not check (oracle
+    # parity — rust-old/src/runtime.rs:914, :946), so the gate is here.
+    if (src_colon >= 0 && _cli_path_escapes(src + src_colon + 1) == 1) {
+        _cli_puts("stiva cp: container path escapes the container root\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    if (dst_colon >= 0 && _cli_path_escapes(dst + dst_colon + 1) == 1) {
+        _cli_puts("stiva cp: container path escapes the container root\n");
+        return CMDIT_EXIT_USAGE;
+    }
     var mgr = container_manager_new(root, image_store_new(root));
     var rc = 0 - 1;
     if (dst_colon >= 0) {
@@ -1120,16 +1173,50 @@ fn _cli_cp(h, root) {
     return CMDIT_EXIT_OK;
 }
 
-# Index of the FIRST ':' in `s`, or -1. Windows-style drive letters are not a
-# concern here (Linux paths), and a container id/name cannot contain ':'.
+# Index of the container/path separator in `s`, or -1 when `s` is a plain host
+# path.
+#
+# ':' is a LEGAL byte in a Linux filename, so a token that is unambiguously a
+# host path — it starts with '/', './' or '../' — is never split, however many
+# colons it contains. Docker's splitCpArg makes the same exemption, and for the
+# same reason: `cp /work/a:b/f.txt out.txt` must copy a file, not look for a
+# container called "/work/a". (The old comment claimed a container name cannot
+# contain ':'; nothing validates that either, so it was not a safe premise.)
 #[must_use]
 fn _cli_split_colon(s) {
+    if (load8(s) == 47) { return 0 - 1; }                       # "/..."
+    if (load8(s) == 46) {
+        if (load8(s + 1) == 47) { return 0 - 1; }               # "./..."
+        if (load8(s + 1) == 46 && load8(s + 2) == 47) { return 0 - 1; }   # "../..."
+    }
     var i = 0;
     while (load8(s + i) != 0) {
         if (load8(s + i) == 58) { return i; }
         i = i + 1;
     }
     return 0 - 1;
+}
+
+# 1 when a container-side path contains a `..` component, i.e. would resolve
+# outside the rootfs it is joined onto. Purely lexical — a symlink INSIDE the
+# image can still redirect the resolved path, which is a separate (and shared
+# with the oracle) exposure tracked in the roadmap.
+#[must_use]
+fn _cli_path_escapes(p) {
+    var i = 0;
+    var at_start = 1;
+    while (load8(p + i) != 0) {
+        if (at_start == 1) {
+            if (load8(p + i) == 46 && load8(p + i + 1) == 46) {
+                var nxt = load8(p + i + 2);
+                if (nxt == 0 || nxt == 47) { return 1; }
+            }
+        }
+        at_start = 0;
+        if (load8(p + i) == 47) { at_start = 1; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 #[must_use]

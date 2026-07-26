@@ -72,3 +72,12 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-07-25T23:22:38Z,7cf8210,main,event_json_build,5979.0000
 2026-07-25T23:22:38Z,7cf8210,main,event_log_append,7792.0000
 2026-07-25T23:22:38Z,7cf8210,main,event_ts_parse,1582.0000
+2026-07-25T23:53:23Z,d1d5079,main,noop,2.0000
+2026-07-25T23:53:23Z,d1d5079,main,oci_config_build+serialize,6840.0000
+2026-07-25T23:53:23Z,d1d5079,main,oci_manifest_to_jv+serialize,15096.0000
+2026-07-25T23:53:23Z,d1d5079,main,compose_yaml_to_toml,28742.0000
+2026-07-25T23:53:23Z,d1d5079,main,compose_400_reverse_sorted_keys,1318000.0000
+2026-07-25T23:53:23Z,d1d5079,main,flatten_layers_2x60_files_4kib,1382000.0000
+2026-07-25T23:53:23Z,d1d5079,main,event_json_build,5955.0000
+2026-07-25T23:53:23Z,d1d5079,main,event_log_append,7803.0000
+2026-07-25T23:53:23Z,d1d5079,main,event_ts_parse,1583.0000

@@ -967,6 +967,134 @@ fn test_flatten_layers_empty() {
 # ships a directory of the same name. `usr -> /tmp/stiva_flat_escape_target`
 # then `usr/pwned` would write OUTSIDE the rootfs; the directory must displace
 # the link instead. Mirrors tar_extract_rejects_traversal on the unpack side.
+# The existing escape test uses a WRITABLE destination parent, where the
+# displacing unlink succeeds and the guard was never exercised. These cover the
+# case that actually escaped: a read-only parent makes the unlink fail, and the
+# surviving symlink was then chmod'd, descended into, and written through.
+fn test_flatten_layers_escape_readonly_parent_file() {
+    test_group("flatten_layers_escape_readonly_parent_file");
+    var base = "/tmp/stiva_flat_ro";
+    _stor_remove_dir_all(base);
+    sys_mkdir(base, 493);
+    var victim = _stor_join(base, "VICTIM.txt");
+    file_write_all(victim, "HOST-ORIGINAL", strlen("HOST-ORIGINAL"));
+
+    # layer0: etc/ 0755 with etc/passwd -> the host victim (absolute targets are
+    # deliberately allowed by _stor_target_escapes, so such a layer extracts).
+    var l0 = _stor_join(base, "l0");
+    sys_mkdir(l0, 493);
+    var e0 = _stor_join(l0, "etc");
+    sys_mkdir(e0, 493);
+    sys_symlink(victim, _stor_join(e0, "passwd"));
+
+    # layer1: etc/ at 0555 — NOT writable — with a real etc/passwd.
+    var l1 = _stor_join(base, "l1");
+    sys_mkdir(l1, 493);
+    var e1 = _stor_join(l1, "etc");
+    sys_mkdir(e1, 493);
+    file_write_all(_stor_join(e1, "passwd"), "PWNED-BY-IMAGE", strlen("PWNED-BY-IMAGE"));
+    sys_chmod(e1, 365);                              # 0555
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    var dst = _stor_join(base, "rootfs");
+    sys_mkdir(dst, 493);
+    flatten_layers(layers, dst);
+
+    var buf = alloc(256);
+    var n = file_read_all(victim, buf, 255);
+    if (n < 0) { n = 0; }
+    store8(buf + n, 0);
+    assert_eq(streq(buf, "HOST-ORIGINAL"), 1,
+    "host file NOT overwritten through a surviving symlink");
+    sys_chmod(e1, 493);
+    return 0;
+}
+
+fn test_flatten_layers_readonly_dir_still_populates() {
+    test_group("flatten_layers_readonly_dir_still_populates");
+    # A 0555 directory is ordinary image content (every /nix/store path). If its
+    # mode is applied BEFORE its children are written, the whole create fails —
+    # and only when unprivileged, since root has CAP_DAC_OVERRIDE.
+    var base = "/tmp/stiva_flat_rodir";
+    _stor_remove_dir_all(base);
+    sys_mkdir(base, 493);
+    var l0 = _stor_join(base, "l0");
+    sys_mkdir(l0, 493);
+    var opt = _stor_join(l0, "opt");
+    sys_mkdir(opt, 493);
+    file_write_all(_stor_join(opt, "app"), "APP", 3);
+    sys_chmod(opt, 365);                             # 0555
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    var dst = _stor_join(base, "rootfs");
+    sys_mkdir(dst, 493);
+    assert_eq(flatten_layers(layers, dst), 0, "0555 directory does not fail the flatten");
+    assert_eq(file_exists(_stor_join(_stor_join(dst, "opt"), "app")), 1,
+    "and its contents landed");
+    sys_chmod(opt, 493);
+    sys_chmod(_stor_join(dst, "opt"), 493);
+    return 0;
+}
+
+fn test_flatten_layers_unreadable_file_is_skipped() {
+    test_group("flatten_layers_unreadable_file_is_skipped");
+    # A mode-0000 file is legal image content; under overlayfs it simply reads
+    # as denied inside the container. Failing the create would make an
+    # unprivileged run reject images a privileged one accepts.
+    var base = "/tmp/stiva_flat_unread";
+    _stor_remove_dir_all(base);
+    sys_mkdir(base, 493);
+    var l0 = _stor_join(base, "l0");
+    sys_mkdir(l0, 493);
+    file_write_all(_stor_join(l0, "secret"), "S", 1);
+    file_write_all(_stor_join(l0, "ok"), "OK", 2);
+    sys_chmod(_stor_join(l0, "secret"), 0);
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    var dst = _stor_join(base, "rootfs");
+    sys_mkdir(dst, 493);
+    assert_eq(flatten_layers(layers, dst), 0, "unreadable file does not fail the flatten");
+    assert_eq(file_exists(_stor_join(dst, "ok")), 1, "the readable sibling still landed");
+    sys_chmod(_stor_join(l0, "secret"), 420);
+    return 0;
+}
+
+fn test_flatten_layers_long_symlink_target() {
+    test_group("flatten_layers_long_symlink_target");
+    # A target over the old 1023-byte buffer was silently truncated into a link
+    # to a DIFFERENT path, with a success return.
+    var base = "/tmp/stiva_flat_long";
+    _stor_remove_dir_all(base);
+    sys_mkdir(base, 493);
+    var l0 = _stor_join(base, "l0");
+    sys_mkdir(l0, 493);
+    var longt = "/";
+    var i = 0;
+    while (i < 120) { longt = _reg_cat2(longt, "0123456789"); i = i + 1; }   # 1201 bytes
+    sys_symlink(longt, _stor_join(l0, "link"));
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    var dst = _stor_join(base, "rootfs");
+    sys_mkdir(dst, 493);
+    flatten_layers(layers, dst);
+    # Either the link is absent, or it points at the FULL target — never a
+    # silently shortened one.
+    var out = alloc(4097);
+    var n = sys_readlink(_stor_join(dst, "link"), out, 4096);
+    if (n > 0) {
+        store8(out + n, 0);
+        assert_eq(streq(out, longt), 1, "symlink target preserved in full, not truncated");
+    } else {
+        assert_eq(1, 1, "link refused rather than truncated");
+    }
+    return 0;
+}
+
 fn test_flatten_layers_no_symlink_escape() {
     test_group("flatten_layers_no_symlink_escape");
     var l0 = "/tmp/stiva_flat_e0";
@@ -1114,6 +1242,10 @@ fn main() {
     test_flatten_layers_stacks_and_preserves_perms();
     test_flatten_layers_empty();
     test_flatten_layers_no_symlink_escape();
+    test_flatten_layers_escape_readonly_parent_file();
+    test_flatten_layers_readonly_dir_still_populates();
+    test_flatten_layers_unreadable_file_is_skipped();
+    test_flatten_layers_long_symlink_target();
     test_flatten_layers_from_prepared();
     test_verify_integrity_clean();
     test_verify_integrity_detects_corruption();

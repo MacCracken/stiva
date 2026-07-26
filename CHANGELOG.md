@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [3.0.13] — 2026-07-25 — §E complete: `stiva events` + a persisted lifecycle event log
+## [3.0.13] — 2026-07-25 — §E complete (`stiva events`) · security: image-controlled writes escaped the rootfs
 
 ### Added — lifecycle events are written to disk
 `container_manager_publish_event` still publishes to the majra hub, and now **also appends the
@@ -95,6 +95,88 @@ have.
 ### Superseded
 The 3.0.12 "Not shipped — `events`, and why" note below. Its diagnosis was right; this release
 removes the cause.
+
+Adversarial review of everything since 3.0.10 — the Tier-1 CLI verbs, cmdit 1.2.0, §E MCP
+dispatch, and the agent-authored rootfs flatten — returned **14 confirmed findings**. All are fixed.
+The first is the reason this is a point release rather than a footnote.
+
+### Security — CRITICAL: a crafted image could overwrite any file the daemon can write
+`flatten_layers` (`src/storage.cyr`), the no-overlayfs rootfs path added in 3.0.12, displaced a
+lower layer's entry with `sys_unlink` **and never checked that it worked**. A read-only parent
+directory is enough to make that unlink fail — and a read-only directory is ordinary image content.
+The surviving symlink was then `chmod`'d and either descended into or written through:
+
+- **Arbitrary host file overwrite.** Layer 1 ships `etc/passwd -> /some/host/file`; layer 2 ships
+  `etc/` at mode 0555 containing a real `etc/passwd`. The write followed the link. `O_TRUNC` on an
+  existing path needs no permission on the parent, so the target only had to be writable by the
+  stiva process. Reproduced end to end; `flatten_layers` returned **success**.
+- **Arbitrary file creation outside the rootfs**, via the directory branch recursing through a
+  surviving symlink.
+
+Absolute symlink targets are deliberately permitted by `_stor_target_escapes`, so such a layer
+extracts cleanly and the whole chain is image-author-controlled. It fires on any unprivileged
+`stiva run`, because the flatten fallback *is* the rootfs path without `CAP_SYS_ADMIN`.
+
+The 3.0.12 commit claimed this escape was closed, and its test
+(`test_flatten_layers_no_symlink_escape`) genuinely passes — but only exercises a **writable**
+destination parent, where the unlink succeeds and the guard is never reached.
+
+Fixed four ways, so no single check is load-bearing: `_stor_replace_existing` now verifies the path
+is actually gone and reports failure; the directory branch `lstat`s the destination and refuses to
+descend unless it is a real directory; the copy opens with `O_NOFOLLOW`; and directory modes are
+applied on the way **out** of the walk, which removes the read-only-parent precondition entirely.
+New regression tests cover the read-only-parent case specifically — verified to FAIL against the
+3.0.12 code.
+
+### Fixed — HIGH
+- **`stiva top` never worked, for any container in any state.** It passed an empty allowed-state
+  list to `container_manager_require_pid`, and `_container_state_allowed` loops `i < n` — so `n=0`
+  matches nothing, the inverse of "any state". The smoke test passed for the wrong reason, since a
+  stopped container yields the same message either way. Now pinned by a unit test that
+  distinguishes them.
+- **`logs --follow` never followed.** It terminated on container state, but
+  `container_fixup_after_restart` rewrites RUNNING/PAUSED to STOPPED for every record loaded from
+  disk, so a fresh CLI process can never see a container as running: the loop always exited after
+  ~414 ms. Against a writer appending for 3 s it captured 3 lines of 11. Termination is now
+  **quiescence**-based; measured capturing 8 of 8. State becomes the better signal once `run -d`
+  lands (v3.1) and there is a live pid to probe.
+- **A 0555 directory anywhere in an image failed the whole `create`** — unprivileged only, because
+  root has `CAP_DAC_OVERRIDE`, so it was invisible to any privileged test. Every `/nix/store` path
+  is 0555. Fixed by the deferred-chmod pass above.
+- **`stiva cp` passed the container-side path through unvalidated**, both directions, exiting 0.
+  `..` components are now refused. (The symlink half — an image shipping `app -> /` — remains, and
+  is oracle parity; tracked in the roadmap.)
+
+### Fixed — MEDIUM / LOW
+- An unreadable source file (mode 0000, legal image content) failed the entire flatten; now skipped
+  with a warning, since overlayfs would simply surface it as unreadable inside the container.
+- Symlink targets over 1023 bytes were silently truncated into a link to a **different** path;
+  now read at `PATH_MAX` and refused if truncation is indistinguishable.
+- `_cli_split_colon` split legal Linux paths containing `:` — `cp /work/a:b/f.txt out` looked for a
+  container named `/work/a`. Unambiguous host paths (`/`, `./`, `../`) are now exempt, as Docker's
+  `splitCpArg` does.
+- `stiva cp <dir> c1:` splatted the directory over the container root; an empty container-side path
+  is refused.
+- `logs -n N --follow` silently ignored `-n`; it now prints the tail then follows, as docker does.
+- `kill` on a missing container printed two errors, the second false.
+- `scripts/cli-smoke.sh` had a genuine ~11%/run flake: it asserted `c1`'s absence against the whole
+  `ps` table, and `c1` is a valid hex bigram inside a 32-hex container ID. Now asserts the name
+  column only.
+
+### Changed — cmdit 1.2.0 → 1.2.1
+Two defects in the completion generator, neither of which exposed stiva (its verb and flag names
+are safe literals) but both of which broke the library's contract:
+- The verb-position guard failed whenever a global flag preceded the verb — `stiva --root /x <TAB>`
+  completed filenames instead of verbs. Verified live against bash 5.3.
+- 1.2.0's changelog claimed every interpolated value was escaped; verb and flag names were not, and
+  the program name was emitted unquoted. Escaping is also **insufficient** — `compgen -W` re-expands
+  each word, so a `$(…)` in a name would run at TAB time inside correct quoting. Names are now
+  whitelist-filtered.
+
+> **Release ordering:** `[deps.cmdit] tag = "1.2.1"`; cmdit 1.2.1 must be pushed and tagged before
+> stiva 3.0.13 builds from a clean clone.
+
+### Tests — review fixes: suite → 1858, smoke → 64
 
 ## [3.0.12] — 2026-07-25 — §E MCP live dispatch · `logs -f` · the empty-rootfs fix
 

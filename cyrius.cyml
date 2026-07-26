@@ -184,5 +184,5 @@ modules = ["dist/agnodrm.cyr"]
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
 path = "../cmdit"
-tag = "1.2.0"
+tag = "1.2.1"
 modules = ["dist/cmdit.cyr"]

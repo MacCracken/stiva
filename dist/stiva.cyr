@@ -9023,8 +9023,14 @@ fn prepare_layers(store, layers) {
 # Returns 0 on success, -1 on any open/read/write failure.
 fn _stor_copy_file_streamed(src, dst, buf, buflen) {
     var rfd = file_open(src, 0, 0);                # O_RDONLY
-    if (rfd < 0) { return 0 - 1; }
-    var wfd = file_open(dst, 577, 384);
+    # An unreadable SOURCE is not fatal — see the caller. -2 distinguishes it
+    # from a write-side failure so the caller can skip rather than abort.
+    if (rfd < 0) { return 0 - 2; }
+    # O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW. O_NOFOLLOW (0o100000) is the
+    # belt-and-braces half of the symlink fix: even if a stale link somehow
+    # survives _stor_replace_existing, the write fails with ELOOP instead of
+    # landing on the link's target somewhere outside the rootfs.
+    var wfd = file_open(dst, 131649, 384);
     if (wfd < 0) {
         file_close(rfd);
         return 0 - 1;
@@ -9060,13 +9066,31 @@ fn _stor_copy_file_streamed(src, dst, buf, buflen) {
 # Clear whatever currently occupies `path` so a higher layer's entry can take
 # it: a directory is removed recursively, anything else unlinked. Absent → no-op.
 # `sb` is a caller-owned 144-byte struct stat scratch. Always returns 0.
+# Remove whatever sits at `path` so a new entry can take its place. Returns 0
+# when the path is CLEAR afterwards, -1 when something is still there.
+#
+# The return value is load-bearing: the caller writes to `path` next, and an
+# unlink that failed (a read-only parent directory is enough) leaves a symlink
+# in place for that write to follow — straight out of the container rootfs.
+# Silently ignoring the failure is how this became an arbitrary-file-overwrite.
+# Merge-aware variant for the directory branch: an existing DIRECTORY is kept
+# (that is the merge), anything else must be removed and verified gone.
+fn _stor_replace_existing_dirsafe(path, sb) {
+    if (sys_lstat(path, sb) != 0) { return 0; }             # nothing there
+    if ((load64(sb + 24) & 61440) == 16384) { return 0; }   # already a dir — merge
+    sys_unlink(path);
+    if (sys_lstat(path, sb) == 0) { return 0 - 1; }         # still there — refuse
+    return 0;
+}
+
 fn _stor_replace_existing(path, sb) {
     if (sys_lstat(path, sb) != 0) { return 0; }             # nothing there
     if ((load64(sb + 24) & 61440) == 16384) {               # S_IFDIR
         _stor_remove_dir_all(path);
-        return 0;
+    } else {
+        sys_unlink(path);
     }
-    sys_unlink(path);
+    if (sys_lstat(path, sb) == 0) { return 0 - 1; }         # still there — refuse
     return 0;
 }
 
@@ -9121,33 +9145,78 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                             var gid = load64(sb + 32) & 4294967295;       # st_gid
                             var typ = st & 61440;                         # S_IFMT
                             if (typ == 16384) {                           # S_IFDIR
-                                # Merge into an existing dir; displace anything else.
-                                if (sys_lstat(d_child, sb) == 0) {
-                                    if ((load64(sb + 24) & 61440) != 16384) { sys_unlink(d_child); }
-                                }
-                                sys_mkdir(d_child, 493);
-                                _stor_lchown(d_child, uid, gid);
-                                if (perms != 0) { sys_chmod(d_child, perms); }
-                                if (_stor_flatten_tree(s_child, d_child, cpbuf, cplen) != 0) {
+                                # Merge into an existing dir; displace anything
+                                # else — and VERIFY the displacement worked.
+                                if (_stor_replace_existing_dirsafe(d_child, sb) != 0) {
                                     rc = 0 - 1;
+                                    skip = 1;
+                                }
+                                if (skip == 0) {
+                                    sys_mkdir(d_child, 493);
+                                    # Confirm we are about to descend into a REAL
+                                    # directory. Without this, a lower layer's
+                                    # surviving symlink (say usr -> /etc) makes
+                                    # the recursion below write through it, out
+                                    # of the rootfs and onto the host.
+                                    if (sys_lstat(d_child, sb) != 0) { rc = 0 - 1; skip = 1; }
+                                    elif ((load64(sb + 24) & 61440) != 16384) { rc = 0 - 1; skip = 1; }
+                                }
+                                if (skip == 0) {
+                                    _stor_lchown(d_child, uid, gid);
+                                    # The directory's OWN mode is applied on the
+                                    # way OUT, not here: a 0555 dir (every
+                                    # /nix/store path, any `chmod 555` install
+                                    # dir) would otherwise be read-only before
+                                    # its children are written, failing the whole
+                                    # create — but only when unprivileged, since
+                                    # root has CAP_DAC_OVERRIDE. Same shape as
+                                    # GNU tar's --delay-directory-restore.
+                                    if (_stor_flatten_tree(s_child, d_child, cpbuf, cplen) != 0) {
+                                        rc = 0 - 1;
+                                    }
+                                    if (perms != 0) { sys_chmod(d_child, perms); }
                                 }
                             } else {
                                 if (typ == 40960) {                       # S_IFLNK
-                                    var tgt = alloc(1024);
-                                    var tn = sys_readlink(s_child, tgt, 1023);
-                                    if (tn < 0) { tn = 0; }
-                                    store8(tgt + tn, 0);
-                                    _stor_replace_existing(d_child, sb);
-                                    if (sys_symlink(tgt, d_child) != 0) { rc = 0 - 1; }
-                                    _stor_lchown(d_child, uid, gid);      # perms follow target
+                                    # PATH_MAX, not 1024: a truncated target is a
+                                    # link to a DIFFERENT, attacker-chosen path,
+                                    # and _stor_extract_tar already accepts GNU
+                                    # long-link entries, so layers can carry them.
+                                    var tgt = alloc(4097);
+                                    var tn = sys_readlink(s_child, tgt, 4096);
+                                    if (tn < 0 || tn >= 4096) {
+                                        # <0 failed; ==4096 is indistinguishable
+                                        # from truncation. Refuse either way.
+                                        rc = 0 - 1;
+                                    } else {
+                                        store8(tgt + tn, 0);
+                                        if (_stor_replace_existing(d_child, sb) != 0) { rc = 0 - 1; }
+                                        elif (sys_symlink(tgt, d_child) != 0) { rc = 0 - 1; }
+                                        else { _stor_lchown(d_child, uid, gid); }
+                                    }
                                 } else {
                                     if (typ == 32768) {                   # S_IFREG
-                                        _stor_replace_existing(d_child, sb);
-                                        if (_stor_copy_file_streamed(s_child, d_child, cpbuf, cplen) != 0) {
+                                        if (_stor_replace_existing(d_child, sb) != 0) {
                                             rc = 0 - 1;
+                                        } else {
+                                            var crc = _stor_copy_file_streamed(s_child, d_child, cpbuf, cplen);
+                                            if (crc == 0 - 2) {
+                                                # Source unreadable (mode 0000 is
+                                                # legal image content). Under
+                                                # overlayfs that file simply reads
+                                                # as denied inside the container;
+                                                # failing the create here would
+                                                # make an unprivileged run reject
+                                                # images a privileged one accepts.
+                                                sakshi_warn("flatten: skipping unreadable source file",
+                                                strlen("flatten: skipping unreadable source file"));
+                                            } elif (crc != 0) {
+                                                rc = 0 - 1;
+                                            } else {
+                                                _stor_lchown(d_child, uid, gid);
+                                                if (perms != 0) { sys_chmod(d_child, perms); }
+                                            }
                                         }
-                                        _stor_lchown(d_child, uid, gid);
-                                        if (perms != 0) { sys_chmod(d_child, perms); }
                                     }
                                     # else: fifo/socket/device — skipped, as the
                                     # tar reader and writer both skip them.

@@ -877,6 +877,34 @@ fn test_container_log_tail() {
     return 0;
 }
 
+fn test_require_pid_empty_allowed_list() {
+    test_group("require_pid_empty_allowed_list");
+    # _container_state_allowed loops `i < n`, so n=0 matches NOTHING — an empty
+    # allowed list means "no state is permitted", the inverse of "any state".
+    # `stiva top` passed (0, 0) and therefore failed for every container in
+    # every state; the CLI smoke test could not tell, because a stopped
+    # container produces the same message either way.
+    assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 1234, 0, 0), 0 - 1,
+    "empty allowed list rejects even RUNNING");
+    assert_eq(container_require_pid(CONTAINER_STATE_PAUSED, 4321, 0, 0), 0 - 1,
+    "empty allowed list rejects even PAUSED");
+
+    # A populated list is what actually admits a state.
+    var allowed = vec_new();
+    vec_push(allowed, CONTAINER_STATE_RUNNING);
+    vec_push(allowed, CONTAINER_STATE_PAUSED);
+    assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 1234, allowed, 2), 1234,
+    "RUNNING admitted, pid returned");
+    assert_eq(container_require_pid(CONTAINER_STATE_PAUSED, 4321, allowed, 2), 4321,
+    "PAUSED admitted, pid returned");
+    assert_eq(container_require_pid(CONTAINER_STATE_STOPPED, 1234, allowed, 2), 0 - 1,
+    "STOPPED still rejected");
+    # A live state with no pid is still a refusal.
+    assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 0 - 1, allowed, 2), 0 - 1,
+    "RUNNING with no pid rejected");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_container_log_tail();
@@ -926,6 +954,7 @@ fn main() {
     test_image_index_remove_missing();
     test_image_index_remove_shared_blob();
     test_image_index_corrupt_guard();
+    test_require_pid_empty_allowed_list();
     return assert_summary();
 }
 
