@@ -2,7 +2,11 @@
 
 Tracks external specifications stiva implements or aligns with, current conformance level, and gaps.
 
-Last reviewed: 2026-04-02 (v2.0.0)
+Last reviewed: 2026-07-26 (v3.0.16 + the unreleased v3.0.17 line)
+
+> **"Implemented" means the module logic exists and is tested.** Where a capability is not
+> reachable from the CLI, that is called out inline — the two cases are CRIU and MCP
+> `handle_run`.
 
 ---
 
@@ -36,6 +40,8 @@ Last reviewed: 2026-04-02 (v2.0.0)
   - Layer media types: gzip and zstd (`tar+gzip`, `tar+zstd`)
   - Platform selection (OS, architecture, variant)
   - Image config (env, cmd, entrypoint, user, workdir, labels)
+  - Whiteouts (`.wh.<name>` and `.wh..wh..opq`) applied during layer unpack, not extracted literally
+  - `diff_ids` computed over **uncompressed** layer bytes (distinct from the compressed layer digests in the manifest)
   - Artifact manifests (`artifactType`, `subject` fields)
   - Non-distributable / foreign layers (external URL fetch)
   - Descriptor annotations
@@ -67,9 +73,11 @@ Last reviewed: 2026-04-02 (v2.0.0)
   - Structured tool output (`content` array with `Text` and `Resource` typed parts)
   - Live tool dispatch against running Stiva instance
   - MCP resources (`stiva://containers/{id}`, `stiva://images/{id}`)
-  - Streamable HTTP transport (via bote 0.91.0)
+  - Streamable HTTP transport (via bote 3.1.4)
 - **Gaps**:
-  - Tool `title` field — not yet in bote's ToolDef struct
+  - Tool `title` field — not in bote's `ToolDef` struct
+  - `handle_run` is not dispatched — it needs the detached-run path to return without
+    blocking the JSON-RPC response
 
 ---
 
@@ -91,8 +99,11 @@ Last reviewed: 2026-04-02 (v2.0.0)
 
 ## CRIU (Checkpoint/Restore)
 
-- **Status**: conformant
-- **Implemented**:
+- **Status**: ported, **not reachable** — `stiva checkpoint` and `stiva restore` are
+  registered but print "not yet wired". The module logic below is ported from the oracle
+  and unit-tested; what is missing is the CLI/facade glue plus a real CRIU on the box to
+  integration-test against. Roadmap v3.1.0 item 3.
+- **Implemented (library)**:
   - Checkpoint creation via `criu dump`
   - Restore via `criu restore`
   - Migration bundle packaging (config + image ref + checkpoint)

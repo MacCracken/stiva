@@ -46,12 +46,12 @@ Benchmark runner that measures test suite timing and release build timing, appen
 Each entry records:
 ```yaml
 ---
-timestamp: 2026-07-17T06:00:00Z
-version: 3.0.4
+timestamp: 2026-07-26T06:00:00Z
+version: 3.0.16
 commit: abc1234
 branch: main
-cyrius: cyrius 6.4.66
-tests: 1184
+cyrius: cyrius 6.4.78
+tests: 2175
 test_ms: 150
 build_ms: 12000
 loc: 4500

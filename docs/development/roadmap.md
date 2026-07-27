@@ -20,7 +20,7 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 
 | | |
 |---|---|
-| CLI | **35 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
+| CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
 | Tests | 2175 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
@@ -33,7 +33,8 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
   green in *every* unit shape including the 6-module `store.tcyr`, and an assertion that fails on a
-  silent wrong value rather than only on a segfault.
+  silent wrong value rather than only on a segfault. Full write-up:
+  [`docs/architecture/001-cycc-struct-id-miscompile.md`](../architecture/001-cycc-struct-id-miscompile.md).
 - **Only x86_64 works.** See v3.2.0.
 - **Containers have no secrets.** `secrets` still serializes as an empty array and
   `build_sandbox` has no kavach setter to thread one through — v3.1.0 item 1. (Rootless networking
@@ -46,6 +47,19 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 All of v3.0.17 has landed — see the CHANGELOG. `accel` is now `default = ["accel"]`, `stiva cron`
 schedules containers, `stiva info` reports accelerators, fleet placement has an accelerator
 dimension, and CI checks the vendored files against the pinned tags.
+
+### Open cleanliness item — 163 line-length warnings in `tests/`
+
+`src/` is fmt-clean and lint-clean at zero warnings. The **test** files are not:
+`registry.tcyr` 69 · `stiva.tcyr` 53 · `mgmt.tcyr` 15 · `runpath.tcyr` 13 · `store.tcyr` 11 ·
+`stiva.bcyr` 2 — all of them `> 120 bytes`, almost entirely long assertion messages.
+
+It is recorded here rather than swept because the fix is 163 hand-verified line splits under a
+formatter rule that is easy to get wrong: **`cyrius fmt --check` requires a continuation line to
+sit at the *same* indent as the statement it continues, not one level deeper.** (That rule is
+also what made `src/build.cyr` and `tests/registry.tcyr` fail `fmt --check` for several releases
+— fixed in this line.) Note the linter counts **bytes, not display columns**, so a line of
+box-drawing characters can trip it while looking short.
 
 ---
 
@@ -210,8 +224,9 @@ all exist now.
 - **Metrics export** — a Prometheus-compatible `/metrics` endpoint.
 - **Ansamblu blue-green deploys** — deploy the new version alongside the old, swap traffic.
 - **Service mesh integration** — sidecar injection for ansamblu services.
-- **Fleet auto-scaling** — adjust node count from majra queue depth. Needs the v3.0.17 fleet defects
-  fixed first, since it drives `select_migration_target`.
+- **Fleet auto-scaling** — adjust node count from majra queue depth, over
+  `select_migration_target`. Its prerequisite — the three inherited `fleet.cyr` defects — was
+  cleared in v3.0.17.
 - **`stiva plugin` system** — loadable plugins for storage drivers, network drivers, auth providers.
 
 ## v3.4.0 — Windows containers

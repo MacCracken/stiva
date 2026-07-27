@@ -12,69 +12,81 @@ On startup, stiva creates a default bridge network:
 
 Every container connected to a bridge gets an IPv4 address from the subnet pool, a veth pair linking it to the bridge, and NAT masquerade for outbound traffic.
 
-```bash
-stiva run nginx:latest
-# Container receives 172.17.0.2, routed through stiva0
-```
+> ⚠️ **The network stack is not attached on the `run` path yet.** Everything below —
+> bridge creation, IP allocation, NAT, DNS injection, policies — is implemented and
+> tested as a **library API**, and ansamblu drives it. What `stiva run` does not yet do
+> is call `network_manager_connect_container` for the container it just started. That
+> is roadmap **v3.1 §J**, and it is why `run` accepts no `-p` flag. Use the library API
+> or an ansamblu file until it lands.
 
-Detached (`run -d`) is deferred to v3.1; today `run` executes in the foreground.
+### Library
 
-### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
-
-```rust
-use stiva::network::NetworkManager;
-
-let mut mgr = NetworkManager::new()?;
-// Default bridge is created automatically
+```cyrius
+var mgr = network_manager_new();   # the default bridge is created automatically
 ```
 
 ## Custom Networks
 
 Create isolated networks with their own subnets:
 
-```bash
-# Not yet a CLI command -- use ansamblu TOML (or the v3.0.x (planned) library API below)
-```
+There is no CLI verb for this — use ansamblu TOML, or the library API:
 
-### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
+### Library
 
-```rust
-let mut mgr = NetworkManager::new()?;
-mgr.create_network("backend", "10.10.0.0/24")?;
-mgr.connect("container-id", "backend", "/path/to/rootfs")?;
+```cyrius
+var mgr = network_manager_new();
+network_manager_create_network(mgr, "backend", "10.10.0.0/24");
+network_manager_connect_container(mgr, container_id, "backend", port_specs, rootfs);
 ```
 
 Containers on different networks are isolated from each other. A container can be connected to multiple networks.
 
 ## Port Mapping
 
-Forward host ports to container ports using `-p`:
+Port mapping creates nftables DNAT rules via nein, and the rules are cleaned up when the
+container disconnects.
 
-```bash
-stiva run -p 8080:80 nginx:latest         # single port
-stiva run -p 8080:80 -p 8443:443 myapp    # multiple ports
+**`stiva run` has no `-p` flag** — passing one is a usage error, not a silent no-op. Port
+specs reach the network manager through `network_manager_connect_container`'s `port_specs`
+argument, which ansamblu supplies from a service's `ports = [...]`:
+
+```toml
+[services.web]
+image = "nginx:latest"
+ports = ["8080:80", "8443:443"]
 ```
 
-(Detached `run -d` is a v3.1 feature; the examples above run in the foreground.)
+A `-p` flag on `run` arrives with §J (v3.1), the same item that attaches the network on the
+run path.
 
-Port mapping creates nftables DNAT rules via nein. The rules are cleaned up when the container stops.
+## Rootless Networking
+
+An unprivileged container cannot create a veth pair, so rootless containers get a userspace
+network stack instead — **slirp4netns** or **pasta**, spawned as a daemon alongside the
+container and torn down with it. Port forwarding goes through the helper's own control
+socket rather than nftables.
+
+```cyrius
+var h = start_rootless_network(preference, pid, port_mappings, log_path);
+# ... container runs ...
+stop_rootless_network(h);
+```
+
+The helper binaries are looked up on `PATH`; if neither is present, rootless containers run
+without outbound networking rather than failing to start.
 
 ## IPv6 Dual-Stack
 
 Stiva supports IPv6 through `DualStackPool`, which wraps an `IpPool` (v4) and an optional `Ipv6Pool` (v6).
 
-### Library — v3.0.x (planned) (blocking library API — not yet in the Cyrius port)
+### Library
 
-```rust
-use stiva::network::pool::DualStackPool;
+```cyrius
+var pool = dual_stack_v4_only("172.17.0.0/24");        # IPv4 only (default)
+var pool = dual_stack_dual("172.17.0.0/24", "fd00::/64");   # dual-stack
 
-// IPv4 only (default)
-let mut pool = DualStackPool::v4_only("172.17.0.0/24")?;
-
-// Dual-stack
-let mut pool = DualStackPool::dual("172.17.0.0/24", "fd00::/64")?;
-let (v4, v6) = pool.allocate()?;
-// v4 = 172.17.0.2, v6 = Some(fd00::2)
+dual_stack_allocate(pool, out_v4, out_v6);
+# out_v4 = 172.17.0.2, out_v6 = fd00::2
 ```
 
 When dual-stack is enabled, `ContainerNetwork` carries both an `ip` (v4) and an optional `ipv6` field. IPv6 is opt-in per network -- existing v4-only networks are unaffected.
@@ -113,7 +125,7 @@ Network isolation is enforced at two levels:
 1. **Bridge isolation** -- containers on different bridge networks cannot communicate.
 2. **nftables rules** -- nein manages firewall rules for NAT, port mapping, and inter-container traffic. Rules are created on connect and removed on disconnect.
 
-Outbound NAT masquerade uses the host's default outbound interface (configurable via `NetworkManager::with_outbound`).
+Outbound NAT masquerade uses the host's default outbound interface.
 
 ## Network Drivers
 

@@ -5,6 +5,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — `src/build.cyr` and `tests/registry.tcyr` had been failing `cyrius fmt --check`
+Silently, and for several releases, because `cyrius audit`'s fmt stage reports only
+`FAIL: files need reformatting` without naming a file, and `cyrius fmt <file> --check` exits 1
+with **no output at all**. Found by bisecting a prefix of the file against `--check`.
+
+The rule neither tool states: **a continuation line must sit at the *same* indent as the
+statement it continues, not one level deeper.** Ten continuation lines were indented the
+conventional way and were wrong. Whitespace-only change; suite unchanged at 2175.
+
+`src/storage.cyr` also carried one lint warning — a box-drawing comment rule that is 53 display
+columns but **141 bytes**, and the linter counts bytes. `src/` is now fmt- and lint-clean at zero
+warnings; the 163 remaining line-length warnings in `tests/` are recorded in the roadmap.
+
+### Changed — documentation sweep: the docs described a runtime that stopped existing several releases ago
+Counts were the least of it. `docs/guides/quick-start.md` told operators that `stiva pull` was
+unwired, that the `Stiva` facade did not exist, and that `stiva top` and `exec` were unimplemented —
+all live for releases. Worse, three guides documented **flags that do not exist**:
+`stiva run -e K=V`, `-p 8080:80` and `-s DB_PASSWORD=…` are each a usage error, and the security
+guide presented that last one as the working way to hand a container a credential. The truth is the
+opposite and is now stated as a warning at the top of that section: **containers currently receive
+no secrets at all**.
+
+Also corrected: the Rust snippets left over from the oracle in the networking and security guides
+(replaced with the Cyrius API that exists); `docs/spec-compliance.md` listing CRIU as "conformant"
+when `checkpoint`/`restore` are not reachable from the CLI; and a `[Unreleased]` entry above
+claiming "all 35 verbs are live" when two never were.
+
+Counts, now derived from execution rather than memory: **36 verbs, 34 live** (`checkpoint` and
+`restore` are the two unwired, both v3.1.0 item 3), **27** domain modules, **2175** tests, **87**
+CLI smoke assertions, **12** ADRs, toolchain **6.4.78**.
+
+### Added — four architecture notes, the first entries in `docs/architecture/`
+That directory has been an empty placeholder since it was created. The four invariants written
+into it are all ones this project has paid for at least once, and none are derivable from reading
+the code:
+
+1. **The cycc struct-id ↔ SIMD-sentinel miscompile**, why every raw-offset accessor exists, and the
+   worked example of a probe that certified the bug fixed hours before it silently corrupted a
+   registry cache key.
+2. **CLI verb ids are registration-ordered** — inserting a verb anywhere but last renumbers every
+   verb after it, silently.
+3. **A `path` dep override silently wins over its `tag`**, and `cyrius.lock` records nothing that
+   would reveal the substitution.
+4. **A container rootfs has two possible layouts** (overlay vs flattened), so anything reasoning
+   about "what changed" needs both paths or it reports a flattened container as clean.
+
 ### Added — the `accel` feature is on by default, unlocking §H and §I
 `default = ["accel"]`. Both bundles were already declared and pinned; the gate was the only thing
 holding them back. Cyrius `[features]` gate dependency activation, not source, so §H/§I code in
@@ -69,7 +115,7 @@ file hash is caught.
 > fine. Both branches now use raw offsets. Found by bisection each time.
 
 ### Tests — 2132 → 2175
-### Added — `stiva diff`, so all 35 verbs are live (roadmap v3.0.17 item 1)
+### Added — `stiva diff` (roadmap v3.0.17 item 1)
 `A` added, `C` changed, `D` deleted, `(no changes)` when clean — and it handles both rootfs layouts
 off the `{croot}/.rootfs-flattened` marker, since they cannot be told apart after the fact
 (`internals` is process-local, and `setup_overlay` creates `upper`/`work`/`merged` even when the

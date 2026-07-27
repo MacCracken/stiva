@@ -2203,9 +2203,9 @@ fn test_bld_diff_ids_are_uncompressed() {
     if (n <= 0) { return 0; }
 
     assert_eq(streq(vec_get(diffs, 1), sha256_digest(out, n)), 1,
-        "diff_id == sha256 of the UNCOMPRESSED tar");
+    "diff_id == sha256 of the UNCOMPRESSED tar");
     assert_eq(streq(vec_get(diffs, 1), top.digest), 0,
-        "and is NOT the compressed blob digest the oracle would have stored");
+    "and is NOT the compressed blob digest the oracle would have stored");
     return 0;
 }
 

@@ -919,7 +919,7 @@ fn _bld_dest_prefix(destination) {
 fn _bld_copy_step_is_safe(context_dir, source, destination) {
     if (_bld_source_is_safe(source) == 0) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-            _img_cat2("copy source must be relative to the build context and free of '..': ", source));
+        _img_cat2("copy source must be relative to the build context and free of '..': ", source));
         return 0;
     }
     # A lexical check is NOT enough, and believing it was is what made the
@@ -935,7 +935,7 @@ fn _bld_copy_step_is_safe(context_dir, source, destination) {
     # `_stor_tar_collect` opens with O_DIRECTORY, which follows unconditionally.
     if (_bld_path_has_symlink(context_dir, source) == 1) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-            _img_cat2("copy source traverses a symlink, which can leave the build context: ", source));
+        _img_cat2("copy source traverses a symlink, which can leave the build context: ", source));
         return 0;
     }
     # The DESTINATION needs the same `..` rejection. `_bld_dest_prefix` only
@@ -946,7 +946,7 @@ fn _bld_copy_step_is_safe(context_dir, source, destination) {
     # the only place that decision is ours to make.
     if (_bld_dest_is_safe(destination) == 0) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-            _img_cat2("copy destination must be free of '..': ", destination));
+        _img_cat2("copy destination must be free of '..': ", destination));
         return 0;
     }
     return 1;
@@ -1005,7 +1005,7 @@ fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
     } else {
         if (typ != 32768) {                         # S_IFREG
             stiva_err_print(STIVA_ERR_INVALID_STATE,
-                _img_cat2("copy source is neither a regular file nor a directory: ", src_path));
+            _img_cat2("copy source is neither a regular file nor a directory: ", src_path));
             return 0;
         }
         if (strlen(dest_prefix) == 0) {
@@ -1070,7 +1070,7 @@ fn _bld_resolve_base(store, client, base) {
     if (im != 0) { return im; }
     if (client == 0) {
         stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND,
-            _img_cat2("base image not in the local store and no registry client is configured: ", base));
+        _img_cat2("base image not in the local store and no registry client is configured: ", base));
         return 0;
     }
     return image_store_pull(client, store, ref);
@@ -1184,7 +1184,7 @@ fn build_image(spec, store, client, context_dir) {
     if (vec_len(base_layers) > 0) {
         if (vec_len(base_diff_ids) != vec_len(base_layers)) {
             stiva_err_print(STIVA_ERR_INVALID_STATE,
-                "base image config has no usable rootfs.diff_ids; cannot derive from it");
+            "base image config has no usable rootfs.diff_ids; cannot derive from it");
             return 0;
         }
     }
@@ -1209,13 +1209,13 @@ fn build_image(spec, store, client, context_dir) {
 
         if (kind == BUILD_STEP_RUN) {
             stiva_err_print(STIVA_ERR_INVALID_STATE,
-                _img_cat2("run steps are not executed by this build: the oracle emitted a marker file ",
-                "rather than running the command, so the layer would assert work that never happened"));
+            _img_cat2("run steps are not executed by this build: the oracle emitted a marker file ",
+            "rather than running the command, so the layer would assert work that never happened"));
             return 0;
         }
         if (kind == BUILD_STEP_FROM_STAGE) {
             stiva_err_print(STIVA_ERR_INVALID_STATE,
-                "from_stage is not supported: multi-stage builds are not implemented");
+            "from_stage is not supported: multi-stage builds are not implemented");
             return 0;
         }
 

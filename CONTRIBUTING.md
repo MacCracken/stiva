@@ -16,10 +16,19 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.4.71** (see `cyrius.cyml`).
-- Local sibling AGNOS repos next to this one, consumed as Cyrius `dist/*.cyr`
-  bundles via `[deps.*]` path overrides in `cyrius.cyml`:
-  `kavach`, `majra`, `nein`, `bote`, `agnodrm` (+ transitive `sakshi`, `libro`, `cmdit`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.4.78** (see `cyrius.cyml`).
+- Nothing else. AGNOS dependencies are resolved **by git tag** from
+  `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote`, `agnodrm`,
+  `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
+  clean machine with no sibling checkouts.
+
+> ⚠️ **Do not commit a `cyrius.lock` produced through a `path` override.** Every
+> `path = "../<dep>"` line in `cyrius.cyml` is commented out deliberately: a path
+> override silently **wins** over its `tag`, and the lock records no dep name or
+> version under path resolution, so nothing detects the substitution. To develop a
+> dep alongside stiva, uncomment its `path` line, work, then **tag and release the
+> dep and bump the `tag` here** before committing the lock. CI compares the resolved
+> dep bundles against the tags and fails on a mismatch.
 
 ## Toolchain Commands
 
@@ -40,8 +49,9 @@ parity oracle; do not edit it.
 
 - **Formatted**: `cyrius fmt <file> --check` must pass for every changed file.
 - **Lint-clean**: `cyrius lint <file>` should be warning-free (lines ≤ 120 chars).
-- **Tested**: new code must include tests in the matching `tests/*.tcyr` file. Each
-  ported function mirrors its rust-old `#[cfg(test)]` cases — the bar is
+- **Tested**: new code must include tests in the matching `tests/*.tcyr` file, and new
+  CLI surface must be covered in `scripts/cli-smoke.sh` (a `.tcyr` file cannot include
+  `main.cyr`). Each ported function mirrors its rust-old `#[cfg(test)]` cases — the bar is
   "matches what the Rust did." Deserializers must be **strict** (a missing required
   field / unknown variant / wrong type is an error, not a silent default), matching serde.
 - **Rebuild the bundle**: run `cyrius distlib` when you change `src/*.cyr`, and commit
@@ -55,6 +65,23 @@ parity oracle; do not edit it.
 The `~35` benign cross-bundle "duplicate fn (last definition wins)" warnings from the
 vendored AGNOS bundles are expected — they are shared agnos error helpers each bundle vendors.
 
+### Three traps specific to this codebase
+
+- **Every deferral marker in the source is tracked in the roadmap.** `cyrius lint` reports
+  untracked `TODO` / `deferred` / `not yet` comments per file, and the count is expected to
+  stay at **zero**. If you add one, add the matching roadmap item in the same change — or
+  delete the comment if it is stale.
+- **CLI verb ids are registration-ordered.** `cmdit_verb(h, ...)` returns an id derived from
+  registration order and the dispatch table is indexed by it, so inserting a verb anywhere
+  but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
+  what catches this.
+- **The cycc struct-id ↔ SIMD-sentinel miscompile is still live at 6.4.78.** A typed
+  `var x: T = p; x.field` can read garbage **silently**, and it varies per function *and* per
+  compilation unit. The raw-offset accessors in hot paths (`_img_id`, `_layer_digest`,
+  `load64(p + N)`, …) are deliberate workarounds — do not "clean them up". When a test needs
+  to verify a struct field, reconstruct the value from a second source rather than reading it
+  back the way the code under test does; the naive read matches the garbage and passes.
+
 ## Scripts
 
 | Script | Usage |
@@ -62,6 +89,7 @@ vendored AGNOS bundles are expected — they are shared agnos error helpers each
 | `scripts/version-bump.sh <version>` | Write the `VERSION` file (cyrius.cyml reads it via `${file:VERSION}`) |
 | `scripts/bench.sh` | Test + build timing history |
 | `scripts/bench-history.sh` | Benchmarks + CSV + trend report |
+| `scripts/cli-smoke.sh` | CLI smoke assertions against the built binary (the only coverage `src/main.cyr` has) |
 | `scripts/port-workflow.js` | Agent-orchestrated per-module port + adversarial parity verify |
 
 ## Commit Messages
@@ -81,20 +109,21 @@ program entry (includes + CLI dispatch). `cyrius.cyml` `[lib].modules` drives
 
 | Module | Purpose |
 |--------|---------|
-| `image` | Substrate: image ref parsing, `Image`/`Layer` structs, content-addressable **blob store** + digests, integrity verify (the OCI-layout store + `save`/`load` moved to `imagelayout`) |
-| `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store, `oci-archive`/`docker-archive` `save`/`load` |
-| `container` | Container lifecycle + state persistence; OCI bundle parse / state (the `ContainerManager` → v3.0.x) |
-| `runtime` | OCI runtime spec, kavach sandbox, cgroups v2, /proc walk, host↔rootfs copy (exec/CRIU → v3.0.x) |
-| `network/` | Bridge, NAT, DNS, IP pools (v4+v6), port mapping, network policy |
-| `storage` | Overlay FS, volume mounts, gzip layer unpack (zstd → v3.1); **perms-preserving USTAR tar** (mode/uid/gid, dir/symlink, GNU longname, base-256; hardened) |
-| `registry` | OCI ref/manifest parsing + serde, credential store (the blocking HTTP pull/push client → v3.0.x group B) |
-| `build` | Stivafile TOML parse, build-cache key (multi-stage layer build → v3.1) |
+| `image` | Substrate: image ref parsing, `Image`/`Layer` structs, content-addressable **blob store** + digests, integrity verify (the OCI-layout store + `save`/`load` live in `imagelayout`) |
+| `imagelayout` | **Net-new:** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store, `oci-archive`/`docker-archive` `save`/`load`, the `image_store_pull`/`push` drivers |
+| `container` | The `ContainerManager`, container lifecycle + state persistence, the `{root}/events.jsonl` log, `diff` |
+| `runtime` | OCI runtime spec, kavach sandbox, cgroups v2, /proc walk, host↔rootfs copy, `exec_in_container`, `scan_output` (CRIU → v3.1) |
+| `network/` | Bridge, NAT, DNS, IP pools (v4+v6), port mapping, network policy, rootless networking (slirp4netns/pasta) |
+| `storage` | Overlay FS, volume mounts, gzip + zstd layer unpack with OCI whiteouts; **perms-preserving USTAR tar** (mode/uid/gid, dir/symlink, GNU longname, base-256; hardened) |
+| `registry` | OCI distribution client: ref/manifest parsing + serde, credential store, token auth, streamed blob fetch, chunked upload, discovery |
+| `build` | Stivafile TOML parse, build-cache key + source fingerprint, the `build_image` driver (`run` / `from_stage` steps → v3.3) |
 | `ansamblu` | TOML ansamblu parse, DAG ordering, rolling-update / scaling logic |
 | `health` | Restart policies, heartbeat health via majra |
-| `fleet` | Fleet scheduling, health monitoring, rollback planning |
+| `cron` | **Net-new:** scheduled containers over samay — `{root}/cron.json`, expression validation, due-time computation |
+| `fleet` | Fleet scheduling, health monitoring, rollback planning, accelerator-aware placement |
 | `agent` | Daimon agent registration |
-| `mcp` | 9 MCP tool defs + 2 synchronous tool handlers (live dispatch → v3.1) |
-| `convert` | Dockerfile → Stivafile (compose YAML → v3.1, needs a YAML parser) |
+| `mcp` | 9 MCP tool defs + live dispatch over the `Stiva` facade |
+| `convert` | Dockerfile **and** docker-compose YAML → Stivafile TOML |
 | `encrypted` | LUKS + dm-verity (agnodrm) |
 | `intents` | Intent value type + serde (the NL `parse_intent` → agnoshi) |
 | `error` | Error types |
@@ -105,3 +134,6 @@ Dependencies on sibling AGNOS projects (Cyrius `dist/*.cyr` bundles):
 - **nein** — nftables firewall rules, NAT, port mapping
 - **bote** — MCP core service (tool registry, structured output)
 - **agnodrm** — LUKS + dm-verity for the `encrypted` module
+- **cmdit** — CLI parsing, verb introspection, shell completions
+- **samay** — cron expression parsing + scheduling for the `cron` module
+- **ai-hwaccel** — accelerator inventory + placement profiles (the `accel` feature, on by default)

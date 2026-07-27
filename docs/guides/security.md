@@ -15,16 +15,10 @@ Stiva supports rootless operation via Linux user namespaces. When `rootless` is 
 # user = "nobody"
 ```
 
-### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
+### Library
 
-```rust
-use stiva::runtime::RuntimeConfig;
-
-let config = RuntimeConfig {
-    rootless: true,
-    // ...
-};
-```
+`rootless` is a field on the runtime config; `build_sandbox` threads it into the kavach
+policy, and the rootless network path (slirp4netns/pasta) is selected from the same flag.
 
 When rootless is enabled, stiva adds OCI runtime-spec v1.2.0 ID-mapped mount options (`X-mount.idmap=`) so bind-mounted volumes work correctly under user namespaces.
 
@@ -42,30 +36,18 @@ Landlock support depends on kernel version (5.13+). When unavailable, kavach fal
 
 ## Credential Management
 
-Secrets are injected into containers through kavach's `CredentialProxy` and `SecretRef` system. This keeps credentials out of container configs and image layers.
+> ⚠️ **Containers currently receive no secrets.** This is the single largest gap in the
+> port, and it is roadmap **v3.1.0 item 1**. Concretely: `secrets` serializes as an empty
+> array, `build_sandbox` has no kavach setter to thread a `SecretRef` through, and `stiva
+> run` registers no `-s` flag — passing one is a usage error, not a silent no-op. If you
+> need a credential inside a container today, you must supply it by a mechanism stiva does
+> not manage (a bind-mounted file, an image layer), with the exposure that implies.
 
-### CLI
+The design it will be built on is kavach's `CredentialProxy` / `SecretRef` system, which
+keeps credentials out of container configs and image layers. The intended properties, none
+of which are load-bearing yet:
 
-```bash
-stiva run -s DB_PASSWORD=secret123 -s API_KEY=abc myapp:latest
-```
-
-(Detached secret injection with `run -d` lands in v3.1.)
-
-### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
-
-```rust
-use kavach::SecretRef;
-
-let secrets = vec![
-    SecretRef { name: "DB_PASSWORD".into(), /* ... */ },
-    SecretRef { name: "API_KEY".into(), /* ... */ },
-];
-```
-
-Key properties:
-
-- Secrets are **not stored** in the container config or state.json.
+- Secrets are **not stored** in the container config or `state.json`.
 - Secrets are injected at runtime via environment variables or files.
 - `stiva inspect` does not expose secret values.
 
@@ -91,9 +73,9 @@ A `PASS` prints normally. A `WARN` prints with secrets replaced by
 with `stiva: sandbox error: output scan: block`.
 
 It is **opt-in** because scanning changes what `logs` prints, which should never
-happen behind an operator's back. The Rust original instead gated this on a
-per-container persisted `scan_policy`; that field is not yet round-tripped through
-`state.json` in the Cyrius port, so the flag stands in for it.
+happen behind an operator's back. The per-container `scan_policy` the Rust original
+gated this on **is** round-tripped through `state.json` now, so a container can carry
+its own policy; `--scan` remains the explicit per-read override.
 
 The library entry point is `scan_output(result, policy)` in `src/runtime.cyr`, with
 `scan_output_last_verdict()` / `scan_output_last_findings()` for the verdict and
@@ -119,15 +101,10 @@ stiva info              # includes overall security score
 stiva inspect <id>      # includes per-container score
 ```
 
-### Library (v3.0.x — planned, blocking Stiva facade, not yet wired in the Cyrius port)
+### Library
 
-```rust
-let score = stiva.security_score();
-// score.value is 0..100
-
-// Score a specific backend + policy combination
-let score = stiva.score_backend(backend, &policy)?;
-```
+Scoring goes through kavach's `score_backend(backend, policy)`; stiva calls it from
+`info` (host-level) and `inspect` (per-container, over that container's actual policy).
 
 Factors that increase the score:
 
@@ -146,7 +123,8 @@ Factors that increase the score:
 5. **Dependency auditing** -- run `cyrius audit` regularly on stiva itself.
 6. **Image provenance** -- verify image digests after pull. Stiva stores and validates content digests for all layers.
 7. **Network isolation** -- place containers on separate bridge networks to limit lateral movement.
-8. **Secret rotation** -- use `CredentialProxy` for runtime injection; rotate secrets without rebuilding images.
+8. **Secret rotation** -- planned, once secret injection lands (v3.1.0 item 1). Until then,
+   treat any credential a container can read as baked in and rotate it out of band.
 
 ## Further Reading
 

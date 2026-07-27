@@ -1749,7 +1749,7 @@ fn export_rootfs(rootfs, output) {
     return create_tar(rootfs, output);
 }
 
-# ── DEFERRED ─────────────────────────────────────────
+# ── DEFERRED ─────────────────────────
 # Every rust-old/src/storage.rs entry point is ported. `unpack_tar_zstd`
 # (rust-old: zstd::stream::Decoder + tar::Archive) landed as
 # `_stor_unpack_zstd_bytes` once sankoch 2.5.0 shipped zstd decode; the

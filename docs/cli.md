@@ -1,13 +1,12 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`); **30 of 35 execute end-to-end today** (`logs` gained `-f`; `events` is live), and the rest print a clear "not yet
-wired" message (their module logic is ported — only the wiring over the sync core
-remains). The **Status** column marks each:
+`--help`); **34 of 36 execute end-to-end today**. The **Status** column marks each:
 
 - **Live** — works end-to-end today.
-- **v3.0.x (planned)** — buildable now (blocking, over the ported sync core), just not wired yet.
-- **v3.1 (blocked)** — gated on an external landing (kavach `sandbox_spawn`, cyrius stackless coroutines).
+- **v3.1 (planned)** — registered but prints a clear "not yet wired" message. Only
+  `checkpoint` and `restore` are in this state; their module logic is ported and what
+  they need is CRIU integration (roadmap v3.1.0 item 3).
 
 ## Global Options
 
@@ -61,10 +60,11 @@ remains). The **Status** column marks each:
 | `stiva info` | **Live** | Show system information and security score |
 | `stiva convert <FILE> -f dockerfile [-o OUT]` | **Live** | Convert a Dockerfile to a `Stivafile` |
 | `stiva convert <FILE> -f compose ...` | **Live** | Convert docker-compose YAML to a compose TOML (documented YAML subset — see below) |
-| `stiva checkpoint <ID> [--leave-running]` | v3.0.x (planned) | CRIU checkpoint a running container |
-| `stiva restore <ID> <DIR>` | v3.0.x (planned) | Restore container from CRIU checkpoint |
+| `stiva checkpoint <ID> [--leave-running]` | v3.1 (planned) | CRIU checkpoint a running container |
+| `stiva restore <ID> <DIR>` | v3.1 (planned) | Restore container from CRIU checkpoint |
+| `stiva cron <SUBCOMMAND> ...` | **Live** | Schedule containers. See [`stiva cron`](#stiva-cron) |
 | `stiva events [--since SEC] [--until SEC] [-n N] [-f]` | **Live** | Replay container lifecycle events from `{root}/events.jsonl` (one JSON object per line, printed verbatim so `\| jq` works). Without `-f` it dumps and exits; `-f` follows until `-n`, `--until`, or an interrupt. See [Lifecycle events](#lifecycle-events) |
-| `stiva diff <ID>` | v3.0.x (planned) | Show filesystem changes in a container vs its image (must handle both rootfs layouts — over an overlay the changed set is `{croot}/upper`; a flattened rootfs has none and is compared against the layer dirs, flagged by `{croot}/.rootfs-flattened`) |
+| `stiva diff <ID>` | **Live** | Show filesystem changes in a container vs its image, one `<status> <path>` line per change (`A` added, `C` changed, `D` deleted). Handles both rootfs layouts — over an overlay the changed set is `{croot}/upper`, with overlayfs whiteouts (char 0:0) and opaque dirs read as deletions; a flattened rootfs (flagged by `{croot}/.rootfs-flattened`) is compared against the layer dirs. "no changes" goes to **stderr**, so `stiva diff <ID> \| wc -l` counts changes |
 | `stiva completions <SHELL>` | **Live** | Generate shell completions (bash, zsh, fish) on **stdout**, from cmdit's own verb table — so the script cannot drift from the CLI |
 | `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
 | `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` tarball into the store (`docker-archive` → v3.0.3) |
@@ -76,11 +76,13 @@ remains). The **Status** column marks each:
 | `--name <NAME>` | Container name |
 | `--backend <NAME>` | Sandbox backend override (`process`, `oci`, `noop`, …) |
 | `-w, --workdir <DIR>` | Working directory inside the container |
-| `-d, --detach` | Registered, but refused — detached run is v3.1 (needs kavach `sandbox_spawn`) |
+| `-d, --detach` | Run detached over kavach `sandbox_spawn`; prints the container id and returns |
 
 > These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
-> (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired yet — passing them is a
-> usage error. They arrive with the `ContainerManager` work on the v3.0.x line.
+> (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired — passing them is a
+> usage error. Secret injection is roadmap v3.1.0 item 1 (containers currently get no
+> secrets at all: `secrets` serializes as an empty array and `build_sandbox` has no kavach
+> setter to thread one through); port mapping arrives with §J live network attach, also v3.1.
 
 ## `stiva exec` Flags
 
@@ -104,6 +106,36 @@ remains). The **Status** column marks each:
 |------|---------|-------------|
 | `-f, --file <PATH>` | `Stivafile` | Path to build spec |
 | `-c, --context <DIR>` | `.` | Build context directory |
+
+## <a name="stiva-cron"></a>`stiva cron`
+
+Scheduled containers, over samay's cron engine. Entries live in `{root}/cron.json`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `cron add --schedule <EXPR> <NAME> <IMAGE> [CMD...]` | Register a job. `EXPR` is a 5-field cron expression or an `@shortcut` (`@daily`, `@hourly`, …); an invalid one is rejected at add time |
+| `cron ls` | List jobs — `NAME`, `SCHEDULE`, `IMAGE`, `ENABLED`, tab-separated |
+| `cron rm <NAME>` | Remove a job |
+| `cron enable <NAME>` / `cron disable <NAME>` | Toggle a job without deleting it |
+| `cron check` | Fire whatever is due **right now**, then exit |
+
+`stiva` is a one-shot dispatcher with no daemon, so **nothing fires unless something calls
+`cron check`**. Drive it from a systemd timer (or any external timer) at whatever
+granularity your shortest schedule needs:
+
+```bash
+stiva cron add --schedule "0 3 * * *" nightly-backup backup:latest /usr/bin/backup.sh
+stiva cron check   # run this on a timer
+```
+
+Two semantics worth knowing:
+
+- **Missed schedules are skipped, not caught up** (`CRON_SKIP`). A machine that was off for
+  six hours starts an hourly job **once** on the next `check`, not sixty times. samay logs
+  the drop either way.
+- **`check` persists the advanced anchors before starting anything.** If a container start
+  crashes the process, the alternative would be re-firing the same job on every subsequent
+  tick forever.
 
 ## `stiva convert` Flags
 
