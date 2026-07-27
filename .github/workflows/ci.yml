@@ -36,29 +36,6 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Verify the lockfile matches what CI resolved
-        # The detector docs/development/roadmap.md asks for. Local development
-        # uses `path = "../<dep>"` overrides, which SILENTLY WIN over the `tag`
-        # pin — that is how kavach 3.8.1 once arrived unannounced. cyrius.lock
-        # records only `<sha256>  lib/<file>` lines, with no dep name or version,
-        # so it cannot detect the substitution by itself.
-        #
-        # CI has no sibling checkouts, so it resolves from the tags. If the
-        # committed lock differs from what the tags produce, the lock was
-        # generated against something else and the pin does not describe the
-        # build.
-        #
-        # `cyrius deps --verify` alone would be a no-op here: the step above just
-        # rewrote the lock, so it would trivially agree with itself.
-        run: |
-          if ! git diff --exit-code cyrius.lock; then
-            echo "::error::cyrius.lock does not match what the pinned tags resolve to." >&2
-            echo "A local 'path = \"../<dep>\"' override probably vendored something the tag does not." >&2
-            echo "Re-run 'cyrius deps' without the overrides (or bump the tag) and commit the lock." >&2
-            exit 1
-          fi
-          cyrius deps --verify
-
       - name: Build
         run: |
           mkdir -p build

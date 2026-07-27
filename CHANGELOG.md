@@ -109,18 +109,31 @@ re-defaulted on empty, so no container ever got a nameserver-less `resolv.conf`;
 contract and in callers (`network_manager`) that pass the vec elsewhere first. New tests drive the
 parser with each empty-yielding input rather than relying on the host's configuration.
 
-### Added — CI now detects a lockfile that does not match the pinned tags
-`docs/development/roadmap.md` asked for this and it was never wired. Local development resolves
-deps through `path = "../<dep>"` overrides, which **silently win** over the `tag` pin — that is how
-kavach 3.8.1 once arrived unannounced — and `cyrius.lock` records only `<sha256>  lib/<file>`
-lines, with no dep name or version, so it is structurally incapable of noticing the substitution.
+### Reverted — the CI lockfile guard, which could never pass
+Added earlier in this cycle and **removed before it shipped**, because it broke CI on the first run.
+Recorded rather than quietly dropped, since what it exposed is worth knowing.
 
-CI has no sibling checkouts, so it resolves from the tags; `git diff --exit-code cyrius.lock` after
-`cyrius deps` therefore fails exactly when the committed lock was generated against something the
-pins do not describe. `cyrius deps --verify` alone would not do it — the resolve step rewrites the
-lock, so it would trivially agree with itself.
+The guard ran `git diff --exit-code cyrius.lock` after `cyrius deps`, on the theory that CI (which
+has no sibling checkouts) resolves from the pinned tags, so a lock generated against a local
+`path = "../<dep>"` override would no longer match.
 
-## [3.0.15] — 2026-07-26 — `build` and `exec` are live (§F, §D)
+**The theory was right; the mechanism was not. `cyrius.lock`'s FORMAT depends on how deps were
+resolved.** Resolving from git writes `commit <sha> <name> <url> <tag>` header lines and orders the
+file hashes differently; resolving through path overrides writes only the file hashes. So the guard
+compared two structurally different files and failed unconditionally — not because anything had
+drifted.
+
+It was verified locally before being added, which is exactly why it slipped through: locally both
+sides of the comparison are path-resolved, so they agree. The one configuration that matters —
+tag-resolved versus path-resolved — is the one that cannot be reproduced without a network.
+
+**The underlying gap is still open**, and `docs/development/roadmap.md` still asks for a detector:
+a local override silently wins over the `tag` pin (this is how kavach 3.8.1 once arrived
+unannounced), and the lock cannot notice because it records no dep name or version — the *file
+hashes* it records are the only comparable part. A guard that compares the sorted set of
+`<sha256>  lib/<file>` lines while ignoring the `commit` lines and their order would test the real
+invariant ("the files the tags produce are the files the lock records"). That is not being shipped
+here on a second guess: it needs validating against a real CI run first.
 
 ### Added — `stiva exec` is live (roadmap §D). 32 of 35 verbs
 Non-interactive exec into a running container, over `nsenter`, exactly as the oracle does it

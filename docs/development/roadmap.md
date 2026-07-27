@@ -802,9 +802,14 @@ splitting by include set at that point.
   `[deps.kavach]` to `3.8.1` so the pin matches what resolution actually vendors; if not, the
   two bundles should not be in `lib/` at all. Either way the lock must be regenerated so lock
   and `lib/` agree.
-- [x] **CI guard for the tag/path substitution — ✅ DONE (Unreleased).** `git diff --exit-code
-  cyrius.lock` after `cyrius deps`, in `.github/workflows/ci.yml`. See the note below for why the
-  lockfile cannot detect it alone.
+- [ ] **CI guard for the tag/path substitution — ATTEMPTED AND REVERTED.** A
+  `git diff --exit-code cyrius.lock` guard was added and removed in the same cycle: it can never
+  pass, because `cyrius.lock`'s FORMAT depends on the resolution mode. Resolving from git tags (what
+  CI does) writes `commit <sha> <name> <url> <tag>` lines and a different hash ordering; resolving
+  through `path` overrides (what local development does) writes only file hashes. The comparison is
+  therefore between two structurally different files. A guard comparing the sorted SET of
+  `<sha256>  lib/<file>` lines — ignoring the `commit` lines and their order — would test the real
+  invariant, but needs validating on a real CI run before being shipped. See the 3.0.16 CHANGELOG.
 - [x] **`tag` does not bind while `path` is present.** `cyrius.cyml:125` pins kavach `3.7.1`;
   the `path = "../kavach"` override silently wins and vendors whatever the sibling checkout is
   at. This is how 3.8.1 arrived unannounced. `cyrius.lock` records only bare
