@@ -84,21 +84,21 @@ stdlib = [
 # Structured tracing (libro's transitive).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
-path = "../sakshi"
+# path = "../sakshi"   # see "Local dep development" above
 tag = "2.4.6"
 modules = ["dist/sakshi.cyr"]
 
 # Audit-chain crypto tools (bote's + nein's transitive).
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
-path = "../libro"
+# path = "../libro"   # see "Local dep development" above
 tag = "2.8.2"
 modules = ["dist/libro.cyr"]
 
 # Job queue, heartbeat FSM, pub/sub — fleet / health / ansamblu / container.
 [deps.majra]
 git = "https://github.com/MacCracken/majra.git"
-path = "../majra"
+# path = "../majra"   # see "Local dep development" above
 tag = "2.5.1"
 modules = ["dist/majra.cyr"]
 
@@ -107,14 +107,14 @@ modules = ["dist/majra.cyr"]
 # the same core (extend to dist/bote.cyr if mcp needs tools beyond core).
 [deps.bote]
 git = "https://github.com/MacCracken/bote.git"
-path = "../bote"
+# path = "../bote"   # see "Local dep development" above
 tag = "3.1.4"
 modules = ["dist/bote-core.cyr"]
 
 # nftables firewall, NAT, port mapping — network/nat + network/manager.
 [deps.nein]
 git = "https://github.com/MacCracken/nein.git"
-path = "../nein"
+# path = "../nein"   # see "Local dep development" above
 tag = "1.6.4"
 modules = ["dist/nein.cyr"]
 
@@ -122,7 +122,7 @@ modules = ["dist/nein.cyr"]
 # SecretRef, StrengthScore, ExternalizationGate).
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
-path = "../kavach"
+# path = "../kavach"   # see "Local dep development" above
 tag = "3.9.3"
 modules = ["dist/kavach.cyr"]
 
@@ -158,7 +158,7 @@ accel = ["samay", "ai-hwaccel"]
 # Cron/schedule machinery + resource-aware placement (roadmap §H).
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
-path = "../samay"
+# path = "../samay"   # see "Local dep development" above
 tag = "1.0.1"
 modules = ["dist/samay.cyr"]
 optional = true
@@ -170,15 +170,37 @@ optional = true
 # also collides but is benign — identical 1/0 semantics.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-path = "../ai-hwaccel"
+# path = "../ai-hwaccel"   # see "Local dep development" above
 tag = "2.3.15"
 modules = ["dist/ai-hwaccel.cyr"]
 optional = true
 
+# ── Local dep development ────────────────────────────────
+#
+# Every `path = "../<dep>"` override is COMMENTED OUT, deliberately.
+#
+# A `path` override silently WINS over its `tag`, and `cyrius.lock` records no
+# dep name or version, so nothing detects the substitution. The practical
+# consequence, observed: the committed lock described whatever the sibling
+# checkouts happened to be, `~/Repos/sakshi` sat 3 commits past its 2.4.6 tag,
+# and every local build and test ran against a sakshi that exists at no tag —
+# while CI, which has no siblings, resolved the tag and got different bytes.
+# This is the same mechanism by which kavach 3.8.1 once arrived here unannounced
+# while this file still said 3.7.1.
+#
+# With the overrides off, `cyrius deps` resolves from the tags on every machine,
+# so the lock means one thing and CI's build is the build.
+#
+# To develop a dep alongside stiva: uncomment its `path` line, work, then tag
+# and release the dep and bump the `tag` here before committing the lock. Do not
+# commit a lock produced with an override active — the CI guard in
+# .github/workflows/ci.yml compares the dep bundles against the tags and will
+# reject it, naming the file.
+
 # LUKS + dm-verity — encrypted.
 [deps.agnodrm]
 git = "https://github.com/MacCracken/agnodrm.git"
-path = "../agnodrm"
+# path = "../agnodrm"   # see "Local dep development" above
 tag = "1.5.0"
 modules = ["dist/agnodrm.cyr"]
 
@@ -189,6 +211,6 @@ modules = ["dist/agnodrm.cyr"]
 # a hand-kept list, drifting from the verbs the moment one is added.
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
-path = "../cmdit"
+# path = "../cmdit"   # see "Local dep development" above
 tag = "1.2.2"
 modules = ["dist/cmdit.cyr"]

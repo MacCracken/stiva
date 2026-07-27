@@ -1,3 +1,15 @@
+commit	bfc127f87489a483a6153f5e91194aed25d6a714	sakshi	https://github.com/MacCracken/sakshi.git	2.4.6
+commit	cfb52e02647af22a94b2a78db55de7d6542d7ddc	libro	https://github.com/MacCracken/libro.git	2.8.2
+commit	056e4b7c307f7c4b77d1b9969664a0c560c28d09	majra	https://github.com/MacCracken/majra.git	2.5.1
+commit	b2b483b6914f845e4a3265c55f0aa9f16c367461	bote	https://github.com/MacCracken/bote.git	3.1.4
+commit	c30e33b6fef848f7b715a19e844e21acbe366ebe	nein	https://github.com/MacCracken/nein.git	1.6.4
+commit	b0df675030ae63c1018c685de2df3609a95ff9cd	kavach	https://github.com/MacCracken/kavach.git	3.9.3
+commit	9dbba878de6a6097a4086a9d7c34c4b49bb5feca	samay	https://github.com/MacCracken/samay.git	1.0.1
+commit	8e02addd40446731473b2de240311ded323b9965	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.15
+commit	8e4984124f112704123b6c9511acf78e8fa08efe	agnodrm	https://github.com/MacCracken/agnodrm.git	1.5.0
+commit	711b963e15356f0d230b932e4b606782e4a4f38e	cmdit	https://github.com/MacCracken/cmdit.git	1.2.2
+commit	7f4aeaef5d4f301b7db085df0870b43879bc2b16	sigil	https://github.com/MacCracken/sigil.git	3.12.1
+commit	f67aef0cc74c39e092d1d647e2f79d2756f196c2	patra	https://github.com/MacCracken/patra.git	1.12.12
 9368b806979583334291a968136674f146a8a68ac7fb379a7b0348fa850c9831  lib/nein.cyr
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr
@@ -26,7 +38,7 @@ c7b3bf5beebddc082d4fa643a7113deaf26d0fd80dd5cd70ba0e3c21671107d0  lib/fs_win.cyr
 17da1a84ea09620067a04004c267e1d0a2adf0470981c086aeae07ae4136ac51  lib/freelist.cyr
 0a416c0e9196001b31c0aaee3ba45852982ee1e7366f96f747a85004fd41e7a3  lib/ai-hwaccel.cyr
 ac55a4ff22d49ccf6c44893be077e1c824825aed845d82c04767f4f87c29d6da  lib/sync_macos.cyr
-fef4873fa425a431e25ed77409ee4dde92d4fc07fe1df76af336ab74d63d8b11  lib/sakshi.cyr
+85b7917cc2e9261367c0dc071bdcccd6541ab2dcf1b2bd0c5f7b1359a9625442  lib/sakshi.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr
 7b045871f231519e65f28a4b7abfbae6dd8e586ce03053fd367b3a119e8303c9  lib/atomic.cyr
 ff14f0d7999956754937f612c0aa60719c138f0967a81019cf99e08aae088087  lib/string.cyr
