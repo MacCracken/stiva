@@ -1117,6 +1117,108 @@ fn test_cm_exec_requires_running() {
     return 0;
 }
 
+# ══ diff (roadmap v3.0.17 item 1) ════════════════════════
+# No oracle: the Rust diff verb has never executed in the CLI (internals is
+# never rehydrated), and its walk emits only C/D and looks for `.wh.` files in an
+# overlay upper, where whiteouts are character devices. This is a rewrite.
+
+fn _dv_write(path, content) {
+    _stor_mkdir_parents(path);
+    file_write_all(path, content, strlen(content));
+    return 0;
+}
+
+fn _dv_find(entries, status, path) {
+    var i = 0;
+    while (i < vec_len(entries)) {
+        var e = vec_get(entries, i);
+        if (cm_diff_status(e) == status) {
+            if (streq(cm_diff_path(e), path) == 1) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_cm_diff_flattened_reports_a_c_d() {
+    test_group("cm_diff_flattened_reports_a_c_d");
+    var root = "/tmp/stiva-t-diff";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    assert(mgr != 0, "manager");
+    if (mgr == 0) { return 0; }
+
+    # A one-layer image with three files.
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("app/orig.txt", 48, 420, 0, 0, 5, "orig\n"));
+    vec_push(entries, _tar_entry_new("app/gone.txt", 48, 420, 0, 0, 5, "gone\n"));
+    vec_push(entries, _tar_entry_new("app/same.txt", 48, 420, 0, 0, 5, "same\n"));
+    var tarp = "/tmp/stiva-t-diff.tar";
+    xunlink(tarp);
+    _stor_write_tar(entries, tarp);
+    var img = image_import(store, tarp, "d", "v1");
+    assert(img != 0, "image imported");
+    if (img == 0) { return 0; }
+
+    var rec = container_manager_create(mgr, img, container_config_default());
+    assert(rec != 0, "container created");
+    if (rec == 0) { return 0; }
+    var rc: Container = rec;
+
+    # An unchanged container has no diff at all.
+    var clean = container_manager_diff(mgr, rc.id);
+    assert(clean != 0, "diff returned");
+    assert_eq(vec_len(clean), 0, "an untouched rootfs reports no changes");
+
+    # Mutate the rootfs the way a running container would.
+    var rfs = _container_cat2(_cm_container_dir(root, rc.id), "/rootfs");
+    _dv_write(_container_cat2(rfs, "/app/orig.txt"), "CHANGED-AND-LONGER\n");
+    _dv_write(_container_cat2(rfs, "/app/added.txt"), "new\n");
+    xunlink(_container_cat2(rfs, "/app/gone.txt"));
+
+    var d = container_manager_diff(mgr, rc.id);
+    assert(d != 0, "diff returned");
+    if (d == 0) { return 0; }
+    assert_eq(_dv_find(d, _CM_DIFF_CHG, "/app/orig.txt"), 1, "C for a modified file");
+    assert_eq(_dv_find(d, _CM_DIFF_ADD, "/app/added.txt"), 1, "A for a new file");
+    assert_eq(_dv_find(d, _CM_DIFF_DEL, "/app/gone.txt"), 1, "D for a removed file");
+    # An untouched file must NOT appear — the fingerprint excludes mtime, so
+    # merely reading a file is not a change.
+    assert_eq(_dv_find(d, _CM_DIFF_CHG, "/app/same.txt"), 0, "an untouched file is not reported");
+    assert_eq(_dv_find(d, _CM_DIFF_ADD, "/app/same.txt"), 0, "nor as an add");
+    return 0;
+}
+
+fn test_cm_diff_unknown_container() {
+    test_group("cm_diff_unknown_container");
+    var root = "/tmp/stiva-t-diff2";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var mgr = container_manager_new(root, store);
+    assert_eq(container_manager_diff(mgr, "nosuchthing"), 0, "unknown container -> 0");
+    return 0;
+}
+
+fn test_cm_diff_meta_type_parse() {
+    test_group("cm_diff_meta_type_parse");
+    # The S_IFMT prefix of a "<type>:<size>:<mode>" fingerprint. 8192 = S_IFCHR,
+    # which is how an overlayfs whiteout is spelled.
+    assert_eq(_cm_diff_meta_type("8192:0:0"), 8192, "chardev");
+    assert_eq(_cm_diff_meta_type("32768:12:420"), 32768, "regular file");
+    assert_eq(_cm_diff_meta_type("16384:4096:493"), 16384, "directory");
+    return 0;
+}
+
+fn test_cm_diff_wh_path_detection() {
+    test_group("cm_diff_wh_path_detection");
+    assert_eq(_cm_diff_is_wh_path("/app/.wh.gone"), 1, "a marker component");
+    assert_eq(_cm_diff_is_wh_path("/.wh..wh..opq"), 1, "the opaque marker");
+    assert_eq(_cm_diff_is_wh_path("/app/normal.txt"), 0, "an ordinary path");
+    assert_eq(_cm_diff_is_wh_path("/app/a.wh.b"), 0, "'.wh.' mid-name is not a marker");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_container_log_tail();
@@ -1178,6 +1280,10 @@ fn main() {
     test_exec_scratch_path_is_per_exec();
     test_exec_in_container_empty_command();
     test_cm_exec_requires_running();
+    test_cm_diff_flattened_reports_a_c_d();
+    test_cm_diff_unknown_container();
+    test_cm_diff_meta_type_parse();
+    test_cm_diff_wh_path_detection();
     return assert_summary();
 }
 

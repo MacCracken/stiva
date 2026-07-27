@@ -1283,6 +1283,44 @@ fn _cli_stiva(root) {
     return stiva_new(cfg);
 }
 
+# `stiva diff <CONTAINER>` — roadmap v3.0.17 item 1.
+fn _cli_diff(h, root) {
+    var vh = cmdit_new("stiva diff");
+    var vr = cmdit_parse_verb(vh, h);
+    if (vr == CMDIT_HELP) { cmdit_help(vh); return CMDIT_EXIT_OK; }
+    if (vr == CMDIT_VERSION) { return cmdit_version(vh, _stiva_version_str()); }
+    if (vr == CMDIT_RESULT_ERR) { cmdit_print_error(vh); return CMDIT_EXIT_USAGE; }
+    if (cmdit_positional_count(vh) < 1) {
+        _cli_puts("stiva diff: usage: diff <container>\n");
+        return CMDIT_EXIT_USAGE;
+    }
+    var s = _cli_stiva(root);
+    if (s == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
+    var entries = stiva_diff(s, cmdit_positional(vh, 0));
+    if (entries == 0) { return CMDIT_EXIT_RUN; }   # detail already printed
+    var n = vec_len(entries);
+    if (n == 0) {
+        # To stderr, not stdout: `stiva diff c | wc -l` must count changes, and a
+        # "no changes" banner on stdout would make an unchanged container read as
+        # one changed file.
+        _cli_eputs("(no changes)\n");
+        return CMDIT_EXIT_OK;
+    }
+    var i = 0;
+    while (i < n) {
+        var e = vec_get(entries, i);
+        var st = alloc(3);
+        store8(st, cm_diff_status(e));
+        store8(st + 1, 32);                         # ' '
+        store8(st + 2, 0);
+        _cli_puts(st);
+        _cli_puts(cm_diff_path(e));
+        _cli_puts("\n");
+        i = i + 1;
+    }
+    return CMDIT_EXIT_OK;
+}
+
 # `stiva exec [-e K=V]... [-w DIR] <CONTAINER> <CMD> [ARGS...]` — §D.
 #
 # Non-interactive only. `-i`/`-t` are NOT registered: `-t` has no substrate at
@@ -1582,6 +1620,7 @@ fn main() {
     if (v == V_COMPLETIONS) { return _cli_completions(h); }
     if (v == V_BUILD) { return _cli_build(h, _cli_root(h, f_root)); }
     if (v == V_EXEC) { return _cli_exec(h, _cli_root(h, f_root)); }
+    if (v == V_DIFF) { return _cli_diff(h, _cli_root(h, f_root)); }
     # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
     return _cli_not_wired(_cli_verb_name(v));
 }

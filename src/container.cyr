@@ -1798,6 +1798,323 @@ fn container_manager_restart(mgr, id) {
 # dir from internals, or the reconstructed {root}/containers/{id}/rootfs
 # fallback when internals is empty (cross-process) — matching today's _cli_export.
 #[must_use]
+# ══ diff (roadmap v3.0.17 item 1) ════════════════════════
+#
+# THERE IS NO ORACLE FOR THIS. `ContainerManager::new` restores containers from
+# state.json but leaves `internals` empty (rust-old/src/container.rs:260) and
+# nothing rehydrates it, so `get_rootfs` always returns ContainerNotFound and the
+# Rust `diff` verb has never executed in the CLI. Its walk is also wrong twice
+# over: it emits only C and D (never A), and it looks for `.wh.` files in the
+# overlay upper — but overlayfs whiteouts are character devices 0:0, not `.wh.`
+# files, so that branch could never fire. This is a rewrite.
+#
+# TWO LAYOUTS, and they cannot be told apart after the fact — `internals` is
+# process-local and `setup_overlay` creates upper/work/merged even when the mount
+# FAILS, so their presence proves nothing. `create` therefore drops a
+# `{croot}/.rootfs-flattened` marker and this reads it.
+#
+#   overlay   → the changed set IS {croot}/upper; walk it.
+#   flattened → no upper. Compare {croot}/rootfs against the image's layer dirs.
+#
+# Output is the Docker convention, one entry per line: `A <path>` added,
+# `C <path>` changed, `D <path>` deleted.
+
+# One diff entry: a status byte ('A'/'C'/'D') and a container-absolute path.
+var _CM_DIFF_ADD = 65;
+var _CM_DIFF_CHG = 67;
+var _CM_DIFF_DEL = 68;
+
+#[must_use]
+fn _cm_diff_entry(status, path) {
+    var e = alloc(16);
+    store64(e, status);
+    store64(e + 8, path);
+    return e;
+}
+
+#[must_use]
+fn cm_diff_status(e) { return load64(e); }
+#[must_use]
+fn cm_diff_path(e) { return load64(e + 8); }
+
+# Walk `dir`, recording every entry into `out` as path → "<type>:<size>:<mode>".
+# Paths are container-absolute ("/etc/passwd"). Directories are recorded too, so
+# a directory that appears or disappears is reported.
+#
+# The fingerprint deliberately excludes mtime: unpacking a layer sets it from the
+# tar, and a container that merely READ a file would otherwise show as changed.
+# Size + mode + type is what "changed" means for a filesystem diff.
+fn _cm_diff_scan(dir, prefix, out) {
+    var fd = sys_open(dir, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    if (fd < 0) { return 0; }
+    var buf = alloc(4096);
+    var sb = alloc(144);
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                # prepare_layers' own bookkeeping, never image content.
+                if (skip == 0) { if (streq(nm, ".unpacked") == 1) { skip = 1; } }
+                if (skip == 0) {
+                    var named = _stor_dup(nm);
+                    var child = _container_cat2(_container_cat2(dir, "/"), named);
+                    var path = _container_cat2(_container_cat2(prefix, "/"), named);
+                    if (sys_lstat(child, sb) == 0) {
+                        var st = load64(sb + 24);
+                        var typ = st & 61440;
+                        var fb = str_builder_new();
+                        str_builder_add_int(fb, typ);
+                        str_builder_add_cstr(fb, ":");
+                        str_builder_add_int(fb, load64(sb + 48));      # size
+                        str_builder_add_cstr(fb, ":");
+                        str_builder_add_int(fb, st & 4095);            # mode
+                        map_set(out, path, str_cstr(str_builder_build(fb)));
+                        if (typ == 16384) { _cm_diff_scan(child, path, out); }
+                    }
+                }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+    return 0;
+}
+
+# The merged metadata view of `layer_dirs`, bottom-to-top, with whiteouts
+# applied — i.e. what the rootfs looked like BEFORE the container ran.
+#
+# Rebuilt here rather than shared with `flatten_layers` because that one copies
+# bytes; this needs only names and metadata, and running it would cost a second
+# full copy of the image per `diff`.
+fn _cm_diff_lower_view(layer_dirs) {
+    var view = map_new();
+    var n = vec_len(layer_dirs);
+    var i = 0;
+    while (i < n) {
+        var ld = vec_get(layer_dirs, i);
+        # Whiteouts first, exactly as the merge applies them: a marker in THIS
+        # layer removes what the layers below contributed.
+        _cm_diff_apply_wh(ld, "", view);
+        var one = map_new();
+        _cm_diff_scan(ld, "", one);
+        var ks = map_keys(one);
+        var k = 0;
+        while (k < vec_len(ks)) {
+            var key = vec_get(ks, k);
+            # The markers themselves are metadata, never content.
+            if (_cm_diff_is_wh_path(key) == 0) { map_set(view, key, map_get(one, key)); }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return view;
+}
+
+# 1 when any component of `path` is a `.wh.` marker.
+#[must_use]
+fn _cm_diff_is_wh_path(path) {
+    var n = strlen(path);
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) {
+            if (i + 4 < n) { if (memeq(path + i + 1, ".wh.", 4) == 1) { return 1; } }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Remove from `view` everything this layer's whiteouts delete.
+fn _cm_diff_apply_wh(dir, prefix, view) {
+    var fd = sys_open(dir, 196608, 0);
+    if (fd < 0) { return 0; }
+    var buf = alloc(4096);
+    var sb = alloc(144);
+    var subs = vec_new();
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                if (skip == 0) {
+                    var named = _stor_dup(nm);
+                    if (memeq(named, ".wh.", 4) == 1) {
+                        if (streq(named, ".wh..wh..opq") == 1) {
+                            _cm_diff_drop_subtree(view, prefix);
+                        } else {
+                            _cm_diff_drop_subtree(view,
+                            _container_cat2(_container_cat2(prefix, "/"), named + 4));
+                        }
+                    } else {
+                        var child = _container_cat2(_container_cat2(dir, "/"), named);
+                        if (sys_lstat(child, sb) == 0) {
+                            if ((load64(sb + 24) & 61440) == 16384) {
+                                vec_push(subs, named);
+                            }
+                        }
+                    }
+                }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+    var s = 0;
+    while (s < vec_len(subs)) {
+        var sn = vec_get(subs, s);
+        _cm_diff_apply_wh(_container_cat2(_container_cat2(dir, "/"), sn),
+        _container_cat2(_container_cat2(prefix, "/"), sn), view);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# Drop `path` and everything under it from `view`. A whiteout on a directory
+# removes the whole subtree, not just the directory entry.
+fn _cm_diff_drop_subtree(view, path) {
+    var plen = strlen(path);
+    var ks = map_keys(view);
+    var i = 0;
+    while (i < vec_len(ks)) {
+        var k = vec_get(ks, i);
+        var drop = 0;
+        if (streq(k, path) == 1) { drop = 1; }
+        elif (strlen(k) > plen) {
+            if (memeq(k, path, plen) == 1) {
+                if (load8(k + plen) == 47) { drop = 1; }   # a real child, not a prefix match
+            }
+        }
+        if (drop == 1) { map_set(view, k, 0); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Diff a container's filesystem against the image it was created from. Returns a
+# vec of diff entries (`_cm_diff_entry`), or 0 when the container is unknown.
+# An empty vec means no changes.
+fn container_manager_diff(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return 0;
+    }
+    var cc: Container = c;
+    var croot = _cm_container_dir(mm.root, cc.id);
+    var out = vec_new();
+
+    # OVERLAY: the upper layer IS the change set, so no comparison is needed —
+    # but the marker decides, not the presence of `upper`, because setup_overlay
+    # creates it even when the mount failed.
+    if (file_exists(_cm_flatten_marker(croot)) == 0) {
+        var upper = _container_cat2(croot, "/upper");
+        if (file_exists(upper) == 0) { return out; }
+        var up = map_new();
+        _cm_diff_scan(upper, "", up);
+        # Which of these are ADDS rather than CHANGES needs the lower view.
+        var lower_o = _cm_diff_lower_view(_cm_diff_layer_dirs(mm, cc));
+        var ks = map_keys(up);
+        var i = 0;
+        while (i < vec_len(ks)) {
+            var k = vec_get(ks, i);
+            var meta = map_get(up, k);
+            if (meta != 0) {
+                # An overlayfs whiteout is a character device 0:0 — NOT a `.wh.`
+                # file. The oracle checked for `.wh.` here, which could never
+                # match on a real overlay. S_IFCHR = 8192; a 0:0 rdev is the
+                # marker, and st_size on a chardev is 0 so the fingerprint's
+                # size field is a safe proxy only for the type check.
+                if (_cm_diff_meta_type(meta) == 8192) {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_DEL, k));
+                } elif (map_get(lower_o, k) == 0) {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_ADD, k));
+                } else {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, k));
+                }
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    # FLATTENED: no upper exists, so the rootfs must be compared against what the
+    # image's layers merge to.
+    var lower = _cm_diff_lower_view(_cm_diff_layer_dirs(mm, cc));
+    var upper2 = map_new();
+    _cm_diff_scan(_container_cat2(croot, "/rootfs"), "", upper2);
+
+    var uk = map_keys(upper2);
+    var a = 0;
+    while (a < vec_len(uk)) {
+        var key = vec_get(uk, a);
+        var now = map_get(upper2, key);
+        if (now != 0) {
+            var was = map_get(lower, key);
+            if (was == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_ADD, key)); }
+            elif (streq(was, now) == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, key)); }
+        }
+        a = a + 1;
+    }
+    var lk = map_keys(lower);
+    var d = 0;
+    while (d < vec_len(lk)) {
+        var lkey = vec_get(lk, d);
+        if (map_get(lower, lkey) != 0) {
+            if (map_get(upper2, lkey) == 0) {
+                vec_push(out, _cm_diff_entry(_CM_DIFF_DEL, lkey));
+            }
+        }
+        d = d + 1;
+    }
+    return out;
+}
+
+# The S_IFMT field of a `_cm_diff_scan` fingerprint ("<type>:<size>:<mode>").
+#[must_use]
+fn _cm_diff_meta_type(meta) {
+    var i = 0;
+    var v = 0;
+    while (load8(meta + i) != 0) {
+        var ch = load8(meta + i);
+        if (ch == 58) { return v; }                 # ':'
+        v = v * 10 + (ch - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# The unpacked layer dirs for the container's image, or an empty vec when the
+# image is gone (`rmi` while a container still references it). An empty lower
+# view degrades the diff to "everything is an add", which is the honest answer
+# when the baseline cannot be established.
+fn _cm_diff_layer_dirs(mm_in, cc_in) {
+    var mm: ContainerManager = mm_in;
+    var cc: Container = cc_in;
+    var img = image_store_find(mm.image_store, cc.image_id);
+    if (img == 0) { return vec_new(); }
+    var dirs = prepare_layers(mm.image_store, _img_layers(img));
+    if (dirs == 0) { return vec_new(); }
+    return dirs;
+}
+
 fn container_manager_get_rootfs(mgr, id) {
     var mm: ContainerManager = mgr;
     # Resolve id-or-name → the real id (the dir + internals key use the id).

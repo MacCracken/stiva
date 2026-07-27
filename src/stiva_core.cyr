@@ -239,6 +239,15 @@ fn stiva_signal(s, id, signal) {
     return r;
 }
 
+# Diff a container's filesystem against its image (roadmap v3.0.17 item 1).
+# Returns a vec of diff entries, or 0. Not audited — a read-only inspection, the
+# same treatment ps/inspect/stats get.
+#[must_use]
+fn stiva_diff(s, id) {
+    var ss: Stiva = s;
+    return container_manager_diff(ss.containers, id);
+}
+
 # Exec a command inside a running container (rust-old: Stiva::exec, lib.rs).
 # Returns a ContainerExecResult*, or 0 with the detail printed.
 #

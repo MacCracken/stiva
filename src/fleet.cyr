@@ -252,23 +252,71 @@ fn free_slots(node) {
 # ── candidate filtering ───────────────────────
 
 # Build a vec of node pointers that are Ready, match constraints, and have
+# 1 when `node` is named in the constraints' `preferred_nodes`.
+#
+# DIVERGENCE: the oracle declares the field and never reads it
+# (rust-old/src/fleet.rs:43), so a caller expressing a placement preference got
+# silence. It is honoured as a PREFERENCE, not a filter: a preferred node that is
+# full or fails the hard constraints must not block the deployment, it just loses
+# its priority. Treating it as a filter would turn a hint into an outage.
+#[must_use]
+fn _fleet_is_preferred(node, constraints) {
+    var c: DeploymentConstraints = constraints;
+    if (c.preferred_nodes == 0) { return 0; }
+    var n: FleetNode = node;
+    var i = 0;
+    while (i < vec_len(c.preferred_nodes)) {
+        if (streq(vec_get(c.preferred_nodes, i), n.id) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when a node in `status` may receive NEW work.
+#
+# DIVERGENCE: the oracle tests `== Ready` at every filter site
+# (rust-old/src/fleet.rs), so `Draining` and `Cordoned` are defined and then
+# behave EXACTLY like `Ready` nowhere and like `NotReady` nowhere — they have no
+# effect at all, which makes cordoning a node a silent no-op. Both now mean "no
+# new work", which is what the names say and what an operator cordoning a node
+# before maintenance expects.
+#
+# They are deliberately NOT the same as NotReady: a draining node is still
+# healthy and still running its containers, so `check_fleet_health` must not
+# sweep it and a rollback must not migrate off it.
+#[must_use]
+fn _fleet_node_schedulable(status) {
+    if (status == FLEET_NODE_READY) { return 1; }
+    return 0;
+}
+
 # free slots — the shared candidate set for schedule / select_migration_target.
 #[must_use]
 fn _fleet_candidates(nodes, count, constraints) {
-    var out = vec_new();
+    # Two tiers, concatenated: preferred nodes first, everything else after. Every
+    # strategy consumes this list in order, so the preference is honoured without
+    # any of them having to know about it — and without it ever excluding a node.
+    var pref = vec_new();
+    var rest = vec_new();
     var i = 0;
     while (i < count) {
         var node = vec_get(nodes, i);
         var n: FleetNode = node;
-        if (n.status == FLEET_NODE_READY) {
+        if (_fleet_node_schedulable(n.status) == 1) {
             if (node_matches_constraints(node, constraints) == 1) {
                 if (free_slots(node) > 0) {
-                    vec_push(out, node);
+                    if (_fleet_is_preferred(node, constraints) == 1) { vec_push(pref, node); }
+                    else { vec_push(rest, node); }
                 }
             }
         }
         i = i + 1;
     }
+    var out = vec_new();
+    var p = 0;
+    while (p < vec_len(pref)) { vec_push(out, vec_get(pref, p)); p = p + 1; }
+    var r = 0;
+    while (r < vec_len(rest)) { vec_push(out, vec_get(rest, r)); r = r + 1; }
     return out;
 }
 
@@ -499,16 +547,20 @@ fn schedule(deployment, nodes, count) {
 fn select_migration_target(nodes, count, constraints) {
     var best = 0;
     var best_slots = 0 - 1;
+    var best_pref = 0;
     var i = 0;
     while (i < count) {
         var node = vec_get(nodes, i);
         var n: FleetNode = node;
-        if (n.status == FLEET_NODE_READY) {
+        if (_fleet_node_schedulable(n.status) == 1) {
             if (node_matches_constraints(node, constraints) == 1) {
                 var fs = free_slots(node);
-                if (fs > 0) {
-                    # max_by_key: ties resolve to the last max in Rust's
-                    # iterator (later element wins on equal key). Use `>=`.
+                var isp = _fleet_is_preferred(node, constraints);
+                # A preferred node outranks ANY non-preferred one; within a tier,
+                # max_by_key semantics — ties resolve to the last max, as Rust's
+                # iterator does, hence `>=`.
+                if (isp > best_pref) { best_pref = isp; best_slots = 0 - 1; }
+                if (fs > 0 && isp == best_pref) {
                     if (fs >= best_slots) {
                         best = node;
                         best_slots = fs;
@@ -574,14 +626,12 @@ fn plan_rollback(nodes, count, constraints) {
             if (cap.running_containers > 0) {
                 var k = 0;
                 while (k < cap.running_containers) {
-                    var target = select_migration_target(nodes, count, constraints);
+                    var target = _fleet_select_and_reserve(nodes, count, constraints, fn0.id);
                     if (target != 0) {
-                        if (streq(target, fn0.id) == 0) {
-                            var pair = alloc(16);
-                            store64(pair, fn0.id);
-                            store64(pair + 8, target);
-                            vec_push(migrations, pair);
-                        }
+                        var pair = alloc(16);
+                        store64(pair, fn0.id);
+                        store64(pair + 8, target);
+                        vec_push(migrations, pair);
                     }
                     k = k + 1;
                 }
@@ -590,6 +640,52 @@ fn plan_rollback(nodes, count, constraints) {
         i = i + 1;
     }
     return migrations;
+}
+
+# Pick a migration target and RESERVE a slot on it, so the next call in the same
+# plan sees the reduced capacity.
+#
+# DIVERGENCE from the oracle (rust-old/src/fleet.rs:336-345), which calls
+# `select_migration_target` once per running container with no reservation
+# between calls — so `select_migration_target` returns the node with the most
+# free slots every time and **all N containers on a failed node plan onto the
+# same target**, regardless of whether it can hold them. A rollback plan that
+# cannot be executed is worse than none.
+#
+# `skip_id` excludes the failing node itself. The reservation mutates
+# `running_containers` on the candidate, which is what `free_slots` reads; the
+# node vec is the caller's planning copy, so this is a projection, not a
+# commitment against live state.
+# RAW OFFSETS, not typed struct locals — deliberate, per the cycc struct-id
+# 20/21 workaround this tree carries elsewhere. A `var n: FleetNode = node;`
+# here SEGFAULTS: the bug is per-function-context, so the identical access is
+# fine in `select_migration_target` two functions up and fatal in this one.
+# Verified by bisection — the two tests that reach this function crashed, the
+# two that do not passed.
+#   FleetNode:         id@0 address@8 labels@16 capacity@24 status@32 last_seen@40
+#   FleetNodeCapacity: memory_mb@0 cpus@8 max_containers@16 running_containers@24
+fn _fleet_select_and_reserve(nodes, count, constraints, skip_id) {
+    var best = 0;
+    var best_slots = 0 - 1;
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        if (_fleet_node_schedulable(load64(node + 32)) == 1) {
+            if (streq(load64(node), skip_id) == 0) {
+                if (node_matches_constraints(node, constraints) == 1) {
+                    var fs = free_slots(node);
+                    if (fs > 0) {
+                        if (fs >= best_slots) { best_slots = fs; best = node; }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (best == 0) { return 0; }
+    var bcap = load64(best + 24);
+    store64(bcap + 24, load64(bcap + 24) + 1);
+    return load64(best);
 }
 
 # ── DEFERRED (already-ported; no deferral needed) ───────────────

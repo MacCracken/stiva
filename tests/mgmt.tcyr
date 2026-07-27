@@ -1469,6 +1469,108 @@ fn test_ev_in_range() {
     return 0;
 }
 
+# ══ fleet defects (roadmap v3.0.17 item 4) ═══════════════
+# All three are inherited from rust-old/src/fleet.rs, so fixing them is a
+# deliberate divergence. Each test fails against the pre-fix behaviour.
+
+fn _fl_node(id, max_c, running, status) {
+    # (memory_mb, cpus, max_containers, running_containers)
+    var cap = fleet_node_capacity_new(8192, 4, max_c, running);
+    # (id, address, labels, capacity, status, last_seen)
+    var n = fleet_node_new(id, "host", 0, cap, status, 0);
+    return n;
+}
+
+fn test_fleet_rollback_does_not_stampede() {
+    test_group("fleet_rollback_does_not_stampede");
+    # A failed node with 3 running containers, and two healthy targets with 2
+    # slots each. The oracle calls select_migration_target once per container
+    # with no reservation, so all THREE plan onto the roomiest node — a plan
+    # that cannot be executed.
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("dead", 4, 3, FLEET_NODE_NOT_READY));
+    vec_push(nodes, _fl_node("a", 2, 0, FLEET_NODE_READY));
+    vec_push(nodes, _fl_node("b", 2, 0, FLEET_NODE_READY));
+    var migs = plan_rollback(nodes, 3, deployment_constraints_default());
+    assert_eq(vec_len(migs), 3, "one migration per running container");
+    var to_a = 0;
+    var to_b = 0;
+    var i = 0;
+    while (i < vec_len(migs)) {
+        var m = vec_get(migs, i);
+        if (streq(load64(m + 8), "a") == 1) { to_a = to_a + 1; }
+        if (streq(load64(m + 8), "b") == 1) { to_b = to_b + 1; }
+        i = i + 1;
+    }
+    assert_eq(to_a + to_b, 3, "every migration targets a healthy node");
+    assert(to_a <= 2, "no more than node a's 2 free slots");
+    assert(to_b <= 2, "no more than node b's 2 free slots");
+    assert(to_a > 0, "the load is spread, not stampeded");
+    assert(to_b > 0, "across both targets");
+    return 0;
+}
+
+fn test_fleet_rollback_never_targets_the_failed_node() {
+    test_group("fleet_rollback_never_targets_the_failed_node");
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("dead", 8, 1, FLEET_NODE_NOT_READY));
+    vec_push(nodes, _fl_node("ok", 2, 0, FLEET_NODE_READY));
+    var migs = plan_rollback(nodes, 2, deployment_constraints_default());
+    assert_eq(vec_len(migs), 1, "one migration");
+    if (vec_len(migs) == 1) {
+        assert_eq(streq(load64(vec_get(migs, 0) + 8), "ok"), 1, "targets the healthy node");
+    }
+    return 0;
+}
+
+fn test_fleet_draining_and_cordoned_take_no_new_work() {
+    test_group("fleet_draining_and_cordoned_take_no_new_work");
+    # The oracle tests `== Ready` everywhere, so these two states are defined and
+    # then behave identically to Ready — cordoning a node was a silent no-op.
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("draining", 8, 0, FLEET_NODE_DRAINING));
+    vec_push(nodes, _fl_node("cordoned", 8, 0, FLEET_NODE_CORDONED));
+    vec_push(nodes, _fl_node("ready", 1, 0, FLEET_NODE_READY));
+    var c = deployment_constraints_default();
+    # Even though the ready node has FEWER slots, it is the only schedulable one.
+    assert_eq(streq(select_migration_target(nodes, 3, c), "ready"), 1,
+    "migration target skips draining/cordoned");
+    var cands = _fleet_candidates(nodes, 3, c);
+    assert_eq(vec_len(cands), 1, "only the ready node is a candidate");
+    return 0;
+}
+
+fn test_fleet_preferred_nodes_are_honoured() {
+    test_group("fleet_preferred_nodes_are_honoured");
+    # The oracle declares preferred_nodes and never reads it.
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("roomy", 16, 0, FLEET_NODE_READY));
+    vec_push(nodes, _fl_node("wanted", 2, 0, FLEET_NODE_READY));
+    var c: DeploymentConstraints = deployment_constraints_default();
+    var pref = vec_new();
+    vec_push(pref, "wanted");
+    c.preferred_nodes = pref;
+    # `wanted` has far fewer free slots, so only the preference can select it.
+    assert_eq(streq(select_migration_target(nodes, 2, c), "wanted"), 1,
+    "a preferred node outranks a roomier one");
+    var cands = _fleet_candidates(nodes, 2, c);
+    assert_eq(vec_len(cands), 2, "but the others are still candidates");
+    assert_eq(streq(_fleet_node_id(vec_get(cands, 0)), "wanted"), 1, "preferred comes first");
+
+    # A preferred node that is FULL must not block the deployment.
+    var nodes2 = vec_new();
+    vec_push(nodes2, _fl_node("roomy", 16, 0, FLEET_NODE_READY));
+    vec_push(nodes2, _fl_node("wanted", 1, 1, FLEET_NODE_READY));
+    assert_eq(streq(select_migration_target(nodes2, 2, c), "roomy"), 1,
+    "a full preferred node falls back rather than failing");
+    return 0;
+}
+
+fn _fleet_node_id(node) {
+    var n: FleetNode = node;
+    return n.id;
+}
+
 fn main() {
     alloc_init();
     test_cm_new_empty_and_list();
@@ -1542,6 +1644,10 @@ fn main() {
     test_ev_survives_container_removal();
     test_ev_ts_parse();
     test_ev_in_range();
+    test_fleet_rollback_does_not_stampede();
+    test_fleet_rollback_never_targets_the_failed_node();
+    test_fleet_draining_and_cordoned_take_no_new_work();
+    test_fleet_preferred_nodes_are_honoured();
     return assert_summary();
 }
 
