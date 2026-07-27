@@ -1019,11 +1019,78 @@ fn test_exec_capture2_signalled_child() {
     return 0;
 }
 
+fn test_exec_capture2_large_output_is_not_a_signal_death() {
+    test_group("exec_capture2_large_output_is_not_a_signal_death");
+    # A command that merely produces more than the cap used to be reported as
+    # exit 141 (SIGPIPE): the parent closed the pipe at the cap, the child died
+    # on its next write, and a successful command looked like a signal death —
+    # with the truncation silent besides.
+    var stub = _t_exec_stub("/tmp/stiva-t-exec-big",
+    "#!/bin/sh\ni=0\nwhile [ $i -lt 3000 ]; do echo 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; i=$((i+1)); done\nexit 5\n");
+    var err_path = "/tmp/stiva-t-exec-big.err";
+    var cap = 4096;
+    var buf = alloc(cap + 1);
+    var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, cap, err_path);
+    assert_eq(n, cap, "the buffer is filled exactly to the cap");
+    assert_eq(rt_last_exec_exit(), 5, "the command's REAL exit code, not 141");
+    assert_eq(rt_last_exec_truncated(), 1, "and the truncation is reported");
+    _rt_take_file(err_path, 1024);
+    sys_unlink(stub);
+
+    # A command that fits must NOT be flagged as truncated.
+    var small = _t_exec_stub("/tmp/stiva-t-exec-small", "#!/bin/sh\necho tiny\nexit 0\n");
+    var b2 = alloc(4096);
+    _exec_capture2(_t_exec_args(small), 0, 0, b2, 4095, "/tmp/stiva-t-exec-small.err");
+    assert_eq(rt_last_exec_truncated(), 0, "output that fits is not flagged");
+    assert_eq(rt_last_exec_exit(), 0, "and its exit code is 0");
+    _rt_take_file("/tmp/stiva-t-exec-small.err", 1024);
+    sys_unlink(small);
+    return 0;
+}
+
 fn test_exec_capture2_empty_args() {
     test_group("exec_capture2_empty_args");
     var buf = alloc(64);
     assert_eq(_exec_capture2(vec_new(), 0, 0, buf, 63, "/tmp/stiva-t-exec-empty.err"), 0 - 1,
     "an empty argv is refused, not forked");
+    return 0;
+}
+
+fn test_exec_workdir_escape_refused() {
+    test_group("exec_workdir_escape_refused");
+    # `--wd` is spliced onto /proc/<pid>/root, so a '..' component walks back OUT
+    # of the container: the process stays chrooted in but its cwd lands on the
+    # HOST, and every relative path the command opens reads the host filesystem.
+    # Verified as an arbitrary host-file read before this guard existed, and
+    # reachable from mcp_handle_exec where workdir is untrusted JSON.
+    assert_eq(_rt_workdir_is_safe("/app"), 1, "an absolute in-container path");
+    assert_eq(_rt_workdir_is_safe("/a/b/c"), 1, "nested");
+    assert_eq(_rt_workdir_is_safe("/..foo"), 1, "'..' inside a NAME is fine");
+    assert_eq(_rt_workdir_is_safe("/a..b"), 1, "and in the middle of one");
+    assert_eq(_rt_workdir_is_safe("/../../.."), 0, "leading ..");
+    assert_eq(_rt_workdir_is_safe("/app/../../.."), 0, "interior ..");
+    assert_eq(_rt_workdir_is_safe("/app/.."), 0, "trailing ..");
+    assert_eq(_rt_workdir_is_safe("../../.."), 0, "relative with ..");
+    assert_eq(_rt_workdir_is_safe("relative"), 0, "relative at all is refused");
+    assert_eq(_rt_workdir_is_safe(""), 0, "empty");
+    assert_eq(_rt_workdir_is_safe(0), 0, "null");
+    # And the driver refuses before building the nsenter argv.
+    var cmd = vec_new();
+    vec_push(cmd, "/bin/true");
+    assert_eq(exec_in_container("/tmp", 1, cmd, 0, "/../../.."), 0, "driver refuses the escape");
+    return 0;
+}
+
+fn test_exec_scratch_path_is_per_exec() {
+    test_group("exec_scratch_path_is_per_exec");
+    # Keying the stderr scratch file on the container's pid alone meant two
+    # concurrent execs into ONE container shared it, and one exec's stderr was
+    # silently lost.
+    var a = _rt_exec_tag(1234);
+    var b = _rt_exec_tag(1234);
+    assert_eq(streq(a, b), 0, "two execs against the same pid get distinct tags");
+    assert_eq(streq(_rt_exec_err_path("/tmp", a), _rt_exec_err_path("/tmp", b)), 0,
+    "and therefore distinct scratch paths");
     return 0;
 }
 
@@ -1105,7 +1172,10 @@ fn main() {
     test_exec_capture2_env_and_workdir();
     test_exec_capture2_missing_binary();
     test_exec_capture2_signalled_child();
+    test_exec_capture2_large_output_is_not_a_signal_death();
     test_exec_capture2_empty_args();
+    test_exec_workdir_escape_refused();
+    test_exec_scratch_path_is_per_exec();
     test_exec_in_container_empty_command();
     test_cm_exec_requires_running();
     return assert_summary();

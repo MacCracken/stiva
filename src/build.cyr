@@ -451,28 +451,44 @@ fn _bld_step_from_pairs(pairs) {
     if (str_eq_cstr(ty, "run") == 1) {
         return build_step_run(_bld_str_vec(pairs, "command"));
     }
+    # EVERY variant's fields are REQUIRED here, and an absent one fails the
+    # parse. `_bld_val_cstr` yields 0 for a missing key, and a 0 landing in a
+    # BuildStep field reaches `str_from(0)` in `build_step_to_jv` (via
+    # `build_cache_key`, on the ordinary build path) — a SIGSEGV driven by an
+    # untrusted Stivafile, not a diagnostic. Rejecting at the parse boundary is
+    # the only place the file is still a document rather than a struct.
+    #
+    # serde does this for free: the oracle's `#[serde(tag = "type")]` enum has
+    # non-Option fields, so a missing one is a deserialization error. This is
+    # that check, written out.
     if (str_eq_cstr(ty, "copy") == 1) {
         var src = _bld_val_cstr(bayan_toml_get(pairs, "source"));
         var dst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        if (src == 0 || dst == 0) { return 0; }
         return build_step_copy(src, dst);
     }
     if (str_eq_cstr(ty, "env") == 1) {
         var ek = _bld_val_cstr(bayan_toml_get(pairs, "key"));
         var ev = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        if (ek == 0 || ev == 0) { return 0; }
         return build_step_env(ek, ev);
     }
     if (str_eq_cstr(ty, "workdir") == 1) {
-        return build_step_workdir(_bld_val_cstr(bayan_toml_get(pairs, "path")));
+        var wp = _bld_val_cstr(bayan_toml_get(pairs, "path"));
+        if (wp == 0) { return 0; }
+        return build_step_workdir(wp);
     }
     if (str_eq_cstr(ty, "label") == 1) {
         var lk = _bld_val_cstr(bayan_toml_get(pairs, "key"));
         var lv = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        if (lk == 0 || lv == 0) { return 0; }
         return build_step_label(lk, lv);
     }
     if (str_eq_cstr(ty, "from_stage") == 1) {
         var fstage = _bld_val_cstr(bayan_toml_get(pairs, "stage"));
         var fsrc = _bld_val_cstr(bayan_toml_get(pairs, "source"));
         var fdst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        if (fstage == 0 || fsrc == 0 || fdst == 0) { return 0; }
         return build_step_from_stage(fstage, fsrc, fdst);
     }
     return 0;                              # unknown step type → parse failure
@@ -582,11 +598,15 @@ fn parse_build_spec(toml_str) {
 # discovered as an OOM. 256 MiB.
 #
 # WHAT THIS DOES NOT BOUND, stated precisely because the number reads more
-# protective than it is: `_stor_tar_collect` has already read every file in the
-# context into the arena by the time this is checked, so the check bounds the
-# tar assembly buffer and the gzip destination — two of the three full-size
-# allocations — but not the collect pass itself. See storage.cyr's IN-MEMORY
-# CAVEAT. There is also no `free`, so a multi-step build accumulates.
+# protective than it is. By the time it is checked, `_stor_tar_collect` has
+# ALREADY read every file in the context into the arena — so the check does not
+# bound the collect pass. Nor does it bound the tar buffer or the gzip
+# destination directly: those are sized from the assembled archive, and the
+# check merely happens before them. What it actually guarantees is that a
+# context whose PAYLOAD exceeds the ceiling is refused before those two
+# allocations are attempted. `_stor_tar_bytes` carries its own 16 GiB backstop
+# and a null-alloc check for the rest. See storage.cyr's IN-MEMORY CAVEAT; there
+# is also no `free`, so a multi-step build accumulates.
 var _BLD_MAX_LAYER_BYTES = 268435456;
 
 # Total payload bytes across a TarEntry vec (headers excluded — this bounds the
@@ -648,7 +668,18 @@ fn _bld_fnv1a(s, len) {
 # `acc` (sum @0, xor @8, count @16). Recurses into real directories only —
 # never through a symlink, matching `_stor_tar_collect`.
 fn _bld_fp_walk(abs_dir, rel_prefix, acc, depth) {
-    if (depth > 64) { return 0; }
+    if (depth > 64) {
+        # Past the cap, perturb the accumulator instead of returning quietly.
+        # Silently skipping made every tree deeper than 64 levels fingerprint
+        # IDENTICALLY regardless of what changed down there, so an edit below
+        # the cap served a stale cached layer. A constant nudge does not
+        # identify WHAT changed, but it guarantees a deep tree never collides
+        # with the same tree truncated — and the cache's job is only to notice
+        # that something differs.
+        store64(acc, load64(acc) + 1);
+        store64(acc + 16, load64(acc + 16) + 1);
+        return 0;
+    }
     var fd = sys_open(abs_dir, 65536, 0);          # O_DIRECTORY
     if (fd < 0) { return 0; }
     var buf = alloc(4096);
@@ -727,6 +758,23 @@ fn _bld_source_fingerprint(context_dir, source) {
     store64(acc + 16, 0);
     var mode = load64(sb + 24) & 65535;
     if ((mode & 61440) == 16384) {
+        # Fold the source root's OWN metadata in, not just its children's.
+        # `_bld_fp_walk` starts INSIDE the directory, so a chmod/chown of the
+        # root itself changed nothing in the fingerprint and served a stale
+        # layer — even though the tar records that mode on the root's entry.
+        var rb = str_builder_new();
+        str_builder_add_cstr(rb, ".");
+        str_builder_add_cstr(rb, "|");
+        str_builder_add_int(rb, mode);
+        str_builder_add_cstr(rb, "|");
+        str_builder_add_int(rb, (load64(sb + 24) >> 32) & 4294967295);
+        str_builder_add_cstr(rb, "|");
+        str_builder_add_int(rb, load64(sb + 32) & 4294967295);
+        var rs = str_builder_build(rb);
+        var rh = _bld_fnv1a(str_data(rs), str_len(rs));
+        store64(acc, rh);
+        store64(acc + 8, rh);
+        store64(acc + 16, 1);
         _bld_fp_walk(path, "", acc, 0);
     } else {
         var eb = str_builder_new();
@@ -796,6 +844,47 @@ fn _bld_source_is_safe(source) {
     return 1;
 }
 
+# 1 when ANY component of `context_dir/source` is a symlink.
+#
+# The companion to `_bld_source_is_safe`'s lexical check: that one rejects a path
+# that spells an escape, this one rejects a path that walks through one. Every
+# prefix is `lstat`ed — `lstat`, not `stat`, because `stat` is exactly the call
+# that follows the link we are trying to detect.
+#
+# The CONTEXT DIR ITSELF is not checked: the user names it (`-c`), so a symlinked
+# context is their own choice, the same way `-c /some/link` would be. Only the
+# step-supplied `source`, which comes out of the Stivafile, is constrained.
+#
+# Refusing rather than resolving is deliberate. Resolving and then re-checking
+# containment would be TOCTOU-racy (the link can change between the check and
+# `_stor_tar_collect`'s open) and would silently change which bytes land in the
+# layer. A build that names a symlinked path should fail loudly.
+#[must_use]
+fn _bld_path_has_symlink(context_dir, source) {
+    var n = strlen(source);
+    var sb = alloc(144);
+    var i = 0;
+    while (i <= n) {
+        var c = 0;
+        if (i < n) { c = load8(source + i); }
+        if (c == 47 || i == n) {
+            if (i > 0) {
+                var prefix = _img_slice(source, 0, i);
+                var full = _img_cat3(context_dir, "/", prefix);
+                if (sys_lstat(full, sb) == 0) {
+                    if ((load64(sb + 24) & 61440) == 40960) { return 1; }   # S_IFLNK
+                }
+            }
+            # A trailing '/' makes the kernel resolve the FINAL component too,
+            # which is how `source = "evil/"` turned a symlink-to-directory into
+            # a walked tree. Stopping at the last real component covers it,
+            # because the component before the slash has already been checked.
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Strip a leading '/' from a COPY destination (rust-old build.rs:531-534 —
 # tar member names are relative). Also strips a trailing '/' so the caller
 # controls where separators go.
@@ -820,12 +909,76 @@ fn _bld_dest_prefix(destination) {
 # it is the ONLY point at which the uncompressed bytes exist — the blob store
 # holds the compressed layer, so a diff_id derived after the fact would have to
 # gunzip it back.
-fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
+# Every check a COPY step must pass before ANY of its paths are touched.
+# Returns 1 when safe; prints the reason and returns 0 otherwise.
+#
+# Called from the driver before the cache key is computed AND from
+# build_copy_layer, because the latter is also reachable directly (tests, and
+# any future caller). Both are cheap.
+#[must_use]
+fn _bld_copy_step_is_safe(context_dir, source, destination) {
     if (_bld_source_is_safe(source) == 0) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
             _img_cat2("copy source must be relative to the build context and free of '..': ", source));
         return 0;
     }
+    # A lexical check is NOT enough, and believing it was is what made the
+    # hardening ineffective. `..` rejection stops a path that SPELLS an escape;
+    # it does nothing about one that WALKS through a symlink:
+    #
+    #     ln -s / ctx/vendor          + source = "vendor/etc/hostname"
+    #     ln -s /home/u/.ssh ctx/evil + source = "evil/"     (trailing slash!)
+    #
+    # Both were verified reading host files into an image the user then pushes.
+    # Nothing downstream stops them: `sys_lstat` resolves every component but the
+    # last (and a trailing '/' makes it resolve that one too), and
+    # `_stor_tar_collect` opens with O_DIRECTORY, which follows unconditionally.
+    if (_bld_path_has_symlink(context_dir, source) == 1) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+            _img_cat2("copy source traverses a symlink, which can leave the build context: ", source));
+        return 0;
+    }
+    # The DESTINATION needs the same `..` rejection. `_bld_dest_prefix` only
+    # strips leading and trailing slashes, so `destination = "/../../etc"`
+    # produced tar members named `../../etc/...`. stiva's own extractor discards
+    # those, so the layer is merely useless here — but the layer is PUSHABLE, and
+    # another runtime's extractor may not be as careful. Refusing to build it is
+    # the only place that decision is ours to make.
+    if (_bld_dest_is_safe(destination) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+            _img_cat2("copy destination must be free of '..': ", destination));
+        return 0;
+    }
+    return 1;
+}
+
+# 1 when `destination` carries no `..` component (component-wise, so `..foo` is
+# fine). An absolute destination IS allowed — `_bld_dest_prefix` strips the
+# leading '/', which is the documented form.
+#[must_use]
+fn _bld_dest_is_safe(destination) {
+    if (destination == 0) { return 1; }            # absent -> rootfs root
+    var n = strlen(destination);
+    var i = 0;
+    var start = 0;
+    while (i <= n) {
+        var c = 0;
+        if (i < n) { c = load8(destination + i); }
+        if (c == 47 || i == n) {
+            if (i - start == 2) {
+                if (load8(destination + start) == 46) {
+                    if (load8(destination + start + 1) == 46) { return 0; }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
+    if (_bld_copy_step_is_safe(context_dir, source, destination) == 0) { return 0; }
     var src_path = _img_cat3(context_dir, "/", source);
     var sb = alloc(144);
     if (sys_lstat(src_path, sb) != 0) {
@@ -879,6 +1032,7 @@ fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
 
     var tc = alloc(8);
     var tarbuf = _stor_tar_bytes(entries, tc);
+    if (tarbuf == 0) { return 0; }        # detail printed by _stor_tar_bytes
     var tarlen = load64(tc);
     store64(out_diff, sha256_digest(tarbuf, tarlen));
 
@@ -1077,6 +1231,13 @@ fn build_image(spec, store, client, context_dir) {
         }
 
         if (kind == BUILD_STEP_COPY) {
+            # Validate BEFORE the cache key, not just inside build_copy_layer.
+            # The key's fingerprint WALKS the source tree, so on a cache miss the
+            # checks in build_copy_layer would run only after an escaping path had
+            # already been traversed (and its metadata folded into a key).
+            if (_bld_copy_step_is_safe(context_dir, st.source, st.destination) == 0) {
+                return 0;                     # detail printed by the validator
+            }
             # Content-aware: the step JSON alone would let an edited context
             # reuse the previous layer. See _bld_source_fingerprint.
             var cache_key = build_copy_cache_key(running_digest, idx, vec_get(steps, idx),

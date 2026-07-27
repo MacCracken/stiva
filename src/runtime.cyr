@@ -1378,6 +1378,16 @@ fn copy_from_container(rootfs, container_src, host_dst) {
 
 # Scratch path for one exec's stderr, under the container root so it inherits
 # that directory's ownership rather than landing in a world-writable /tmp.
+# A per-exec tag: "<pid>-<seq>". The sequence makes concurrent execs into the
+# same container distinct; the pid keeps separate stiva processes distinct.
+var _rt_exec_seq = 0;
+
+#[must_use]
+fn _rt_exec_tag(pid) {
+    _rt_exec_seq = _rt_exec_seq + 1;
+    return _rt_cat2(_rt_cat2(_rt_int_to_cstr(pid), "-"), _rt_int_to_cstr(_rt_exec_seq));
+}
+
 #[must_use]
 fn _rt_exec_err_path(root, tag) {
     var b = _rt_cat2(root, "/.exec-err-");
@@ -1412,6 +1422,13 @@ fn _rt_take_file(path, cap) {
 # `#ifdef`. A regular file never blocks its writer, so none of that is needed.
 # (Same reasoning, same shape, as kavach 3.9.2's `_oci_run`.)
 var _rt_last_exec_exit = 0;
+var _rt_last_exec_truncated = 0;
+
+# 1 when the most recent capture filled its buffer and discarded the rest. The
+# command still ran to completion and its exit code is real; only the captured
+# text is short.
+#[must_use]
+fn rt_last_exec_truncated() { return _rt_last_exec_truncated; }
 
 # Exit status of the most recent `_exec_capture2`: the code for a normal exit,
 # `128 + signal` for a signalled child — the convention kavach's
@@ -1461,21 +1478,31 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
             sys_dup2(devnull, 0);
             sys_close(devnull);
         }
-        sys_dup2(wfd, 1);
-        sys_close(wfd);
-        var efd = sys_open(err_path, 1089, 384);            # O_WRONLY|O_CREAT|O_TRUNC, 0600
+        # Guarded: `dup2(fd, N)` is a no-op when fd == N, so an unguarded
+        # `close(fd)` right after would destroy the descriptor just installed.
+        # Reachable whenever the caller starts with fd 1 closed (a daemon that
+        # tidied its descriptors), which the pipe would then be allocated into.
+        if (wfd != 1) {
+            sys_dup2(wfd, 1);
+            sys_close(wfd);
+        }
+        # O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600. NOT 1089 — that is
+        # O_WRONLY|O_CREAT|O_APPEND (the comment here used to claim O_TRUNC and
+        # was simply wrong), which made a leftover file turn this exec's stderr
+        # into the CONCATENATION of a previous exec's and this one's. The parent
+        # unlinks first, so O_EXCL guarantees a fresh regular file and
+        # O_NOFOLLOW refuses a planted symlink.
+        var efd = sys_open(err_path, 131265, 384);
         if (efd >= 0) {
             sys_dup2(efd, 2);
             sys_close(efd);
         }
-        # chdir(2) — no stdlib wrapper exists on any arch, so it goes raw, the
-        # same way storage.cyr:1356 reaches lchown. x86_64 Linux #80; kavach's
-        # own syscall table agrees (lib/kavach.cyr:1278). A failure is not fatal:
-        # the oracle's `current_dir` would surface it as a spawn error, but a
-        # missing workdir inside the container is better reported by the command
-        # itself than by refusing to run it.
+        # chdir(2) via the PER-ARCH constant, not a hardcoded 80. On aarch64 80
+        # is `fstat`, so the literal made this a silent no-op there. A failure is
+        # not fatal: a missing workdir inside the container is better reported by
+        # the command itself than by refusing to run it.
         if (workdir != 0) {
-            if (strlen(workdir) > 0) { syscall(80, workdir); }
+            if (strlen(workdir) > 0) { syscall(SYS_CHDIR, workdir); }
         }
         # CVE-2024-21626: close inherited host fds before exec, or the container
         # can reach host resources through /proc/self/fd/N. The oracle bounds
@@ -1488,10 +1515,12 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
         }
         # NO_NEW_PRIVS — a hardening divergence, not parity. The oracle does not
         # set it here (it does in the container-launch pre_exec), but an exec is
-        # the same trust boundary: without it a setuid binary inside the
-        # container could gain privileges the exec'ing user does not have.
-        # PR_SET_NO_NEW_PRIVS = 38.
-        syscall(157, 38, 1, 0, 0, 0);
+        # the same trust boundary.
+        #
+        # Through `sys_prctl`, NOT `syscall(157, ...)`. 157 is prctl only on
+        # x86_64; on aarch64 it is `setsid`, so the literal silently skipped the
+        # hardening AND detached the child into a new session. PR_SET_NO_NEW_PRIVS = 38.
+        sys_prctl(38, 1, 0, 0, 0);
         sys_execve(vec_get(args, 0), argv, envp);
         # execve failed — 127 is the shell's "command not found", visible to the
         # caller instead of being swallowed into a success.
@@ -1501,16 +1530,29 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
     sys_close(wfd);
     var total = 0;
     var rgo = 1;
+    _rt_last_exec_truncated = 0;
+    # Once the buffer is full, KEEP DRAINING into a scratch block instead of
+    # closing the pipe.
+    #
+    # Closing here — what this did before — sends the child SIGPIPE on its next
+    # write, so a command that merely produced a lot of output was reported as
+    # exit 141: a successful `cat` of a large file looked like a signal death,
+    # and the truncation was silent besides. The child now runs to completion and
+    # reports its own status; the caller learns about the truncation from
+    # `rt_last_exec_truncated()`.
+    var sink = 0;
     while (rgo == 1) {
-        var n = sys_read(rfd, out_buf + total, out_cap - total);
-        if (n <= 0) { rgo = 0; }
-        else {
-            total = total + n;
-            if (total >= out_cap) { rgo = 0; }
+        var n = 0;
+        if (total < out_cap) {
+            n = sys_read(rfd, out_buf + total, out_cap - total);
+            if (n > 0) { total = total + n; }
+        } else {
+            if (sink == 0) { sink = alloc(65536); }
+            n = sys_read(rfd, sink, 65536);
+            if (n > 0) { _rt_last_exec_truncated = 1; }
         }
+        if (n <= 0) { rgo = 0; }
     }
-    # Closed BEFORE waitpid: a child that outruns `out_cap` would otherwise block
-    # on a full pipe forever and hang the wait. It gets EPIPE instead.
     sys_close(rfd);
 
     var stbuf[4];
@@ -1536,6 +1578,47 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
 fn _rt_nonempty(s) {
     if (s == 0) { return 0; }
     if (strlen(s) == 0) { return 0; }
+    return 1;
+}
+
+# 1 when `workdir` is safe to hand to nsenter's `--wd`.
+#
+# THIS IS A CONFINEMENT BOUNDARY, not a tidiness check. The workdir is spliced
+# onto `/proc/<pid>/root` — see the `--wd` construction in `exec_in_container`,
+# and the reason it has to be — so a `..` component walks straight back OUT of
+# the container: `--wd=/proc/<pid>/root/../../..` leaves the process chrooted
+# into the container with its cwd on the HOST, and every relative path the
+# command then opens reads the host filesystem.
+#
+# That is reachable two ways: an operator typing `stiva exec -w ../../..`, and —
+# worse — `mcp_handle_exec`, where `workdir` arrives as untrusted JSON from a
+# client that is not the host operator. Verified as an arbitrary host-file read
+# before this guard existed.
+#
+# Absolute-only, because a relative workdir has no meaning against a root the
+# caller cannot see. Component-wise, so a directory legitimately named `..foo`
+# or `a..b` still works.
+#[must_use]
+fn _rt_workdir_is_safe(workdir) {
+    if (workdir == 0) { return 0; }
+    var n = strlen(workdir);
+    if (n == 0) { return 0; }
+    if (load8(workdir) != 47) { return 0; }        # must be absolute
+    var i = 0;
+    var start = 0;
+    while (i <= n) {
+        var c = 0;
+        if (i < n) { c = load8(workdir + i); }
+        if (c == 47 || i == n) {
+            if (i - start == 2) {
+                if (load8(workdir + start) == 46) {
+                    if (load8(workdir + start + 1) == 46) { return 0; }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
     return 1;
 }
 
@@ -1602,8 +1685,14 @@ fn exec_in_container(root, pid, command, env, workdir) {
     # which does not exist under the new root, and getcwd() inside the container
     # fails outright.
     if (_rt_nonempty(workdir) == 1) {
+        # Refuse before splicing, not after: an unvalidated `..` here is a
+        # container escape, not a bad path. See _rt_workdir_is_safe.
+        if (_rt_workdir_is_safe(workdir) == 0) {
+            stiva_err_print(STIVA_ERR_INVALID_STATE,
+            _rt_cat2("exec workdir must be an absolute path inside the container, free of '..': ", workdir));
+            return 0;
+        }
         var wd = _rt_cat2(_rt_cat2("--wd=/proc/", _rt_int_to_cstr(pid)), "/root");
-        if (load8(workdir) != 47) { wd = _rt_cat2(wd, "/"); }   # ensure one '/'
         vec_push(args, _rt_cat2(wd, workdir));
     } else {
         vec_push(args, "-w");
@@ -1648,7 +1737,15 @@ fn exec_in_container(root, pid, command, env, workdir) {
     var lm = _rt_cat2("exec into running container via nsenter, pid=", _rt_int_to_cstr(pid));
     sakshi_info(lm, strlen(lm));
 
-    var err_path = _rt_exec_err_path(root, _rt_int_to_cstr(pid));
+    # Per-EXEC, not per-container: keying the scratch file on the container's pid
+    # alone meant two concurrent execs into one container shared it, and one
+    # exec's stderr was silently lost. A monotonic counter makes each exec's path
+    # distinct within a process; the pid keeps it distinct across processes.
+    var err_path = _rt_exec_err_path(root, _rt_exec_tag(pid));
+    # Clear it before the fork: O_EXCL in the child would otherwise FAIL on a
+    # leftover and send stderr to the inherited fd 2, and the read-back would
+    # return purely the stale contents — worse than appending.
+    sys_unlink(err_path);
     var out_buf = alloc(_RT_EXEC_MAX_OUTPUT + 1);
     var start = mono_now_ns();
     # workdir goes to nsenter via --wd above, NOT to the child: nsenter chdirs

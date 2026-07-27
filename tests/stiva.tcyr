@@ -644,6 +644,44 @@ fn test_dns_host_servers_returns_something() {
     return 0;
 }
 
+# The above passes on any host with an IPv4 nameserver — i.e. almost every host,
+# which is precisely why it hid the defect. These drive the PARSER with the
+# inputs that produced an empty result, so the "always non-empty" contract is
+# tested rather than assumed.
+fn test_dns_parse_yields_empty_for_nameserverless_files() {
+    test_group("network_dns::parse_empty_cases");
+    # An IPv6-only resolv.conf: reads fine, parses to nothing.
+    var v6 = "nameserver 2001:4860:4860::8888\nnameserver fe80::1\n";
+    assert_eq(vec_len(network_dns_parse_resolv_conf(v6)), 0, "IPv6-only -> empty");
+    # Search/options only.
+    var so = "search example.com\noptions ndots:5\n";
+    assert_eq(vec_len(network_dns_parse_resolv_conf(so)), 0, "no nameserver line -> empty");
+    assert_eq(vec_len(network_dns_parse_resolv_conf("")), 0, "empty file -> empty");
+    assert_eq(vec_len(network_dns_parse_resolv_conf("# just a comment\n")), 0, "comment only -> empty");
+    # And a normal one still parses, so the fallback is not masking a broken parser.
+    var ok = "nameserver 8.8.4.4\n";
+    assert_eq(vec_len(network_dns_parse_resolv_conf(ok)), 1, "an IPv4 nameserver still parses");
+    return 0;
+}
+
+fn test_dns_inject_defaults_when_empty() {
+    test_group("network_dns::inject_defaults_when_empty");
+    # The downstream guard: an empty server list must still produce a usable
+    # resolv.conf inside the container rather than an empty file.
+    var rootfs = "/tmp/stiva-t-dns-empty";
+    _stor_remove_dir_all(rootfs);
+    _stor_mkdir_p(rootfs);
+    assert_eq(network_dns_inject_resolv_conf(rootfs, vec_new()), 0, "inject with an empty list");
+    var buf = alloc(4096);
+    var n = file_read_all("/tmp/stiva-t-dns-empty/etc/resolv.conf", buf, 4095);
+    assert(n > 0, "resolv.conf written");
+    if (n > 0) {
+        store8(buf + n, 0);
+        assert_eq(strstr(buf, "nameserver ") >= 0, 1, "and it names a server");
+    }
+    return 0;
+}
+
 # ── network_pool.cyr (rust-old/src/network/pool.rs) ──
 # ── network_pool.cyr (rust-old/src/network/pool.rs) ──────────────
 # IPv4 addresses are the u32 host value; IPv6 addresses are 16-byte
@@ -2352,6 +2390,8 @@ fn main() {
     test_dns_inject_hosts_to_rootfs();
     test_dns_inject_hostname_to_rootfs();
     test_dns_host_servers_returns_something();
+    test_dns_parse_yields_empty_for_nameserverless_files();
+    test_dns_inject_defaults_when_empty();
     test_np_new_pool();
     test_np_allocate_sequential();
     test_np_release_and_reuse();

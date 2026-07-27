@@ -602,7 +602,14 @@ fn mcp_handle_exec(s, params) {
     var i = 0;
     while (i < json_v_arr_len(cmd_v)) {
         var el = json_v_arr_get(cmd_v, i);
-        if (json_v_is_str(el) == 1) { vec_push(command, str_cstr(json_v_str(el))); }
+        # REJECT a non-string element rather than skipping it. Skipping silently
+        # SHIFTS every later argument left, so `["sh","-c",7,"echo hi"]` would
+        # run `sh -c "echo hi"` — a different command than the client asked for,
+        # with no indication anything was dropped.
+        if (json_v_is_str(el) == 0) {
+            return mcp_result_err("command must contain only strings");
+        }
+        vec_push(command, str_cstr(json_v_str(el)));
         i = i + 1;
     }
     if (vec_len(command) == 0) { return mcp_result_err("command must be a non-empty array of strings"); }
@@ -614,7 +621,16 @@ fn mcp_handle_exec(s, params) {
             var j = 0;
             while (j < json_v_arr_len(env_v)) {
                 var ev = json_v_arr_get(env_v, j);
-                if (json_v_is_str(ev) == 1) { vec_push(env, str_cstr(json_v_str(ev))); }
+                if (json_v_is_str(ev) == 0) {
+                    return mcp_result_err("env must contain only \"KEY=VALUE\" strings");
+                }
+                var evs = str_cstr(json_v_str(ev));
+                # Same rule as the CLI: execve rejects the whole envp for one
+                # entry with no '=', so a bare NAME must not reach it.
+                if (_img_find(evs, 61) <= 0) {
+                    return mcp_result_err("env entries must be KEY=VALUE");
+                }
+                vec_push(env, evs);
                 j = j + 1;
             }
         }

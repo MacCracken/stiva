@@ -188,22 +188,41 @@ fn network_dns_parse_resolv_conf(content) {
     return out;
 }
 
-# Read DNS servers from the host's /etc/resolv.conf; on read failure fall back
-# to the two DEFAULT_DNS servers (rust-old: host_dns_servers -> Vec<Ipv4Addr>).
-# Returns a vec of packed IPv4 u32 (always non-empty: defaults guarantee ≥1).
+# Read DNS servers from the host's /etc/resolv.conf, falling back to the two
+# DEFAULT_DNS servers (rust-old: host_dns_servers -> Vec<Ipv4Addr>).
+# Returns a vec of packed IPv4 u32 — ALWAYS non-empty.
+#
+# DIVERGENCE, and the reason it is one: the oracle
+# (rust-old/src/network/dns.rs:13-18) falls back only when the READ fails. A
+# resolv.conf that reads fine but yields no IPv4 nameserver — an IPv6-only host,
+# a file with only `search`/`options` lines, an empty file — parses to an EMPTY
+# vec, so the "always non-empty" contract this function's callers rely on is
+# broken on exactly those hosts.
+#
+# That is not hypothetical here: the oracle's own test
+# (`host_dns_servers_returns_something`) asserts non-empty, and this port mirrors
+# it. On a host without an IPv4 nameserver that test FAILS — a latent CI flake
+# that passes everywhere an IPv4 resolver happens to be configured. Falling back
+# on an empty PARSE as well as a failed read makes the contract, the test, and
+# the callers agree.
+#
+# `network_dns_inject_resolv_conf` re-defaults on empty too, so a container never
+# got a nameserver-less resolv.conf; the hole was in the contract, and in any
+# caller (like network_manager) that passes the vec somewhere else first.
 #[must_use]
 fn network_dns_host_servers() {
     var cap = 65536;
     var buf = alloc(cap);
     var n = file_read_all("/etc/resolv.conf", buf, cap - 1);
-    if (n < 0) {
-        var out = vec_new();
-        vec_push(out, network_dns_default_primary());
-        vec_push(out, network_dns_default_secondary());
-        return out;
+    if (n >= 0) {
+        store8(buf + n, 0);
+        var parsed = network_dns_parse_resolv_conf(buf);
+        if (vec_len(parsed) > 0) { return parsed; }
     }
-    store8(buf + n, 0);
-    return network_dns_parse_resolv_conf(buf);
+    var out = vec_new();
+    vec_push(out, network_dns_default_primary());
+    vec_push(out, network_dns_default_secondary());
+    return out;
 }
 
 # ── injection into the container rootfs ──────────────────

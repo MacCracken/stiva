@@ -70,7 +70,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.15 — OCI container runtime (Cyrius port)";
+    return "3.0.16 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -82,7 +82,12 @@ fn _cli_register_verbs(h) {
     cmdit_verb(h, "ps", "List containers");
     cmdit_verb(h, "stop", "Stop a container");
     cmdit_verb(h, "rm", "Remove a container");
-    cmdit_verb(h, "exec", "Execute a command in a running container");
+    # Everything after the container id is the PAYLOAD's command line, verbatim
+    # (cmdit 1.2.2). Without this `stiva exec c1 ls -l` fails with "unknown
+    # flag" and the command never runs, `-- ` does not help, and — the dangerous
+    # one — `stiva exec c1 mycmd --root /x` silently retargets STIVA's own data
+    # root instead of passing `--root /x` to `mycmd`.
+    cmdit_verb_trailing_after(h, cmdit_verb(h, "exec", "Execute a command in a running container"), 1);
     cmdit_verb(h, "top", "List processes in a running container");
     cmdit_verb(h, "inspect", "Inspect a container or image");
     cmdit_verb(h, "images", "List local images");
@@ -1477,6 +1482,23 @@ fn _cli_prune(h, root) {
     while (i < n) {
         var cc: Container = vec_get(cs, i);
         if (cc.state == CONTAINER_STATE_STOPPED) {
+            # Delete the DIRECTORY too, not just the record.
+            #
+            # Dropping the record alone made the container permanently
+            # unreachable while leaving `{root}/containers/<id>` on disk —
+            # including the flattened rootfs, a full image-sized copy. Nothing
+            # could reclaim it afterwards: a second `prune` no longer sees it,
+            # `rm` reports "container not found", and `gc` only sweeps blobs. So
+            # every pruned container leaked one image copy forever.
+            #
+            # Best-effort and unconditional, matching `container_manager_remove`:
+            # a directory that is already gone is fine, and a failure to remove
+            # must not abort the prune of the remaining containers.
+            _stor_remove_dir_all(_cm_container_dir(root, cc.id));
+            # And record it, for the same reason `rm` does: an audit built on
+            # {root}/events.jsonl otherwise shows containers that were created
+            # and started but never removed.
+            container_events_append(root, _cm_event_json("removed", cc.id, "reason", "prune"));
             removed_c = removed_c + 1;
         } else {
             vec_push(kept, vec_get(cs, i));

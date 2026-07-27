@@ -2315,6 +2315,73 @@ fn test_bld_source_traversal_refused() {
     return 0;
 }
 
+fn test_bld_symlink_traversal_refused() {
+    test_group("build: a copy source may not traverse a symlink");
+    var ctx = "/tmp/stiva-bld-symlink-ctx";
+    var out = "/tmp/stiva-bld-symlink-out";
+    _stor_remove_dir_all(ctx);
+    _stor_remove_dir_all(out);
+    _stor_mkdir_p(_stor_cat2(out, "/inner"));
+    file_write_all(_stor_cat2(out, "/inner/secret"), "LEAKED\n", 7);
+    _bld_t_file(_stor_cat2(ctx, "/app"), "ok", "fine\n");
+
+    # ctx/esc -> the out-of-context directory.
+    if (sys_symlink(out, _stor_cat2(ctx, "/esc")) != 0) {
+        assert_eq(1, 1, "symlink unsupported here; skipping");
+        return 0;
+    }
+    # The lexical check passes all three of these — only the symlink check stops
+    # them. Each was verified reading host files into a pushable image.
+    assert_eq(_bld_copy_step_is_safe(ctx, "esc/inner/secret", "/loot"), 0, "through a symlink");
+    assert_eq(_bld_copy_step_is_safe(ctx, "esc/", "/loot"), 0, "trailing slash resolves the link");
+    assert_eq(_bld_copy_step_is_safe(ctx, "esc", "/loot"), 0, "the link itself");
+    # A real path in the context still passes.
+    assert_eq(_bld_copy_step_is_safe(ctx, "app", "/app"), 1, "an ordinary directory is fine");
+    assert_eq(_bld_copy_step_is_safe(ctx, "app/ok", "/app/ok"), 1, "an ordinary file is fine");
+
+    # And build_copy_layer refuses rather than reading.
+    var lc = alloc(8);
+    var dc = alloc(8);
+    assert_eq(build_copy_layer(ctx, "esc/inner/secret", "/loot", lc, dc), 0, "the layer is not built");
+    return 0;
+}
+
+fn test_bld_dest_is_safe() {
+    test_group("build: a copy destination may not carry '..'");
+    assert_eq(_bld_dest_is_safe("/app"), 1, "absolute is fine (the prefix is stripped)");
+    assert_eq(_bld_dest_is_safe("app/sub"), 1, "relative is fine");
+    assert_eq(_bld_dest_is_safe("/a..b/c"), 1, "'..' inside a NAME is fine");
+    assert_eq(_bld_dest_is_safe("/..foo"), 1, "a name starting with .. is fine");
+    assert_eq(_bld_dest_is_safe("/../../etc"), 0, "leading ..");
+    assert_eq(_bld_dest_is_safe("a/../../b"), 0, "interior ..");
+    assert_eq(_bld_dest_is_safe(".."), 0, "bare ..");
+    assert_eq(_bld_dest_is_safe("a/.."), 0, "trailing ..");
+    assert_eq(_bld_dest_is_safe(0), 1, "absent -> rootfs root");
+    return 0;
+}
+
+fn test_bld_malformed_step_is_a_parse_error_not_a_crash() {
+    test_group("build: a step missing a required field fails the parse");
+    # Each of these used to leave a 0 in a BuildStep field, which reached
+    # str_from(0) in build_step_to_jv on the ordinary build path — a SIGSEGV
+    # driven by an untrusted Stivafile.
+    var hdr = "[image]\nbase = \"local/b:v1\"\nname = \"n\"\ntag = \"v1\"\n\n";
+    assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\nsource = \"a\"\n")), 0,
+    "copy without destination");
+    assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\ndestination = \"/a\"\n")), 0,
+    "copy without source");
+    assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"env\"\nkey = \"K\"\n")), 0,
+    "env without value");
+    assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"label\"\nvalue = \"v\"\n")), 0,
+    "label without key");
+    assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"workdir\"\n")), 0,
+    "workdir without path");
+    # A well-formed step still parses.
+    assert(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\nsource = \"a\"\ndestination = \"/a\"\n")) != 0,
+    "a complete copy step still parses");
+    return 0;
+}
+
 fn test_bld_dest_prefix() {
     test_group("build: destination prefix normalisation");
     assert_eq(streq(_bld_dest_prefix("/app"), "app"), 1, "leading slash stripped");
@@ -2587,6 +2654,9 @@ fn main() {
     test_bld_spec_workdir_beats_step();
     test_bld_refuses_run_and_from_stage();
     test_bld_source_traversal_refused();
+    test_bld_symlink_traversal_refused();
+    test_bld_dest_is_safe();
+    test_bld_malformed_step_is_a_parse_error_not_a_crash();
     test_bld_dest_prefix();
     test_bld_cache_reuse();
     test_bld_cache_invalidates_on_context_change();

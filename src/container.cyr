@@ -1176,6 +1176,23 @@ fn container_events_append_with(root, event_json, max_bytes, max_files) {
     store8(line + jlen + 1, 0);
 
     var path = container_events_path(root);
+    # KNOWN RACE, recorded rather than papered over with a mitigation that does
+    # not mitigate.
+    #
+    # `_cm_file_size` and `rotate_logs` run OUTSIDE `file_append_locked`'s flock,
+    # so two stiva processes crossing the threshold together can both decide to
+    # rotate, and the second's renames shift the first's already-rotated
+    # generations along — discarding whole retained files.
+    #
+    # Closing it needs `file_append_locked` to expose its lock so the rotate can
+    # happen inside it; taking a SECOND lock here would invert the acquisition
+    # order against the container-log path that shares `rotate_logs`. Re-reading
+    # the size just before rotating was considered and rejected: both reads are
+    # still outside the lock, so it narrows nothing and reads like a fix.
+    #
+    # The blast radius is bounded and worth stating: a lost RETAINED generation
+    # under concurrent writers at the exact rollover. The live append is flocked,
+    # so no event is ever lost or interleaved.
     if (container_should_rotate(max_bytes, max_files, _cm_file_size(path), jlen + 1) == 1) {
         rotate_logs(path, max_files);
     }
@@ -1395,7 +1412,16 @@ fn container_manager_create(mgr, image, config) {
     var rec = container_new(id, name, _img_id(image), full_ref,
     CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, config, 0 - 1);
     var spec = generate_spec(rec, rootfs);
-    if (spec == 0) { return 0; }        # detail printed by generate_spec
+    if (spec == 0) {
+        # Reclaim the container directory. Everything expensive has already
+        # happened by this point — the layers are unpacked and flattened into
+        # {croot}/rootfs, a full image-sized copy — and the record is NOT
+        # persisted on this path, so nothing could ever reach that directory
+        # again: not `rm`, not `prune`, not `gc`. It would leak one image copy
+        # per failed create, forever.
+        _stor_remove_dir_all(croot);
+        return 0;                       # detail printed by generate_spec
+    }
 
     var logp = _container_cat2(croot, "/container.log");
     map_set(mm.internals, id, container_internals_new(overlay, spec, 0, logp, 0));

@@ -5,6 +5,121 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.16] — 2026-07-26 — security: four sandbox escapes closed (3.0.15 audit)
+
+### Security — four ways out of the sandbox, all found by adversarial review of 3.0.15
+A 43-agent audit of everything 3.0.15 shipped produced 37 findings; 29 survived adversarial
+verification (each verifier's job was to *refute*, defaulting to "not a bug" unless they reproduced
+it themselves). The four that matter most were all reproduced end to end against the shipped
+binary.
+
+**1. `exec -w` escaped the container.** The workdir is spliced onto `/proc/<pid>/root` — which it
+has to be, because nsenter resolves `--wd` before `-r` — so a `..` component walked straight back
+out: the process stayed chrooted into the container with its **cwd on the host**, and every
+relative path the command opened read the host filesystem. Reachable by an operator typing
+`stiva exec -w ../../..` and, worse, from `mcp_handle_exec`, where `workdir` is untrusted JSON from
+a client that is not the host operator. `_rt_workdir_is_safe` now requires an absolute path with no
+`..` component, refusing before the argv is built.
+
+**2. A COPY source escaped the build context through a symlink.** `_bld_source_is_safe` rejected a
+path that *spells* an escape (`..`, absolute) and did nothing about one that *walks* through a
+symlink. `ln -s / ctx/vendor` + `source = "vendor/etc/hostname"`, or `ln -s /home/u/.ssh ctx/evil` +
+`source = "evil/"` — the trailing slash makes `lstat` resolve the link, so `_stor_tar_collect` walks
+the whole out-of-context tree. Both were verified reading host files into an image the user then
+pushes. `_bld_path_has_symlink` now `lstat`s every prefix and refuses; resolving-then-rechecking was
+rejected as TOCTOU-racy.
+
+**3. Validation ran after the damage.** `build_copy_cache_key`'s fingerprint **walks** the source
+tree, and it was computed before `build_copy_layer`'s checks — so on a cache miss an escaping path
+was traversed, and its metadata folded into a key, before anything refused it. All checks moved into
+`_bld_copy_step_is_safe`, called by the driver first.
+
+**4. `..` in a COPY destination was accepted**, producing layer members named `../../etc/...`.
+stiva's own extractor discards those, so the layer was merely useless *here* — but it is
+**pushable**, and another runtime's extractor may be less careful.
+
+### Fixed — `stiva exec` could not pass a flag to the command, and stole `--root`
+`stiva exec c1 ls -l` failed with "unknown flag" and never ran; `stiva exec c1 -- ls -l` failed
+**identically**, because cmdit's dispatcher consumed the `--` terminator without forwarding it.
+And `stiva exec c1 mycmd --root /x` silently retargeted **stiva's own data root** instead of passing
+the argument to `mycmd`. Fixed in cmdit 1.2.2 (`--` forwarding + `cmdit_verb_trailing_after`) and
+wired here, so everything after the container id is the payload's, verbatim.
+
+### Fixed — the rest of the audit
+- **A malformed Stivafile SIGSEGV'd.** A step missing a required TOML field left a 0 in a
+  `BuildStep`, which reached `str_from(0)` on the ordinary build path. Missing fields are now a
+  parse error, which is what serde gives the oracle for free.
+- **`_stor_tar_bytes` wrote through a failed allocation** — a context large enough to exhaust the
+  arena was a NULL-deref rather than an error. Now a 16 GiB backstop plus a null check.
+- **A large-output exec was reported as a signal death.** The parent closed the pipe at the cap, so
+  the child took SIGPIPE and a successful command surfaced as exit 141, with the truncation silent.
+  It now drains to completion and reports the real status plus `rt_last_exec_truncated()`.
+- **`stiva prune` deleted the record but never the directory** — leaking one full flattened image
+  copy per container, permanently: a second prune no longer saw it, `rm` said "container not
+  found", and `gc` only sweeps blobs. It now removes the directory and emits the `removed` event
+  the audit trail was missing.
+- **`container_manager_create` leaked the same way** when `generate_spec` failed, after the layers
+  were already flattened.
+- **The exec stderr scratch file was `O_APPEND`** (the comment claimed `O_TRUNC`), so a leftover
+  made one exec return a previous exec's stderr; and it was keyed on the container's pid, so two
+  concurrent execs collided. Now per-exec, unlinked before the fork, `O_EXCL|O_NOFOLLOW`.
+- **`dup2(fd, N); close(fd)`** with no `fd != N` guard destroyed the descriptor it had just
+  installed when the caller started with fd 1 closed.
+- **`syscall(157, …)` for `prctl` and `syscall(80, …)` for `chdir`** are x86_64-only — 157 is
+  `setsid` on aarch64 and 80 is `fstat`, so NO_NEW_PRIVS was silently never set and the workdir hook
+  was a no-op there. Now `sys_prctl` and `SYS_CHDIR`. The sibling `_stor_lchown` (`syscall(94, …)`,
+  which is `exit_group` on aarch64 — an aarch64 `stiva load` terminates silently on the first tar
+  entry) **cannot** be fixed here: the stdlib exposes no wrapper and no constant. Filed upstream;
+  aarch64 is not a working target until it lands.
+- **MCP `exec` silently dropped non-string array elements**, shifting every later argument, so
+  `["sh","-c",7,"echo hi"]` ran a different command than the client asked for. Now rejected.
+- Cache-fingerprint accuracy: the source root's **own** metadata is folded in (a `chmod` of it
+  served a stale layer), and the depth-64 cap perturbs the accumulator instead of silently
+  under-fingerprinting.
+
+**One finding did not hold.** The audit reported `stiva events -f` allocating per event line; it
+allocates once before the loop, and `_cli_events_scan` terminates lines in place with a comment
+saying exactly that. Recorded because a verified-looking finding that is wrong is the thing this
+process has to keep catching. The event-log rotation race IS real and is now documented at the
+site, with the mitigation that was considered and rejected for not mitigating.
+
+### Changed — kavach 3.9.2 → 3.9.3, cmdit 1.2.1 → 1.2.2
+kavach: the OCI scratch directory `/tmp/kavach-runc-<uid>` was created with its result discarded and
+then trusted, so on a shared host another user could own runc's state and both scratch files. Now
+validated (real directory, owned by us, no group/other bits), with `O_EXCL|O_NOFOLLOW` opens and an
+unlink-before-create. cmdit: `--` forwarding and trailing-verbatim, above.
+
+### Tests — 2011 → 2051 unit
+Regression tests for every security fix, each written to fail against the pre-fix code.
+
+### Fixed — `network_dns_host_servers` could return an empty list, breaking its own contract
+Its doc comment promised "always non-empty: defaults guarantee ≥1", but the DEFAULT_DNS fallback
+fired only when the *read* failed. A `/etc/resolv.conf` that reads fine and yields no IPv4
+nameserver — an IPv6-only host, a systemd stub with only `search`/`options`, an empty file — parsed
+to an empty vec.
+
+**This was a latent CI flake, not a theoretical one.** The port mirrors the oracle's
+`host_dns_servers_returns_something` test, which asserts non-empty; on any host without an IPv4
+resolver that test fails. It passes everywhere an IPv4 nameserver happens to be configured, which
+is nearly everywhere — so it would have surfaced as a mystery failure on one runner.
+
+Inherited: `rust-old/src/network/dns.rs:13-18` has the identical hole *and* the identical
+over-claiming test, so correcting it is a deliberate divergence. `inject_resolv_conf` already
+re-defaulted on empty, so no container ever got a nameserver-less `resolv.conf`; the gap was in the
+contract and in callers (`network_manager`) that pass the vec elsewhere first. New tests drive the
+parser with each empty-yielding input rather than relying on the host's configuration.
+
+### Added — CI now detects a lockfile that does not match the pinned tags
+`docs/development/roadmap.md` asked for this and it was never wired. Local development resolves
+deps through `path = "../<dep>"` overrides, which **silently win** over the `tag` pin — that is how
+kavach 3.8.1 once arrived unannounced — and `cyrius.lock` records only `<sha256>  lib/<file>`
+lines, with no dep name or version, so it is structurally incapable of noticing the substitution.
+
+CI has no sibling checkouts, so it resolves from the tags; `git diff --exit-code cyrius.lock` after
+`cyrius deps` therefore fails exactly when the committed lock was generated against something the
+pins do not describe. `cyrius deps --verify` alone would not do it — the resolve step rewrites the
+lock, so it would trivially agree with itself.
+
 ## [3.0.15] — 2026-07-26 — `build` and `exec` are live (§F, §D)
 
 ### Added — `stiva exec` is live (roadmap §D). 32 of 35 verbs

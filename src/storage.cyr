@@ -1353,6 +1353,21 @@ fn _tar_fill_header(hdr, name, mode, uid, gid, size, typeflag, linkname) {
 # mount code). Not in the vendored syscall wrappers; kept local. Best-effort:
 # the caller ignores the return (chown needs CAP_CHOWN — a no-op when rootless).
 fn _stor_lchown(path, uid, gid) {
+    # PORTABILITY DEFECT, deliberately left in place with its consequence
+    # documented rather than papered over with a wrong-looking guess.
+    #
+    # 94 is `lchown` on x86_64 and `__NR_exit_group` on aarch64 — so an aarch64
+    # build TERMINATES SILENTLY on the first tar entry of any layer unpack,
+    # `import`, or `load`. Verified by execution: `stiva load` prints nothing and
+    # exits 16 (the path pointer's low byte), with `exit_group` visible under
+    # qemu strace.
+    #
+    # It cannot be fixed correctly here: the cyrius stdlib exposes neither a
+    # `sys_lchown` wrapper nor a `SYS_LCHOWN`/`SYS_FCHOWNAT` per-arch constant
+    # (unlike `SYS_CHDIR`, which is why runtime.cyr's chdir COULD be fixed), and
+    # hardcoding a second literal would just move the bug. Filed upstream; until
+    # a wrapper lands, aarch64 is not a working target for this tree. Only
+    # x86_64 is built, tested, and released today (CI is ubuntu-latest only).
     return syscall(94, path, uid, gid);
 }
 
@@ -1496,7 +1511,23 @@ fn _stor_tar_bytes(entries, out_len) {
     }
     total = total + 1024;                 # two trailing all-zero blocks
 
+    # Refuse rather than write through a failed allocation. `alloc` returns 0
+    # when it cannot satisfy the request, and pass 2 below writes unconditionally
+    # — so a context large enough to exhaust the arena was a NULL-deref SIGSEGV
+    # rather than an error the caller could report. The ceiling is generous
+    # (16 GiB) because this is a backstop, not a policy: the per-layer limit that
+    # actually bounds a build lives in build.cyr.
+    if (total > 17179869184) {
+        stiva_err_print(STIVA_ERR_STORAGE, "tar: archive exceeds the 16 GiB assembly ceiling");
+        store64(out_len, 0);
+        return 0;
+    }
     var buf = alloc(total);
+    if (buf == 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, "tar: cannot allocate the archive buffer");
+        store64(out_len, 0);
+        return 0;
+    }
     var pos = 0;
     var k = 0;
     while (k < nf) {
@@ -1531,6 +1562,7 @@ fn _stor_tar_bytes(entries, out_len) {
 fn _stor_write_tar(entries, out_path) {
     var len_cell = alloc(8);
     var buf = _stor_tar_bytes(entries, len_cell);
+    if (buf == 0) { return 0; }           # detail printed by _stor_tar_bytes
     var wrote = file_write_all(out_path, buf, load64(len_cell));
     if (wrote < 0) {
         stiva_err_print(STIVA_ERR_STORAGE, "tar: cannot write output archive");

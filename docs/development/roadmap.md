@@ -802,6 +802,9 @@ splitting by include set at that point.
   `[deps.kavach]` to `3.8.1` so the pin matches what resolution actually vendors; if not, the
   two bundles should not be in `lib/` at all. Either way the lock must be regenerated so lock
   and `lib/` agree.
+- [x] **CI guard for the tag/path substitution — ✅ DONE (Unreleased).** `git diff --exit-code
+  cyrius.lock` after `cyrius deps`, in `.github/workflows/ci.yml`. See the note below for why the
+  lockfile cannot detect it alone.
 - [x] **`tag` does not bind while `path` is present.** `cyrius.cyml:125` pins kavach `3.7.1`;
   the `path = "../kavach"` override silently wins and vendors whatever the sibling checkout is
   at. This is how 3.8.1 arrived unannounced. `cyrius.lock` records only bare
