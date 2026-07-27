@@ -1571,6 +1571,58 @@ fn _fleet_node_id(node) {
     return n.id;
 }
 
+# ══ §I accelerator placement ═════════════════════════════
+
+fn test_fleet_accel_requirement_gates_placement() {
+    test_group("fleet_accel_requirement_gates_placement");
+    var nodes = vec_new();
+    # A node with a real GPU profile, and one with none known.
+    vec_push(nodes, _fl_node("gpu", 4, 0, FLEET_NODE_READY));
+    vec_push(nodes, _fl_node("cpu", 16, 0, FLEET_NODE_READY));
+    # FleetNode.capacity @24 by raw offset — a typed `var n: FleetNode` here
+    # segfaults (cycc struct-id 20/21, per-function-context), same as
+    # _fleet_select_and_reserve in src/fleet.cyr.
+    var profs = vec_new();
+    vec_push(profs, profile_cuda(0, 8589934592));
+    fleet_node_capacity_set_accel(load64(vec_get(nodes, 0) + 24), profs);
+
+    # DeploymentConstraints by raw offset: node_labels@0 min_memory_mb@8
+    # min_cpus@16 preferred_nodes@24 accel_req@32 accel_min_chips@40.
+    var c = deployment_constraints_default();
+    assert_eq(streq(select_migration_target(nodes, 2, c), "cpu"), 1, "REQ_NONE ignores accelerators");
+    store64(c + 32, REQ_GPU);
+    assert_eq(streq(select_migration_target(nodes, 2, c), "gpu"), 1, "REQ_GPU selects the GPU node");
+    # And the CPU node is excluded outright, not merely outranked.
+    assert_eq(node_matches_constraints(vec_get(nodes, 1), c), 0, "a node with no profiles fails REQ_GPU");
+    assert_eq(node_matches_constraints(vec_get(nodes, 0), c), 1, "the GPU node satisfies it");
+    return 0;
+}
+
+fn test_fleet_unknown_accel_inventory_is_not_satisfying() {
+    test_group("fleet_unknown_accel_inventory_is_not_satisfying");
+    # A node nobody has inventoried must NOT satisfy a GPU request: treating
+    # unknown as satisfying would place the workload where it cannot run.
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("unknown", 8, 0, FLEET_NODE_READY));
+    var c = deployment_constraints_default();
+    store64(c + 32, REQ_ANY_ACCELERATOR);
+    assert_eq(node_matches_constraints(vec_get(nodes, 0), c), 0, "0 profiles != no requirement");
+    assert_eq(select_migration_target(nodes, 1, c), 0, "and nothing is selected");
+    return 0;
+}
+
+fn test_fleet_accel_default_is_req_none() {
+    test_group("fleet_accel_default_is_req_none");
+    var c = deployment_constraints_default();
+    assert_eq(load64(c + 32), REQ_NONE, "default constraints request no accelerator");
+    assert_eq(load64(c + 40), 0, "and no minimum chip count");
+    # So every existing caller is unaffected.
+    var nodes = vec_new();
+    vec_push(nodes, _fl_node("plain", 8, 0, FLEET_NODE_READY));
+    assert_eq(node_matches_constraints(vec_get(nodes, 0), c), 1, "a plain node still matches");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_cm_new_empty_and_list();
@@ -1648,6 +1700,9 @@ fn main() {
     test_fleet_rollback_never_targets_the_failed_node();
     test_fleet_draining_and_cordoned_take_no_new_work();
     test_fleet_preferred_nodes_are_honoured();
+    test_fleet_accel_requirement_gates_placement();
+    test_fleet_unknown_accel_inventory_is_not_satisfying();
+    test_fleet_accel_default_is_req_none();
     return assert_summary();
 }
 

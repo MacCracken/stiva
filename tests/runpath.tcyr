@@ -23,6 +23,7 @@ include "src/build.cyr"
 include "src/encrypted.cyr"
 include "src/runtime.cyr"
 include "src/container.cyr"
+include "src/cron.cyr"
 include "src/health.cyr"
 include "src/ansamblu.cyr"
 include "src/agent.cyr"
@@ -1346,6 +1347,100 @@ fn test_rootless_handle_accessors() {
     return 0;
 }
 
+# ══ §H cron containers ═══════════════════════════════════
+# NET-NEW: rust-old has no time-triggered start, so no oracle. The timing
+# semantics come from samay; what is tested here is stiva's side — validation,
+# persistence, and the mapping back from a fired task to a container spec.
+
+fn test_cron_expr_validation() {
+    test_group("cron_expr_validation");
+    assert_eq(cron_expr_is_valid("* * * * *"), 1, "every minute");
+    assert_eq(cron_expr_is_valid("0 3 * * *"), 1, "daily at 03:00");
+    assert_eq(cron_expr_is_valid("@daily"), 1, "@daily shortcut");
+    assert_eq(cron_expr_is_valid("@hourly"), 1, "@hourly shortcut");
+    assert_eq(cron_expr_is_valid("*/15 * * * *"), 1, "step values");
+    # `cron_expr_parse` returns a RESULT, so a naive `!= 0` accepts everything —
+    # which is exactly how "not a cron" was accepted as a schedule.
+    assert_eq(cron_expr_is_valid("not a cron"), 0, "garbage is refused");
+    assert_eq(cron_expr_is_valid("@bogus"), 0, "an unknown shortcut is refused");
+    assert_eq(cron_expr_is_valid(""), 0, "empty is refused");
+    assert_eq(cron_expr_is_valid(0), 0, "null is refused");
+    return 0;
+}
+
+fn test_cron_store_round_trip() {
+    test_group("cron_store_round_trip");
+    var root = "/tmp/stiva-t-cron";
+    _stor_remove_dir_all(root);
+    _stor_mkdir_p(root);
+    assert_eq(vec_len(cron_store_load(root)), 0, "an absent store is empty");
+
+    var cmd = vec_new();
+    vec_push(cmd, "/bin/backup");
+    vec_push(cmd, "--full");
+    assert_eq(cron_add(root, "nightly", "0 3 * * *", "local/tools:v1", cmd), 1, "add");
+    var jobs = cron_store_load(root);
+    assert_eq(vec_len(jobs), 1, "one job persisted");
+    if (vec_len(jobs) != 1) { return 0; }
+    var j = vec_get(jobs, 0);
+    assert_eq(streq(cron_job_name(j), "nightly"), 1, "name");
+    assert_eq(streq(cron_job_expr(j), "0 3 * * *"), 1, "the expression AS TYPED survives");
+    assert_eq(streq(cron_job_image(j), "local/tools:v1"), 1, "image");
+    assert_eq(vec_len(cron_job_command(j)), 2, "argv length");
+    assert_eq(streq(vec_get(cron_job_command(j), 1), "--full"), 1, "argv content");
+    assert_eq(cron_job_enabled(j), 1, "enabled by default");
+
+    # A bad expression must never reach the store.
+    assert_eq(cron_add(root, "bad", "nonsense", "local/tools:v1", vec_new()), 0, "bad expr refused");
+    assert_eq(vec_len(cron_store_load(root)), 1, "and nothing was written");
+
+    # Same name replaces rather than duplicating.
+    assert_eq(cron_add(root, "nightly", "@daily", "local/other:v2", vec_new()), 1, "re-add");
+    var jobs2 = cron_store_load(root);
+    assert_eq(vec_len(jobs2), 1, "still one job");
+    assert_eq(streq(cron_job_expr(vec_get(jobs2, 0)), "@daily"), 1, "the definition was replaced");
+
+    assert_eq(cron_set_enabled(root, "nightly", 0), 1, "disable");
+    assert_eq(cron_job_enabled(vec_get(cron_store_load(root), 0)), 0, "disabled persists");
+    assert_eq(cron_remove(root, "nightly"), 1, "remove");
+    assert_eq(vec_len(cron_store_load(root)), 0, "store is empty again");
+    assert_eq(cron_remove(root, "nightly"), 0, "removing an unknown job reports it");
+    return 0;
+}
+
+fn test_cron_due_uses_injected_clock() {
+    test_group("cron_due_uses_injected_clock");
+    # samay's check_due_at takes the clock, so this is deterministic.
+    var jobs = vec_new();
+    vec_push(jobs, cron_job_new("m", "* * * * *", "local/x:v1", vec_new(), 1, 0));
+    # First evaluation with last_fired == 0 fires only if the minute matches;
+    # `* * * * *` always matches.
+    var t0 = 1700000000000000000;
+    var due = cron_due_at(jobs, t0);
+    assert_eq(vec_len(due), 1, "an every-minute job is due");
+    # last_fired is advanced, so the same instant is no longer due.
+    assert_eq(vec_len(cron_due_at(jobs, t0)), 0, "not due twice at the same instant");
+    return 0;
+}
+
+fn test_cron_disabled_never_fires() {
+    test_group("cron_disabled_never_fires");
+    var jobs = vec_new();
+    vec_push(jobs, cron_job_new("off", "* * * * *", "local/x:v1", vec_new(), 0, 0));
+    assert_eq(vec_len(cron_due_at(jobs, 1700000000000000000)), 0, "a disabled job never fires");
+    return 0;
+}
+
+fn test_cron_strip_task_suffix() {
+    test_group("cron_strip_task_suffix");
+    # samay appends " (cron)" to the fired task name; it has to come off before
+    # the job lookup or nothing maps back.
+    assert_eq(streq(_cron_strip_suffix("nightly (cron)"), "nightly"), 1, "suffix removed");
+    assert_eq(streq(_cron_strip_suffix("nightly"), "nightly"), 1, "absent suffix is a no-op");
+    assert_eq(streq(_cron_strip_suffix("(cron)"), "(cron)"), 1, "a name that IS the suffix is left alone");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_container_log_tail();
@@ -1419,6 +1514,11 @@ fn main() {
     test_rootless_spawn_detached_does_not_wait();
     test_rootless_spawn_reports_failure();
     test_rootless_handle_accessors();
+    test_cron_expr_validation();
+    test_cron_store_round_trip();
+    test_cron_due_uses_injected_clock();
+    test_cron_disabled_never_fires();
+    test_cron_strip_task_suffix();
     return assert_summary();
 }
 

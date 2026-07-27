@@ -36,6 +36,35 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
+      - name: Verify the vendored files match the pinned tags
+        # A local `path = "../<dep>"` override SILENTLY WINS over the `tag` pin —
+        # that is how kavach 3.8.1 once arrived unannounced — and cyrius.lock
+        # records no dep name or version, so it cannot detect the substitution.
+        #
+        # Compares the sorted SET of `<sha256>  lib/<file>` lines, ignoring the
+        # `commit …` header lines and their order. That comparison is the whole
+        # point: cyrius.lock's FORMAT depends on the resolution mode. Resolving
+        # from git tags (what CI does) writes `commit <sha> <name> <url> <tag>`
+        # lines and a different hash ordering; resolving through path overrides
+        # (local development) writes only file hashes. A plain
+        # `git diff --exit-code cyrius.lock` therefore compares two structurally
+        # different files and fails unconditionally — it was tried, it broke the
+        # build, and it was reverted.
+        #
+        # The file hashes are the part that means the same thing in both modes,
+        # and they answer the real question: are the files the tags produce the
+        # files the lock records?
+        run: |
+          hashes () { grep -E '^[0-9a-f]{64}[[:space:]]' "$1" | sort; }
+          git show HEAD:cyrius.lock > /tmp/lock.committed
+          if ! diff <(hashes /tmp/lock.committed) <(hashes cyrius.lock); then
+            echo "::error::The vendored lib/ does not match what the pinned tags resolve to." >&2
+            echo "A local 'path = \"../<dep>\"' override probably vendored something the tag does not." >&2
+            echo "Bump the tag (or re-resolve without the override) and commit cyrius.lock." >&2
+            exit 1
+          fi
+          echo "cyrius.lock file hashes match the tag-resolved lib/"
+
       - name: Build
         run: |
           mkdir -p build

@@ -47,6 +47,7 @@ modules = [
     "src/encrypted.cyr",
     "src/runtime.cyr",
     "src/container.cyr",
+    "src/cron.cyr",
     "src/health.cyr",
     "src/ansamblu.cyr",
     "src/agent.cyr",
@@ -132,13 +133,18 @@ modules = ["dist/kavach.cyr"]
 # optional on its side, so they no longer arrive uninvited; stiva now names them
 # explicitly, on its own terms.
 #
-# They are OPTIONAL and the `accel` feature is DEFAULT-OFF, because cyrius
-# auto-includes every ACTIVE [deps.*] module into EVERY compilation unit. These
-# two are ~279 KB of source, and switching them on pushes `tests/stiva.tcyr`
-# past cycc's identifier cap — a hard `identifier buffer full (261893/262144)`
-# compile error, not a warning. Turn the feature on when the roadmap §H/§I work
-# actually lands (cron scheduling; accelerator inventory + placement), and
-# expect to split the test units at the same time.
+# The `accel` feature is now DEFAULT-ON: roadmap §H (cron containers) and §I
+# (accelerator inventory + placement) have landed and call into both bundles.
+#
+# The two historical objections are both dead. The identifier-cap warning below
+# was written against cycc's 262144-entry buffer; 6.4.76 raised it to 524288 and
+# the worst unit with `accel` on measures 276,898 (52.8%) — a full
+# `cyrius tests --features accel` run passes with no splitting. The size
+# objection (~279 KB reaching every consumer of dist/stiva.cyr) is real but not
+# material for a container runtime.
+#
+# They stay declared `optional` so the feature can still be switched off by a
+# consumer that genuinely wants neither.
 #
 # NOTE: `path` OVERRIDES `tag` — a local sibling checkout wins outright. That is
 # how kavach 3.8.1 arrived here while this file still said 3.7.1. `cyrius.lock`
@@ -146,7 +152,7 @@ modules = ["dist/kavach.cyr"]
 # so it cannot detect the substitution; `git diff cyrius.lock` after
 # `cyrius deps` is the only reliable check.
 [features]
-default = []
+default = ["accel"]
 accel = ["samay", "ai-hwaccel"]
 
 # Cron/schedule machinery + resource-aware placement (roadmap §H).

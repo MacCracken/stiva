@@ -5,6 +5,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — the `accel` feature is on by default, unlocking §H and §I
+`default = ["accel"]`. Both bundles were already declared and pinned; the gate was the only thing
+holding them back. Cyrius `[features]` gate dependency activation, not source, so §H/§I code in
+`src/` requires it on.
+
+### Added — `stiva cron`: scheduled containers (roadmap §H)
+`cron add|ls|rm|enable|disable|check`, over a new `src/cron.cyr` and `{root}/cron.json`.
+
+The timing semantics come from samay, which already had the hard parts: a 5-field parser with
+`@shortcuts`, ranges, steps and the Vixie DOM-vs-DOW rule; a scheduler with a missed-schedule
+policy, catch-up counting and a firing cap; and an injected-clock `check_due_at`, so the whole
+thing is deterministically testable with no wall clock.
+
+Three things samay does not provide, which is why the module exists: `CronTaskTemplate` cannot
+carry an image, command, env or mounts (nor can its JSON codec), so stiva owns the entry-name →
+container-spec table; the typed cron *expression string* is not persisted either (only the seven
+bitmasks), so stiva stores its own copy or `cron ls` could not show what the user typed; and there
+is no poll site, since `main.cyr` is a one-shot dispatcher — `cron check` fires what is due and
+exits, driven by an external timer.
+
+**`cron_expr_parse` returns a `Result`, not a pointer.** Testing it with `!= 0` accepts every
+string, because `Err(1)` is non-zero — which is exactly how `--schedule "not a cron"` was accepted
+as a valid schedule during development. It now goes through `is_ok`.
+
+`CRON_SKIP` is the policy, not `CRON_CATCHUP`: a container that missed six hours of hourly runs
+because the machine was off should start **once**, not sixty times. samay logs the drop either way.
+`check` persists the advanced anchors *before* running anything — otherwise a crash mid-start
+re-fires the same job on every subsequent tick forever.
+
+### Added — accelerator inventory and placement (roadmap §I)
+`stiva info` now reports the node's accelerators via `registry_detect_no_exec`, which is
+subprocess-free (pure sysfs and syscall reads) so it cannot hang on a missing `nvidia-smi` — the
+exec-based detectors are force-stripped by the builder mask, not merely unused.
+
+`FleetNodeCapacity` gains `accel_profiles` and `DeploymentConstraints` gains `accel_req` /
+`accel_min_chips`, gating placement through ai-hwaccel's `find_satisfying_profile`. **Grafted onto
+stiva's own structs rather than adopting samay's `NodeCapacity`**, which is a superset only on the
+continuous dimensions — it has no `max_containers` (stiva's entire fit test), no node status and no
+label constraints, so adopting it would regress three shipped features.
+
+**A node with no known profiles fails any non-`REQ_NONE` request.** Treating "not inventoried" as
+"satisfies" would place a GPU workload where it cannot run. `REQ_NONE` is the default, so every
+existing caller is unaffected.
+
+### Added — CI guard for the tag/path substitution (roadmap v3.0.17 item 4)
+Second attempt, and this one is validated. A local `path = "../<dep>"` override silently wins over
+the `tag` pin, and `cyrius.lock` records no dep name or version to notice with.
+
+The first attempt used `git diff --exit-code cyrius.lock`, which **can never pass**: the lock's
+FORMAT depends on the resolution mode — resolving from git tags writes `commit <sha> <name> <url>
+<tag>` header lines and a different hash ordering, resolving through path overrides writes only file
+hashes. It broke CI and was reverted.
+
+This compares the sorted **set** of `<sha256>  lib/<file>` lines, ignoring the `commit` lines and
+their order — the part that means the same thing in both modes, and the part that answers the real
+question. Verified against synthetic locks: format and ordering differences are ignored, a changed
+file hash is caught.
+
+> **The cycc struct-id miscompile bit twice more.** Adding a field to `FleetNodeCapacity` and
+> `DeploymentConstraints` made typed access to the NEW fields segfault inside
+> `node_matches_constraints` — while `cap.memory_mb`, a few lines below in the same function, is
+> fine. Both branches now use raw offsets. Found by bisection each time.
+
+### Tests — 2132 → 2175
 ### Added — `stiva diff`, so all 35 verbs are live (roadmap v3.0.17 item 1)
 `A` added, `C` changed, `D` deleted, `(no changes)` when clean — and it handles both rootfs layouts
 off the `{croot}/.rootfs-flattened` marker, since they cannot be told apart after the fact

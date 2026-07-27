@@ -176,3 +176,17 @@ timestamp,commit,branch,benchmark,estimate_ns
 2026-07-26T23:16:48Z,dca8591,main,unpack_layer_gz_20_files_4kib,1001000.0000
 2026-07-26T23:16:48Z,dca8591,main,build_copy_layer_20_files_4kib,2738000.0000
 2026-07-26T23:16:48Z,dca8591,main,exec_capture2_trivial_child,30219000.0000
+2026-07-27T05:32:45Z,4a44545,main,noop,2.0000
+2026-07-27T05:32:45Z,4a44545,main,oci_config_build+serialize,6930.0000
+2026-07-27T05:32:45Z,4a44545,main,oci_manifest_to_jv+serialize,15340.0000
+2026-07-27T05:32:45Z,4a44545,main,compose_yaml_to_toml,31088.0000
+2026-07-27T05:32:45Z,4a44545,main,compose_400_reverse_sorted_keys,1327000.0000
+2026-07-27T05:32:45Z,4a44545,main,flatten_layers_2x60_files_4kib,1398000.0000
+2026-07-27T05:32:45Z,4a44545,main,event_json_build,5928.0000
+2026-07-27T05:32:45Z,4a44545,main,event_log_append,7661.0000
+2026-07-27T05:32:45Z,4a44545,main,event_ts_parse,1574.0000
+2026-07-27T05:32:45Z,4a44545,main,gzip_compress_2mib,39019000.0000
+2026-07-27T05:32:45Z,4a44545,main,gzip_decompress_2mib,9159000.0000
+2026-07-27T05:32:45Z,4a44545,main,unpack_layer_gz_20_files_4kib,1005000.0000
+2026-07-27T05:32:45Z,4a44545,main,build_copy_layer_20_files_4kib,2748000.0000
+2026-07-27T05:32:45Z,4a44545,main,exec_capture2_trivial_child,31825000.0000

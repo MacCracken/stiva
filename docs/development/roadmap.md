@@ -20,10 +20,10 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 
 | | |
 |---|---|
-| CLI | **34 of 35 verbs live**; only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
+| CLI | **35 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2132 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Tests | 2175 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
 | Deps | cyrius 6.4.78 · kavach 3.9.3 · cmdit 1.2.2 · majra 2.5.1 · nein 1.6.4 · bote 3.1.4 · agnodrm 1.5.0 |
 
 **Three facts that constrain everything below**, all verified by execution rather than by reading:
@@ -41,93 +41,11 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 
 ---
 
-## v3.0.17 — finish the single-node runtime
+## v3.0.17 — finish the single-node runtime — COMPLETE
 
-`diff`, rootless networking, `scan_policy` persistence and the three `fleet.cyr` defects have
-landed; see the CHANGELOG. What remains needs a decision or a CI run, not more code.
-
-### 1. Decide the `accel` feature gate — blocks items 2 and 3
-
-**A product decision, not an engineering one, and it needs an answer before §H or §I start.**
-
-Cyrius `[features]` gate **dependency activation only, not source**; there is no `#[cfg(feature)]`
-and no conditional `include`. Proven by execution: with `default = []` a build calling into
-`ai-hwaccel` fails with "refusing to emit binary with 2 reachable undefined function(s)", and
-`cyrius test` / `cyrius tests` have **no `--features` flag**. So any §I code in `src/` forces
-`default = ["accel"]` permanently, making 276 KB of samay + ai-hwaccel non-optional for every
-consumer of `dist/stiva.cyr` — daimon and sutra included.
-
-The identifier-cap worry is **not** a reason to hesitate: measured at pin 6.4.78, the worst unit with
-`accel` on is 276,898 / 524,288 (52.8%), and a full `cyrius tests --features accel` run passes.
-
-Options: turn it on and accept the size; keep it off and drop §H/§I; or split the accelerator surface
-into a separate consumer-side module.
-
-### 2. §H — scheduled / cron containers
-
-stiva has no time-triggered container start, and neither does `rust-old`. The hard parts are already
-written in `samay` — named here so nobody re-derives them:
-
-- `cron_expr_parse` / `cron_expr_matches` / `cron_expr_next_after` — a full standard 5-field parser
-  with `@shortcuts`, ranges, steps, month/DOW name lookup, and the Vixie `crontab(5)` DOM-vs-DOW
-  star rule.
-- `cron_scheduler_new` / `_add(name, expr, template, enabled, missed_policy)` / `_check_due` /
-  `_check_due_at` / `_remove_entry` / `_list_entries`, with `struct CronEntry` / `struct
-  CronScheduler`, a missed-schedule policy, and catch-up counting with a cap
-  (`_cron_count_due`, `_cron_log_catchup_cap`) — the hard part, already solved.
-- `cron_scheduler_to_json_str` / `from_json_str` for persistence.
-
-`cron_scheduler_check_due_at` takes an injected clock, so catch-up/skip/cap semantics are
-deterministically testable with no wall clock.
-
-Two pieces samay does not give you:
-
-- **A container side table.** `CronTaskTemplate` carries name/description/agent_id/priority/
-  resource_requirements — no image, command, env, mounts or restart policy — and its JSON codec
-  cannot carry them either. stiva owns an entry-name → `ContainerConfig` table and its persistence,
-  and must strip the `" (cron)"` suffix the task namer appends. The typed cron *expression string*
-  is not persisted either (only the seven bitmasks), so stiva stores its own.
-- **A poll site.** `src/main.cyr` is a one-shot dispatcher ending in `syscall(SYS_EXIT, …)`. v1 is
-  `stiva cron add/ls/rm/check` driven by an external systemd timer — `check` fires what is due and
-  exits. The in-process loop is a later increment.
-
-Prerequisite: item 1.
-
-### 3. §I — accelerator inventory and placement
-
-`lib/ai-hwaccel.cyr` is a read-only hardware inventory and workload-planning library across 19
-accelerator types and 17 backends. It is **not** a device-plumbing library — see v3.1.0 item 4.
-
-- **Node inventory in `stiva info` / `inspect`.** `registry_detect_no_exec()` is subprocess-free
-  (pure sysfs/syscall reads) so it cannot hang on a missing `nvidia-smi`; pair with
-  `registry_to_summary_json`. Two calls.
-- **An accelerator dimension in `fleet` placement — graft onto stiva's own structs, do NOT adopt
-  samay's `NodeCapacity`.** samay's is a superset only on the continuous dimensions: no
-  `max_containers` (stiva's entire fit test), no node status, no label constraints, and only
-  best-fit-by-utilization against stiva's three strategies. Adopting it regresses three shipped
-  features. Its ledger also leaks — `node_capacity_release` is reached only from `cancel_task`, so a
-  task reaching COMPLETED/FAILED never releases its reservation.
-- **Persist accel profiles** — `profile_to_json` / `profile_from_json` round-trip losslessly.
-- *(optional)* NUMA / fabric affinity, so ansamblu can express "these two containers must land on
-  NVSwitch-connected devices". `detect_interconnects` shells out and is masked off under
-  `registry_detect_no_exec`.
-
-Prerequisite: item 1.
-
-### 4. CI guard for the tag/path substitution
-
-A local `path = "../<dep>"` override **silently wins** over the `tag` pin — this is how kavach 3.8.1
-once arrived unannounced — and `cyrius.lock` records no dep name or version, so it cannot detect the
-substitution.
-
-A `git diff --exit-code cyrius.lock` guard was attempted and **reverted**: `cyrius.lock`'s *format*
-depends on the resolution mode. Resolving from git tags (CI) writes `commit <sha> <name> <url> <tag>`
-lines and a different hash ordering; resolving through path overrides (local) writes only file
-hashes. The comparison is between two structurally different files and fails unconditionally.
-
-The workable shape compares the sorted **set** of `<sha256>  lib/<file>` lines, ignoring the `commit`
-lines and their order — that tests the real invariant, "the files the tags produce are the files the
-lock records". Validate it against a real CI run before shipping it again.
+All of v3.0.17 has landed — see the CHANGELOG. `accel` is now `default = ["accel"]`, `stiva cron`
+schedules containers, `stiva info` reports accelerators, fleet placement has an accelerator
+dimension, and CI checks the vendored files against the pinned tags.
 
 ---
 

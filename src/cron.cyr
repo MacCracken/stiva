@@ -1,0 +1,340 @@
+# stiva — scheduled (cron) containers. Roadmap §H.
+#
+# NET-NEW: `rust-old` has no time-triggered container start of any kind, so
+# there is no parity oracle here. The cron SEMANTICS come from samay, which
+# already implements the hard parts — a standard 5-field parser with
+# `@shortcuts`, ranges, steps, name lookup and the Vixie `crontab(5)`
+# DOM-vs-DOW star rule; a scheduler with a missed-schedule policy, catch-up
+# counting and a firing cap; and an injected-clock `check_due_at` so the whole
+# thing is deterministically testable with no wall clock.
+#
+# WHAT SAMAY DOES NOT GIVE YOU, and why this module exists at all:
+#
+#   1. `CronTaskTemplate` carries name/description/agent_id/priority/
+#      resource_requirements — no image, command, env, mounts or restart
+#      policy — and its JSON codec cannot carry them either. So stiva owns the
+#      entry-name → container-spec table and its persistence.
+#   2. The typed cron EXPRESSION STRING is not persisted by samay's codec
+#      (only the seven bitmasks), so stiva stores its own copy — otherwise
+#      `stiva cron ls` could not show the user what they typed.
+#   3. There is no poll site. `src/main.cyr` is a one-shot dispatcher ending in
+#      `syscall(SYS_EXIT, …)`, so v1 is `stiva cron add/ls/rm/check` driven by
+#      an external systemd timer: `check` fires whatever is due and exits. An
+#      in-process loop is a later increment, not a blocker.
+#
+# The scheduler is rebuilt from stiva's table on each `check` and its
+# `last_fired` written back, so catch-up survives across the one-shot
+# invocations that are the whole point of the design.
+
+# ── CronJob ──
+# One scheduled container. `command` is a vec of cstrs (may be empty, meaning
+# the image's own entrypoint). `last_fired_ns` is 0 until the first firing.
+struct CronJob {
+    name;
+    expr;             # the cron expression AS TYPED
+    image;            # image reference
+    command;          # vec<cstr>
+    enabled;          # 1/0
+    last_fired_ns;
+}
+
+#[must_use]
+fn cron_job_new(name, expr, image, command, enabled, last_fired_ns) {
+    var p = alloc(48);
+    var j: CronJob = p;
+    j.name = name;
+    j.expr = expr;
+    j.image = image;
+    j.command = command;
+    j.enabled = enabled;
+    j.last_fired_ns = last_fired_ns;
+    return p;
+}
+
+#[must_use]
+fn cron_job_name(j) { var x: CronJob = j; return x.name; }
+#[must_use]
+fn cron_job_expr(j) { var x: CronJob = j; return x.expr; }
+#[must_use]
+fn cron_job_image(j) { var x: CronJob = j; return x.image; }
+#[must_use]
+fn cron_job_command(j) { var x: CronJob = j; return x.command; }
+#[must_use]
+fn cron_job_enabled(j) { var x: CronJob = j; return x.enabled; }
+#[must_use]
+fn cron_job_last_fired(j) { var x: CronJob = j; return x.last_fired_ns; }
+
+# ── persistence: {root}/cron.json ──
+
+#[must_use]
+fn cron_store_path(root) {
+    return _container_cat2(root, "/cron.json");
+}
+
+# Validate a cron expression. Returns 1 when samay can parse it.
+#
+# Done HERE, at `add` time, rather than at `check`: a typo that is only caught
+# by the timer is a job that silently never runs, and the operator has no reason
+# to look again at something `add` accepted.
+#[must_use]
+fn cron_expr_is_valid(expr) {
+    if (expr == 0) { return 0; }
+    if (strlen(expr) == 0) { return 0; }
+    # `cron_expr_parse` returns a RESULT, not a raw pointer — it answers `Err(1)`
+    # for a bad expression, which is non-zero. Testing `!= 0` therefore accepts
+    # every string, which is how "not a cron" was accepted as a schedule.
+    return is_ok(cron_expr_parse(str_from(expr)));
+}
+
+# The parsed CronExpr for `expr`, or 0 when it does not parse.
+#[must_use]
+fn _cron_parsed(expr) {
+    var r = cron_expr_parse(str_from(expr));
+    if (is_ok(r) == 0) { return 0; }
+    return result_unwrap(r);
+}
+
+# Load the job table, or an empty vec. A malformed file yields an empty vec
+# rather than an error: `cron.json` is written by stiva, so a corrupt one is a
+# bug or tampering, and refusing every subsequent `check` would turn it into an
+# outage. The condition is logged.
+fn cron_store_load(root) {
+    var out = vec_new();
+    var path = cron_store_path(root);
+    if (file_exists(path) == 0) { return out; }
+    var cell = alloc(8);
+    var buf = _img_read_file(path, cell);
+    if (buf == 0) { return out; }
+    var v = bayan_json_v_parse_str(buf, load64(cell));
+    if (v == 0) {
+        sakshi_warn("cron.json is not valid JSON; treating the schedule as empty",
+        strlen("cron.json is not valid JSON; treating the schedule as empty"));
+        return out;
+    }
+    var arr = json_v_obj_get(v, "jobs");
+    if (arr == 0) { return out; }
+    if (json_v_is_arr(arr) == 0) { return out; }
+    var n = json_v_arr_len(arr);
+    var i = 0;
+    while (i < n) {
+        var e = json_v_arr_get(arr, i);
+        var nm = _cron_jv_str(e, "name");
+        var ex = _cron_jv_str(e, "expr");
+        var im = _cron_jv_str(e, "image");
+        if (nm != 0 && ex != 0 && im != 0) {
+            var cmd = vec_new();
+            var ca = json_v_obj_get(e, "command");
+            if (ca != 0) {
+                if (json_v_is_arr(ca) == 1) {
+                    var k = 0;
+                    while (k < json_v_arr_len(ca)) {
+                        var el = json_v_arr_get(ca, k);
+                        if (json_v_is_str(el) == 1) { vec_push(cmd, str_cstr(json_v_str(el))); }
+                        k = k + 1;
+                    }
+                }
+            }
+            var en = 1;
+            var ev = json_v_obj_get(e, "enabled");
+            if (ev != 0) { en = json_v_int(ev); }
+            var lf = 0;
+            var lv = json_v_obj_get(e, "last_fired_ns");
+            if (lv != 0) { lf = json_v_int(lv); }
+            vec_push(out, cron_job_new(nm, ex, im, cmd, en, lf));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+#[must_use]
+fn _cron_jv_str(v, key) {
+    if (v == 0) { return 0; }
+    var f = json_v_obj_get(v, key);
+    if (f == 0) { return 0; }
+    if (json_v_is_str(f) == 0) { return 0; }
+    return str_cstr(json_v_str(f));
+}
+
+# Write the job table atomically (tmp + rename), the same way `state.json` is
+# written — a half-written schedule read by the next timer tick would drop jobs.
+# Returns 1 on success, 0 on failure.
+fn cron_store_save(root, jobs) {
+    var arr = json_v_arr_new();
+    var i = 0;
+    while (i < vec_len(jobs)) {
+        var j = vec_get(jobs, i);
+        var o = json_v_obj_new();
+        json_v_obj_set(o, str_from("name"), json_v_str_new(str_from(cron_job_name(j))));
+        json_v_obj_set(o, str_from("expr"), json_v_str_new(str_from(cron_job_expr(j))));
+        json_v_obj_set(o, str_from("image"), json_v_str_new(str_from(cron_job_image(j))));
+        var ca = json_v_arr_new();
+        var cmd = cron_job_command(j);
+        if (cmd != 0) {
+            var k = 0;
+            while (k < vec_len(cmd)) {
+                json_v_arr_push(ca, json_v_str_new(str_from(vec_get(cmd, k))));
+                k = k + 1;
+            }
+        }
+        json_v_obj_set(o, str_from("command"), ca);
+        json_v_obj_set(o, str_from("enabled"), json_v_int_new(cron_job_enabled(j)));
+        json_v_obj_set(o, str_from("last_fired_ns"), json_v_int_new(cron_job_last_fired(j)));
+        json_v_arr_push(arr, o);
+        i = i + 1;
+    }
+    var doc = json_v_obj_new();
+    json_v_obj_set(doc, str_from("jobs"), arr);
+    var s = json_v_build(doc);
+
+    var path = cron_store_path(root);
+    var tmp = _container_cat2(path, ".tmp");
+    sys_mkdir(root, 493);
+    if (file_write_all(tmp, str_data(s), str_len(s)) < 0) { return 0; }
+    if (sys_rename(tmp, path) != 0) { sys_unlink(tmp); return 0; }
+    return 1;
+}
+
+# Index of `name` in `jobs`, or -1.
+#[must_use]
+fn cron_find(jobs, name) {
+    var i = 0;
+    while (i < vec_len(jobs)) {
+        if (streq(cron_job_name(vec_get(jobs, i)), name) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# ── operations ──
+
+# Add (or replace) a scheduled container. Returns 1, or 0 with the detail
+# printed. Replacing rather than refusing a duplicate name matches how a tag
+# behaves elsewhere in stiva: the name is a mutable pointer to a definition.
+fn cron_add(root, name, expr, image, command) {
+    if (name == 0 || strlen(name) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "cron: a job name is required");
+        return 0;
+    }
+    if (cron_expr_is_valid(expr) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, _container_cat2("cron: unparseable expression: ", expr));
+        return 0;
+    }
+    if (image == 0 || strlen(image) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, "cron: an image reference is required");
+        return 0;
+    }
+    var jobs = cron_store_load(root);
+    var at = cron_find(jobs, name);
+    var job = cron_job_new(name, expr, image, command, 1, 0);
+    if (at >= 0) { vec_set(jobs, at, job); } else { vec_push(jobs, job); }
+    if (cron_store_save(root, jobs) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "cron: failed to write the schedule");
+        return 0;
+    }
+    return 1;
+}
+
+# Remove a job. Returns 1 when one was removed, 0 when the name was unknown.
+fn cron_remove(root, name) {
+    var jobs = cron_store_load(root);
+    var at = cron_find(jobs, name);
+    if (at < 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, _container_cat2("cron: no such job: ", name));
+        return 0;
+    }
+    var kept = vec_new();
+    var i = 0;
+    while (i < vec_len(jobs)) {
+        if (i != at) { vec_push(kept, vec_get(jobs, i)); }
+        i = i + 1;
+    }
+    if (cron_store_save(root, kept) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "cron: failed to write the schedule");
+        return 0;
+    }
+    return 1;
+}
+
+# Enable or disable a job without deleting it. Returns 1/0.
+fn cron_set_enabled(root, name, enabled) {
+    var jobs = cron_store_load(root);
+    var at = cron_find(jobs, name);
+    if (at < 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, _container_cat2("cron: no such job: ", name));
+        return 0;
+    }
+    var j: CronJob = vec_get(jobs, at);
+    j.enabled = enabled;
+    if (cron_store_save(root, jobs) == 0) {
+        stiva_err_print(STIVA_ERR_IO, "cron: failed to write the schedule");
+        return 0;
+    }
+    return 1;
+}
+
+# Which jobs are due at `now_ns`? Returns a vec of CronJob*, and updates each
+# returned job's `last_fired_ns` in `jobs` (the caller persists).
+#
+# Built on samay's scheduler rather than re-deriving the timing: the
+# missed-schedule policy, the catch-up counting and the firing cap are the hard
+# part and are already solved there. A samay entry is created per enabled job,
+# seeded with the persisted `last_fired`, and `check_due_at` decides.
+#
+# CRON_SKIP is the policy, not CRON_CATCHUP: a container that missed six hours
+# of hourly runs because the machine was off should start ONCE, not sixty times.
+# samay logs the drop either way, so nothing is silent.
+fn cron_due_at(jobs, now_ns) {
+    var due = vec_new();
+    var sched = cron_scheduler_new();
+    var i = 0;
+    while (i < vec_len(jobs)) {
+        var j = vec_get(jobs, i);
+        if (cron_job_enabled(j) == 1) {
+            var expr = _cron_parsed(cron_job_expr(j));
+            if (expr != 0) {
+                var tmpl = cron_task_template_new(str_from(cron_job_name(j)),
+                str_from(""), str_from(""), 0, resource_req_default());
+                var e = cron_entry_new(str_from(cron_job_name(j)), expr, tmpl, 1, CRON_SKIP);
+                CronEntry_set_last_fired(e, cron_job_last_fired(j));
+                cron_scheduler_add_entry(sched, e);
+            }
+        }
+        i = i + 1;
+    }
+    var tasks = cron_scheduler_check_due_at(sched, now_ns);
+    # Map the fired tasks back to stiva jobs. samay appends " (cron)" to the
+    # task name, so it has to come off before the lookup.
+    var t = 0;
+    while (t < vec_len(tasks)) {
+        var nm = _cron_strip_suffix(str_cstr(ScheduledTask_name(vec_get(tasks, t))));
+        var at = cron_find(jobs, nm);
+        if (at >= 0) {
+            var j2: CronJob = vec_get(jobs, at);
+            j2.last_fired_ns = now_ns;
+            vec_push(due, vec_get(jobs, at));
+        }
+        t = t + 1;
+    }
+    # Advance last_fired for every ENABLED job, not only the fired ones —
+    # otherwise a job whose expression did not match keeps its stale anchor and
+    # the next check re-counts the whole interval as missed.
+    var k = 0;
+    while (k < vec_len(jobs)) {
+        var j3: CronJob = vec_get(jobs, k);
+        if (j3.enabled == 1) { j3.last_fired_ns = now_ns; }
+        k = k + 1;
+    }
+    return due;
+}
+
+# Strip samay's " (cron)" task-name suffix.
+#[must_use]
+fn _cron_strip_suffix(name) {
+    var n = strlen(name);
+    var suffix = " (cron)";
+    var sl = strlen(suffix);
+    if (n <= sl) { return name; }
+    if (memeq(name + n - sl, suffix, sl) == 0) { return name; }
+    return _img_slice(name, 0, n - sl);
+}

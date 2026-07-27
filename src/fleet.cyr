@@ -82,17 +82,44 @@ struct FleetNodeCapacity {
     cpus;                 # u32
     max_containers;       # u32
     running_containers;   # u32
+    accel_profiles;       # vec<ai-hwaccel profile*> | 0 = none known (§I)
 }
 
 #[must_use]
 fn fleet_node_capacity_new(memory_mb, cpus, max_containers, running_containers) {
-    var p = alloc(32);
+    var p = alloc(40);
     var c: FleetNodeCapacity = p;
     c.memory_mb = memory_mb;
     c.cpus = cpus;
     c.max_containers = max_containers;
     c.running_containers = running_containers;
+    c.accel_profiles = 0;
     return p;
+}
+
+# Attach a node's accelerator profiles (roadmap §I). A vec of ai-hwaccel
+# `profile_*` pointers, or 0 for "none known" — which is NOT the same as "no
+# accelerators": an undetected node must not silently satisfy a GPU
+# requirement, so `_fleet_accel_ok` treats 0 as unsatisfiable for any non-NONE
+# request.
+#
+# GRAFTED onto stiva's own struct rather than adopting samay's `NodeCapacity`,
+# which is a superset only on the continuous dimensions: it has no
+# `max_containers` (stiva's entire fit test), no node status, no label
+# constraints, and only best-fit-by-utilization against stiva's three
+# strategies. Adopting it would regress three shipped features. Its ledger also
+# leaks — `node_capacity_release` is reached only from `cancel_task`, so a task
+# reaching COMPLETED/FAILED never releases its reservation.
+fn fleet_node_capacity_set_accel(cap, profiles) {
+    var c: FleetNodeCapacity = cap;
+    c.accel_profiles = profiles;
+    return 0;
+}
+
+#[must_use]
+fn fleet_node_capacity_accel(cap) {
+    var c: FleetNodeCapacity = cap;
+    return c.accel_profiles;
 }
 
 # ── FleetNode (rust-old: struct FleetNode) ─────────────────
@@ -130,18 +157,22 @@ struct DeploymentConstraints {
     min_memory_mb;
     min_cpus;
     preferred_nodes;
+    accel_req;            # ai-hwaccel REQ_* (§I); REQ_NONE = CPU is enough
+    accel_min_chips;
 }
 
 # Rust `Default` for DeploymentConstraints: empty labels, no min_memory/min_cpus
 # (encoded -1), empty preferred_nodes. Empty maps/vecs are the 0 sentinel.
 #[must_use]
 fn deployment_constraints_default() {
-    var p = alloc(32);
+    var p = alloc(48);
     var c: DeploymentConstraints = p;
     c.node_labels = 0;
     c.min_memory_mb = 0 - 1;
     c.min_cpus = 0 - 1;
     c.preferred_nodes = 0;
+    c.accel_req = REQ_NONE;
+    c.accel_min_chips = 0;
     return p;
 }
 
@@ -228,6 +259,29 @@ fn node_matches_constraints(node, constraints) {
     # Memory constraint (Some(min) → node.memory_mb >= min).
     if (c.min_memory_mb != 0 - 1) {
         if (cap.memory_mb < c.min_memory_mb) { return 0; }
+    }
+
+    # Accelerator constraint (§I). `find_satisfying_profile` + `requirement_
+    # satisfied` were written for exactly this — ai-hwaccel's header calls it
+    # "used for scheduling integration".
+    #
+    # A node with NO known profiles fails any non-NONE request. Treating unknown
+    # as satisfying would place a GPU workload on a node nobody has inventoried,
+    # which is the failure the constraint exists to prevent.
+    # RAW OFFSETS. Typed access to the two fields ADDED here segfaults — the
+    # cycc struct-id 20/21 miscompile, per-function-context, so `cap.memory_mb`
+    # a few lines below is fine and `cap.accel_profiles` is fatal. Verified by
+    # bisection: the two tests reaching this branch crashed, the one that only
+    # read the defaults passed.
+    #   FleetNodeCapacity:     memory_mb@0 cpus@8 max_containers@16
+    #                          running_containers@24 accel_profiles@32
+    #   DeploymentConstraints: node_labels@0 min_memory_mb@8 min_cpus@16
+    #                          preferred_nodes@24 accel_req@32 accel_min_chips@40
+    var req = load64(constraints + 32);
+    if (req != REQ_NONE) {
+        var prof = load64(n.capacity + 32);
+        if (prof == 0) { return 0; }
+        if (find_satisfying_profile(req, load64(constraints + 40), prof) == 0) { return 0; }
     }
 
     # CPU constraint.
