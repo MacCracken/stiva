@@ -526,6 +526,58 @@ fn _ct_map_to_jv(m) {
     return o;
 }
 
+# ── scan_policy round-trip (roadmap v3.0.17 item 3) ────────
+#
+# The field used to serialize as `null` and read back as 0, so a per-container
+# externalization policy never survived a save/load. That is why `stiva logs
+# --scan` is an explicit flag: the oracle gates scanning on the PERSISTED value
+# (rust-old/src/container.rs:1210-1222) and the port had nothing to read.
+#
+# kavach's `ExternalizationPolicy` is five scalars, so this is a plain object —
+# no handle smuggling, and a policy written by one stiva build is readable by
+# the next.
+#
+# Absent or null → 0, meaning "no per-container policy", which is what every
+# existing state.json on disk already says. The upgrade is silent and lossless
+# in both directions.
+#[must_use]
+fn _ct_scan_policy_to_jv(p) {
+    if (p == 0) { return json_v_null(); }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("enabled"), json_v_int_new(ExternalizationPolicy_enabled(p)));
+    json_v_obj_set(o, str_from("max_artifact_size_bytes"),
+    json_v_int_new(ExternalizationPolicy_max_artifact_size_bytes(p)));
+    json_v_obj_set(o, str_from("block_threshold"),
+    json_v_int_new(ExternalizationPolicy_block_threshold(p)));
+    json_v_obj_set(o, str_from("quarantine_threshold"),
+    json_v_int_new(ExternalizationPolicy_quarantine_threshold(p)));
+    json_v_obj_set(o, str_from("redact_secrets"),
+    json_v_int_new(ExternalizationPolicy_redact_secrets(p)));
+    return o;
+}
+
+# Rebuild a policy from its JSON object, or 0 when absent/null/not an object.
+# Starts from `ext_policy_default()` so a field the writer omitted keeps kavach's
+# default rather than becoming 0 — a 0 `block_threshold` would silently BLOCK
+# every artifact, the opposite of a missing field's intent.
+#[must_use]
+fn _ct_scan_policy_from_jv(v) {
+    if (v == 0) { return 0; }
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var p = ext_policy_default();
+    var e = json_v_obj_get(v, "enabled");
+    if (e != 0) { ExternalizationPolicy_set_enabled(p, json_v_int(e)); }
+    var m = json_v_obj_get(v, "max_artifact_size_bytes");
+    if (m != 0) { ExternalizationPolicy_set_max_artifact_size_bytes(p, json_v_int(m)); }
+    var b = json_v_obj_get(v, "block_threshold");
+    if (b != 0) { ExternalizationPolicy_set_block_threshold(p, json_v_int(b)); }
+    var q = json_v_obj_get(v, "quarantine_threshold");
+    if (q != 0) { ExternalizationPolicy_set_quarantine_threshold(p, json_v_int(q)); }
+    var r = json_v_obj_get(v, "redact_secrets");
+    if (r != 0) { ExternalizationPolicy_set_redact_secrets(p, json_v_int(r)); }
+    return p;
+}
+
 # ContainerConfig* → JSON object.
 fn _container_config_to_jv(config) {
     var c: ContainerConfig = config;
@@ -545,7 +597,7 @@ fn _container_config_to_jv(config) {
     json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
     json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
     json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.1.0 item 1
-    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # roadmap v3.0.17 item 3
+    json_v_obj_set(o, str_from("scan_policy"), _ct_scan_policy_to_jv(c.scan_policy));
     json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
     json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
     json_v_obj_set(o, str_from("min_isolation_score"), _ct_int_or_null(c.min_isolation_score));
@@ -655,7 +707,7 @@ fn _container_config_from_jv(v) {
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
     c.secrets = 0;                                       # roadmap v3.1.0 item 1
-    c.scan_policy = 0;                                   # roadmap v3.0.17 item 3
+    c.scan_policy = _ct_scan_policy_from_jv(json_v_obj_get(v, "scan_policy"));
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
     c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
@@ -1499,6 +1551,16 @@ fn container_manager_start(mgr, id) {
         # later process has only (pid, start_ticks) to decide whether the
         # container is still alive.
         cc.start_ticks = _cm_proc_start_ticks(cc.pid);
+        # Rootless networking (roadmap v3.0.17 item 2). This is the ONLY point
+        # with a live pid — slirp4netns and pasta attach to a running process's
+        # network namespace, so it cannot happen at create.
+        #
+        # Unprivileged only: with root the bridge/veth path already ran. The
+        # helper's own failure is logged, never fatal — a container without port
+        # forwarding is still a container, and refusing to start one because a
+        # helper is missing would be a worse default than the warning this
+        # replaces.
+        _cm_start_rootless_net(mgr, cc, _cm_container_dir(mm.root, id));
         container_manager_publish_event(mgr, _cm_event_json("started", id, "detach", "true"));
         _cm_persist(mgr);
         return STIVA_ERR_OK;
@@ -1558,9 +1620,62 @@ fn _cm_log_path(mgr, real_id) {
 # this reachable.
 fn _cm_disconnect_network(mgr, id) {
     var mm: ContainerManager = mgr;
+    # Tear down the rootless helper first — it is per-container and this is the
+    # one place that knows the container is going away. Keyed on the id so it
+    # works cross-process, where `internals` is empty.
+    _cm_stop_rootless_net(mm.root, id);
     if (mm.network_manager == 0) { return 0; }
     # A real NetworkManager would detach the container here; the one-shot path
     # never constructs one, so this only runs on the (v3.1) daemon path.
+    return 0;
+}
+
+# Where a container's rootless-helper pid is recorded, so a LATER process can
+# stop it. `internals` is in-memory, so without this a second `stiva` invocation
+# could not reap the helper and it would outlive the container.
+#[must_use]
+fn _cm_rootless_pidfile(root, id) {
+    return _container_cat2(_cm_container_dir(root, id), "/rootless-net.pid");
+}
+
+# Start the rootless network helper for a freshly-spawned container, recording
+# its pid. Best-effort: every failure is a warning, never a start failure.
+fn _cm_start_rootless_net(mgr, cc_in, croot) {
+    var cc: Container = cc_in;
+    if (is_unprivileged() == 0) { return 0; }       # root: the bridge path ran
+    if (cc.pid <= 0) { return 0; }
+    var cfg = cc.config;
+    var ports = vec_new();
+    if (cfg != 0) {
+        var cf: ContainerConfig = cfg;
+        if (cf.ports != 0) { ports = parse_port_mappings(cf.ports); }
+    }
+    var logp = _container_cat2(croot, "/rootless-net.log");
+    var h = start_rootless_network(NETWORK_ROOTLESS_BACKEND_AUTO, cc.pid, ports, logp);
+    if (h == 0) {
+        sakshi_warn("rootless network unavailable; the container has no external connectivity",
+        strlen("rootless network unavailable; the container has no external connectivity"));
+        return 0;
+    }
+    var pf = _container_cat2(croot, "/rootless-net.pid");
+    var sb = str_builder_new();
+    str_builder_add_int(sb, rootless_handle_pid(h));
+    var pstr = str_builder_build(sb);
+    file_write_all(pf, str_data(pstr), str_len(pstr));
+    return 0;
+}
+
+# Stop a container's rootless helper, if one was recorded.
+fn _cm_stop_rootless_net(root, id) {
+    var pf = _cm_rootless_pidfile(root, id);
+    if (file_exists(pf) == 0) { return 0; }
+    var buf = alloc(64);
+    var n = file_read_all(pf, buf, 63);
+    sys_unlink(pf);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    var pid = str_to_int(str_from(buf));
+    if (pid > 0) { sys_kill(pid, 15); }
     return 0;
 }
 

@@ -14,16 +14,16 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.0.16
+## Where stiva is — v3.0.16 (+ unreleased v3.0.17 work)
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
 | | |
 |---|---|
-| CLI | **32 of 35 verbs live**; `checkpoint`, `restore`, `diff` are not wired |
+| CLI | **34 of 35 verbs live**; only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
-| Container | run · run -d · exec · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2075 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
+| Tests | 2132 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
 | Deps | cyrius 6.4.78 · kavach 3.9.3 · cmdit 1.2.2 · majra 2.5.1 · nein 1.6.4 · bote 3.1.4 · agnodrm 1.5.0 |
 
 **Three facts that constrain everything below**, all verified by execution rather than by reading:
@@ -35,90 +35,18 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
   green in *every* unit shape including the 6-module `store.tcyr`, and an assertion that fails on a
   silent wrong value rather than only on a segfault.
 - **Only x86_64 works.** See v3.2.0.
-- **Containers have no secrets and, unprivileged, no network.** See v3.0.17 item 3 and v3.1.0
-  item 1. Both were `TODO(v3.1)` comments in the source and appeared in no roadmap until now.
+- **Containers have no secrets.** `secrets` still serializes as an empty array and
+  `build_sandbox` has no kavach setter to thread one through — v3.1.0 item 1. (Rootless networking
+  and `scan_policy` persistence, the two siblings found in the same sweep, shipped in v3.0.17.)
 
 ---
 
 ## v3.0.17 — finish the single-node runtime
 
-No external landing required for any of this.
+`diff`, rootless networking, `scan_policy` persistence and the three `fleet.cyr` defects have
+landed; see the CHANGELOG. What remains needs a decision or a CI run, not more code.
 
-### 1. `stiva diff` — the last wireable verb
-
-Over an overlay the changed set IS `{croot}/upper`; a flattened rootfs has no upper and must be
-compared against the layer dirs. The two cannot be told apart after the fact — `internals` is
-process-local and never persisted, and `setup_overlay` creates `upper`/`work`/`merged` *even when
-the mount fails* — so `create` drops a `{croot}/.rootfs-flattened` marker for `diff` to read.
-
-**There is no oracle.** `ContainerManager::new` restores containers from `state.json` but leaves
-`internals` empty (`rust-old/src/container.rs:260`) and nothing rehydrates it, so `get_rootfs`
-always returns `ContainerNotFound` and the Rust `diff` verb has never executed in the CLI. This is a
-rewrite; the Docker A/C/D output convention is the reference.
-
-### 2. Rootless container networking — containers currently have NO network unprivileged
-
-`network_manager.cyr:119-122` and `:204-207` log `"bridge creation deferred (requires root)"` /
-`"veth creation deferred (requires root)"` and carry on, so an unprivileged `stiva run` produces a
-container with no connectivity and only a warning. That is stiva's default mode.
-
-`network_rootless.cyr` already ports the detection half — `RootlessNetworkBackend`,
-`parse_port_mappings`, `is_unprivileged`, `stiva_which`, `available_backends`, `select_backend` —
-and only the slirp4netns/pasta **spawn** was left out, for want of a subprocess primitive.
-
-**That primitive now exists**: `_exec_capture2` (`src/runtime.cyr`) forks, execs, captures both
-streams and reports a real wait status. The remaining work is to spawn the selected backend against
-the container's network namespace and wire `parse_port_mappings` through to it.
-
-### 3. Persist `scan_policy`, so `logs --scan` stops being opt-in
-
-`container_config_to_jv` writes `scan_policy` as `json_v_null()` and `_from_jv` reads it back as 0
-(`container.cyr:548, 658`), so the field never survives a save/load. The oracle gates output
-scanning on that persisted value (`rust-old/src/container.rs:1210-1222`); because the port drops it,
-`stiva logs --scan` is an explicit flag instead of a per-container default.
-
-Purely stiva-side: give `ContainerConfig.scan_policy` a real serde round-trip and have `logs`
-consult the record, keeping the flag as an override. (The *sandbox-side* half — actually threading
-the policy into kavach — is v3.1.0 item 1, because it needs a kavach setter.)
-
-### 4. Three inherited `fleet.cyr` defects
-
-All present in `rust-old/src/fleet.rs` too, so correcting them is a deliberate divergence and wants
-an ADR. Pure functions, no I/O, fully CI-testable.
-
-- `plan_rollback` (`src/fleet.cyr:561-587`) calls `select_migration_target` once per running
-  container with **no reservation between calls**, so all N containers on a failed node plan onto
-  the same target.
-- `DeploymentConstraints.preferred_nodes` (`src/fleet.cyr:127`) is never read.
-- `FLEET_NODE_DRAINING` / `FLEET_NODE_CORDONED` (`src/fleet.cyr:59-60`) exist but every filter tests
-  only `== FLEET_NODE_READY`, so there is no drain semantic.
-
-### 5. Delete the stale deferral comments
-
-`cyrius lint` reports 36 untracked deferrals across 12 files. Some describe work that has since
-landed, so the comment is now false and actively misleading. Delete these; do not re-track them.
-
-- `imagelayout.cyr:854` — claims a docker-archive is "reported as unsupported (the docker→OCI read
-  path is a v3.0.2 follow-up)". The read path landed in **v3.0.3** and the function handles it.
-- `container.cyr:478, 947, 1555` — describe the `ContainerManager` as deferred. It landed in §C.
-- `health.cyr:15` — calls `exec_in_container` deferred. It landed in §D.
-- `mcp.cyr:13` — says the handlers "land with the Stiva runtime driver". They landed in §E.
-- `runtime.cyr:9, 1771, 1781` — the DEFERRED block header; only CRIU is still deferred, and the
-  block lists `export_rootfs` / `import_rootfs` / `spawn_container`, all of which shipped. Trim it
-  to CRIU and point at v3.1.0.
-- `fleet.cyr:600`, `storage.cyr:1752`, `image.cyr:277` — already say nothing is deferred; reword so
-  the linter agrees.
-- `intents.cyr:60, 65, 76, 266` — real, but the tracking reference belongs here: see v3.1.0 item 5.
-- `audit.cyr:174, 457` — false positives on ordinary prose ("worst-case", "take low byte only");
-  reword.
-- `main.cyr:202, 205, 1586, 1589` — the `_cli_deferred` handler for the three unwired verbs. It goes
-  away when `diff` (item 1) and CRIU (v3.1.0 item 3) land.
-- `storage.cyr:1363` — a real limitation, not a deferral: see "Known limitations".
-- `network_manager.cyr:51, 101, 121, 206` — real: item 2 above.
-- `container.cyr:547, 548, 657, 658, 1814` and `runtime.cyr:796, 856` — real: item 3 above and
-  v3.1.0 item 1.
-
-### 6. Decide the `accel` feature gate — blocks items 7 and 8
+### 1. Decide the `accel` feature gate — blocks items 2 and 3
 
 **A product decision, not an engineering one, and it needs an answer before §H or §I start.**
 
@@ -135,7 +63,7 @@ The identifier-cap worry is **not** a reason to hesitate: measured at pin 6.4.78
 Options: turn it on and accept the size; keep it off and drop §H/§I; or split the accelerator surface
 into a separate consumer-side module.
 
-### 7. §H — scheduled / cron containers
+### 2. §H — scheduled / cron containers
 
 stiva has no time-triggered container start, and neither does `rust-old`. The hard parts are already
 written in `samay` — named here so nobody re-derives them:
@@ -163,9 +91,9 @@ Two pieces samay does not give you:
   `stiva cron add/ls/rm/check` driven by an external systemd timer — `check` fires what is due and
   exits. The in-process loop is a later increment.
 
-Prerequisite: item 6.
+Prerequisite: item 1.
 
-### 8. §I — accelerator inventory and placement
+### 3. §I — accelerator inventory and placement
 
 `lib/ai-hwaccel.cyr` is a read-only hardware inventory and workload-planning library across 19
 accelerator types and 17 backends. It is **not** a device-plumbing library — see v3.1.0 item 4.
@@ -184,9 +112,9 @@ accelerator types and 17 backends. It is **not** a device-plumbing library — s
   NVSwitch-connected devices". `detect_interconnects` shells out and is masked off under
   `registry_detect_no_exec`.
 
-Prerequisite: item 6.
+Prerequisite: item 1.
 
-### 9. CI guard for the tag/path substitution
+### 4. CI guard for the tag/path substitution
 
 A local `path = "../<dep>"` override **silently wins** over the `tag` pin — this is how kavach 3.8.1
 once arrived unannounced — and `cyrius.lock` records no dep name or version, so it cannot detect the

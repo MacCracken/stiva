@@ -1219,6 +1219,133 @@ fn test_cm_diff_wh_path_detection() {
     return 0;
 }
 
+# ══ scan_policy persistence (roadmap v3.0.17 item 3) ═════
+# The field used to serialize as `null` and read back as 0, so a per-container
+# externalization policy never survived a save/load — which is why `logs --scan`
+# had to be an explicit flag.
+
+fn test_scan_policy_round_trips() {
+    test_group("scan_policy_round_trips");
+    var cfg: ContainerConfig = container_config_default();
+    assert_eq(cfg.scan_policy, 0, "default has no policy");
+
+    var p = ext_policy_default();
+    ExternalizationPolicy_set_enabled(p, 1);
+    ExternalizationPolicy_set_max_artifact_size_bytes(p, 12345);
+    ExternalizationPolicy_set_block_threshold(p, 4);
+    ExternalizationPolicy_set_quarantine_threshold(p, 3);
+    ExternalizationPolicy_set_redact_secrets(p, 0);
+    cfg.scan_policy = p;
+
+    var jv = _container_config_to_jv(cfg);
+    var back: ContainerConfig = _container_config_from_jv(jv);
+    var q = back.scan_policy;
+    assert(q != 0, "the policy survived the round trip");
+    if (q == 0) { return 0; }
+    assert_eq(ExternalizationPolicy_max_artifact_size_bytes(q), 12345, "size limit");
+    assert_eq(ExternalizationPolicy_block_threshold(q), 4, "block threshold");
+    assert_eq(ExternalizationPolicy_quarantine_threshold(q), 3, "quarantine threshold");
+    assert_eq(ExternalizationPolicy_redact_secrets(q), 0, "redact flag");
+    return 0;
+}
+
+fn test_scan_policy_absent_stays_absent() {
+    test_group("scan_policy_absent_stays_absent");
+    # Every state.json written before this change has `"scan_policy": null`, and
+    # must keep meaning "no policy" rather than becoming a zeroed one — a 0
+    # block_threshold would BLOCK every artifact.
+    var cfg: ContainerConfig = container_config_default();
+    var back: ContainerConfig = _container_config_from_jv(_container_config_to_jv(cfg));
+    assert_eq(back.scan_policy, 0, "null round-trips to 0, not a zeroed policy");
+    assert_eq(_ct_scan_policy_from_jv(0), 0, "an absent key is 0");
+    assert_eq(_ct_scan_policy_from_jv(json_v_null()), 0, "an explicit null is 0");
+    assert_eq(_ct_scan_policy_from_jv(json_v_int_new(7)), 0, "a non-object is 0");
+    return 0;
+}
+
+fn test_scan_policy_partial_object_keeps_defaults() {
+    test_group("scan_policy_partial_object_keeps_defaults");
+    # A field the writer omitted must keep kavach's default, not become 0.
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("enabled"), json_v_int_new(1));
+    var p = _ct_scan_policy_from_jv(o);
+    assert(p != 0, "a partial object still yields a policy");
+    if (p == 0) { return 0; }
+    var d = ext_policy_default();
+    assert_eq(ExternalizationPolicy_block_threshold(p),
+    ExternalizationPolicy_block_threshold(d), "omitted block_threshold keeps the default");
+    assert_eq(ExternalizationPolicy_redact_secrets(p),
+    ExternalizationPolicy_redact_secrets(d), "omitted redact_secrets keeps the default");
+    return 0;
+}
+
+# ══ rootless networking (roadmap v3.0.17 item 2) ═════════
+# Before this, network_manager logged "bridge creation deferred (requires root)"
+# and carried on — so an unprivileged `stiva run`, stiva's DEFAULT mode, produced
+# a container with no connectivity and only a warning.
+
+fn test_rootless_bin_path_is_absolute() {
+    test_group("rootless_bin_path_is_absolute");
+    # execve does NOT search PATH, and the child gets an empty environment, so a
+    # bare name would always fail.
+    var p = _rl_bin_path("slirp4netns");
+    assert_eq(load8(p), 47, "the resolved path is absolute");
+    assert_eq(strstr(p, "slirp4netns") >= 0, 1, "and names the binary");
+    return 0;
+}
+
+fn test_rootless_sock_path_is_per_pid() {
+    test_group("rootless_sock_path_is_per_pid");
+    # Two containers must not share slirp4netns' API socket.
+    assert_eq(streq(_rl_sock_path(111), _rl_sock_path(222)), 0, "distinct per pid");
+    assert_eq(strstr(_rl_sock_path(111), "111") >= 0, 1, "names the pid");
+    return 0;
+}
+
+fn test_rootless_spawn_detached_does_not_wait() {
+    test_group("rootless_spawn_detached_does_not_wait");
+    # THE property that makes this different from _exec_capture2: slirp4netns and
+    # pasta run for the container's lifetime, so a primitive that waits would
+    # hang `run` forever.
+    var stub = "/tmp/stiva-t-rl-sleeper";
+    sys_unlink(stub);
+    var body = "#!/bin/sh\nsleep 30\n";
+    file_write_all(stub, body, strlen(body));
+    sys_chmod(stub, 493);
+    var args = vec_new();
+    vec_push(args, stub);
+    var t0 = mono_now_ns();
+    var pid = _rl_spawn_detached(args, "/tmp/stiva-t-rl.log");
+    var elapsed_ms = (mono_now_ns() - t0) / 1000000;
+    assert(pid > 0, "a pid is returned");
+    # It must return immediately, not after the child's 30 s.
+    assert(elapsed_ms < 2000, "returns immediately rather than waiting");
+    if (pid > 0) { sys_kill(pid, 9); }
+    sys_unlink(stub);
+    sys_unlink("/tmp/stiva-t-rl.log");
+    return 0;
+}
+
+fn test_rootless_spawn_reports_failure() {
+    test_group("rootless_spawn_reports_failure");
+    assert_eq(_rl_spawn_detached(vec_new(), 0), 0 - 1, "an empty argv is refused");
+    return 0;
+}
+
+fn test_rootless_handle_accessors() {
+    test_group("rootless_handle_accessors");
+    var h = alloc(24);
+    store64(h, 4242);
+    store64(h + 8, NETWORK_ROOTLESS_BACKEND_PASTA);
+    store64(h + 16, 0);
+    assert_eq(rootless_handle_pid(h), 4242, "pid");
+    assert_eq(rootless_handle_backend(h), NETWORK_ROOTLESS_BACKEND_PASTA, "backend");
+    assert_eq(rootless_handle_socket(h), 0, "pasta needs no api socket");
+    # stop is safe on a handle whose pid is already gone, and on 0.
+    assert_eq(stop_rootless_network(0), 0, "stop(0) is a no-op");
+    return 0;
+}
+
 fn main() {
     alloc_init();
     test_container_log_tail();
@@ -1284,6 +1411,14 @@ fn main() {
     test_cm_diff_unknown_container();
     test_cm_diff_meta_type_parse();
     test_cm_diff_wh_path_detection();
+    test_scan_policy_round_trips();
+    test_scan_policy_absent_stays_absent();
+    test_scan_policy_partial_object_keeps_defaults();
+    test_rootless_bin_path_is_absolute();
+    test_rootless_sock_path_is_per_pid();
+    test_rootless_spawn_detached_does_not_wait();
+    test_rootless_spawn_reports_failure();
+    test_rootless_handle_accessors();
     return assert_summary();
 }
 

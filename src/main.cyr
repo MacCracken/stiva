@@ -595,6 +595,18 @@ fn _cli_file_size(path) {
     return sz;
 }
 
+# The container's persisted externalization policy, or 0. Reads the record
+# rather than the internals map, so it works in a fresh one-shot process.
+#[must_use]
+fn _cli_container_scan_policy(mgr, id) {
+    var c = container_manager_get(mgr, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    if (cc.config == 0) { return 0; }
+    var cfg: ContainerConfig = cc.config;
+    return cfg.scan_policy;
+}
+
 fn _cli_logs(h, root) {
     var vh = cmdit_new("stiva logs");
     var f_tail = cmdit_int(vh, 110, "tail", 0, "Show only the last N lines (0 = all)");
@@ -613,16 +625,26 @@ fn _cli_logs(h, root) {
         stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
         return CMDIT_EXIT_RUN;
     }
+    # The container's OWN policy, now that it persists (roadmap v3.0.17 item 3).
+    # `--scan` is an override, not the only way in: the oracle gates scanning on
+    # the stored `config.scan_policy` (rust-old/src/container.rs:1210-1222), and
+    # the port could not because the field never survived a save/load.
+    var pol = _cli_container_scan_policy(mgr, id);
+    var scan_on = cmdit_get_bool(vh, f_scan);
+    if (pol != 0) { scan_on = 1; }
     if (cmdit_get_bool(vh, f_follow) == 1) {
-        return _cli_logs_follow(mgr, id, cmdit_get_bool(vh, f_scan), cmdit_get_int(vh, f_tail));
+        return _cli_logs_follow(mgr, id, scan_on, cmdit_get_int(vh, f_tail));
     }
     var out = container_manager_log_tail(mgr, id, cmdit_get_int(vh, f_tail));
     if (out == 0) { return CMDIT_EXIT_OK; }
-    if (cmdit_get_bool(vh, f_scan) == 1) {
+    if (scan_on == 1) {
         # Synthesize the ContainerExecResult the gate expects — the oracle
         # does the same at container.rs:1213-1219 (exit_code 0, empty stderr).
-        var sres = scan_output(container_exec_result_new(0, out, "", 0, 0),
-        ext_policy_default());
+        # The container's own policy when it has one, else the default, so
+        # `--scan` on an unconfigured container behaves exactly as before.
+        var eff = pol;
+        if (eff == 0) { eff = ext_policy_default(); }
+        var sres = scan_output(container_exec_result_new(0, out, "", 0, 0), eff);
         if (sres == 0) { return CMDIT_EXIT_RUN; }   # detail printed by scan_output
         out = load64(sres + 8);                     # scanned.stdout, raw offset
     }

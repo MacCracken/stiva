@@ -4351,7 +4351,277 @@ fn select_backend(preference) {
     return 0 - 1;
 }
 
-# ── DEFERRED (land with the async process-runtime port) ──────────
+# ══ rootless network spawn ══  (roadmap v3.0.17 item 2)
+#
+# Until now `network_manager` only warned that the bridge needed root
+# and carried on, so an unprivileged `stiva run` — stiva's DEFAULT mode —
+# produced a container with no connectivity and only a warning. The detection
+# half (available_backends / select_backend / parse_port_mappings) was already
+# ported; only the spawn was missing, for want of a subprocess primitive.
+#
+# WHY NOT `_exec_capture2`. These are DAEMONS: slirp4netns and pasta run for
+# the container lifetime, attached to its network namespace. A capture primitive
+# waits for the child, so using it would hang `run` forever. This needs a
+# detached spawn returning the pid. See docs/development/roadmap.md.
+
+# A running rootless-network helper: pid @0, backend @8, api socket path @16
+# (0 when the backend has none).
+#[must_use]
+fn rootless_handle_pid(h) { return load64(h); }
+#[must_use]
+fn rootless_handle_backend(h) { return load64(h + 8); }
+#[must_use]
+fn rootless_handle_socket(h) { return load64(h + 16); }
+
+# Fork/exec `args` and return the child pid WITHOUT waiting. stdin and stdout go
+# to /dev/null; stderr appends to `log_path` so a failure to start is
+# diagnosable after the fact — the oracle pipes stderr and then never reads it.
+#
+# The child is deliberately not reaped: it outlives this one-shot process and is
+# reparented to init, exactly like a detached container. `stop_rootless_network`
+# signals it by pid.
+fn _rl_spawn_detached(args, log_path) {
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        var devnull = sys_open("/dev/null", 2, 0);          # O_RDWR
+        if (devnull >= 0) {
+            sys_dup2(devnull, 0);
+            sys_dup2(devnull, 1);
+            sys_close(devnull);
+        }
+        if (log_path != 0) {
+            var lf = sys_open(log_path, 1089, 384);          # O_WRONLY|O_CREAT|O_APPEND, 0600
+            if (lf >= 0) { sys_dup2(lf, 2); sys_close(lf); }
+        }
+        # CVE-2024-21626: never hand inherited host fds to a child that outlives
+        # this process.
+        var fd = 3;
+        while (fd < 1024) { sys_close(fd); fd = fd + 1; }
+        sys_execve(vec_get(args, 0), argv, envp);
+        sys_exit(127);
+    }
+    return pid;
+}
+
+# "<n>" as a fresh cstr.
+#[must_use]
+fn _rl_int_cstr(v) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, v);
+    return str_cstr(str_builder_build(sb));
+}
+
+# The API socket path slirp4netns is told to create for `pid`.
+#[must_use]
+fn _rl_sock_path(pid) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/stiva-slirp-");
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, ".sock");
+    return str_cstr(str_builder_build(sb));
+}
+
+# Start slirp4netns against `pid`'s network namespace. Returns a handle, or 0.
+fn _rl_start_slirp4netns(bin, pid, port_mappings, log_path) {
+    var sock = _rl_sock_path(pid);
+    sys_unlink(sock);                       # a stale socket makes slirp4netns refuse
+    var args = vec_new();
+    vec_push(args, bin);
+    vec_push(args, "--configure");
+    vec_push(args, "--mtu=65520");
+    vec_push(args, "--disable-host-loopback");
+    vec_push(args, "--api-socket");
+    vec_push(args, sock);
+    vec_push(args, _rl_int_cstr(pid));
+    vec_push(args, "tap0");
+    var child = _rl_spawn_detached(args, log_path);
+    if (child < 0) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, "failed to start slirp4netns");
+        return 0;
+    }
+    var h = alloc(24);
+    store64(h, child);
+    store64(h + 8, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS);
+    store64(h + 16, sock);
+    # Port forwards go over the API socket, which only exists once slirp4netns
+    # has initialised — hence the retry loop rather than the oracle's fixed
+    # 200 ms sleep, which is a race on a loaded machine either way.
+    if (port_mappings != 0) {
+        if (vec_len(port_mappings) > 0) { _rl_add_slirp_forwards(sock, port_mappings); }
+    }
+    return h;
+}
+
+# Start pasta against `pid`'s network namespace. Returns a handle, or 0.
+#
+# pasta takes port mappings as ARGV flags, so it needs no API socket at all —
+# which is why it is preferred when mappings are present.
+fn _rl_start_pasta(bin, pid, port_mappings, log_path) {
+    var args = vec_new();
+    vec_push(args, bin);
+    vec_push(args, "--ns-ifname");
+    vec_push(args, "eth0");
+    if (port_mappings != 0) {
+        var i = 0;
+        while (i < vec_len(port_mappings)) {
+            var m = vec_get(port_mappings, i);
+            var flag = "-t";
+            if (streq(PortMapping_protocol(m), "udp") == 1) { flag = "-u"; }
+            vec_push(args, flag);
+            var sb = str_builder_new();
+            str_builder_add_int(sb, PortMapping_host_port(m));
+            str_builder_add_cstr(sb, ":");
+            str_builder_add_int(sb, PortMapping_container_port(m));
+            vec_push(args, str_cstr(str_builder_build(sb)));
+            i = i + 1;
+        }
+    }
+    vec_push(args, _rl_int_cstr(pid));
+    var child = _rl_spawn_detached(args, log_path);
+    if (child < 0) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, "failed to start pasta");
+        return 0;
+    }
+    var h = alloc(24);
+    store64(h, child);
+    store64(h + 8, NETWORK_ROOTLESS_BACKEND_PASTA);
+    store64(h + 16, 0);
+    return h;
+}
+
+# Ask slirp4netns to forward each mapping, over its JSON-RPC UNIX socket.
+# Best-effort: a failure costs port forwarding, never the container's network.
+fn _rl_add_slirp_forwards(sock, port_mappings) {
+    var i = 0;
+    while (i < vec_len(port_mappings)) {
+        var m = vec_get(port_mappings, i);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"execute\":\"add_hostfwd\",\"arguments\":{\"proto\":\"");
+        str_builder_add_cstr(sb, PortMapping_protocol(m));
+        str_builder_add_cstr(sb, "\",\"host_addr\":\"0.0.0.0\",\"host_port\":");
+        str_builder_add_int(sb, PortMapping_host_port(m));
+        str_builder_add_cstr(sb, ",\"guest_port\":");
+        str_builder_add_int(sb, PortMapping_container_port(m));
+        str_builder_add_cstr(sb, "}}");
+        var msg = str_builder_build(sb);
+        _rl_unix_send(sock, str_data(msg), str_len(msg));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Connect to the AF_UNIX socket at `path`, write `len` bytes, close. Returns 0 on
+# success, -1 otherwise. Retries briefly: the socket appears only once
+# slirp4netns has initialised, and the oracle's fixed 200 ms sleep is a race on
+# a loaded machine.
+#
+# sockaddr_un: sa_family @0 (u16, AF_UNIX = 1), sun_path @2, 108 bytes.
+fn _rl_unix_send(path, data, len) {
+    var plen = strlen(path);
+    if (plen > 107) { return 0 - 1; }
+    var attempt = 0;
+    while (attempt < 50) {
+        var fd = sys_socket(1, 1, 0);                    # AF_UNIX, SOCK_STREAM
+        if (fd >= 0) {
+            var sa = alloc(110);
+            var z = 0;
+            while (z < 110) { store8(sa + z, 0); z = z + 1; }
+            store16(sa, 1);                              # AF_UNIX
+            memcpy(sa + 2, path, plen);
+            if (sys_connect(fd, sa, 110) == 0) {
+                sys_write(fd, data, len);
+                sys_close(fd);
+                return 0;
+            }
+            sys_close(fd);
+        }
+        # 10 ms between attempts, 50 attempts -> a 500 ms ceiling. Through
+        # `sleep_ms`, NOT a raw nanosleep: syscall 35 is nanosleep on Linux and
+        # something else entirely elsewhere — the drift class filed upstream.
+        sleep_ms(10);
+        attempt = attempt + 1;
+    }
+    return 0 - 1;
+}
+
+# Start the rootless network helper for `pid`, choosing a backend.
+#
+# DIVERGENCE: when port mappings are present and `preference` is Auto, pasta is
+# chosen over slirp4netns. pasta takes mappings as argv, so they are in effect
+# the moment it starts; slirp4netns needs a JSON-RPC round trip against a socket
+# that does not exist yet, which is inherently racy. The oracle has no such
+# preference and its slirp path sleeps 200 ms and hopes.
+#
+# Returns a handle, or 0 (detail printed). 0 is not fatal to the caller: a
+# container without port forwarding is still a container.
+fn start_rootless_network(preference, pid, port_mappings, log_path) {
+    var want = preference;
+    if (want == NETWORK_ROOTLESS_BACKEND_AUTO) {
+        if (port_mappings != 0) {
+            if (vec_len(port_mappings) > 0) {
+                if (stiva_which("pasta") == 1) { want = NETWORK_ROOTLESS_BACKEND_PASTA; }
+            }
+        }
+    }
+    var backend = select_backend(want);
+    if (backend == NETWORK_ROOTLESS_BACKEND_AUTO) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK,
+        "no rootless network backend available (install slirp4netns or pasta)");
+        return 0;
+    }
+    if (backend == NETWORK_ROOTLESS_BACKEND_PASTA) {
+        return _rl_start_pasta(_rl_bin_path("pasta"), pid, port_mappings, log_path);
+    }
+    return _rl_start_slirp4netns(_rl_bin_path("slirp4netns"), pid, port_mappings, log_path);
+}
+
+# Absolute path for a helper binary. execve does NOT search PATH, and the child
+# is exec'd with an empty environment, so a bare name would always fail.
+#[must_use]
+fn _rl_bin_path(name) {
+    var a = _rl_cat2("/usr/bin/", name);
+    if (file_exists(a) == 1) { return a; }
+    var b = _rl_cat2("/usr/local/bin/", name);
+    if (file_exists(b) == 1) { return b; }
+    var c = _rl_cat2("/bin/", name);
+    if (file_exists(c) == 1) { return c; }
+    return a;
+}
+
+#[must_use]
+fn _rl_cat2(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_cstr(str_builder_build(sb));
+}
+
+# Stop a rootless network helper: SIGTERM the pid and remove its socket.
+# Returns 0. Best-effort — the helper also exits on its own when the container's
+# netns goes away.
+fn stop_rootless_network(h) {
+    if (h == 0) { return 0; }
+    var pid = rootless_handle_pid(h);
+    if (pid > 0) { sys_kill(pid, 15); }
+    var sock = rootless_handle_socket(h);
+    if (sock != 0) { sys_unlink(sock); }
+    return 0;
+}
+
+# ── NOT PORTED ──
 # rust-old/src/network/rootless.rs also defines the async, OS-process-
 # coupled surface — these wrap tokio::process::Child, UNIX-socket JSON
 # RPC (serde_json), std::env::temp_dir and filesystem cleanup, none of
@@ -15200,6 +15470,58 @@ fn _ct_map_to_jv(m) {
     return o;
 }
 
+# ── scan_policy round-trip (roadmap v3.0.17 item 3) ────────
+#
+# The field used to serialize as `null` and read back as 0, so a per-container
+# externalization policy never survived a save/load. That is why `stiva logs
+# --scan` is an explicit flag: the oracle gates scanning on the PERSISTED value
+# (rust-old/src/container.rs:1210-1222) and the port had nothing to read.
+#
+# kavach's `ExternalizationPolicy` is five scalars, so this is a plain object —
+# no handle smuggling, and a policy written by one stiva build is readable by
+# the next.
+#
+# Absent or null → 0, meaning "no per-container policy", which is what every
+# existing state.json on disk already says. The upgrade is silent and lossless
+# in both directions.
+#[must_use]
+fn _ct_scan_policy_to_jv(p) {
+    if (p == 0) { return json_v_null(); }
+    var o = json_v_obj_new();
+    json_v_obj_set(o, str_from("enabled"), json_v_int_new(ExternalizationPolicy_enabled(p)));
+    json_v_obj_set(o, str_from("max_artifact_size_bytes"),
+    json_v_int_new(ExternalizationPolicy_max_artifact_size_bytes(p)));
+    json_v_obj_set(o, str_from("block_threshold"),
+    json_v_int_new(ExternalizationPolicy_block_threshold(p)));
+    json_v_obj_set(o, str_from("quarantine_threshold"),
+    json_v_int_new(ExternalizationPolicy_quarantine_threshold(p)));
+    json_v_obj_set(o, str_from("redact_secrets"),
+    json_v_int_new(ExternalizationPolicy_redact_secrets(p)));
+    return o;
+}
+
+# Rebuild a policy from its JSON object, or 0 when absent/null/not an object.
+# Starts from `ext_policy_default()` so a field the writer omitted keeps kavach's
+# default rather than becoming 0 — a 0 `block_threshold` would silently BLOCK
+# every artifact, the opposite of a missing field's intent.
+#[must_use]
+fn _ct_scan_policy_from_jv(v) {
+    if (v == 0) { return 0; }
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var p = ext_policy_default();
+    var e = json_v_obj_get(v, "enabled");
+    if (e != 0) { ExternalizationPolicy_set_enabled(p, json_v_int(e)); }
+    var m = json_v_obj_get(v, "max_artifact_size_bytes");
+    if (m != 0) { ExternalizationPolicy_set_max_artifact_size_bytes(p, json_v_int(m)); }
+    var b = json_v_obj_get(v, "block_threshold");
+    if (b != 0) { ExternalizationPolicy_set_block_threshold(p, json_v_int(b)); }
+    var q = json_v_obj_get(v, "quarantine_threshold");
+    if (q != 0) { ExternalizationPolicy_set_quarantine_threshold(p, json_v_int(q)); }
+    var r = json_v_obj_get(v, "redact_secrets");
+    if (r != 0) { ExternalizationPolicy_set_redact_secrets(p, json_v_int(r)); }
+    return p;
+}
+
 # ContainerConfig* → JSON object.
 fn _container_config_to_jv(config) {
     var c: ContainerConfig = config;
@@ -15219,7 +15541,7 @@ fn _container_config_to_jv(config) {
     json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
     json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
     json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.1.0 item 1
-    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # roadmap v3.0.17 item 3
+    json_v_obj_set(o, str_from("scan_policy"), _ct_scan_policy_to_jv(c.scan_policy));
     json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
     json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
     json_v_obj_set(o, str_from("min_isolation_score"), _ct_int_or_null(c.min_isolation_score));
@@ -15329,7 +15651,7 @@ fn _container_config_from_jv(v) {
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
     c.secrets = 0;                                       # roadmap v3.1.0 item 1
-    c.scan_policy = 0;                                   # roadmap v3.0.17 item 3
+    c.scan_policy = _ct_scan_policy_from_jv(json_v_obj_get(v, "scan_policy"));
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
     c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
@@ -16173,6 +16495,16 @@ fn container_manager_start(mgr, id) {
         # later process has only (pid, start_ticks) to decide whether the
         # container is still alive.
         cc.start_ticks = _cm_proc_start_ticks(cc.pid);
+        # Rootless networking (roadmap v3.0.17 item 2). This is the ONLY point
+        # with a live pid — slirp4netns and pasta attach to a running process's
+        # network namespace, so it cannot happen at create.
+        #
+        # Unprivileged only: with root the bridge/veth path already ran. The
+        # helper's own failure is logged, never fatal — a container without port
+        # forwarding is still a container, and refusing to start one because a
+        # helper is missing would be a worse default than the warning this
+        # replaces.
+        _cm_start_rootless_net(mgr, cc, _cm_container_dir(mm.root, id));
         container_manager_publish_event(mgr, _cm_event_json("started", id, "detach", "true"));
         _cm_persist(mgr);
         return STIVA_ERR_OK;
@@ -16232,9 +16564,62 @@ fn _cm_log_path(mgr, real_id) {
 # this reachable.
 fn _cm_disconnect_network(mgr, id) {
     var mm: ContainerManager = mgr;
+    # Tear down the rootless helper first — it is per-container and this is the
+    # one place that knows the container is going away. Keyed on the id so it
+    # works cross-process, where `internals` is empty.
+    _cm_stop_rootless_net(mm.root, id);
     if (mm.network_manager == 0) { return 0; }
     # A real NetworkManager would detach the container here; the one-shot path
     # never constructs one, so this only runs on the (v3.1) daemon path.
+    return 0;
+}
+
+# Where a container's rootless-helper pid is recorded, so a LATER process can
+# stop it. `internals` is in-memory, so without this a second `stiva` invocation
+# could not reap the helper and it would outlive the container.
+#[must_use]
+fn _cm_rootless_pidfile(root, id) {
+    return _container_cat2(_cm_container_dir(root, id), "/rootless-net.pid");
+}
+
+# Start the rootless network helper for a freshly-spawned container, recording
+# its pid. Best-effort: every failure is a warning, never a start failure.
+fn _cm_start_rootless_net(mgr, cc_in, croot) {
+    var cc: Container = cc_in;
+    if (is_unprivileged() == 0) { return 0; }       # root: the bridge path ran
+    if (cc.pid <= 0) { return 0; }
+    var cfg = cc.config;
+    var ports = vec_new();
+    if (cfg != 0) {
+        var cf: ContainerConfig = cfg;
+        if (cf.ports != 0) { ports = parse_port_mappings(cf.ports); }
+    }
+    var logp = _container_cat2(croot, "/rootless-net.log");
+    var h = start_rootless_network(NETWORK_ROOTLESS_BACKEND_AUTO, cc.pid, ports, logp);
+    if (h == 0) {
+        sakshi_warn("rootless network unavailable; the container has no external connectivity",
+        strlen("rootless network unavailable; the container has no external connectivity"));
+        return 0;
+    }
+    var pf = _container_cat2(croot, "/rootless-net.pid");
+    var sb = str_builder_new();
+    str_builder_add_int(sb, rootless_handle_pid(h));
+    var pstr = str_builder_build(sb);
+    file_write_all(pf, str_data(pstr), str_len(pstr));
+    return 0;
+}
+
+# Stop a container's rootless helper, if one was recorded.
+fn _cm_stop_rootless_net(root, id) {
+    var pf = _cm_rootless_pidfile(root, id);
+    if (file_exists(pf) == 0) { return 0; }
+    var buf = alloc(64);
+    var n = file_read_all(pf, buf, 63);
+    sys_unlink(pf);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    var pid = str_to_int(str_from(buf));
+    if (pid > 0) { sys_kill(pid, 15); }
     return 0;
 }
 
@@ -16472,6 +16857,323 @@ fn container_manager_restart(mgr, id) {
 # dir from internals, or the reconstructed {root}/containers/{id}/rootfs
 # fallback when internals is empty (cross-process) — matching today's _cli_export.
 #[must_use]
+# ══ diff (roadmap v3.0.17 item 1) ════════════════════════
+#
+# THERE IS NO ORACLE FOR THIS. `ContainerManager::new` restores containers from
+# state.json but leaves `internals` empty (rust-old/src/container.rs:260) and
+# nothing rehydrates it, so `get_rootfs` always returns ContainerNotFound and the
+# Rust `diff` verb has never executed in the CLI. Its walk is also wrong twice
+# over: it emits only C and D (never A), and it looks for `.wh.` files in the
+# overlay upper — but overlayfs whiteouts are character devices 0:0, not `.wh.`
+# files, so that branch could never fire. This is a rewrite.
+#
+# TWO LAYOUTS, and they cannot be told apart after the fact — `internals` is
+# process-local and `setup_overlay` creates upper/work/merged even when the mount
+# FAILS, so their presence proves nothing. `create` therefore drops a
+# `{croot}/.rootfs-flattened` marker and this reads it.
+#
+#   overlay   → the changed set IS {croot}/upper; walk it.
+#   flattened → no upper. Compare {croot}/rootfs against the image's layer dirs.
+#
+# Output is the Docker convention, one entry per line: `A <path>` added,
+# `C <path>` changed, `D <path>` deleted.
+
+# One diff entry: a status byte ('A'/'C'/'D') and a container-absolute path.
+var _CM_DIFF_ADD = 65;
+var _CM_DIFF_CHG = 67;
+var _CM_DIFF_DEL = 68;
+
+#[must_use]
+fn _cm_diff_entry(status, path) {
+    var e = alloc(16);
+    store64(e, status);
+    store64(e + 8, path);
+    return e;
+}
+
+#[must_use]
+fn cm_diff_status(e) { return load64(e); }
+#[must_use]
+fn cm_diff_path(e) { return load64(e + 8); }
+
+# Walk `dir`, recording every entry into `out` as path → "<type>:<size>:<mode>".
+# Paths are container-absolute ("/etc/passwd"). Directories are recorded too, so
+# a directory that appears or disappears is reported.
+#
+# The fingerprint deliberately excludes mtime: unpacking a layer sets it from the
+# tar, and a container that merely READ a file would otherwise show as changed.
+# Size + mode + type is what "changed" means for a filesystem diff.
+fn _cm_diff_scan(dir, prefix, out) {
+    var fd = sys_open(dir, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    if (fd < 0) { return 0; }
+    var buf = alloc(4096);
+    var sb = alloc(144);
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                # prepare_layers' own bookkeeping, never image content.
+                if (skip == 0) { if (streq(nm, ".unpacked") == 1) { skip = 1; } }
+                if (skip == 0) {
+                    var named = _stor_dup(nm);
+                    var child = _container_cat2(_container_cat2(dir, "/"), named);
+                    var path = _container_cat2(_container_cat2(prefix, "/"), named);
+                    if (sys_lstat(child, sb) == 0) {
+                        var st = load64(sb + 24);
+                        var typ = st & 61440;
+                        var fb = str_builder_new();
+                        str_builder_add_int(fb, typ);
+                        str_builder_add_cstr(fb, ":");
+                        str_builder_add_int(fb, load64(sb + 48));      # size
+                        str_builder_add_cstr(fb, ":");
+                        str_builder_add_int(fb, st & 4095);            # mode
+                        map_set(out, path, str_cstr(str_builder_build(fb)));
+                        if (typ == 16384) { _cm_diff_scan(child, path, out); }
+                    }
+                }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+    return 0;
+}
+
+# The merged metadata view of `layer_dirs`, bottom-to-top, with whiteouts
+# applied — i.e. what the rootfs looked like BEFORE the container ran.
+#
+# Rebuilt here rather than shared with `flatten_layers` because that one copies
+# bytes; this needs only names and metadata, and running it would cost a second
+# full copy of the image per `diff`.
+fn _cm_diff_lower_view(layer_dirs) {
+    var view = map_new();
+    var n = vec_len(layer_dirs);
+    var i = 0;
+    while (i < n) {
+        var ld = vec_get(layer_dirs, i);
+        # Whiteouts first, exactly as the merge applies them: a marker in THIS
+        # layer removes what the layers below contributed.
+        _cm_diff_apply_wh(ld, "", view);
+        var one = map_new();
+        _cm_diff_scan(ld, "", one);
+        var ks = map_keys(one);
+        var k = 0;
+        while (k < vec_len(ks)) {
+            var key = vec_get(ks, k);
+            # The markers themselves are metadata, never content.
+            if (_cm_diff_is_wh_path(key) == 0) { map_set(view, key, map_get(one, key)); }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return view;
+}
+
+# 1 when any component of `path` is a `.wh.` marker.
+#[must_use]
+fn _cm_diff_is_wh_path(path) {
+    var n = strlen(path);
+    var i = 0;
+    while (i < n) {
+        if (load8(path + i) == 47) {
+            if (i + 4 < n) { if (memeq(path + i + 1, ".wh.", 4) == 1) { return 1; } }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Remove from `view` everything this layer's whiteouts delete.
+fn _cm_diff_apply_wh(dir, prefix, view) {
+    var fd = sys_open(dir, 196608, 0);
+    if (fd < 0) { return 0; }
+    var buf = alloc(4096);
+    var sb = alloc(144);
+    var subs = vec_new();
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                if (skip == 0) {
+                    var named = _stor_dup(nm);
+                    if (memeq(named, ".wh.", 4) == 1) {
+                        if (streq(named, ".wh..wh..opq") == 1) {
+                            _cm_diff_drop_subtree(view, prefix);
+                        } else {
+                            _cm_diff_drop_subtree(view,
+                            _container_cat2(_container_cat2(prefix, "/"), named + 4));
+                        }
+                    } else {
+                        var child = _container_cat2(_container_cat2(dir, "/"), named);
+                        if (sys_lstat(child, sb) == 0) {
+                            if ((load64(sb + 24) & 61440) == 16384) {
+                                vec_push(subs, named);
+                            }
+                        }
+                    }
+                }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+    var s = 0;
+    while (s < vec_len(subs)) {
+        var sn = vec_get(subs, s);
+        _cm_diff_apply_wh(_container_cat2(_container_cat2(dir, "/"), sn),
+        _container_cat2(_container_cat2(prefix, "/"), sn), view);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# Drop `path` and everything under it from `view`. A whiteout on a directory
+# removes the whole subtree, not just the directory entry.
+fn _cm_diff_drop_subtree(view, path) {
+    var plen = strlen(path);
+    var ks = map_keys(view);
+    var i = 0;
+    while (i < vec_len(ks)) {
+        var k = vec_get(ks, i);
+        var drop = 0;
+        if (streq(k, path) == 1) { drop = 1; }
+        elif (strlen(k) > plen) {
+            if (memeq(k, path, plen) == 1) {
+                if (load8(k + plen) == 47) { drop = 1; }   # a real child, not a prefix match
+            }
+        }
+        if (drop == 1) { map_set(view, k, 0); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Diff a container's filesystem against the image it was created from. Returns a
+# vec of diff entries (`_cm_diff_entry`), or 0 when the container is unknown.
+# An empty vec means no changes.
+fn container_manager_diff(mgr, id) {
+    var mm: ContainerManager = mgr;
+    var c = container_state_find(mm.containers, id);
+    if (c == 0) {
+        stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
+        return 0;
+    }
+    var cc: Container = c;
+    var croot = _cm_container_dir(mm.root, cc.id);
+    var out = vec_new();
+
+    # OVERLAY: the upper layer IS the change set, so no comparison is needed —
+    # but the marker decides, not the presence of `upper`, because setup_overlay
+    # creates it even when the mount failed.
+    if (file_exists(_cm_flatten_marker(croot)) == 0) {
+        var upper = _container_cat2(croot, "/upper");
+        if (file_exists(upper) == 0) { return out; }
+        var up = map_new();
+        _cm_diff_scan(upper, "", up);
+        # Which of these are ADDS rather than CHANGES needs the lower view.
+        var lower_o = _cm_diff_lower_view(_cm_diff_layer_dirs(mm, cc));
+        var ks = map_keys(up);
+        var i = 0;
+        while (i < vec_len(ks)) {
+            var k = vec_get(ks, i);
+            var meta = map_get(up, k);
+            if (meta != 0) {
+                # An overlayfs whiteout is a character device 0:0 — NOT a `.wh.`
+                # file. The oracle checked for `.wh.` here, which could never
+                # match on a real overlay. S_IFCHR = 8192; a 0:0 rdev is the
+                # marker, and st_size on a chardev is 0 so the fingerprint's
+                # size field is a safe proxy only for the type check.
+                if (_cm_diff_meta_type(meta) == 8192) {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_DEL, k));
+                } elif (map_get(lower_o, k) == 0) {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_ADD, k));
+                } else {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, k));
+                }
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    # FLATTENED: no upper exists, so the rootfs must be compared against what the
+    # image's layers merge to.
+    var lower = _cm_diff_lower_view(_cm_diff_layer_dirs(mm, cc));
+    var upper2 = map_new();
+    _cm_diff_scan(_container_cat2(croot, "/rootfs"), "", upper2);
+
+    var uk = map_keys(upper2);
+    var a = 0;
+    while (a < vec_len(uk)) {
+        var key = vec_get(uk, a);
+        var now = map_get(upper2, key);
+        if (now != 0) {
+            var was = map_get(lower, key);
+            if (was == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_ADD, key)); }
+            elif (streq(was, now) == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, key)); }
+        }
+        a = a + 1;
+    }
+    var lk = map_keys(lower);
+    var d = 0;
+    while (d < vec_len(lk)) {
+        var lkey = vec_get(lk, d);
+        if (map_get(lower, lkey) != 0) {
+            if (map_get(upper2, lkey) == 0) {
+                vec_push(out, _cm_diff_entry(_CM_DIFF_DEL, lkey));
+            }
+        }
+        d = d + 1;
+    }
+    return out;
+}
+
+# The S_IFMT field of a `_cm_diff_scan` fingerprint ("<type>:<size>:<mode>").
+#[must_use]
+fn _cm_diff_meta_type(meta) {
+    var i = 0;
+    var v = 0;
+    while (load8(meta + i) != 0) {
+        var ch = load8(meta + i);
+        if (ch == 58) { return v; }                 # ':'
+        v = v * 10 + (ch - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+# The unpacked layer dirs for the container's image, or an empty vec when the
+# image is gone (`rmi` while a container still references it). An empty lower
+# view degrades the diff to "everything is an add", which is the honest answer
+# when the baseline cannot be established.
+fn _cm_diff_layer_dirs(mm_in, cc_in) {
+    var mm: ContainerManager = mm_in;
+    var cc: Container = cc_in;
+    var img = image_store_find(mm.image_store, cc.image_id);
+    if (img == 0) { return vec_new(); }
+    var dirs = prepare_layers(mm.image_store, _img_layers(img));
+    if (dirs == 0) { return vec_new(); }
+    return dirs;
+}
+
 fn container_manager_get_rootfs(mgr, id) {
     var mm: ContainerManager = mgr;
     # Resolve id-or-name → the real id (the dir + internals key use the id).
@@ -18071,23 +18773,71 @@ fn free_slots(node) {
 # ── candidate filtering ───────────────────────
 
 # Build a vec of node pointers that are Ready, match constraints, and have
+# 1 when `node` is named in the constraints' `preferred_nodes`.
+#
+# DIVERGENCE: the oracle declares the field and never reads it
+# (rust-old/src/fleet.rs:43), so a caller expressing a placement preference got
+# silence. It is honoured as a PREFERENCE, not a filter: a preferred node that is
+# full or fails the hard constraints must not block the deployment, it just loses
+# its priority. Treating it as a filter would turn a hint into an outage.
+#[must_use]
+fn _fleet_is_preferred(node, constraints) {
+    var c: DeploymentConstraints = constraints;
+    if (c.preferred_nodes == 0) { return 0; }
+    var n: FleetNode = node;
+    var i = 0;
+    while (i < vec_len(c.preferred_nodes)) {
+        if (streq(vec_get(c.preferred_nodes, i), n.id) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when a node in `status` may receive NEW work.
+#
+# DIVERGENCE: the oracle tests `== Ready` at every filter site
+# (rust-old/src/fleet.rs), so `Draining` and `Cordoned` are defined and then
+# behave EXACTLY like `Ready` nowhere and like `NotReady` nowhere — they have no
+# effect at all, which makes cordoning a node a silent no-op. Both now mean "no
+# new work", which is what the names say and what an operator cordoning a node
+# before maintenance expects.
+#
+# They are deliberately NOT the same as NotReady: a draining node is still
+# healthy and still running its containers, so `check_fleet_health` must not
+# sweep it and a rollback must not migrate off it.
+#[must_use]
+fn _fleet_node_schedulable(status) {
+    if (status == FLEET_NODE_READY) { return 1; }
+    return 0;
+}
+
 # free slots — the shared candidate set for schedule / select_migration_target.
 #[must_use]
 fn _fleet_candidates(nodes, count, constraints) {
-    var out = vec_new();
+    # Two tiers, concatenated: preferred nodes first, everything else after. Every
+    # strategy consumes this list in order, so the preference is honoured without
+    # any of them having to know about it — and without it ever excluding a node.
+    var pref = vec_new();
+    var rest = vec_new();
     var i = 0;
     while (i < count) {
         var node = vec_get(nodes, i);
         var n: FleetNode = node;
-        if (n.status == FLEET_NODE_READY) {
+        if (_fleet_node_schedulable(n.status) == 1) {
             if (node_matches_constraints(node, constraints) == 1) {
                 if (free_slots(node) > 0) {
-                    vec_push(out, node);
+                    if (_fleet_is_preferred(node, constraints) == 1) { vec_push(pref, node); }
+                    else { vec_push(rest, node); }
                 }
             }
         }
         i = i + 1;
     }
+    var out = vec_new();
+    var p = 0;
+    while (p < vec_len(pref)) { vec_push(out, vec_get(pref, p)); p = p + 1; }
+    var r = 0;
+    while (r < vec_len(rest)) { vec_push(out, vec_get(rest, r)); r = r + 1; }
     return out;
 }
 
@@ -18318,16 +19068,20 @@ fn schedule(deployment, nodes, count) {
 fn select_migration_target(nodes, count, constraints) {
     var best = 0;
     var best_slots = 0 - 1;
+    var best_pref = 0;
     var i = 0;
     while (i < count) {
         var node = vec_get(nodes, i);
         var n: FleetNode = node;
-        if (n.status == FLEET_NODE_READY) {
+        if (_fleet_node_schedulable(n.status) == 1) {
             if (node_matches_constraints(node, constraints) == 1) {
                 var fs = free_slots(node);
-                if (fs > 0) {
-                    # max_by_key: ties resolve to the last max in Rust's
-                    # iterator (later element wins on equal key). Use `>=`.
+                var isp = _fleet_is_preferred(node, constraints);
+                # A preferred node outranks ANY non-preferred one; within a tier,
+                # max_by_key semantics — ties resolve to the last max, as Rust's
+                # iterator does, hence `>=`.
+                if (isp > best_pref) { best_pref = isp; best_slots = 0 - 1; }
+                if (fs > 0 && isp == best_pref) {
                     if (fs >= best_slots) {
                         best = node;
                         best_slots = fs;
@@ -18393,14 +19147,12 @@ fn plan_rollback(nodes, count, constraints) {
             if (cap.running_containers > 0) {
                 var k = 0;
                 while (k < cap.running_containers) {
-                    var target = select_migration_target(nodes, count, constraints);
+                    var target = _fleet_select_and_reserve(nodes, count, constraints, fn0.id);
                     if (target != 0) {
-                        if (streq(target, fn0.id) == 0) {
-                            var pair = alloc(16);
-                            store64(pair, fn0.id);
-                            store64(pair + 8, target);
-                            vec_push(migrations, pair);
-                        }
+                        var pair = alloc(16);
+                        store64(pair, fn0.id);
+                        store64(pair + 8, target);
+                        vec_push(migrations, pair);
                     }
                     k = k + 1;
                 }
@@ -18409,6 +19161,52 @@ fn plan_rollback(nodes, count, constraints) {
         i = i + 1;
     }
     return migrations;
+}
+
+# Pick a migration target and RESERVE a slot on it, so the next call in the same
+# plan sees the reduced capacity.
+#
+# DIVERGENCE from the oracle (rust-old/src/fleet.rs:336-345), which calls
+# `select_migration_target` once per running container with no reservation
+# between calls — so `select_migration_target` returns the node with the most
+# free slots every time and **all N containers on a failed node plan onto the
+# same target**, regardless of whether it can hold them. A rollback plan that
+# cannot be executed is worse than none.
+#
+# `skip_id` excludes the failing node itself. The reservation mutates
+# `running_containers` on the candidate, which is what `free_slots` reads; the
+# node vec is the caller's planning copy, so this is a projection, not a
+# commitment against live state.
+# RAW OFFSETS, not typed struct locals — deliberate, per the cycc struct-id
+# 20/21 workaround this tree carries elsewhere. A `var n: FleetNode = node;`
+# here SEGFAULTS: the bug is per-function-context, so the identical access is
+# fine in `select_migration_target` two functions up and fatal in this one.
+# Verified by bisection — the two tests that reach this function crashed, the
+# two that do not passed.
+#   FleetNode:         id@0 address@8 labels@16 capacity@24 status@32 last_seen@40
+#   FleetNodeCapacity: memory_mb@0 cpus@8 max_containers@16 running_containers@24
+fn _fleet_select_and_reserve(nodes, count, constraints, skip_id) {
+    var best = 0;
+    var best_slots = 0 - 1;
+    var i = 0;
+    while (i < count) {
+        var node = vec_get(nodes, i);
+        if (_fleet_node_schedulable(load64(node + 32)) == 1) {
+            if (streq(load64(node), skip_id) == 0) {
+                if (node_matches_constraints(node, constraints) == 1) {
+                    var fs = free_slots(node);
+                    if (fs > 0) {
+                        if (fs >= best_slots) { best_slots = fs; best = node; }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if (best == 0) { return 0; }
+    var bcap = load64(best + 24);
+    store64(bcap + 24, load64(bcap + 24) + 1);
+    return load64(best);
 }
 
 # ── DEFERRED (already-ported; no deferral needed) ───────────────
@@ -19015,6 +19813,15 @@ fn stiva_signal(s, id, signal) {
     audit_entry_with_metadata(e, str_cstr(json_v_build(md)));
     _stiva_emit_audit(s, e);
     return r;
+}
+
+# Diff a container's filesystem against its image (roadmap v3.0.17 item 1).
+# Returns a vec of diff entries, or 0. Not audited — a read-only inspection, the
+# same treatment ps/inspect/stats get.
+#[must_use]
+fn stiva_diff(s, id) {
+    var ss: Stiva = s;
+    return container_manager_diff(ss.containers, id);
 }
 
 # Exec a command inside a running container (rust-old: Stiva::exec, lib.rs).

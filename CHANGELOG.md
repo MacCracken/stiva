@@ -5,6 +5,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — `stiva diff`, so all 35 verbs are live (roadmap v3.0.17 item 1)
+`A` added, `C` changed, `D` deleted, `(no changes)` when clean — and it handles both rootfs layouts
+off the `{croot}/.rootfs-flattened` marker, since they cannot be told apart after the fact
+(`internals` is process-local, and `setup_overlay` creates `upper`/`work`/`merged` even when the
+mount fails).
+
+**There is no oracle for this.** `ContainerManager::new` leaves `internals` empty
+(`rust-old/src/container.rs:260`) and nothing rehydrates it, so `get_rootfs` always returns
+`ContainerNotFound` and the Rust `diff` verb has never executed in the CLI. Its walk is wrong twice
+over anyway: it emits only `C`/`D`, never `A`, and it looks for `.wh.` files in the overlay upper —
+but overlayfs whiteouts are **character devices 0:0**, so that branch could never fire. This checks
+`S_IFCHR`. A rewrite, not a port.
+
+The change fingerprint is type + size + mode, deliberately **excluding mtime**: unpacking a layer
+sets mtime from the tar, so a container that merely *read* a file would otherwise show as changed.
+
+### Added — rootless container networking (roadmap v3.0.17 item 2)
+Before this, `network_manager` warned that the bridge needed root and carried on — so an
+unprivileged `stiva run`, **stiva's default mode**, produced a container with no connectivity and
+only a log line. The detection half was already ported; only the spawn was missing.
+
+**Not over `_exec_capture2`.** slirp4netns and pasta are *daemons* — they run for the container's
+lifetime attached to its network namespace — so a capture primitive, which waits for the child,
+would hang `run` forever. `_rl_spawn_detached` forks, execs and returns the pid without reaping;
+the helper is reparented to init exactly like a detached container, and its pid is recorded in
+`{croot}/rootless-net.pid` so a *later* stiva process can stop it (`internals` is in-memory, so
+without the file nothing could reap it cross-process).
+
+Wired at the **detached start** branch, the only point with a live pid. Two divergences: absolute
+binary paths are resolved before exec (execve does not search `PATH`, and the child gets an empty
+environment, so a bare name always fails), and when port mappings are present pasta is preferred —
+it takes mappings as argv, whereas slirp4netns needs a JSON-RPC round trip against a socket that
+does not exist yet. The oracle has no such preference and its slirp path sleeps 200 ms and hopes;
+this retries the connect on a 500 ms ceiling. A missing helper is a warning, never a start failure.
+
+### Fixed — `scan_policy` now persists (roadmap v3.0.17 item 3)
+It serialized as `null` and read back as 0, so a per-container externalization policy never survived
+a save/load — which is why `logs --scan` had to be an explicit flag. `logs` now consults the record
+and treats the flag as an override. A partial object keeps kavach's defaults rather than zeroing
+them: a 0 `block_threshold` would silently BLOCK every artifact, the opposite of a missing field's
+intent. Absent/null still means "no policy", so every existing `state.json` upgrades silently.
+
+### Fixed — three inherited `fleet.cyr` defects (roadmap v3.0.17 item 4)
+All three are present in `rust-old/src/fleet.rs`, so correcting them is a deliberate divergence.
+
+- **`plan_rollback` planned every container onto one node.** It called `select_migration_target`
+  once per running container with no reservation between calls, so all N containers on a failed node
+  targeted whichever node had the most free slots — a plan that cannot be executed.
+  `_fleet_select_and_reserve` now decrements the chosen node's capacity as it goes.
+- **`Draining` and `Cordoned` did nothing.** Every filter tested `== Ready`, so the two states were
+  defined and then behaved like neither — cordoning a node before maintenance was a silent no-op.
+  They now mean "no new work", and deliberately remain distinct from `NotReady`: a draining node is
+  still healthy, so health checks must not sweep it and a rollback must not migrate off it.
+- **`preferred_nodes` was never read.** Now honoured as a **preference**, not a filter — a preferred
+  node that is full or fails the hard constraints loses its priority rather than blocking the
+  deployment. Treating it as a filter would turn a hint into an outage.
+
+> **The cycc struct-id 20/21 miscompile bit brand-new code here.** `_fleet_select_and_reserve`
+> segfaulted on an ordinary `var n: FleetNode = node;` while the *identical* access in
+> `select_migration_target`, two functions above it, is fine — the bug is per-function-context.
+> Found by bisection (the two tests reaching the function crashed; the two that did not passed) and
+> fixed with the documented raw-offset workaround. Worth recording that stdout buffering made the
+> first diagnosis wrong: the test-group header flushed but its assertions did not, so print position
+> lied about where execution died.
+
+### Tests — 2075 → 2132
 ### Changed — the roadmap is a plan again, and every deferral in the source is tracked
 The roadmap had accreted to 1051 lines with completed work interleaved between open items, so the
 next step had to be *derived* by grepping for `- [ ]` rather than read. Rewritten to 400 lines:

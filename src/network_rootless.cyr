@@ -372,7 +372,277 @@ fn select_backend(preference) {
     return 0 - 1;
 }
 
-# ── DEFERRED (land with the async process-runtime port) ──────────
+# ══ rootless network spawn ══  (roadmap v3.0.17 item 2)
+#
+# Until now `network_manager` only warned that the bridge needed root
+# and carried on, so an unprivileged `stiva run` — stiva's DEFAULT mode —
+# produced a container with no connectivity and only a warning. The detection
+# half (available_backends / select_backend / parse_port_mappings) was already
+# ported; only the spawn was missing, for want of a subprocess primitive.
+#
+# WHY NOT `_exec_capture2`. These are DAEMONS: slirp4netns and pasta run for
+# the container lifetime, attached to its network namespace. A capture primitive
+# waits for the child, so using it would hang `run` forever. This needs a
+# detached spawn returning the pid. See docs/development/roadmap.md.
+
+# A running rootless-network helper: pid @0, backend @8, api socket path @16
+# (0 when the backend has none).
+#[must_use]
+fn rootless_handle_pid(h) { return load64(h); }
+#[must_use]
+fn rootless_handle_backend(h) { return load64(h + 8); }
+#[must_use]
+fn rootless_handle_socket(h) { return load64(h + 16); }
+
+# Fork/exec `args` and return the child pid WITHOUT waiting. stdin and stdout go
+# to /dev/null; stderr appends to `log_path` so a failure to start is
+# diagnosable after the fact — the oracle pipes stderr and then never reads it.
+#
+# The child is deliberately not reaped: it outlives this one-shot process and is
+# reparented to init, exactly like a detached container. `stop_rootless_network`
+# signals it by pid.
+fn _rl_spawn_detached(args, log_path) {
+    var argc = vec_len(args);
+    if (argc < 1) { return 0 - 1; }
+    var argv = alloc((argc + 1) * 8);
+    var i = 0;
+    while (i < argc) {
+        store64(argv + i * 8, vec_get(args, i));
+        i = i + 1;
+    }
+    store64(argv + argc * 8, 0);
+    var envp = alloc(8);
+    store64(envp, 0);
+
+    var pid = sys_fork();
+    if (pid < 0) { return 0 - 1; }
+    if (pid == 0) {
+        var devnull = sys_open("/dev/null", 2, 0);          # O_RDWR
+        if (devnull >= 0) {
+            sys_dup2(devnull, 0);
+            sys_dup2(devnull, 1);
+            sys_close(devnull);
+        }
+        if (log_path != 0) {
+            var lf = sys_open(log_path, 1089, 384);          # O_WRONLY|O_CREAT|O_APPEND, 0600
+            if (lf >= 0) { sys_dup2(lf, 2); sys_close(lf); }
+        }
+        # CVE-2024-21626: never hand inherited host fds to a child that outlives
+        # this process.
+        var fd = 3;
+        while (fd < 1024) { sys_close(fd); fd = fd + 1; }
+        sys_execve(vec_get(args, 0), argv, envp);
+        sys_exit(127);
+    }
+    return pid;
+}
+
+# "<n>" as a fresh cstr.
+#[must_use]
+fn _rl_int_cstr(v) {
+    var sb = str_builder_new();
+    str_builder_add_int(sb, v);
+    return str_cstr(str_builder_build(sb));
+}
+
+# The API socket path slirp4netns is told to create for `pid`.
+#[must_use]
+fn _rl_sock_path(pid) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/stiva-slirp-");
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, ".sock");
+    return str_cstr(str_builder_build(sb));
+}
+
+# Start slirp4netns against `pid`'s network namespace. Returns a handle, or 0.
+fn _rl_start_slirp4netns(bin, pid, port_mappings, log_path) {
+    var sock = _rl_sock_path(pid);
+    sys_unlink(sock);                       # a stale socket makes slirp4netns refuse
+    var args = vec_new();
+    vec_push(args, bin);
+    vec_push(args, "--configure");
+    vec_push(args, "--mtu=65520");
+    vec_push(args, "--disable-host-loopback");
+    vec_push(args, "--api-socket");
+    vec_push(args, sock);
+    vec_push(args, _rl_int_cstr(pid));
+    vec_push(args, "tap0");
+    var child = _rl_spawn_detached(args, log_path);
+    if (child < 0) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, "failed to start slirp4netns");
+        return 0;
+    }
+    var h = alloc(24);
+    store64(h, child);
+    store64(h + 8, NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS);
+    store64(h + 16, sock);
+    # Port forwards go over the API socket, which only exists once slirp4netns
+    # has initialised — hence the retry loop rather than the oracle's fixed
+    # 200 ms sleep, which is a race on a loaded machine either way.
+    if (port_mappings != 0) {
+        if (vec_len(port_mappings) > 0) { _rl_add_slirp_forwards(sock, port_mappings); }
+    }
+    return h;
+}
+
+# Start pasta against `pid`'s network namespace. Returns a handle, or 0.
+#
+# pasta takes port mappings as ARGV flags, so it needs no API socket at all —
+# which is why it is preferred when mappings are present.
+fn _rl_start_pasta(bin, pid, port_mappings, log_path) {
+    var args = vec_new();
+    vec_push(args, bin);
+    vec_push(args, "--ns-ifname");
+    vec_push(args, "eth0");
+    if (port_mappings != 0) {
+        var i = 0;
+        while (i < vec_len(port_mappings)) {
+            var m = vec_get(port_mappings, i);
+            var flag = "-t";
+            if (streq(PortMapping_protocol(m), "udp") == 1) { flag = "-u"; }
+            vec_push(args, flag);
+            var sb = str_builder_new();
+            str_builder_add_int(sb, PortMapping_host_port(m));
+            str_builder_add_cstr(sb, ":");
+            str_builder_add_int(sb, PortMapping_container_port(m));
+            vec_push(args, str_cstr(str_builder_build(sb)));
+            i = i + 1;
+        }
+    }
+    vec_push(args, _rl_int_cstr(pid));
+    var child = _rl_spawn_detached(args, log_path);
+    if (child < 0) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK, "failed to start pasta");
+        return 0;
+    }
+    var h = alloc(24);
+    store64(h, child);
+    store64(h + 8, NETWORK_ROOTLESS_BACKEND_PASTA);
+    store64(h + 16, 0);
+    return h;
+}
+
+# Ask slirp4netns to forward each mapping, over its JSON-RPC UNIX socket.
+# Best-effort: a failure costs port forwarding, never the container's network.
+fn _rl_add_slirp_forwards(sock, port_mappings) {
+    var i = 0;
+    while (i < vec_len(port_mappings)) {
+        var m = vec_get(port_mappings, i);
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"execute\":\"add_hostfwd\",\"arguments\":{\"proto\":\"");
+        str_builder_add_cstr(sb, PortMapping_protocol(m));
+        str_builder_add_cstr(sb, "\",\"host_addr\":\"0.0.0.0\",\"host_port\":");
+        str_builder_add_int(sb, PortMapping_host_port(m));
+        str_builder_add_cstr(sb, ",\"guest_port\":");
+        str_builder_add_int(sb, PortMapping_container_port(m));
+        str_builder_add_cstr(sb, "}}");
+        var msg = str_builder_build(sb);
+        _rl_unix_send(sock, str_data(msg), str_len(msg));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Connect to the AF_UNIX socket at `path`, write `len` bytes, close. Returns 0 on
+# success, -1 otherwise. Retries briefly: the socket appears only once
+# slirp4netns has initialised, and the oracle's fixed 200 ms sleep is a race on
+# a loaded machine.
+#
+# sockaddr_un: sa_family @0 (u16, AF_UNIX = 1), sun_path @2, 108 bytes.
+fn _rl_unix_send(path, data, len) {
+    var plen = strlen(path);
+    if (plen > 107) { return 0 - 1; }
+    var attempt = 0;
+    while (attempt < 50) {
+        var fd = sys_socket(1, 1, 0);                    # AF_UNIX, SOCK_STREAM
+        if (fd >= 0) {
+            var sa = alloc(110);
+            var z = 0;
+            while (z < 110) { store8(sa + z, 0); z = z + 1; }
+            store16(sa, 1);                              # AF_UNIX
+            memcpy(sa + 2, path, plen);
+            if (sys_connect(fd, sa, 110) == 0) {
+                sys_write(fd, data, len);
+                sys_close(fd);
+                return 0;
+            }
+            sys_close(fd);
+        }
+        # 10 ms between attempts, 50 attempts -> a 500 ms ceiling. Through
+        # `sleep_ms`, NOT a raw nanosleep: syscall 35 is nanosleep on Linux and
+        # something else entirely elsewhere — the drift class filed upstream.
+        sleep_ms(10);
+        attempt = attempt + 1;
+    }
+    return 0 - 1;
+}
+
+# Start the rootless network helper for `pid`, choosing a backend.
+#
+# DIVERGENCE: when port mappings are present and `preference` is Auto, pasta is
+# chosen over slirp4netns. pasta takes mappings as argv, so they are in effect
+# the moment it starts; slirp4netns needs a JSON-RPC round trip against a socket
+# that does not exist yet, which is inherently racy. The oracle has no such
+# preference and its slirp path sleeps 200 ms and hopes.
+#
+# Returns a handle, or 0 (detail printed). 0 is not fatal to the caller: a
+# container without port forwarding is still a container.
+fn start_rootless_network(preference, pid, port_mappings, log_path) {
+    var want = preference;
+    if (want == NETWORK_ROOTLESS_BACKEND_AUTO) {
+        if (port_mappings != 0) {
+            if (vec_len(port_mappings) > 0) {
+                if (stiva_which("pasta") == 1) { want = NETWORK_ROOTLESS_BACKEND_PASTA; }
+            }
+        }
+    }
+    var backend = select_backend(want);
+    if (backend == NETWORK_ROOTLESS_BACKEND_AUTO) {
+        stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK,
+        "no rootless network backend available (install slirp4netns or pasta)");
+        return 0;
+    }
+    if (backend == NETWORK_ROOTLESS_BACKEND_PASTA) {
+        return _rl_start_pasta(_rl_bin_path("pasta"), pid, port_mappings, log_path);
+    }
+    return _rl_start_slirp4netns(_rl_bin_path("slirp4netns"), pid, port_mappings, log_path);
+}
+
+# Absolute path for a helper binary. execve does NOT search PATH, and the child
+# is exec'd with an empty environment, so a bare name would always fail.
+#[must_use]
+fn _rl_bin_path(name) {
+    var a = _rl_cat2("/usr/bin/", name);
+    if (file_exists(a) == 1) { return a; }
+    var b = _rl_cat2("/usr/local/bin/", name);
+    if (file_exists(b) == 1) { return b; }
+    var c = _rl_cat2("/bin/", name);
+    if (file_exists(c) == 1) { return c; }
+    return a;
+}
+
+#[must_use]
+fn _rl_cat2(a, b) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, a);
+    str_builder_add_cstr(sb, b);
+    return str_cstr(str_builder_build(sb));
+}
+
+# Stop a rootless network helper: SIGTERM the pid and remove its socket.
+# Returns 0. Best-effort — the helper also exits on its own when the container's
+# netns goes away.
+fn stop_rootless_network(h) {
+    if (h == 0) { return 0; }
+    var pid = rootless_handle_pid(h);
+    if (pid > 0) { sys_kill(pid, 15); }
+    var sock = rootless_handle_socket(h);
+    if (sock != 0) { sys_unlink(sock); }
+    return 0;
+}
+
+# ── NOT PORTED ──
 # rust-old/src/network/rootless.rs also defines the async, OS-process-
 # coupled surface — these wrap tokio::process::Child, UNIX-socket JSON
 # RPC (serde_json), std::env::temp_dir and filesystem cleanup, none of
