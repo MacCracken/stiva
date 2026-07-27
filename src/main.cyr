@@ -199,10 +199,10 @@ fn _cli_convert(h) {
 # (registry pull/push, container manager, exec/CRIU) — NOT async and NOT v3.1.
 # The small genuinely-blocked residue (detached `run -d`, interactive
 # `exec -it`) is v3.1. See docs/development/roadmap.md.
-fn _cli_deferred(verb_name) {
+fn _cli_not_wired(verb_name) {
     _cli_puts("stiva ");
     _cli_puts(verb_name);
-    _cli_puts(": not yet wired in the Cyrius port.\n");
+    _cli_puts(": not wired yet. See docs/development/roadmap.md\n");
     _cli_puts("  Part of completing the single-node runtime (v3.0.x — registry pull/push,\n");
     _cli_puts("  container lifecycle, exec/CRIU); see docs/development/roadmap.md.\n");
     return CMDIT_EXIT_RUN;
@@ -238,7 +238,7 @@ fn _cli_find_image(images, ref) {
 # the command in a kavach sandbox (one-shot). Mirrors rust-old container.rs
 # create()+start(): image lookup → prepare_layers → setup_overlay (with the
 # container_root/rootfs fallback when the overlay mount is unavailable) →
-# generate_spec → exec_container. Detached (-d) is deferred to v3.1.
+# generate_spec → exec_container. Detached (-d) landed in v3.0.14.
 fn _cli_run(h, root) {
     var vh = cmdit_new("stiva run");
     var f_name = cmdit_str(vh, 0, "name", 0, "Container name");
@@ -507,7 +507,7 @@ fn _cli_import(h, root) {
 # QUARANTINE/BLOCK verdict refuses to print at all. The oracle gates this on
 # a PERSISTED `container.config.scan_policy` (rust-old/src/container.rs:1210-
 # 1222), but the Cyrius port zeroes that field on save/load (container.cyr
-# TODO(v3.1)), so it is an explicit opt-in flag here rather than a silent
+# roadmap v3.0.17 item 3), so it is an explicit opt-in flag here rather than a silent
 # record-driven default. Off by default — scanning changes what `logs` prints,
 # and that must never happen behind the operator's back.
 # Poll interval while following, and how long the log must stay QUIET before
@@ -1583,10 +1583,10 @@ fn main() {
     if (v == V_BUILD) { return _cli_build(h, _cli_root(h, f_root)); }
     if (v == V_EXEC) { return _cli_exec(h, _cli_root(h, f_root)); }
     # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
-    return _cli_deferred(_cli_verb_name(v));
+    return _cli_not_wired(_cli_verb_name(v));
 }
 
-# Verb id → display name (for the deferred message; registration order).
+# Verb id → display name (for the not-yet-wired message; registration order).
 #[must_use]
 fn _cli_verb_name(v) {
     if (v == V_PULL) { return "pull"; }

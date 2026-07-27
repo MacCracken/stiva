@@ -274,7 +274,7 @@ fn layer_new(digest, size_bytes, media_type) {
 # A locally stored OCI image (rust-old: struct Image). `layers` is a vec
 # of Layer*; `created_at` is an epoch-seconds i64 (chrono::DateTime in Rust).
 # `manifest_digest` (A2, appended at offset 40) is the "sha256:{hex}" digest of
-# this image's OCI manifest blob (0 = not yet built). It anchors the image in
+# this image's OCI manifest blob (0 before the store assembles one). It anchors it in
 # the on-disk `index.json` descriptor list and is a GC root alongside `id` (the
 # config digest) and the layer digests. `image_new` leaves it 0; the OCI store
 # layer (imagelayout.cyr) sets it on import / reconstructs it on load.

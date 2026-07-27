@@ -597,4 +597,4 @@ fn plan_rollback(nodes, count, constraints) {
 # is already ported (src/container.cyr: struct ContainerConfig +
 # container_config_default). Callers build the config via
 # container_config_default() and pass the pointer to fleet_deployment_new —
-# no fleet-side type is deferred.
+# fleet defines no config type of its own.

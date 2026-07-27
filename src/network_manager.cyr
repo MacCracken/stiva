@@ -48,7 +48,8 @@ fn _network_manager_default_outbound_iface() {
 
 # ── ManagedNetwork (rust-old: struct ManagedNetwork) ─────────────
 # pool          : ptr to an IpPool (network_pool.cyr)
-# bridge_created : 1 if the bridge interface was created, 0 if deferred (root)
+# bridge_created : 1 if the bridge interface was created, 0 if skipped (needs
+#                  root; rootless path is roadmap v3.0.17 item 2)
 struct ManagedNetwork {
     pool;
     bridge_created;
@@ -98,7 +99,8 @@ fn network_manager_with_outbound(outbound_iface) {
 # Create a named network with the given subnet (rust-old: create_network).
 # Returns STIVA_ERR_OK on success, or STIVA_ERR_NETWORK if the name already
 # exists or the subnet is invalid. The bridge interface is created best-effort
-# (deferred with a warning when not root) — the pool is always registered.
+# (skipped with a warning when not root — roadmap v3.0.17 item 2); the pool is
+# always registered.
 fn network_manager_create_network(m, name, subnet) {
     var mgr: NetworkManager = m;
 
@@ -118,7 +120,8 @@ fn network_manager_create_network(m, name, subnet) {
         sakshi_info("bridge network created", strlen("bridge network created"));
         bridge_created = 1;
     } else {
-        sakshi_warn("bridge creation deferred (requires root):", strlen("bridge creation deferred (requires root):"));
+        sakshi_warn("bridge creation skipped, requires root (roadmap v3.0.17 item 2):",
+        strlen("bridge creation skipped, requires root (roadmap v3.0.17 item 2):"));
     }
 
     map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
@@ -203,7 +206,8 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
     var container_veth = container_veth_name();      # always "eth0"
     if (host_veth == 0) {
         # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
-        sakshi_warn("veth creation deferred (requires root):", strlen("veth creation deferred (requires root):"));
+        sakshi_warn("veth creation skipped, requires root (roadmap v3.0.17 item 2):",
+        strlen("veth creation skipped, requires root (roadmap v3.0.17 item 2):"));
         host_veth = host_veth_name(container_id);
     }
 

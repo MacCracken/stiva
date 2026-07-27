@@ -851,7 +851,7 @@ fn _il_load_oci_layout(store, layout) {
 # save). Extracts to a scratch dir under the store root, validates the oci-layout
 # marker, then merges the layout. Returns the number of images loaded, or -1 on
 # failure. A docker-archive (manifest.json, no oci-layout) is detected and
-# reported as unsupported (the docker→OCI read path is a v3.0.2 follow-up).
+# converted through `_il_load_docker_archive` (landed v3.0.3).
 # Gzip one uncompressed docker-archive layer tar (`dir/lname`) and store it as an
 # OCI gzip layer blob, appending its descriptor + Layer to the given vecs. Returns
 # the compressed length (> 0) on success, 0 on any read/gzip/store failure.

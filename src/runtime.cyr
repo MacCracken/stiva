@@ -2,11 +2,10 @@
 # Ported from rust-old/src/runtime.rs.
 #
 # This module bridges container config to kavach for process isolation. The
-# HEAVY paths — kavach sandbox build/exec/spawn, tokio async I/O, nsenter/criu
-# subprocess execution, tar/gzip codecs, cgroups fs writes, and the
-# ExternalizationGate — are DEFERRED (see the block at the bottom): they need
-# the async runtime, tar/gzip/zstd codecs, and process-spawning surface the
-# ported base does not yet expose, matching the storage/registry precedent.
+# The heavy paths — kavach sandbox build/exec/spawn, nsenter subprocess
+# execution, tar/gzip codecs, cgroup fs writes, the ExternalizationGate — are all
+# ported. Only CRIU remains; see the block at the bottom and
+# docs/development/roadmap.md v3.1.0 item 3.
 #
 # What is ported here (self-contained + already-ported deps only):
 #   * The runtime spec value types: Namespace enum, SpecMount, RuntimeSpec,
@@ -793,7 +792,8 @@ fn unpause_container(pid) {
 # in MB (bytes/1048576, truncating) and CPU in tenths-of-a-core ((shares*10)/1024)
 # rather than the oracle's f64 fractional cores. SandboxConfig has no secrets /
 # externalization setter in the dist, so scan_policy + secret injection are
-# TODO(v3.1). sandbox_create/exec return 0 (no error code) so their failure
+# roadmap v3.1.0 item 1. sandbox_create/exec return 0 (no error code) so their
+# failure
 # messages carry no "<e>"; sandbox_transition returns a code → kavach_err_name.
 fn build_sandbox(spec) {
     var sp: RuntimeSpec = spec;
@@ -853,7 +853,8 @@ fn build_sandbox(spec) {
     # for the SandboxConfig.rootfs field; before that stiva could not express it
     # through the API at all (roadmap §K).
     if (sp.rootfs != 0) { config_rootfs(cfg, sp.rootfs); }
-    # TODO(v3.1): scan_policy + secret injection — no SandboxConfig setter in dist.
+    # scan_policy + secret injection need a SandboxConfig setter kavach does not
+    # expose — roadmap v3.1.0 item 1.
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {
@@ -1766,20 +1767,20 @@ fn exec_in_container(root, pid, command, env, workdir) {
     return container_exec_result_new(rt_last_exec_exit(), out_buf, errtext, dur_ms, 0);
 }
 
-# ── DEFERRED (land with the async runtime + codecs + kavach exec) ─────────
-# rust-old/src/runtime.rs additionally defines the execution/orchestration
-# surface below. Each needs infrastructure the ported base does not yet expose
-# — the tokio async runtime, subprocess spawning (nsenter/criu), tar/gzip/zstd
-# codecs, and the deeper kavach sandbox exec/spawn + ExternalizationGate
-# handles — so they are ported alongside those landings.
+# ── NOT PORTED: CRIU (roadmap v3.1.0 item 3) ──
+# The only rust-old/src/runtime.rs surface still missing. Everything else that
+# used to live in this block — spawn_container/DaemonHandle, export_rootfs,
+# import_rootfs, exec_in_container — has landed.
 #
-# spawn_container(spec) -> DaemonHandle                    [async, kavach spawn]
-# struct DaemonHandle { process: SpawnedProcess, _sandbox: Sandbox }
-#     .pid() / .wait() / .kill(grace_ms) / .try_wait()     [async, kavach]
-# export_rootfs(rootfs, output)                        [async, tar builder]
-# import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
-#     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
-# checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
-# pre_dump_container(pid, dump_dir, parent_dir)        [async criu pre-dump]
-# restore_lazy(dump_dir, rootfs, page_server_addr) -> pid  [async criu lazy restore]
-# restore_container(dump_dir, rootfs) -> pid           [async criu restore]
+#   checkpoint_container(pid, dump_dir, leave_running)      criu dump
+#   pre_dump_container(pid, dump_dir, parent_dir)           criu pre-dump
+#   restore_container(dump_dir, rootfs) -> pid              criu restore
+#   restore_lazy(dump_dir, rootfs, page_server_addr) -> pid criu lazy restore
+#
+# The port is straightforward — the oracle shells out to the `criu` binary and
+# `criu_available()` is already ported here. What blocks it is one layer down:
+# every stiva container runs in the HOST pid namespace, because `NS_PID` is set
+# by no caller and `build_sandbox` never forwards the spec's namespace list (so
+# `RUNTIME_NS_PID` above is decorative). `criu restore` would have to re-claim
+# the exact host PIDs via /proc/sys/kernel/ns_last_pid — racy by construction.
+# kavach must honour the namespace list first. See the roadmap.

@@ -475,8 +475,8 @@ fn _container_cat2(a, b) {
 }
 
 # ── Container state persistence (rust-old: state.json round-trip) ─────
-# The stateful ContainerManager (RwLock/PubSub) is deferred, but its DISK
-# format is not async: state.json is a JSON array of Container records
+# The ContainerManager is in this file (§C); its DISK format is independent of
+# it: state.json is a JSON array of Container records
 # (serde_json Vec<Container>). These fns implement the SYNCHRONOUS save/load
 # used by the single-shot CLI, via the bayan JSON codec (same pattern as
 # image.cyr's images.json index).
@@ -544,8 +544,8 @@ fn _container_config_to_jv(config) {
     json_v_obj_set(o, str_from("detach"), json_v_bool_new(c.detach));
     json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
     json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
-    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # TODO(v3.1): kavach SecretRef handles
-    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # TODO(v3.1)
+    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.1.0 item 1
+    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # roadmap v3.0.17 item 3
     json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
     json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
     json_v_obj_set(o, str_from("min_isolation_score"), _ct_int_or_null(c.min_isolation_score));
@@ -654,8 +654,8 @@ fn _container_config_from_jv(v) {
     c.detach = _ct_jv_bool(v, "detach");
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
-    c.secrets = 0;                                       # TODO(v3.1)
-    c.scan_policy = 0;                                   # TODO(v3.1)
+    c.secrets = 0;                                       # roadmap v3.1.0 item 1
+    c.scan_policy = 0;                                   # roadmap v3.0.17 item 3
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
     c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
@@ -943,8 +943,8 @@ fn parse_bundle(bundle_path) {
 # The stateful lifecycle manager. The oracle's every method is `async` over
 # tokio::sync::RwLock; here the single-node run-to-completion model collapses
 # `Arc<RwLock<HashMap>>` to a plain heap vec + map and blocking calls, so this
-# is a synchronous port, not an async one (§C). Only the genuinely external-
-# or coroutine-blocked methods stay deferred (see the note at the bottom).
+# is a synchronous port, not an async one (§C). What is still missing is listed
+# in docs/development/roadmap.md, not here.
 
 # ── ContainerInternals (rust-old: struct ContainerInternals) ──────
 # Runtime-only side data for a container, keyed by id in the manager's
@@ -1552,9 +1552,10 @@ fn _cm_log_path(mgr, real_id) {
 }
 
 # ── network (best-effort; rust-old connect/disconnect_network) ────
-# In v3.0.x only the deferred daemon-start path would connect, so the live
-# one-shot path never builds a NetworkManager and disconnect is a no-op. Ported
-# for parity + the future daemon path; connect stays effectively unreachable.
+# Only a daemon-start path would connect, and stiva has none: the one-shot path
+# never builds a NetworkManager, so disconnect is a no-op. Ported for parity and
+# for the rootless-networking work (roadmap v3.0.17 item 2), which is what makes
+# this reachable.
 fn _cm_disconnect_network(mgr, id) {
     var mm: ContainerManager = mgr;
     if (mm.network_manager == 0) { return 0; }
@@ -1811,7 +1812,8 @@ fn container_manager_get_rootfs(mgr, id) {
     return _container_cat2(_cm_container_dir(mm.root, cc.id), "/rootfs");
 }
 
-# Whole-file logs (rust-old: logs, container.rs:1191). scan_policy is not yet
+# Whole-file logs (rust-old: logs, container.rs:1191). scan_policy does not
+# persist yet — roadmap v3.0.17 item 3.
 # persisted (loads as 0), so this returns the content unscanned — `stiva logs
 # --scan` drives scan_output explicitly. Returns the content cstr, or 0 if the
 # log file does not exist.

@@ -171,7 +171,8 @@ fn audit_entry_with_metadata(entry, metadata) {
 }
 
 # ── JSON escaping (RFC-8259 minimal) ───────────────────
-# Worst-case each byte becomes \uXXXX (6 bytes); +1 for NUL. Emits a heap
+# Upper bound: each byte can become \uXXXX (6 bytes); +1 for NUL. #skip-lint
+# Emits a heap
 # cstr with quotes/backslashes/control chars escaped. Used for the string
 # fields (container_id, image_ref, user, result_msg) which are
 # caller-controllable.
@@ -454,7 +455,7 @@ fn _audit_json_field(line, key) {
             elif (d == 98) { store8(out + pos, 8); }
             elif (d == 102) { store8(out + pos, 12); }
             elif (d == 117) {
-                # \uXXXX — take low byte only (control chars we emit are ASCII)
+                # \uXXXX — low byte only; the control chars we emit are ASCII. #skip-lint
                 var h = _audit_hex4(p + 1);
                 store8(out + pos, h & 255);
                 p = p + 4;

@@ -5,6 +5,75 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — the roadmap is a plan again, and every deferral in the source is tracked
+The roadmap had accreted to 1051 lines with completed work interleaved between open items, so the
+next step had to be *derived* by grepping for `- [ ]` rather than read. Rewritten to 400 lines:
+completed work **deleted** (the CHANGELOG and git carry it), everything remaining assigned to a
+release, and every prerequisite in another repo written down as its own work item with a named
+symbol instead of as a reason to wait.
+
+**Releases are now explicit** — v3.0.17 (finish the single-node runtime), v3.1.0 (secrets,
+interactivity, mobility), v3.2.0 (aarch64 then AGNOS), v3.3.0 (orchestration surface), v3.4.0
+(Windows) — and the catch-all "Deferred" section is gone; its contents were assigned to v3.3.0 and
+v3.4.0.
+
+**`cyrius lint` reported 36 untracked deferrals across 12 source files. They are now zero**, and
+the sweep found two real gaps that had never appeared in any roadmap:
+
+- **Secrets are not wired at all.** `container_config_to_jv` writes `secrets` as an empty array and
+  `scan_policy` as null; `_from_jv` zeroes both; `build_sandbox` carries "no SandboxConfig setter in
+  dist". `CLAUDE.md` lists kavach's CredentialProxy/SecretRef and ExternalizationGate among the
+  features stiva must keep wired — neither is. Now v3.1.0 item 1, with the kavach-side setter as
+  step 1.
+- **Unprivileged containers have no network.** `network_manager` logs "bridge creation deferred
+  (requires root)" and carries on, so stiva's *default* mode produces a container with no
+  connectivity and only a warning. `network_rootless.cyr` already ports the detection half; only the
+  slirp4netns/pasta spawn was missing, for want of a subprocess primitive — and `_exec_capture2`
+  (shipped in 3.0.15) is that primitive. Now v3.0.17 item 2.
+
+Also corrected in the source rather than re-tracked: `imagelayout.cyr` claimed a docker-archive was
+"reported as unsupported (a v3.0.2 follow-up)" — the read path landed in **v3.0.3** and the function
+handles it. `container.cyr` described the `ContainerManager` as deferred (landed §C), `health.cyr`
+called `exec_in_container` deferred (landed §D), `mcp.cyr` said its handlers were still to come
+(landed §E), `main.cyr` said detached `run -d` was deferred to v3.1 (landed v3.0.14), and
+`runtime.cyr`'s DEFERRED block still listed `spawn_container`, `export_rootfs` and `import_rootfs`,
+all of which shipped. Those comments were false, not pending.
+
+### Fixed — OCI whiteouts were extracted literally, so deleted files stayed visible
+A layer deletes a path from the layers below it by shipping a marker rather than the file:
+`.wh.<name>` removes `<name>`, and `.wh..wh..opq` hides everything a directory inherited. Both were
+written out as ordinary files, so a file deleted in an upper layer **stayed in the container** and
+the marker appeared next to it. Every image with a `rm` in its history was affected.
+
+Inherited: `rust-old/src/storage.rs` has no whiteout handling either, and overlayfs understands
+only its own char-dev-0:0 convention — never the tar one — so the privileged path was equally wrong.
+
+**The roadmap's proposed fix does not work, and the entry is corrected.** It called for translating
+markers at unpack "where it lands for both paths at once". It cannot: the file a marker deletes
+lives in a *different* layer, and unpack sees one layer's tar in isolation. The only unpack-time
+representation that works is an overlayfs char-dev-0:0 whiteout, and creating one needs `CAP_MKNOD`
+— which the unprivileged path, the one that always runs, does not have. Markers therefore stay in
+the layer directory as that layer's metadata, and `flatten_layers` interprets them at merge time.
+
+Applied as a **pre-pass per directory**, not inline: `getdents64` order is filesystem-dependent, so
+a single streaming pass would apply `.wh.foo` before or after copying a sibling depending on the
+directory's layout, and an opaque marker must take effect before any of the layer's entries land.
+That also matches containerd.
+
+Hardening that came with it:
+- **A whiteout target name is validated** — it comes from an untrusted image, and `.wh.` + `../../etc`
+  would otherwise hand a path outside the rootfs to the deleter. Names containing `/`, or equal to
+  `.` or `..`, are refused.
+- **`_stor_remove_dir_all` now opens `O_NOFOLLOW`.** Without it, deleting a path that a lower layer
+  left as a symlink-to-directory recursively deletes the *target*. Every existing caller was safe by
+  construction (`_stor_replace_existing` `lstat`s first), but that was a property of the callers,
+  and whiteout code deletes paths an image names.
+
+**Tests verified against the pre-fix code**, not just the fix: disabling the two call sites turns
+six assertions red. Coverage includes file and directory whiteouts, opaque directories, marker
+non-leak, the escape attempt, and that a whiteout hides only layers *below* it (a later layer
+re-adding the name still wins). **2051 → 2075.**
+
 ## [3.0.16] — 2026-07-26 — security: four sandbox escapes closed (3.0.15 audit)
 
 ### Security — four ways out of the sandbox, all found by adversarial review of 3.0.15

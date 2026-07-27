@@ -277,12 +277,13 @@ fn ansamblu_action_name(action) {
 #
 # Placeholder — actual NL parsing requires the agnoshi project, which does
 # not exist yet. Mirrors rust-old `parse_intent`, which always returns
-# `Err(StivaError::Runtime("agnoshi intent parsing not yet implemented"))`.
+# `Err(StivaError::Runtime("agnoshi intent parsing …"))` — roadmap v3.1.0 item 6.
 # Following the oci.cyr `parse_signal` sentinel idiom, we return the
 # negated error code `-(STIVA_ERR_RUNTIME)` (= -6) — never a valid intent
 # handle — so every call fails. The caller maps it back to STIVA_ERR_RUNTIME
 # and supplies the detail string via `stiva_err_print(STIVA_ERR_RUNTIME,
-# "agnoshi intent parsing not yet implemented")`. STIVA_ERR_RUNTIME is 6
+# "agnoshi intent parsing not yet implemented")`. See roadmap v3.1.0 item 6.
+# STIVA_ERR_RUNTIME is 6
 # (see error.cyr); inlined here to keep this a zero-include leaf module.
 #[must_use]
 fn parse_intent(text) {
@@ -293,7 +294,7 @@ fn parse_intent(text) {
 # A tagged union: `kind` selects which fields are live; one flat struct holds
 # every field (unused = 0). The serde round-trip (externally-tagged
 # {"<Variant>": { fields }}) is real and Rust-tested (intent_serde), and is
-# independent of parse_intent (the NL parser above, still deferred).
+# independent of parse_intent (the NL parser above; roadmap v3.1.0 item 6).
 struct Intent {
     kind;      # INTENT_KIND_* ordinal
     image;     # String (Run, Pull)
@@ -483,7 +484,8 @@ fn intent_from_jv(v) {
 }
 
 # ── DEFERRED (land with a real agnoshi NL parser) ───────────────
-# Only `parse_intent` (the natural-language → Intent parser) remains deferred:
+# Only `parse_intent` (the natural-language → Intent parser) remains — it is
+# gated on the agnoshi project; see docs/development/roadmap.md v3.1.0 item 6:
 # it needs the agnoshi project, which does not exist yet, so the sentinel above
 # is the live behaviour. The field-carrying Intent value type and its serde
 # round-trip (the "variant payloads" item) are now ported above.
@@ -663,7 +665,8 @@ fn audit_entry_with_metadata(entry, metadata) {
 }
 
 # ── JSON escaping (RFC-8259 minimal) ───────────────────
-# Worst-case each byte becomes \uXXXX (6 bytes); +1 for NUL. Emits a heap
+# Upper bound: each byte can become \uXXXX (6 bytes); +1 for NUL. #skip-lint
+# Emits a heap
 # cstr with quotes/backslashes/control chars escaped. Used for the string
 # fields (container_id, image_ref, user, result_msg) which are
 # caller-controllable.
@@ -946,7 +949,7 @@ fn _audit_json_field(line, key) {
             elif (d == 98) { store8(out + pos, 8); }
             elif (d == 102) { store8(out + pos, 12); }
             elif (d == 117) {
-                # \uXXXX — take low byte only (control chars we emit are ASCII)
+                # \uXXXX — low byte only; the control chars we emit are ASCII. #skip-lint
                 var h = _audit_hex4(p + 1);
                 store8(out + pos, h & 255);
                 p = p + 4;
@@ -4797,7 +4800,8 @@ fn _network_manager_default_outbound_iface() {
 
 # ── ManagedNetwork (rust-old: struct ManagedNetwork) ─────────────
 # pool          : ptr to an IpPool (network_pool.cyr)
-# bridge_created : 1 if the bridge interface was created, 0 if deferred (root)
+# bridge_created : 1 if the bridge interface was created, 0 if skipped (needs
+#                  root; rootless path is roadmap v3.0.17 item 2)
 struct ManagedNetwork {
     pool;
     bridge_created;
@@ -4847,7 +4851,8 @@ fn network_manager_with_outbound(outbound_iface) {
 # Create a named network with the given subnet (rust-old: create_network).
 # Returns STIVA_ERR_OK on success, or STIVA_ERR_NETWORK if the name already
 # exists or the subnet is invalid. The bridge interface is created best-effort
-# (deferred with a warning when not root) — the pool is always registered.
+# (skipped with a warning when not root — roadmap v3.0.17 item 2); the pool is
+# always registered.
 fn network_manager_create_network(m, name, subnet) {
     var mgr: NetworkManager = m;
 
@@ -4867,7 +4872,8 @@ fn network_manager_create_network(m, name, subnet) {
         sakshi_info("bridge network created", strlen("bridge network created"));
         bridge_created = 1;
     } else {
-        sakshi_warn("bridge creation deferred (requires root):", strlen("bridge creation deferred (requires root):"));
+        sakshi_warn("bridge creation skipped, requires root (roadmap v3.0.17 item 2):",
+        strlen("bridge creation skipped, requires root (roadmap v3.0.17 item 2):"));
     }
 
     map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
@@ -4952,7 +4958,8 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
     var container_veth = container_veth_name();      # always "eth0"
     if (host_veth == 0) {
         # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
-        sakshi_warn("veth creation deferred (requires root):", strlen("veth creation deferred (requires root):"));
+        sakshi_warn("veth creation skipped, requires root (roadmap v3.0.17 item 2):",
+        strlen("veth creation skipped, requires root (roadmap v3.0.17 item 2):"));
         host_veth = host_veth_name(container_id);
     }
 
@@ -5409,7 +5416,7 @@ fn layer_new(digest, size_bytes, media_type) {
 # A locally stored OCI image (rust-old: struct Image). `layers` is a vec
 # of Layer*; `created_at` is an epoch-seconds i64 (chrono::DateTime in Rust).
 # `manifest_digest` (A2, appended at offset 40) is the "sha256:{hex}" digest of
-# this image's OCI manifest blob (0 = not yet built). It anchors the image in
+# this image's OCI manifest blob (0 before the store assembles one). It anchors it in
 # the on-disk `index.json` descriptor list and is a GC root alongside `id` (the
 # config digest) and the layer digests. `image_new` leaves it 0; the OCI store
 # layer (imagelayout.cyr) sets it on import / reconstructs it on load.
@@ -8456,7 +8463,17 @@ fn teardown_overlay(paths) {
 #
 # O_RDONLY = 0, O_DIRECTORY = 65536 (0o200000). DT_DIR = 4.
 fn _stor_remove_dir_all(path) {
-    var fd = sys_open(path, 65536, 0);   # O_DIRECTORY (dir-only open)
+    # O_DIRECTORY|O_NOFOLLOW (65536|131072). Without O_NOFOLLOW this follows a
+    # symlink-to-directory and recursively deletes the TARGET — so a lower layer
+    # leaving `dest/foo` as a link to /etc, plus a caller that hands this
+    # `dest/foo`, is an arbitrary host-tree delete.
+    #
+    # Every in-tree caller is currently safe by construction: `_stor_replace_existing`
+    # lstats first and only recurses on a real S_IFDIR, and the rest pass paths
+    # stiva itself built. That is a property of the CALLERS, not of this function,
+    # and the whiteout code below deletes paths named by an untrusted image — so
+    # the guarantee belongs here.
+    var fd = sys_open(path, 196608, 0);
     if (fd >= 0) {
         var buf = alloc(4096);
         var rgo = 1;
@@ -9242,7 +9259,144 @@ fn _stor_replace_existing(path, sb) {
 # instead of being descended through. Without that, a layer shipping `usr →
 # /etc` followed by one shipping `usr/passwd` would write outside the rootfs —
 # the escape `_stor_has_symlink_ancestor` blocks on the extraction side.
+# ── OCI whiteouts ──────────────
+#
+# A layer deletes a path from the layers below it by shipping a marker rather
+# than the file: `.wh.<name>` removes `<name>`, and `.wh..wh..opq` in a
+# directory hides EVERYTHING that directory inherited from below.
+#
+# Both were previously extracted LITERALLY, so a file deleted in an upper layer
+# stayed visible in the container and the marker itself appeared alongside it.
+# Inherited — `rust-old/src/storage.cyr` has no whiteout handling at all, and
+# overlayfs understands only its own char-dev-0:0 convention, never the tar one,
+# so the privileged path was equally wrong.
+#
+# WHY THIS LIVES AT MERGE TIME, not at unpack. The roadmap proposed fixing it in
+# `_stor_extract_tar` "where it lands for both paths at once". It cannot: the
+# file a marker deletes lives in a DIFFERENT layer, and unpack sees one layer's
+# tar in isolation. The only unpack-time representation that works is overlayfs's
+# char-dev-0:0 whiteout, and creating those needs CAP_MKNOD — which the
+# unprivileged path, the one that always runs, does not have. So the markers stay
+# in the layer directory as this layer's metadata, and the merge interprets them.
+#
+# WHY A PRE-PASS. `getdents64` order is filesystem-dependent, so a single
+# streaming pass would apply `.wh.foo` before or after copying a sibling
+# depending on the directory layout — and `.wh..wh..opq` must take effect before
+# ANY of this layer entry lands. Whiteouts are therefore applied in full, for one
+# directory, before that directory content is merged. Matches containerd.
+#
+# 1 when `name` is a whiteout marker of any kind.
+#[must_use]
+fn _stor_is_whiteout(name) {
+    return memeq(name, ".wh.", 4);
+}
+
+# 1 when `name` is specifically the opaque-directory marker.
+#[must_use]
+fn _stor_is_opaque(name) {
+    return streq(name, ".wh..wh..opq");
+}
+
+# Delete every entry in `dir` (used for an opaque directory). Returns 0.
+fn _stor_clear_dir(dir, sb) {
+    var fd = sys_open(dir, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    if (fd < 0) { return 0; }
+    var names = vec_new();
+    var buf = alloc(4096);
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                var skip = 0;
+                if (load8(nm) == 46) {
+                    if (load8(nm + 1) == 0) { skip = 1; }
+                    if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
+                }
+                # Collected first, deleted after: unlinking during the same
+                # getdents64 walk that produced the names invalidates the
+                # directory stream's position on some filesystems.
+                if (skip == 0) { vec_push(names, _stor_dup(nm)); }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+    var i = 0;
+    while (i < vec_len(names)) {
+        _stor_replace_existing(_stor_join(dir, vec_get(names, i)), sb);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Apply `src`'s whiteouts to `dst`, before any of `src`'s content is merged.
+# Returns 0 always — a marker naming something that is not there is normal (the
+# lower layers simply never created it).
+fn _stor_apply_whiteouts(src, dst, sb) {
+    var fd = sys_open(src, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    if (fd < 0) { return 0; }
+    var targets = vec_new();
+    var opaque = 0;
+    var buf = alloc(4096);
+    var rgo = 1;
+    while (rgo == 1) {
+        var n = sys_getdents64(fd, buf, 4096);
+        if (n <= 0) { rgo = 0; }
+        else {
+            var pos = 0;
+            while (pos < n) {
+                var nm = buf + pos + 19;
+                if (_stor_is_whiteout(nm) == 1) {
+                    if (_stor_is_opaque(nm) == 1) { opaque = 1; }
+                    else { vec_push(targets, _stor_dup(nm + 4)); }
+                }
+                pos = pos + load16(buf + pos + 16);
+            }
+        }
+    }
+    sys_close(fd);
+
+    # Opaque first — it removes everything, making the individual markers in the
+    # same directory no-ops rather than a second pass over a cleared tree.
+    if (opaque == 1) { _stor_clear_dir(dst, sb); }
+    var i = 0;
+    while (i < vec_len(targets)) {
+        var t = vec_get(targets, i);
+        # A marker naming "." or ".." or carrying a '/' is not a filename — it is
+        # an attempt to reach outside this directory. `.wh.` + `../../etc` would
+        # otherwise delete host files.
+        if (_stor_wh_name_is_safe(t) == 1) {
+            _stor_replace_existing(_stor_join(dst, t), sb);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when a whiteout target is a plain filename: non-empty, not "." or "..", and
+# containing no '/'. The name comes from an untrusted image.
+#[must_use]
+fn _stor_wh_name_is_safe(name) {
+    var n = strlen(name);
+    if (n == 0) { return 0; }
+    if (streq(name, ".") == 1) { return 0; }
+    if (streq(name, "..") == 1) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(name + i) == 47) { return 0; }        # '/'
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
+    # This layer's deletions take effect before any of its content lands.
+    var wsb = alloc(144);
+    _stor_apply_whiteouts(src, dst, wsb);
     var fd = sys_open(src, 65536, 0);      # O_DIRECTORY (dir-only open)
     if (fd < 0) { return 0 - 1; }
     var buf = alloc(4096);
@@ -9268,6 +9422,12 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                     # `.unpacked` is prepare_layers' own bookkeeping marker, not
                     # image content — it must not land in the container rootfs.
                     if (streq(named, ".unpacked") == 1) { skip = 1; }
+                    # Whiteout markers are this layer's DELETION instructions,
+                    # already applied by _stor_apply_whiteouts above. They are
+                    # metadata, never content: copying them through is what put
+                    # `.wh.foo` into the container next to the `foo` it was
+                    # supposed to remove.
+                    if (_stor_is_whiteout(named) == 1) { skip = 1; }
                     if (skip == 0) {
                         var s_child = _stor_join(src, named);
                         var d_child = _stor_join(dst, named);
@@ -9406,7 +9566,8 @@ fn flatten_layers(layer_dirs, dest) {
 # IN-MEMORY CAVEAT: the archive is assembled in a single heap buffer sized to
 # the full uncompressed total (sum over files of 512 header + roundup512(size),
 # plus the trailing 1024-byte zero terminator), then written in one shot. A
-# rootfs larger than addressable RAM is out of scope here — rust-old streamed
+# rootfs larger than addressable RAM cannot be exported (roadmap: Known
+# limitations) — rust-old streamed
 # via tar::Builder; a streaming writer lands if that ever matters.
 
 # Round a byte count up to the next multiple of 512.
@@ -9795,7 +9956,7 @@ fn export_rootfs(rootfs, output) {
 }
 
 # ── DEFERRED ─────────────────────────────────────────
-# Nothing from rust-old/src/storage.rs is deferred any more. `unpack_tar_zstd`
+# Every rust-old/src/storage.rs entry point is ported. `unpack_tar_zstd`
 # (rust-old: zstd::stream::Decoder + tar::Archive) landed as
 # `_stor_unpack_zstd_bytes` once sankoch 2.5.0 shipped zstd decode; the
 # unpack_tar_gz / unpack_layer / prepare_layers / create_tar / export_rootfs
@@ -10661,7 +10822,7 @@ fn _il_load_oci_layout(store, layout) {
 # save). Extracts to a scratch dir under the store root, validates the oci-layout
 # marker, then merges the layout. Returns the number of images loaded, or -1 on
 # failure. A docker-archive (manifest.json, no oci-layout) is detected and
-# reported as unsupported (the docker→OCI read path is a v3.0.2 follow-up).
+# converted through `_il_load_docker_archive` (landed v3.0.3).
 # Gzip one uncompressed docker-archive layer tar (`dir/lname`) and store it as an
 # OCI gzip layer blob, appending its descriptor + Layer to the given vecs. Returns
 # the compressed length (> 0) on success, 0 on any read/gzip/store failure.
@@ -12726,11 +12887,10 @@ fn encrypt_layer(data, data_len, key_source, out_len) {
 # Ported from rust-old/src/runtime.rs.
 #
 # This module bridges container config to kavach for process isolation. The
-# HEAVY paths — kavach sandbox build/exec/spawn, tokio async I/O, nsenter/criu
-# subprocess execution, tar/gzip codecs, cgroups fs writes, and the
-# ExternalizationGate — are DEFERRED (see the block at the bottom): they need
-# the async runtime, tar/gzip/zstd codecs, and process-spawning surface the
-# ported base does not yet expose, matching the storage/registry precedent.
+# The heavy paths — kavach sandbox build/exec/spawn, nsenter subprocess
+# execution, tar/gzip codecs, cgroup fs writes, the ExternalizationGate — are all
+# ported. Only CRIU remains; see the block at the bottom and
+# docs/development/roadmap.md v3.1.0 item 3.
 #
 # What is ported here (self-contained + already-ported deps only):
 #   * The runtime spec value types: Namespace enum, SpecMount, RuntimeSpec,
@@ -13517,7 +13677,8 @@ fn unpause_container(pid) {
 # in MB (bytes/1048576, truncating) and CPU in tenths-of-a-core ((shares*10)/1024)
 # rather than the oracle's f64 fractional cores. SandboxConfig has no secrets /
 # externalization setter in the dist, so scan_policy + secret injection are
-# TODO(v3.1). sandbox_create/exec return 0 (no error code) so their failure
+# roadmap v3.1.0 item 1. sandbox_create/exec return 0 (no error code) so their
+# failure
 # messages carry no "<e>"; sandbox_transition returns a code → kavach_err_name.
 fn build_sandbox(spec) {
     var sp: RuntimeSpec = spec;
@@ -13577,7 +13738,8 @@ fn build_sandbox(spec) {
     # for the SandboxConfig.rootfs field; before that stiva could not express it
     # through the API at all (roadmap §K).
     if (sp.rootfs != 0) { config_rootfs(cfg, sp.rootfs); }
-    # TODO(v3.1): scan_policy + secret injection — no SandboxConfig setter in dist.
+    # scan_policy + secret injection need a SandboxConfig setter kavach does not
+    # expose — roadmap v3.1.0 item 1.
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {
@@ -14490,23 +14652,23 @@ fn exec_in_container(root, pid, command, env, workdir) {
     return container_exec_result_new(rt_last_exec_exit(), out_buf, errtext, dur_ms, 0);
 }
 
-# ── DEFERRED (land with the async runtime + codecs + kavach exec) ─────────
-# rust-old/src/runtime.rs additionally defines the execution/orchestration
-# surface below. Each needs infrastructure the ported base does not yet expose
-# — the tokio async runtime, subprocess spawning (nsenter/criu), tar/gzip/zstd
-# codecs, and the deeper kavach sandbox exec/spawn + ExternalizationGate
-# handles — so they are ported alongside those landings.
+# ── NOT PORTED: CRIU (roadmap v3.1.0 item 3) ──
+# The only rust-old/src/runtime.rs surface still missing. Everything else that
+# used to live in this block — spawn_container/DaemonHandle, export_rootfs,
+# import_rootfs, exec_in_container — has landed.
 #
-# spawn_container(spec) -> DaemonHandle                    [async, kavach spawn]
-# struct DaemonHandle { process: SpawnedProcess, _sandbox: Sandbox }
-#     .pid() / .wait() / .kill(grace_ms) / .try_wait()     [async, kavach]
-# export_rootfs(rootfs, output)                        [async, tar builder]
-# import_rootfs(tar_path, store, name, tag) -> Image   [tar read + gzip + sha256
-#     + image store_blob/add_to_index; image.cyr's add_to_index is itself deferred]
-# checkpoint_container(pid, dump_dir, leave_running)   [async criu dump]
-# pre_dump_container(pid, dump_dir, parent_dir)        [async criu pre-dump]
-# restore_lazy(dump_dir, rootfs, page_server_addr) -> pid  [async criu lazy restore]
-# restore_container(dump_dir, rootfs) -> pid           [async criu restore]
+#   checkpoint_container(pid, dump_dir, leave_running)      criu dump
+#   pre_dump_container(pid, dump_dir, parent_dir)           criu pre-dump
+#   restore_container(dump_dir, rootfs) -> pid              criu restore
+#   restore_lazy(dump_dir, rootfs, page_server_addr) -> pid criu lazy restore
+#
+# The port is straightforward — the oracle shells out to the `criu` binary and
+# `criu_available()` is already ported here. What blocks it is one layer down:
+# every stiva container runs in the HOST pid namespace, because `NS_PID` is set
+# by no caller and `build_sandbox` never forwards the spec's namespace list (so
+# `RUNTIME_NS_PID` above is decorative). `criu restore` would have to re-claim
+# the exact host PIDs via /proc/sys/kernel/ns_last_pid — racy by construction.
+# kavach must honour the namespace list first. See the roadmap.
 
 # --- container.cyr ---
 
@@ -14987,8 +15149,8 @@ fn _container_cat2(a, b) {
 }
 
 # ── Container state persistence (rust-old: state.json round-trip) ─────
-# The stateful ContainerManager (RwLock/PubSub) is deferred, but its DISK
-# format is not async: state.json is a JSON array of Container records
+# The ContainerManager is in this file (§C); its DISK format is independent of
+# it: state.json is a JSON array of Container records
 # (serde_json Vec<Container>). These fns implement the SYNCHRONOUS save/load
 # used by the single-shot CLI, via the bayan JSON codec (same pattern as
 # image.cyr's images.json index).
@@ -15056,8 +15218,8 @@ fn _container_config_to_jv(config) {
     json_v_obj_set(o, str_from("detach"), json_v_bool_new(c.detach));
     json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
     json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
-    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # TODO(v3.1): kavach SecretRef handles
-    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # TODO(v3.1)
+    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.1.0 item 1
+    json_v_obj_set(o, str_from("scan_policy"), json_v_null());    # roadmap v3.0.17 item 3
     json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
     json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
     json_v_obj_set(o, str_from("min_isolation_score"), _ct_int_or_null(c.min_isolation_score));
@@ -15166,8 +15328,8 @@ fn _container_config_from_jv(v) {
     c.detach = _ct_jv_bool(v, "detach");
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
-    c.secrets = 0;                                       # TODO(v3.1)
-    c.scan_policy = 0;                                   # TODO(v3.1)
+    c.secrets = 0;                                       # roadmap v3.1.0 item 1
+    c.scan_policy = 0;                                   # roadmap v3.0.17 item 3
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
     c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
@@ -15455,8 +15617,8 @@ fn parse_bundle(bundle_path) {
 # The stateful lifecycle manager. The oracle's every method is `async` over
 # tokio::sync::RwLock; here the single-node run-to-completion model collapses
 # `Arc<RwLock<HashMap>>` to a plain heap vec + map and blocking calls, so this
-# is a synchronous port, not an async one (§C). Only the genuinely external-
-# or coroutine-blocked methods stay deferred (see the note at the bottom).
+# is a synchronous port, not an async one (§C). What is still missing is listed
+# in docs/development/roadmap.md, not here.
 
 # ── ContainerInternals (rust-old: struct ContainerInternals) ──────
 # Runtime-only side data for a container, keyed by id in the manager's
@@ -16064,9 +16226,10 @@ fn _cm_log_path(mgr, real_id) {
 }
 
 # ── network (best-effort; rust-old connect/disconnect_network) ────
-# In v3.0.x only the deferred daemon-start path would connect, so the live
-# one-shot path never builds a NetworkManager and disconnect is a no-op. Ported
-# for parity + the future daemon path; connect stays effectively unreachable.
+# Only a daemon-start path would connect, and stiva has none: the one-shot path
+# never builds a NetworkManager, so disconnect is a no-op. Ported for parity and
+# for the rootless-networking work (roadmap v3.0.17 item 2), which is what makes
+# this reachable.
 fn _cm_disconnect_network(mgr, id) {
     var mm: ContainerManager = mgr;
     if (mm.network_manager == 0) { return 0; }
@@ -16323,7 +16486,8 @@ fn container_manager_get_rootfs(mgr, id) {
     return _container_cat2(_cm_container_dir(mm.root, cc.id), "/rootfs");
 }
 
-# Whole-file logs (rust-old: logs, container.rs:1191). scan_policy is not yet
+# Whole-file logs (rust-old: logs, container.rs:1191). scan_policy does not
+# persist yet — roadmap v3.0.17 item 3.
 # persisted (loads as 0), so this returns the content unscanned — `stiva logs
 # --scan` drives scan_output explicitly. Returns the content cstr, or 0 if the
 # log file does not exist.
@@ -16415,9 +16579,9 @@ fn container_manager_try_wait(mgr, id) {
 # members to global constants under "last-def-wins", so bare names would
 # collide with other modules (see error.cyr / oci.cyr).
 #
-# DEFERRED at the bottom: run_probe / start_probe_loop — they require
-# runtime::exec_in_container (itself deferred, async/kavach-exec) plus tokio
-# timeout + task spawn, which the ported base lacks.
+# NOT PORTED: run_probe / start_probe_loop. `exec_in_container` landed in §D, so
+# the exec half is available; what is still missing is a timer/task loop to drive
+# the probes on an interval. See docs/development/roadmap.md.
 
 # ── RestartPolicy (rust-old: enum RestartPolicy) ───────────────
 # Serde kebab-case wire names: never / always / on-failure / unless-stopped.
@@ -18252,7 +18416,7 @@ fn plan_rollback(nodes, count, constraints) {
 # is already ported (src/container.cyr: struct ContainerConfig +
 # container_config_default). Callers build the config via
 # container_config_default() and pass the pointer to fleet_deployment_new —
-# no fleet-side type is deferred.
+# fleet defines no config type of its own.
 
 # --- mcp.cyr ---
 
@@ -18267,10 +18431,10 @@ fn plan_rollback(nodes, count, constraints) {
 # The live async dispatch layer (handle_tool + the per-tool handle_* fns,
 # list_resources, read_resource) is coupled to the live async `Stiva`
 # instance (rust-old/src/lib.rs: stiva.pull/run/ps/stop/exec/push/inspect…),
-# an async runtime, and serde_json Value construction that the ported base
-# does not yet have. Those land with the Stiva runtime driver — see the
-# DEFERRED block at the bottom, matching the storage/registry async
-# precedent.
+# an async runtime, and serde_json Value construction. Those handlers landed in
+# §E and live in stiva_core.cyr, which is downstream of this file and can reach
+# the facade; this module keeps the schema, McpResult, and the facade-free
+# handler.
 #
 # Enum members are namespaced (MCP_CONTENT_*) — Cyrius hoists enum members
 # to global constants under "last definition wins", so bare names would

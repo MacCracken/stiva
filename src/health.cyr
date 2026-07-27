@@ -11,9 +11,9 @@
 # members to global constants under "last-def-wins", so bare names would
 # collide with other modules (see error.cyr / oci.cyr).
 #
-# DEFERRED at the bottom: run_probe / start_probe_loop — they require
-# runtime::exec_in_container (itself deferred, async/kavach-exec) plus tokio
-# timeout + task spawn, which the ported base lacks.
+# NOT PORTED: run_probe / start_probe_loop. `exec_in_container` landed in §D, so
+# the exec half is available; what is still missing is a timer/task loop to drive
+# the probes on an interval. See docs/development/roadmap.md.
 
 # ── RestartPolicy (rust-old: enum RestartPolicy) ───────────────
 # Serde kebab-case wire names: never / always / on-failure / unless-stopped.

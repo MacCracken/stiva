@@ -9,10 +9,10 @@
 # The live async dispatch layer (handle_tool + the per-tool handle_* fns,
 # list_resources, read_resource) is coupled to the live async `Stiva`
 # instance (rust-old/src/lib.rs: stiva.pull/run/ps/stop/exec/push/inspect…),
-# an async runtime, and serde_json Value construction that the ported base
-# does not yet have. Those land with the Stiva runtime driver — see the
-# DEFERRED block at the bottom, matching the storage/registry async
-# precedent.
+# an async runtime, and serde_json Value construction. Those handlers landed in
+# §E and live in stiva_core.cyr, which is downstream of this file and can reach
+# the facade; this module keeps the schema, McpResult, and the facade-free
+# handler.
 #
 # Enum members are namespaced (MCP_CONTENT_*) — Cyrius hoists enum members
 # to global constants under "last definition wins", so bare names would

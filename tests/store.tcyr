@@ -1485,6 +1485,143 @@ fn test_verify_integrity_detects_corruption() {
 }
 
 
+
+# ══ OCI whiteouts ════════════════════════════════════════
+# A layer deletes a path from the layers below it by shipping `.wh.<name>`, or
+# hides a whole inherited directory with `.wh..wh..opq`. Both used to be
+# extracted literally, so the deleted file stayed visible AND the marker
+# appeared next to it.
+
+fn _wh_file(dir, name, content) {
+    _stor_mkdir_p(dir);
+    var p = _stor_cat2(_stor_cat2(dir, "/"), name);
+    file_write_all(p, content, strlen(content));
+    return p;
+}
+
+fn _wh_exists(dir, name) {
+    return file_exists(_stor_cat2(_stor_cat2(dir, "/"), name));
+}
+
+fn test_whiteout_removes_a_lower_layer_file() {
+    test_group("whiteout_removes_a_lower_layer_file");
+    var l0 = "/tmp/stiva-wh-l0";
+    var l1 = "/tmp/stiva-wh-l1";
+    var dst = "/tmp/stiva-wh-dst";
+    _stor_remove_dir_all(l0); _stor_remove_dir_all(l1); _stor_remove_dir_all(dst);
+    _wh_file(l0, "keep.txt", "keep\n");
+    _wh_file(l0, "gone.txt", "gone\n");
+    # Upper layer deletes gone.txt and adds its own file.
+    _wh_file(l1, ".wh.gone.txt", "");
+    _wh_file(l1, "added.txt", "added\n");
+
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+    assert_eq(_wh_exists(dst, "keep.txt"), 1, "an untouched lower file survives");
+    assert_eq(_wh_exists(dst, "added.txt"), 1, "the upper layer's own file lands");
+    assert_eq(_wh_exists(dst, "gone.txt"), 0, "the whited-out file is GONE");
+    assert_eq(_wh_exists(dst, ".wh.gone.txt"), 0, "and the marker never reaches the rootfs");
+    return 0;
+}
+
+fn test_whiteout_removes_a_lower_layer_directory() {
+    test_group("whiteout_removes_a_lower_layer_directory");
+    var l0 = "/tmp/stiva-wh2-l0";
+    var l1 = "/tmp/stiva-wh2-l1";
+    var dst = "/tmp/stiva-wh2-dst";
+    _stor_remove_dir_all(l0); _stor_remove_dir_all(l1); _stor_remove_dir_all(dst);
+    _wh_file(_stor_cat2(l0, "/subdir"), "inner.txt", "inner\n");
+    _wh_file(l1, ".wh.subdir", "");
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+    assert_eq(file_exists(_stor_cat2(dst, "/subdir")), 0, "the whole directory is gone");
+    return 0;
+}
+
+fn test_whiteout_opaque_hides_inherited_contents() {
+    test_group("whiteout_opaque_hides_inherited_contents");
+    var l0 = "/tmp/stiva-wh3-l0";
+    var l1 = "/tmp/stiva-wh3-l1";
+    var dst = "/tmp/stiva-wh3-dst";
+    _stor_remove_dir_all(l0); _stor_remove_dir_all(l1); _stor_remove_dir_all(dst);
+    _wh_file(_stor_cat2(l0, "/d"), "old1.txt", "o1\n");
+    _wh_file(_stor_cat2(l0, "/d"), "old2.txt", "o2\n");
+    # Upper layer marks d/ opaque and contributes one file.
+    _wh_file(_stor_cat2(l1, "/d"), ".wh..wh..opq", "");
+    _wh_file(_stor_cat2(l1, "/d"), "new.txt", "n\n");
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+    var d = _stor_cat2(dst, "/d");
+    assert_eq(_wh_exists(d, "new.txt"), 1, "the upper layer's file is present");
+    assert_eq(_wh_exists(d, "old1.txt"), 0, "inherited file 1 is hidden");
+    assert_eq(_wh_exists(d, "old2.txt"), 0, "inherited file 2 is hidden");
+    assert_eq(_wh_exists(d, ".wh..wh..opq"), 0, "and the opaque marker does not leak");
+    return 0;
+}
+
+fn test_whiteout_name_cannot_escape() {
+    test_group("whiteout_name_cannot_escape");
+    # The target name comes from an untrusted image. `.wh.` + "../../etc" would
+    # otherwise hand _stor_replace_existing a path outside the rootfs.
+    assert_eq(_stor_wh_name_is_safe("file.txt"), 1, "a plain name");
+    assert_eq(_stor_wh_name_is_safe("..foo"), 1, "a name starting with ..");
+    assert_eq(_stor_wh_name_is_safe(".."), 0, "bare ..");
+    assert_eq(_stor_wh_name_is_safe("."), 0, "bare .");
+    assert_eq(_stor_wh_name_is_safe(""), 0, "empty");
+    assert_eq(_stor_wh_name_is_safe("../etc"), 0, "traversal");
+    assert_eq(_stor_wh_name_is_safe("a/b"), 0, "any slash at all");
+
+    # End to end: a hostile marker must not delete outside the destination.
+    var l0 = "/tmp/stiva-wh4-l0";
+    var dst = "/tmp/stiva-wh4-dst";
+    var victim = "/tmp/stiva-wh4-victim";
+    _stor_remove_dir_all(l0); _stor_remove_dir_all(dst);
+    _stor_mkdir_p(victim);
+    file_write_all(_stor_cat2(victim, "/precious"), "KEEP\n", 5);
+    _wh_file(l0, ".wh...", "");                  # ".wh." + ".." -> refused
+    var layers = vec_new();
+    vec_push(layers, l0);
+    flatten_layers(layers, dst);
+    assert_eq(file_exists(_stor_cat2(victim, "/precious")), 1, "nothing outside dst was touched");
+    _stor_remove_dir_all(victim);
+    return 0;
+}
+
+fn test_whiteout_is_per_layer_not_global() {
+    test_group("whiteout_is_per_layer_not_global");
+    # A whiteout only hides layers BELOW it. A later layer re-adding the same
+    # name must win.
+    var l0 = "/tmp/stiva-wh5-l0";
+    var l1 = "/tmp/stiva-wh5-l1";
+    var l2 = "/tmp/stiva-wh5-l2";
+    var dst = "/tmp/stiva-wh5-dst";
+    _stor_remove_dir_all(l0); _stor_remove_dir_all(l1);
+    _stor_remove_dir_all(l2); _stor_remove_dir_all(dst);
+    _wh_file(l0, "f.txt", "from-l0\n");
+    _wh_file(l1, ".wh.f.txt", "");
+    _wh_file(l2, "f.txt", "from-l2\n");
+    var layers = vec_new();
+    vec_push(layers, l0);
+    vec_push(layers, l1);
+    vec_push(layers, l2);
+    assert_eq(flatten_layers(layers, dst), 0, "flatten ok");
+    assert_eq(_wh_exists(dst, "f.txt"), 1, "the re-added file is present");
+    var lc = alloc(8);
+    var got = _stor_read_file(_stor_cat2(dst, "/f.txt"), lc);
+    assert(got != 0, "readable");
+    if (got != 0) {
+        store8(got + load64(lc), 0);
+        assert_eq(strstr(got, "from-l2") >= 0, 1, "and it is the LATER layer's content");
+    }
+    return 0;
+}
+
 fn main() {
     test_oci_config_object_minimal();
     test_oci_config_object_fields();
@@ -1541,6 +1678,11 @@ fn main() {
     test_flatten_layers_from_prepared();
     test_verify_integrity_clean();
     test_verify_integrity_detects_corruption();
+    test_whiteout_removes_a_lower_layer_file();
+    test_whiteout_removes_a_lower_layer_directory();
+    test_whiteout_opaque_hides_inherited_contents();
+    test_whiteout_name_cannot_escape();
+    test_whiteout_is_per_layer_not_global();
     return assert_summary();
 }
 
