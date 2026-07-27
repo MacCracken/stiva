@@ -36,35 +36,65 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Verify the vendored files match the pinned tags
+      - name: Verify the dep bundles match the pinned tags
         # A local `path = "../<dep>"` override SILENTLY WINS over the `tag` pin —
         # that is how kavach 3.8.1 once arrived unannounced — and cyrius.lock
         # records no dep name or version, so it cannot detect the substitution.
         #
-        # Compares the sorted SET of `<sha256>  lib/<file>` lines, ignoring the
-        # `commit …` header lines and their order. That comparison is the whole
-        # point: cyrius.lock's FORMAT depends on the resolution mode. Resolving
-        # from git tags (what CI does) writes `commit <sha> <name> <url> <tag>`
-        # lines and a different hash ordering; resolving through path overrides
-        # (local development) writes only file hashes. A plain
-        # `git diff --exit-code cyrius.lock` therefore compares two structurally
-        # different files and fails unconditionally — it was tried, it broke the
-        # build, and it was reverted.
+        # Scoped to the files a [deps.*] entry OWNS (its `modules` basenames):
         #
-        # The file hashes are the part that means the same thing in both modes,
-        # and they answer the real question: are the files the tags produce the
-        # files the lock records?
+        #  1. cyrius.lock's FORMAT depends on the resolution mode. Tag resolution
+        #     (CI) writes `commit <sha> <name> <url> <tag>` header lines and a
+        #     different hash ordering; path overrides (local) write only file
+        #     hashes. A plain `git diff --exit-code cyrius.lock` compares two
+        #     structurally different files and fails unconditionally — tried,
+        #     broke the build, reverted.
+        #  2. Most of lib/ is the STDLIB subset vendored from the cyrius
+        #     toolchain snapshot, not from any git dep. That set legitimately
+        #     differs between a developer's `cyrius lib sync` state and a fresh
+        #     CI install, so comparing all of lib/ reports drift unrelated to any
+        #     dep pin. (It did: sigil_*/hashmap_fast/sha1.)
+        #
+        # What remains is the question worth asking: do the dep bundles the tags
+        # produce match the ones the lock records?
         run: |
-          hashes () { grep -E '^[0-9a-f]{64}[[:space:]]' "$1" | sort; }
-          git show HEAD:cyrius.lock > /tmp/lock.committed
-          if ! diff <(hashes /tmp/lock.committed) <(hashes cyrius.lock); then
-            echo "::error::The vendored lib/ does not match what the pinned tags resolve to." >&2
-            echo "A local 'path = \"../<dep>\"' override probably vendored something the tag does not." >&2
-            echo "Bump the tag (or re-resolve without the override) and commit cyrius.lock." >&2
-            exit 1
-          fi
-          echo "cyrius.lock file hashes match the tag-resolved lib/"
+          python3 - <<'PY'
+          import re, sys, subprocess
+          # Line-based: a [deps.NAME] section runs until the next line starting with '['.
+          # A regex block match cannot be used — `modules = ["dist/x.cyr"]` contains '[',
+          # so a `[^\[]*` block stops before ever reaching the module list.
+          owned, in_deps = set(), False
+          for line in open('cyrius.cyml'):
+              st = line.strip()
+              if st.startswith('['):
+                  in_deps = st.startswith('[deps.')
+                  continue
+              if in_deps:
+                  for mod in re.findall(r'"([^"]+\.cyr)"', st):
+                      owned.add('lib/' + mod.split('/')[-1])
+          def hashes(text):
+              out = {}
+              for line in text.splitlines():
+                  m = re.match(r'^([0-9a-f]{64})\s+(lib/\S+)$', line)
+                  if m and m.group(2) in owned:
+                      out[m.group(2)] = m.group(1)
+              return out
+          committed = hashes(subprocess.run(['git','show','HEAD:cyrius.lock'],
+                                            capture_output=True, text=True).stdout)
+          resolved = hashes(open('cyrius.lock').read())
+          bad = []
+          for f in sorted(set(committed) | set(resolved)):
+              if committed.get(f) != resolved.get(f):
+                  bad.append(f"  {f}: lock={committed.get(f,'(absent)')[:12]} tags={resolved.get(f,'(absent)')[:12]}")
+          if bad:
+              print("::error::Dep bundles do not match the pinned tags:", file=sys.stderr)
+              print("\n".join(bad), file=sys.stderr)
+              print("A local 'path = \"../<dep>\"' override vendored something the tag does not.", file=sys.stderr)
+              print("Tag the sibling (and bump the pin), or re-resolve without the override.", file=sys.stderr)
+              sys.exit(1)
+          print(f"{len(resolved)} dep bundle(s) match their pinned tags")
 
+          PY
       - name: Build
         run: |
           mkdir -p build
