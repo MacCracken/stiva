@@ -24,7 +24,7 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
 | Tests | 2175 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
-| Deps | cyrius 6.5.33 · kavach 3.11.15 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.6 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
+| Deps | cyrius 6.5.33 · kavach 3.11.15 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
 
 **Three facts that constrain everything below**, all verified by execution rather than by reading:
 

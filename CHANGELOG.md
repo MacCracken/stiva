@@ -5,6 +5,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — nein `1.6.6` → `1.6.10`
+
+nein's 1.6.7–1.6.10 line closed a Rust→Cyrius port-completeness audit, deleted its
+`rust-old/` tree, and ran a P(-1) hardening review that produced 1 CRITICAL / 6 HIGH /
+10 MEDIUM confirmed findings. 2181 tests and 87 CLI smoke assertions unchanged; all 13
+nein functions stiva calls still exist with the same signatures.
+
+⚠ **stiva was not exposed to any of the three HIGH findings, and the reason is worth
+recording** — it is a design decision that turned out to be load-bearing rather than luck:
+
+- **SIGPIPE killing the host process on a dead `nft`** (reproduced upstream as exit 141)
+  lives in nein's `_run_nft_stdin`. stiva never pipes to nft's stdin: it writes a temp file
+  and runs `nft -f <file>` (`src/network_manager.cyr:358-361`), a divergence from the Rust
+  oracle taken for unrelated reasons. That path has no pipe to break.
+- **`diff_compute` ignoring rule order** (a re-added deny rule landing after the accept it
+  was meant to precede, leaving the host permitted) and **`_strip_handle_suffix` mis-parsing
+  a rule whose comment contains ` # handle `** are both in the diff/parse surface. stiva
+  calls **no** `apply_*` or `diff_*` function — verified by cross-referencing all 456 fns
+  nein defines against every call site in `src/`: stiva uses 13, all render/validate/build.
+
+The one fix that does reach stiva is the MEDIUM: `#` is now rejected by
+`validate_nft_element` (`lib/nein.cyr:340`), which `firewall_validate` runs — and stiva
+calls that at `src/network_manager.cyr:244`. nft treats `#` as a comment to end-of-line, so
+`… ip saddr 1.2.3.4 accept # drop` applies as an **accept** with the intended verdict
+silently gone. stiva feeds nein only subnets, interface names, ports and IPs, so nothing it
+constructs today contains a `#`; the change is strictly a tightening.
+
 ## [3.0.17] — 2026-08-21 — single-node runtime finished (§H cron, §I accel, `diff`, rootless net) · toolchain 6.5.33
 
 Closes the v3.0.17 roadmap line: `stiva diff`, rootless container networking,

@@ -3,7 +3,7 @@ commit	515a57f439c31951eaf5ca81444fd64881ffe9c0	sakshi	https://github.com/MacCra
 commit	02b9d3fe90f94c51e95ee1a663d481e890dd1502	libro	https://github.com/MacCracken/libro.git	2.8.8
 commit	0135725ce114608ed0296adb36ffd28391f8703e	majra	https://github.com/MacCracken/majra.git	2.6.7
 commit	f2651c5393008c2f90c91642e7db781c94e228e9	bote	https://github.com/MacCracken/bote.git	3.3.2
-commit	c48a8d3346b4061c96d0dc3bd6f23396b8dfb1bb	nein	https://github.com/MacCracken/nein.git	1.6.6
+commit	47a79e9c88105fe21508616af1e0cd65f32a5935	nein	https://github.com/MacCracken/nein.git	1.6.10
 commit	347f6648d35488c602e1b05978a8ff96231012d2	kavach	https://github.com/MacCracken/kavach.git	3.11.15
 commit	9dbba878de6a6097a4086a9d7c34c4b49bb5feca	samay	https://github.com/MacCracken/samay.git	1.0.1
 commit	c2404c1bf97b071c283b5fbcbbda9292dcf0eb6d	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.18
@@ -11,7 +11,7 @@ commit	7b79a189c1ba5dc0a6f05dc0049113414286fa12	agnodrm	https://github.com/MacCr
 commit	711b963e15356f0d230b932e4b606782e4a4f38e	cmdit	https://github.com/MacCracken/cmdit.git	1.2.2
 commit	f8b5da7153667fcfa58020fb3db3c9c359714347	patra	https://github.com/MacCracken/patra.git	1.13.9
 commit	f2651c5393008c2f90c91642e7db781c94e228e9	bote-core	https://github.com/MacCracken/bote.git	3.3.2
-327074a7a7dd4053c58341ee0772530394525dd99a64d629f93f47cda8a5215c  lib/nein.cyr
+37f3df6f78e816a8f4bb52cc54d968cd57c67eb772fccdcc041791674d700dd8  lib/nein.cyr
 7240760b1260fa06c53c5a139d1a2086fb439e21ac90e53eacd4bf486ac0e9ca  lib/tagged.cyr
 5978751906616997dc497d5ffaa5171c92611c5cb6f6466ada2c6c1dd0b83c79  lib/net.cyr
 2dd564a6351f9897ba90f17a108d70d5db676be3ee2764075a03edb9c38e01ed  lib/syscalls_macos.cyr
