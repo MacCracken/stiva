@@ -16,7 +16,7 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.4.78** (see `cyrius.cyml`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.5.33** (see `cyrius.cyml`).
 - Nothing else. AGNOS dependencies are resolved **by git tag** from
   `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote`, `agnodrm`,
   `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
@@ -75,7 +75,8 @@ vendored AGNOS bundles are expected — they are shared agnos error helpers each
   registration order and the dispatch table is indexed by it, so inserting a verb anywhere
   but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
   what catches this.
-- **The cycc struct-id ↔ SIMD-sentinel miscompile is still live at 6.4.78.** A typed
+- **The cycc struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and has
+  not been re-verified at the 6.5.33 pin — assume live.** A typed
   `var x: T = p; x.field` can read garbage **silently**, and it varies per function *and* per
   compilation unit. The raw-offset accessors in hot paths (`_img_id`, `_layer_digest`,
   `load64(p + N)`, …) are deliberate workarounds — do not "clean them up". When a test needs

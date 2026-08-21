@@ -6,8 +6,8 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.4.78** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.16
+- **Toolchain**: Cyrius, pin **6.5.33** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.0.17
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -23,7 +23,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 
 **2175 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 347 ·
 mgmt 325 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
-assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.4.78**.
+assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.5.33**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
 image-layout + transfer surface (v3.0.1–v3.0.4) · §G output scanning + `convert compose`
@@ -32,7 +32,7 @@ client, `pull`/`push` live (v3.0.8–v3.0.10) · the Tier-1 CLI sweep (v3.0.11) 
 dispatch, `logs -f`, `events` over a persisted `{root}/events.jsonl` (v3.0.12–v3.0.13) ·
 §K containers actually enter their rootfs (v3.0.14) · §F `build` and §D non-interactive
 `exec` (v3.0.15) · OCI whiteouts, `stiva diff`, rootless networking, §H `cron`, §I
-accelerator inventory + placement (v3.0.16 and the unreleased line). See
+accelerator inventory + placement (v3.0.16–v3.0.17). See
 `CHANGELOG.md` for what each release actually contained, and
 `docs/development/roadmap.md` for what is left (v3.1 → v3.4).
 
@@ -59,8 +59,11 @@ attach, an audit ledger, concurrent layer pulls) — not a Cyrius gap. JSON/TOML
 surface, `cron.cyr`, whiteouts and `diff` are **net-new**, so the OCI **image-spec** (not
 rust-old) is their oracle.
 
-> ⚠️ **cycc struct-id miscompile — STILL LIVE at 6.4.78.** The struct-id **20/21 ↔ SIMD
-> f64v2/f64v4 sentinel collision** makes typed field access (`var x: T = p; x.field`) read
+> ⚠️ **cycc struct-id miscompile — last verified live at 6.4.78; NOT re-verified at the
+> current 6.5.33 pin. Assume live.** The suite is green at 6.5.33 with the workarounds in
+> place, which this bug has already demonstrated is not evidence of anything. The struct-id
+> **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes typed field access
+> (`var x: T = p; x.field`) read
 > **garbage — usually silently**, sometimes segfault. It is **per-function** *and*
 > **per-compilation-unit**.
 >
@@ -109,18 +112,42 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.9.3** |
-| majra | Job queue, heartbeat FSM, pub/sub — pin **2.5.1** |
-| nein | nftables firewall, NAT, port mapping — pin **1.6.4** |
-| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.1.4** |
-| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.5.0** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.11.15** |
+| majra | Job queue, heartbeat FSM, pub/sub — pin **2.6.7** |
+| nein | nftables firewall, NAT, port mapping — pin **1.6.6** |
+| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.2** |
+| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.5.1** |
 | cmdit | CLI parsing, verb introspection, shell completions — pin **1.2.2** |
 | samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.0.1** |
-| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.3.15** |
-| sakshi · libro | Structured logging · docs tooling — pins **2.4.6** / **2.8.2** |
+| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.3.18** |
+| sakshi · libro | Structured logging · docs tooling — pins **2.4.11** / **2.8.8** |
+| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.12.9** |
 
 All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cyml`
 `[deps.*]` **by git tag**.
+
+> ⚠️ **`[deps.sigil]` must stay declared FIRST and at the latest sigil.** libro declares its
+> own `[deps.sigil]` selecting four *thin* sub-bundles; stiva takes the full monolith, which
+> already inlines all four. Claiming the name before the transitive walk reaches libro is
+> what keeps both surfaces out of one compilation unit — and that is a hard build failure,
+> not a warning: two copies push cycc's 16-slot `#define`/flag table to 17.
+
+> ⚠️ **`src/error.cyr` carries a samay 1.0.1 compatibility shim — `json_v_parse_str`.**
+> samay still calls that unprefixed bayan name, which bayan 1.3.0 (cyrius 6.5.0) removed, so
+> without the shim the symbol is undefined at link time and cycc refuses to emit. It sits in
+> `error.cyr` — not beside the samay consumer in `cron.cyr` — because cyrius auto-prepends
+> every active `[deps.*]` module into *every* compilation unit, so the reference exists even
+> in `convert.tcyr`; `error.cyr` is the one module every unit includes. **Retire it the
+> moment samay ≥ 1.0.2 lands** with the call updated: past that point it shadows a real
+> definition rather than supplying a missing one.
+
+> ⚠️ **A dep's `.deps` sidecar may name stdlib leaves ONLY.** A consumer resolves every line
+> in it against the pinned toolchain snapshot, so a git-dep bundle listed there is an
+> assertion stiva cannot satisfy — `cyrius deps` fails outright. `cyrius distlib` excludes
+> named deps automatically, but only when the `[deps.NAME]` section name matches the module
+> basename. That mismatch is what broke 3.0.17's CI (nein shipped `bote-core` as a leaf; see
+> the CHANGELOG). If a dep bump ever reintroduces `dep X requires 'Y' but it is not in the
+> cyrius stdlib`, the fix is upstream in X's manifest, not in stiva's `[deps].stdlib`.
 
 > ⚠️ **Every `path = "../<dep>"` override is deliberately COMMENTED OUT.** A `path`
 > override silently WINS over its `tag`, and `cyrius.lock` records no dep name or version
@@ -156,7 +183,7 @@ daimon (container management), sutra (fleet deployment)
 | `build` | TOML-based image builds (Stivafile), multi-stage builds, build cache; the **`build_image` driver** — one gzip layer per `copy` step, content-fingerprinted cache keys, full OCI config + manifest |
 | `ansamblu` | Multi-container orchestration, DAG ordering, rolling updates, scaling, service logs |
 | `health` | Heartbeat monitoring, restart policies |
-| `cron` | **Net-new (v3.0.16):** scheduled containers over samay — `{root}/cron.json` entry table, expression validation, `cron_due_at`, `CRON_SKIP` missed-schedule policy |
+| `cron` | **Net-new (v3.0.17):** scheduled containers over samay — `{root}/cron.json` entry table, expression validation, `cron_due_at`, `CRON_SKIP` missed-schedule policy |
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned), health monitoring, rollback planning, **accelerator-aware placement** (`accel_profiles` / `accel_req` / `accel_min_chips` over ai-hwaccel) |
 | `agent` | Daimon agent registration |
 | `mcp` | 9 MCP tools with structured output, live dispatch, resource exposure |

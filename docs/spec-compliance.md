@@ -2,7 +2,7 @@
 
 Tracks external specifications stiva implements or aligns with, current conformance level, and gaps.
 
-Last reviewed: 2026-07-26 (v3.0.16 + the unreleased v3.0.17 line)
+Last reviewed: 2026-08-21 (v3.0.17)
 
 > **"Implemented" means the module logic exists and is tested.** Where a capability is not
 > reachable from the CLI, that is called out inline — the two cases are CRIU and MCP

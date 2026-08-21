@@ -1,6 +1,14 @@
 # 001 — Typed struct field access can silently read garbage (cycc)
 
-**Status: live at cyrius 6.4.78.** Verified by execution, not by reading.
+**Status: last verified live at cyrius 6.4.78, by execution rather than by reading.
+NOT re-verified at 6.5.33** — the pin moved at 3.0.17 and no probe was run against it, so
+treat the status as *unknown at the current pin, and assume live*.
+
+The full suite (2175 tests) and the 87 CLI smoke assertions are green at 6.5.33 with the
+workarounds below still in place. **That is not evidence the bug is gone** — see "the
+expensive lesson" below, where a green probe and a green suite coexisted with live silent
+corruption. Assume live until someone runs the retirement checklist at the end of this
+document.
 
 cycc assigns each struct a numeric id. Ids **20 and 21** collide with the SIMD `f64v2` /
 `f64v4` sentinels, so a scalar field access on such a struct can compile to a **vector

@@ -38,7 +38,7 @@ What that means concretely:
   and `convert` from a Dockerfile or a docker-compose YAML.
 
 **2175 tests** across `tests/*.tcyr`, plus **87** CLI smoke assertions against the built
-binary. Toolchain pin **6.4.78**.
+binary. Toolchain pin **6.5.33**.
 
 Two verbs are not wired: `checkpoint` and `restore`, both gated on CRIU integration and
 scheduled for v3.1 — see [What's next](#whats-next).
@@ -119,7 +119,8 @@ full picture; the shape of it:
 
 Three known limitations are worth reading before you rely on stiva:
 **only x86_64 works**; **containers have no secrets** (v3.1 item 1); and the **cycc
-struct-id ↔ SIMD-sentinel miscompile is still live at 6.4.78**, which is why several hot
+struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and is un-re-verified
+at the current 6.5.33 pin**, which is why several hot
 paths use raw-offset accessors instead of typed field access.
 
 ## Known limitations
@@ -130,7 +131,7 @@ for the maintained list.
 ## <a name="language"></a>Language
 
 Stiva is written in **Cyrius**, the AGNOS systems language, and built with the `cyrius`
-toolchain (toolchain pin **6.4.78**). It consumes its AGNOS dependencies as Cyrius
+toolchain (toolchain pin **6.5.33**). It consumes its AGNOS dependencies as Cyrius
 single-file `dist/*.cyr` bundles (kavach, majra, nein, bote, agnodrm, cmdit, samay,
 ai-hwaccel, sakshi, libro), wired **by git tag** in [`cyrius.cyml`](cyrius.cyml). Stiva is
 itself consumable as a single-file bundle, `dist/stiva.cyr` (built by `cyrius distlib`).

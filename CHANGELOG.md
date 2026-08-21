@@ -5,6 +5,104 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.17] — 2026-08-21 — single-node runtime finished (§H cron, §I accel, `diff`, rootless net) · toolchain 6.5.33
+
+Closes the v3.0.17 roadmap line: `stiva diff`, rootless container networking,
+persisted `scan_policy`, three inherited `fleet.cyr` defects, plus §H scheduled
+containers and §I accelerator-aware placement — the last two unlocked by turning
+the `accel` feature on by default. 2075 → **2175** tests across `tests/*.tcyr`,
+**87** CLI smoke assertions, 36 registered verbs (34 live).
+
+The release also moves the toolchain and every dependency pin, which is where it
+got interesting — see the two entries directly below.
+
+### Benchmarks — flat across the toolchain move, on a contended box
+
+14 benchmarks, no real movement against the pre-bump run (`03a55fe`): the two OCI
+serialize paths are within 1 %, everything else lands between −3.3 % and +5.7 %.
+
+⚠ **The recorded 3.0.17 row was measured at load 0.80–1.07 and reads slightly hot
+throughout.** Almost every benchmark moved *up* together by 1.6–4.7 %, which is the
+box-wide-contention signature rather than a code change — the same tell cyrius
+documents for its own `.21`/`.23`/`.25` incidents.
+
+`flatten_layers_2x60_files_4kib` is the one entry that looks like a regression at
+**+5.7 %** (1.458 ms → 1.541 ms). It is not: three fresh runs measured 1.420 / 1.425 /
+1.477 ms, a median *below* the 3.0.16 figure. The recorded value is the high end of
+run-to-run variance on a busy machine. Re-baseline on a settled box (load < 0.35) before
+reading anything into these numbers.
+
+### Changed — toolchain `6.4.78` → `6.5.33` and a full dependency refresh
+
+Every AGNOS pin to its current tag: **kavach 3.9.3 → 3.11.15**, **majra 2.5.1 →
+2.6.7**, **bote 3.1.4 → 3.3.2**, **libro 2.8.2 → 2.8.8**, **sakshi 2.4.6 →
+2.4.11**, **agnodrm 1.5.0 → 1.5.1**, **ai-hwaccel 2.3.15 → 2.3.18**, **nein 1.6.4
+→ 1.6.6**. `cmdit` and `samay` stay at 1.2.2 / 1.0.1 (both already current).
+
+**`[deps.sigil]` is now declared explicitly, pinned to 3.12.9 and listed FIRST.**
+stiva takes the full `dist/sigil.cyr`; libro declares its own `[deps.sigil]`
+selecting four *thin* sub-bundles, and the full monolith already inlines all
+four. Claiming the name ahead of the transitive walk is what stops both surfaces
+landing in one compilation unit — which is not a warning-level problem: the two
+copies push cycc's 16-slot `#define`/flag table to 17 and the build stops. Same
+remedy nein 1.6.3 documents for the identical collision.
+
+Three source-level adjustments the toolchain move forced:
+
+- **`bayan_json_v_parse_str` → `_buf`** (15 call sites) and
+  **`bayan_yaml_parse_str` → `_buf`** (1). bayan 1.3.0, which ships with cyrius
+  6.5.0, renamed the `(buf, len)` entry points; the bodies are unchanged.
+- **`Backend.*` → `KavachBackend.*`** (9 sites) — kavach 3.11.x namespaced the
+  enum.
+- **A samay 1.0.1 compatibility shim in `src/error.cyr`.** samay's `_parse` still
+  calls the unprefixed `json_v_parse_str`, which bayan 1.3.0 removed, so the
+  symbol is undefined at link time and cycc refuses to emit. The shim forwards to
+  `bayan_json_v_parse_buf` (identical signature and body). It lives in
+  `error.cyr` rather than beside the samay consumer in `cron.cyr` because cyrius
+  auto-prepends every active `[deps.*]` module into *every* compilation unit — so
+  the unresolved reference exists even in `convert.tcyr`, which includes only
+  `error.cyr` + `convert.cyr`. `error.cyr` is the one module every unit includes.
+  **Retire it the moment samay ≥ 1.0.2 lands** with the call updated; past that
+  point it shadows rather than shims. ai-hwaccel hit the same break and fixed its
+  own copy at 2.3.16; samay has had no release since.
+
+`src/` and `tests/` were also reformatted under the 6.5.x formatter — continuation
+lines now indent by two columns instead of aligning to the statement. Whitespace
+only, no token changes.
+
+### Fixed — CI could not resolve dependencies at all: `dep nein requires 'bote-core'`
+
+The toolchain bump broke `cyrius deps` outright, before build or test:
+
+```
+error: cannot read <snapshot>/lib/bote-core.cyr
+error: dep nein requires 'bote-core' but it is not in the cyrius stdlib
+```
+
+**The cause was upstream in nein, and the bump only revealed it.** `cyrius
+distlib` omits a fold from a `.deps` sidecar only when the fold basename equals
+the dep's `[deps.NAME]` section name. nein named that section for the repo
+(`bote`) while the module is `bote-core`, so its `include "lib/bote-core.cyr"`
+was emitted into **both** `dist/nein.deps` and `dist/nein-mcp.deps` as a *stdlib
+leaf* — asserting a git-dep bundle ships in the toolchain snapshot.
+
+It shipped in nein 1.6.4 and 1.6.5 and was invisible in both: through cyrius
+6.5.23, `_dep_find_stdlib_dir()` returned the consumer's own half-populated
+`./lib` as the stdlib for any project carrying a `src/main.cyr`, and stiva's own
+`[deps.bote]` drops `lib/bote-core.cyr` there, so the bad leaf resolved by
+accident. cyrius 6.5.24/6.5.25 corrected that lookup to consult the pinned
+snapshot — correct, and it turned a latent packaging lie into a hard error.
+
+Fixed in **nein 1.6.6** (`[deps.bote-core]`, matching the module basename); stiva
+pins it here. Worth keeping: **reverting the toolchain alone does not fix this** —
+6.4.78 with the refreshed deps fails differently, on four *false* errors
+(`test`, `patra`, `regex`, `hashmap_fast` — all real stdlib modules) that are
+precisely what 6.5.24 fixed. Forward was the only way out.
+
+`cyrius.lock` is regenerated and committed: 84 files, 13 commit-pinned (12 → 13
+because nein's renamed section resolves `bote-core` transitively alongside
+stiva's own `bote`; both land on the same commit).
+
 ### Fixed — `src/build.cyr` and `tests/registry.tcyr` had been failing `cyrius fmt --check`
 Silently, and for several releases, because `cyrius audit`'s fmt stage reports only
 `FAIL: files need reformatting` without naming a file, and `cyrius fmt <file> --check` exits 1
@@ -379,6 +477,8 @@ hashes* it records are the only comparable part. A guard that compares the sorte
 `<sha256>  lib/<file>` lines while ignoring the `commit` lines and their order would test the real
 invariant ("the files the tags produce are the files the lock records"). That is not being shipped
 here on a second guess: it needs validating against a real CI run first.
+
+## [3.0.15] — 2026-07-26 — `build` and `exec` are live (§F, §D)
 
 ### Added — `stiva exec` is live (roadmap §D). 32 of 35 verbs
 Non-interactive exec into a running container, over `nsenter`, exactly as the oracle does it

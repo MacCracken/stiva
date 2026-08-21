@@ -14,7 +14,7 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.0.16 (+ unreleased v3.0.17 work)
+## Where stiva is — v3.0.17
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
@@ -24,11 +24,12 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
 | Tests | 2175 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
-| Deps | cyrius 6.4.78 · kavach 3.9.3 · cmdit 1.2.2 · majra 2.5.1 · nein 1.6.4 · bote 3.1.4 · agnodrm 1.5.0 |
+| Deps | cyrius 6.5.33 · kavach 3.11.15 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.6 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
 
 **Three facts that constrain everything below**, all verified by execution rather than by reading:
 
-- **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile is still live at 6.4.78.** A typed
+- **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
+  it has not been re-verified at the 6.5.33 pin, so assume live.** A typed
   `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
@@ -47,6 +48,22 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 All of v3.0.17 has landed — see the CHANGELOG. `accel` is now `default = ["accel"]`, `stiva cron`
 schedules containers, `stiva info` reports accelerators, fleet placement has an accelerator
 dimension, and CI checks the vendored files against the pinned tags.
+
+The release also moved the toolchain **6.4.78 → 6.5.33** and every dependency pin to its current
+tag, which forced three source-level adjustments (the bayan `_str` → `_buf` rename, kavach's
+`Backend` → `KavachBackend`, and a samay 1.0.1 shim in `src/error.cyr` to retire when samay
+≥ 1.0.2 lands). It also surfaced a latent packaging bug in nein that broke `cyrius deps`
+outright — fixed upstream in **nein 1.6.6**, pinned here. The CHANGELOG carries the full account;
+the short version is that a dep's `.deps` sidecar may name stdlib leaves only, and reverting the
+toolchain would not have helped.
+
+### Open cleanliness item — `cyrius audit` exits 1 on 43 undocumented public fns
+
+Every other audit stage is clean at 3.0.17 — `fmt` ok, `lint` ok, tests 2175/0, bench 1/0 — and
+`rc = 1` comes solely from the docs stage counting **43 undocumented public fns** across `src/`.
+It is not a CI gate (`.github/workflows/ci.yml` runs deps/build/test, not `cyrius audit`), but it
+does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until the count is
+zero. Pre-existing and unchanged by the 3.0.17 release work.
 
 ### Open cleanliness item — 163 line-length warnings in `tests/`
 

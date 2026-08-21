@@ -212,8 +212,8 @@ fn _cli_not_wired(verb_name) {
     _cli_puts("stiva ");
     _cli_puts(verb_name);
     _cli_puts(": not wired yet. See docs/development/roadmap.md\n");
-    _cli_puts("  Part of completing the single-node runtime (v3.0.x — registry pull/push,\n");
-    _cli_puts("  container lifecycle, exec/CRIU); see docs/development/roadmap.md.\n");
+    _cli_puts("  Needs CRIU — roadmap v3.1.0 item 3. The rest of the single-node runtime\n");
+    _cli_puts("  is complete as of v3.0.17; see docs/development/roadmap.md.\n");
     return CMDIT_EXIT_RUN;
 }
 
