@@ -108,12 +108,12 @@ fn test_oci_status_all_variants() {
 fn test_oci_state_serde() {
     test_group("oci_state_serde");
     var st = oci_state_new("1.2.0", "test-container", OCI_STATUS_RUNNING, 1234,
-    "/run/containers/test", 0);
+      "/run/containers/test", 0);
     var json = json_v_build(oci_state_to_jv(st));
     var cs = str_cstr(json);
     assert_eq(strstr(cs, "\"ociVersion\":\"1.2.0\"") >= 0, 1, "has ociVersion");
     assert_eq(strstr(cs, "\"status\":\"running\"") >= 0, 1, "has status running");
-    var back = oci_state_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var back = oci_state_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var bs: OciState = back;
     assert_eq(streq(bs.id, "test-container"), 1, "id round-trip");
     assert_eq(bs.status, OCI_STATUS_RUNNING, "status round-trip");
@@ -125,7 +125,7 @@ fn test_build_state_json() {
     test_group("build_state_json");
     var cfg = container_config_default();
     var c: Container = container_new("abc123", "test", "sha256:dead000000000000000000000000000000000000000000000000000000000000", "",
-    CONTAINER_STATE_RUNNING, 42, 1000, 2000, cfg, 0 - 1);
+      CONTAINER_STATE_RUNNING, 42, 1000, 2000, cfg, 0 - 1);
     var s: OciState = build_state(c, "/run/bundle");
     assert_eq(streq(s.oci_version, "1.2.0"), 1, "oci_version 1.2.0");
     assert_eq(s.status, OCI_STATUS_RUNNING, "status Running");
@@ -207,39 +207,39 @@ fn test_intent_payload_serde() {
     assert_eq(strstr(rcs, "\"Run\":") >= 0, 1, "Run externally-tagged");
     assert_eq(strstr(rcs, "\"image\":\"nginx\"") >= 0, 1, "Run image wire");
     assert_eq(strstr(rcs, "\"name\":\"web\"") >= 0, 1, "Run name wire");
-    var rb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(rj), str_len(rj)));
+    var rb: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(rj), str_len(rj)));
     assert_eq(rb.kind, INTENT_KIND_RUN, "Run kind");
     assert_eq(streq(rb.image, "nginx"), 1, "Run image");
     assert_eq(streq(rb.name, "web"), 1, "Run name");
     # Run with name None → null on the wire, 0 back.
     var rn = json_v_build(intent_to_jv(intent_run("alpine", 0)));
-    var rnb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(rn), str_len(rn)));
+    var rnb: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(rn), str_len(rn)));
     assert_eq(rnb.name, 0, "Run name None round-trips");
     # Stop { id }
     var sj = json_v_build(intent_to_jv(intent_stop("abc123")));
-    var sb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(sj), str_len(sj)));
+    var sb: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(sj), str_len(sj)));
     assert_eq(sb.kind, INTENT_KIND_STOP, "Stop kind");
     assert_eq(streq(sb.id, "abc123"), 1, "Stop id");
     # Pull { image }
     var pj = json_v_build(intent_to_jv(intent_pull("alpine")));
-    var pb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(pj), str_len(pj)));
+    var pb: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(pj), str_len(pj)));
     assert_eq(pb.kind, INTENT_KIND_PULL, "Pull kind");
     assert_eq(streq(pb.image, "alpine"), 1, "Pull image");
     # Ansamblu { action: Up }
     var aj = json_v_build(intent_to_jv(intent_ansamblu(ANSAMBLU_ACTION_UP)));
     assert_eq(strstr(str_cstr(aj), "\"action\":\"Up\"") >= 0, 1, "Ansamblu action wire");
-    var ab: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(aj), str_len(aj)));
+    var ab: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(aj), str_len(aj)));
     assert_eq(ab.kind, INTENT_KIND_ANSAMBLU, "Ansamblu kind");
     assert_eq(ab.action, ANSAMBLU_ACTION_UP, "Ansamblu action Up");
     # Scale { service, replicas }
     var scj = json_v_build(intent_to_jv(intent_scale("worker", 3)));
-    var scb: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(scj), str_len(scj)));
+    var scb: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(scj), str_len(scj)));
     assert_eq(scb.kind, INTENT_KIND_SCALE, "Scale kind");
     assert_eq(streq(scb.service, "worker"), 1, "Scale service");
     assert_eq(scb.replicas, 3, "Scale replicas");
     # Inspect { target }
     var ij = json_v_build(intent_to_jv(intent_inspect("nginx")));
-    var ibk: Intent = intent_from_jv(bayan_json_v_parse_str(str_data(ij), str_len(ij)));
+    var ibk: Intent = intent_from_jv(bayan_json_v_parse_buf(str_data(ij), str_len(ij)));
     assert_eq(ibk.kind, INTENT_KIND_INSPECT, "Inspect kind");
     assert_eq(streq(ibk.target, "nginx"), 1, "Inspect target");
     # AnsambluAction name↔ordinal round-trip (rust: ansamblu_action_serde).
@@ -254,7 +254,7 @@ fn test_intent_payload_serde() {
 # required field, a wrong-typed value, an unknown variant/action, and an object
 # without exactly one variant key. (Adversarial parity-verify pass.)
 fn _t_intent_parse(j) {
-    return intent_from_jv(bayan_json_v_parse_str(j, strlen(j)));
+    return intent_from_jv(bayan_json_v_parse_buf(j, strlen(j)));
 }
 
 fn test_intent_from_jv_strict() {
@@ -1024,17 +1024,17 @@ fn test_registry_descriptor_serde() {
     assert_eq(strstr(cs, "\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\"") >= 0, 1, "has digest");
     assert_eq(strstr(cs, "\"size\":100") >= 0, 1, "has size");
     assert_eq(strstr(cs, "urls") >= 0, 0, "no urls key when None");
-    var back = descriptor_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var back = descriptor_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var bb: Descriptor = back;
     assert_eq(streq(bb.media_type, media_oci_config()), 1, "media_type round-trip");
     assert_eq(streq(bb.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "digest round-trip");
     assert_eq(bb.size, 100, "size round-trip");
     assert_eq(bb.urls, 0, "urls None round-trip");
     var badj = "{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}";
-    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing mediaType -> 0");
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(badj, strlen(badj))), 0, "missing mediaType -> 0");
     # size must be an integer (strict) — a string size is rejected, not coerced to 0.
     var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:7900000000000000000000000000000000000000000000000000000000000000\",\"size\":\"123\"}";
-    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(badsize, strlen(badsize))), 0, "string size -> 0");
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(badsize, strlen(badsize))), 0, "string size -> 0");
     return 0;
 }
 
@@ -1053,7 +1053,7 @@ fn test_registry_manifest_serde() {
     assert_eq(strstr(cs, "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"") >= 0, 1, "layers array");
     var json2 = json_v_build(oci_manifest_to_jv(m));
     assert_eq(streq(str_cstr(json2), cs), 1, "deterministic build");
-    var back = oci_manifest_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var back = oci_manifest_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var bm: OciManifest = back;
     assert_eq(bm.schema_version, 2, "schema_version round-trip");
     assert_eq(streq(bm.media_type, media_oci_manifest()), 1, "media_type round-trip");
@@ -1064,7 +1064,7 @@ fn test_registry_manifest_serde() {
     assert_eq(streq(blay.digest, "sha256:6ca7900000000000000000000000000000000000000000000000000000000000"), 1, "layer digest round-trip");
     assert_eq(blay.size, 200, "layer size round-trip");
     var badj = "{\"schemaVersion\":2,\"layers\":[]}";
-    assert_eq(oci_manifest_from_jv(bayan_json_v_parse_str(badj, strlen(badj))), 0, "missing config -> 0");
+    assert_eq(oci_manifest_from_jv(bayan_json_v_parse_buf(badj, strlen(badj))), 0, "missing config -> 0");
     return 0;
 }
 
@@ -1771,7 +1771,7 @@ fn test_runtime_process_info_serde() {
     test_group("runtime_process_info_serde");
     var info = process_info_new(123, 1, "sleep", "sleep 60", 83);   # 'S' = 83
     var json = json_v_build(process_info_to_jv(info));
-    var back = process_info_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var back = process_info_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var b: ProcessInfo = back;
     assert_eq(b.pid, 123, "pid round-trip");
     assert_eq(b.state, 83, "state 'S' round-trip");
@@ -1786,7 +1786,7 @@ fn test_runtime_copy_into_container() {
     sys_mkdir("/tmp/stiva_cp_in/rootfs", 0x1ED);
     file_write_all("/tmp/stiva_cp_in/hello.txt", "hello", 5);
     assert_eq(copy_into_container("/tmp/stiva_cp_in/rootfs",
-    "/tmp/stiva_cp_in/hello.txt", "/app/hello.txt"), 0, "copy ok");
+        "/tmp/stiva_cp_in/hello.txt", "/app/hello.txt"), 0, "copy ok");
     var buf = alloc(64);
     var n = file_read_all("/tmp/stiva_cp_in/rootfs/app/hello.txt", buf, 63);
     store8(buf + n, 0);
@@ -1803,7 +1803,7 @@ fn test_runtime_copy_from_container() {
     sys_mkdir("/tmp/stiva_cp_out/rootfs/data", 0x1ED);
     file_write_all("/tmp/stiva_cp_out/rootfs/data/out.txt", "result", 6);
     assert_eq(copy_from_container("/tmp/stiva_cp_out/rootfs", "/data/out.txt",
-    "/tmp/stiva_cp_out/output.txt"), 0, "copy ok");
+        "/tmp/stiva_cp_out/output.txt"), 0, "copy ok");
     var buf = alloc(64);
     var n = file_read_all("/tmp/stiva_cp_out/output.txt", buf, 63);
     store8(buf + n, 0);
@@ -1818,7 +1818,7 @@ fn test_runtime_copy_from_missing() {
     sys_mkdir("/tmp/stiva_cp_miss", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_miss/rootfs", 0x1ED);
     assert_eq(copy_from_container("/tmp/stiva_cp_miss/rootfs", "/nope",
-    "/tmp/stiva_cp_miss/out"), 0 - 1, "missing source -> -1");
+        "/tmp/stiva_cp_miss/out"), 0 - 1, "missing source -> -1");
     return 0;
 }
 
@@ -1853,7 +1853,7 @@ fn test_runtime_copy_into_container_dir() {
     sys_mkdir("/tmp/stiva_cp_ind/srcdir", 0x1ED);
     file_write_all("/tmp/stiva_cp_ind/srcdir/x.txt", "xyz", 3);
     assert_eq(copy_into_container("/tmp/stiva_cp_ind/rootfs",
-    "/tmp/stiva_cp_ind/srcdir", "/app/data"), 0, "dir copy ok");
+        "/tmp/stiva_cp_ind/srcdir", "/app/data"), 0, "dir copy ok");
     var buf = alloc(16);
     var n = file_read_all("/tmp/stiva_cp_ind/rootfs/app/data/x.txt", buf, 15);
     store8(buf + n, 0);
@@ -1926,8 +1926,8 @@ fn test_container_serde_round_trip() {
     cfg.memory_limit = 256 * 1024 * 1024;
     cfg.user = "nobody";
     var c: Container = container_new("abc-123", "web", "sha256:696d670000000000000000000000000000000000000000000000000000000000",
-    "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
-    1000, 2000, cfg, 0);
+      "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
+      1000, 2000, cfg, 0);
     assert_eq(streq(c.id, "abc-123"), 1, "id");
     assert_eq(c.state, CONTAINER_STATE_STOPPED, "state Stopped");
     assert_eq(c.exit_status, 0, "exit_code 0");
@@ -1941,7 +1941,7 @@ fn test_migration_bundle_serde() {
     test_group("migration_bundle_serde");
     var cfg = container_config_default();
     var b: MigrationBundle = migration_bundle_new("abc-123",
-    "docker.io/library/nginx:latest", cfg, "/tmp/checkpoint", "node-1", 42);
+      "docker.io/library/nginx:latest", cfg, "/tmp/checkpoint", "node-1", 42);
     assert_eq(streq(b.source_container_id, "abc-123"), 1, "source id");
     assert_eq(streq(b.image_ref, "docker.io/library/nginx:latest"), 1, "image_ref");
     assert_eq(streq(b.source_node, "node-1"), 1, "source_node");
@@ -2178,16 +2178,16 @@ fn _mcp_names_contains(tools, target) {
 fn test_mcp_tool_list_has_nine_tools() {
     test_group("mcp_tool_list_has_nine_tools");
     var tools = tool_list();
-    assert_eq(vec_len(tools), 9);
-    assert_eq(_mcp_names_contains(tools, "stiva_pull"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_run"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_ps"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_stop"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_ansamblu"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_exec"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_build"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_push"), 1);
-    assert_eq(_mcp_names_contains(tools, "stiva_inspect"), 1);
+    assert_eq(vec_len(tools), 9, "the registry exposes exactly nine tools");
+    assert_eq(_mcp_names_contains(tools, "stiva_pull"), 1, "stiva_pull registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_run"), 1, "stiva_run registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_ps"), 1, "stiva_ps registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_stop"), 1, "stiva_stop registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_ansamblu"), 1, "stiva_ansamblu registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_exec"), 1, "stiva_exec registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_build"), 1, "stiva_build registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_push"), 1, "stiva_push registered");
+    assert_eq(_mcp_names_contains(tools, "stiva_inspect"), 1, "stiva_inspect registered");
     return 0;
 }
 
@@ -2199,11 +2199,11 @@ fn test_mcp_tool_schemas_are_valid() {
     for (i = 0; i < n; i = i + 1) {
         var t = vec_get(tools, i);
         # input_schema.schema_type == "object"
-        assert_eq(streq(schema_type(tool_def_input_schema(t)), "object"), 1);
+        assert_eq(streq(schema_type(tool_def_input_schema(t)), "object"), 1, "every tool input schema is an object");
         # description non-empty
-        assert(strlen(tool_def_description(t)) > 0);
+        assert(strlen(tool_def_description(t)) > 0, "every tool has a description");
         # annotations present (non-null)
-        assert(tool_def_annotations(t) != 0);
+        assert(tool_def_annotations(t) != 0, "every tool has annotations");
     }
     return 0;
 }
@@ -2211,32 +2211,32 @@ fn test_mcp_tool_schemas_are_valid() {
 fn test_mcp_result_ok() {
     test_group("mcp_result_ok");
     var r = mcp_result_ok("{\"key\": \"value\"}");
-    assert_eq(mcp_result_success(r), 1);
-    assert_eq(vec_len(mcp_result_content(r)), 1);
+    assert_eq(mcp_result_success(r), 1, "ok result is a success");
+    assert_eq(vec_len(mcp_result_content(r)), 1, "ok result carries one content part");
     var part = vec_get(mcp_result_content(r), 0);
-    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT);
+    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT, "ok result part is text");
     return 0;
 }
 
 fn test_mcp_result_err() {
     test_group("mcp_result_err");
     var r = mcp_result_err("something failed");
-    assert_eq(mcp_result_success(r), 0);
-    assert_eq(vec_len(mcp_result_content(r)), 1);
+    assert_eq(mcp_result_success(r), 0, "err result is not a success");
+    assert_eq(vec_len(mcp_result_content(r)), 1, "err result carries one content part");
     var part = vec_get(mcp_result_content(r), 0);
-    assert_eq(streq(content_part_text_of(part), "something failed"), 1);
+    assert_eq(streq(content_part_text_of(part), "something failed"), 1, "err result carries the message verbatim");
     return 0;
 }
 
 fn test_mcp_result_resource() {
     test_group("mcp_result_resource");
     var r = mcp_result_resource("stiva://test/1", "{\"id\": \"1\"}");
-    assert_eq(mcp_result_success(r), 1);
-    assert_eq(vec_len(mcp_result_content(r)), 1);
+    assert_eq(mcp_result_success(r), 1, "resource result is a success");
+    assert_eq(vec_len(mcp_result_content(r)), 1, "resource result carries one content part");
     var part = vec_get(mcp_result_content(r), 0);
-    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE);
-    assert_eq(streq(content_part_uri(part), "stiva://test/1"), 1);
-    assert_eq(streq(content_part_mime_type(part), "application/json"), 1);
+    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE, "resource result part is a resource");
+    assert_eq(streq(content_part_uri(part), "stiva://test/1"), 1, "resource result uri");
+    assert_eq(streq(content_part_mime_type(part), "application/json"), 1, "resource result mime type");
     return 0;
 }
 
@@ -2253,7 +2253,7 @@ fn test_mcp_handle_ansamblu() {
     var up = json_v_obj_new();
     json_v_obj_set(up, str_from("action"), json_v_str_new(str_from("up")));
     json_v_obj_set(up, str_from("file"),
-    json_v_str_new(str_from("[services.web]\nimage = \"nginx\"\n\n[services.db]\nimage = \"postgres\"\n")));
+      json_v_str_new(str_from("[services.web]\nimage = \"nginx\"\n\n[services.db]\nimage = \"postgres\"\n")));
     var r = mcp_handle_ansamblu(up);
     assert_eq(mcp_result_success(r), 1, "up ok");
     var text = content_part_text_of(vec_get(mcp_result_content(r), 0));
@@ -2278,27 +2278,27 @@ fn test_mcp_handle_ansamblu() {
 fn test_mcp_content_type_names() {
     test_group("mcp_content_type_names");
     # ContentPart #[serde(tag = "type")] wire values.
-    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_TEXT), "text"), 1);
-    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_RESOURCE), "resource"), 1);
+    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_TEXT), "text"), 1, "MCP_CONTENT_TEXT names \"text\"");
+    assert_eq(streq(mcp_content_type_name(MCP_CONTENT_RESOURCE), "resource"), 1, "resource content type name");
     return 0;
 }
 
 fn test_mcp_content_part_text() {
     test_group("mcp_content_part_text");
     var part = content_part_text("hello");
-    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT);
-    assert_eq(streq(content_part_text_of(part), "hello"), 1);
-    assert_eq(content_part_uri(part), 0);
+    assert_eq(content_part_kind(part), MCP_CONTENT_TEXT, "text part kind");
+    assert_eq(streq(content_part_text_of(part), "hello"), 1, "text part payload");
+    assert_eq(content_part_uri(part), 0, "a text part carries no uri");
     return 0;
 }
 
 fn test_mcp_content_part_resource() {
     test_group("mcp_content_part_resource");
     var part = content_part_resource("stiva://containers/abc", "application/json", "{}");
-    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE);
-    assert_eq(streq(content_part_uri(part), "stiva://containers/abc"), 1);
-    assert_eq(streq(content_part_mime_type(part), "application/json"), 1);
-    assert_eq(streq(content_part_text_of(part), "{}"), 1);
+    assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE, "resource part kind");
+    assert_eq(streq(content_part_uri(part), "stiva://containers/abc"), 1, "resource part uri");
+    assert_eq(streq(content_part_mime_type(part), "application/json"), 1, "resource part mime type");
+    assert_eq(streq(content_part_text_of(part), "{}"), 1, "resource part text");
     return 0;
 }
 
@@ -2319,12 +2319,12 @@ fn test_lib_default_config() {
 fn test_lib_config_custom_values() {
     test_group("lib::config_custom_values");
     var d: StivaConfig = stiva_config_new(
-    "/custom/containers",
-    "/custom/images",
-    network_mode_new(NETWORK_MODE_HOST, 0),
-    128,
-    0
-    );
+      "/custom/containers",
+      "/custom/images",
+      network_mode_new(NETWORK_MODE_HOST, 0),
+      128,
+      0
+      );
     assert_eq(streq(d.root_path, "/custom/containers"), 1, "custom root_path");
     assert_eq(streq(d.image_path, "/custom/images"), 1, "custom image_path");
     assert_eq(d.max_containers, 128, "custom max_containers");

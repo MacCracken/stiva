@@ -45,12 +45,12 @@ fn stiva_config_new(root_path, image_path, default_network, max_containers, audi
 fn stiva_config_default() {
     var net = network_mode_new(NETWORK_MODE_BRIDGE, 0);
     return stiva_config_new(
-    "/var/lib/agnos/containers",
-    "/var/lib/agnos/images",
-    net,
-    64,
-    0
-    );
+      "/var/lib/agnos/containers",
+      "/var/lib/agnos/images",
+      net,
+      64,
+      0
+      );
 }
 
 # ══ Stiva runtime facade (rust-old/src/lib.rs) ═══════════════════
@@ -571,7 +571,7 @@ fn _mcp_image_jv(im) {
     var o = json_v_obj_new();
     json_v_obj_set(o, str_from("id"), json_v_str_new(str_from(_img_id(im))));
     json_v_obj_set(o, str_from("reference"),
-    json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
+      json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
     var ii: Image = im;
     json_v_obj_set(o, str_from("size_bytes"), json_v_int_new(ii.size_bytes));
     var nl = 0;
@@ -596,7 +596,7 @@ fn mcp_handle_build(s, params) {
     var im = stiva_build(s, spec, ctx);
     if (im == 0) { return mcp_result_err("build failed"); }
     return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
-    str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+      str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
 }
 
 # stiva_exec (oracle mcp.rs). `command` is a JSON array of strings; `env` an
@@ -664,7 +664,7 @@ fn mcp_handle_pull(s, params) {
     var im = stiva_pull(s, image);
     if (im == 0) { return mcp_result_err(_img_cat2("pull failed: ", image)); }
     return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
-    str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+      str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
 }
 
 # stiva_ps (oracle mcp.rs:336).
@@ -727,13 +727,13 @@ fn mcp_handle_inspect(s, params) {
         if (c == 0) { return mcp_result_err(_img_cat2("inspect failed: ", id)); }
         var cc: Container = c;
         return mcp_result_resource(_mcp_uri("stiva://containers/", cc.id),
-        str_cstr(json_v_build_pretty(_mcp_container_jv(c, 1), 2)));
+          str_cstr(json_v_build_pretty(_mcp_container_jv(c, 1), 2)));
     }
     if (streq(kind, "image") == 1) {
         var im = stiva_inspect_image(s, id);
         if (im == 0) { return mcp_result_err(_img_cat2("inspect failed: ", id)); }
         return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
-        str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
+          str_cstr(json_v_build_pretty(_mcp_image_jv(im), 2)));
     }
     return mcp_result_err(_img_cat2("unknown inspect type: ", kind));
 }
@@ -749,14 +749,14 @@ fn mcp_list_resources(s) {
             var cc: Container = vec_get(cs, i);
             var o = json_v_obj_new();
             json_v_obj_set(o, str_from("uri"),
-            json_v_str_new(str_from(_mcp_uri("stiva://containers/", cc.id))));
+              json_v_str_new(str_from(_mcp_uri("stiva://containers/", cc.id))));
             var nm = cc.name;
             if (nm == 0) { nm = cc.id; }
             json_v_obj_set(o, str_from("name"), json_v_str_new(str_from(nm)));
             json_v_obj_set(o, str_from("mimeType"), json_v_str_new(str_from("application/json")));
             json_v_obj_set(o, str_from("description"),
-            json_v_str_new(str_from(_img_cat2(_img_cat2("Container ", cc.id),
-            _img_cat2(" (", _img_cat2(container_state_name(cc.state), ")"))))));
+              json_v_str_new(str_from(_img_cat2(_img_cat2("Container ", cc.id),
+                    _img_cat2(" (", _img_cat2(container_state_name(cc.state), ")"))))));
             vec_push(out, o);
             i = i + 1;
         }
@@ -769,14 +769,14 @@ fn mcp_list_resources(s) {
             var im = vec_get(ims, j);
             var o2 = json_v_obj_new();
             json_v_obj_set(o2, str_from("uri"),
-            json_v_str_new(str_from(_mcp_uri("stiva://images/", _img_id(im)))));
+              json_v_str_new(str_from(_mcp_uri("stiva://images/", _img_id(im)))));
             json_v_obj_set(o2, str_from("name"),
-            json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
+              json_v_str_new(str_from(image_ref_full_ref(_image_reference(im)))));
             json_v_obj_set(o2, str_from("mimeType"), json_v_str_new(str_from("application/json")));
             var iid: Image = im;
             json_v_obj_set(o2, str_from("description"),
-            json_v_str_new(str_from(_img_cat2(_img_cat2("Image ", _img_id(im)),
-            _img_cat2(" (", _img_cat2(_rt_int_to_cstr(iid.size_bytes), " bytes)"))))));
+              json_v_str_new(str_from(_img_cat2(_img_cat2("Image ", _img_id(im)),
+                    _img_cat2(" (", _img_cat2(_rt_int_to_cstr(iid.size_bytes), " bytes)"))))));
             vec_push(out, o2);
             j = j + 1;
         }
@@ -835,7 +835,7 @@ fn mcp_handle_tool(s, name, params) {
     if (streq(name, "stiva_ansamblu") == 1) { return mcp_handle_ansamblu(params); }
     if (streq(name, "stiva_run") == 1) {
         return mcp_result_err(
-        "stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)");
+          "stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)");
     }
     if (streq(name, "stiva_exec") == 1) { return mcp_handle_exec(s, params); }
     return mcp_result_err(_img_cat2("unknown tool: ", name));

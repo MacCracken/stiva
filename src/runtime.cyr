@@ -561,7 +561,7 @@ fn generate_spec(container, rootfs) {
 # the send-failure message drops the ": <e>" suffix.
 fn send_signal(pid, signal) {
     var lm = _rt_cat3("sending signal to container: signal=", _rt_int_to_cstr(signal),
-    _rt_cat2(" pid=", _rt_int_to_cstr(pid)));
+      _rt_cat2(" pid=", _rt_int_to_cstr(pid)));
     sakshi_info(lm, strlen(lm));
     if (signal < 1 || signal > 64) {
         stiva_err_print(STIVA_ERR_RUNTIME, _rt_cat2("invalid signal ", _rt_int_to_cstr(signal)));
@@ -574,8 +574,8 @@ fn send_signal(pid, signal) {
     var rc = sys_kill(pid, signal);
     if (rc < 0) {
         stiva_err_print(STIVA_ERR_RUNTIME,
-        _rt_cat3("failed to send signal ", _rt_int_to_cstr(signal),
-        _rt_cat2(" to PID ", _rt_int_to_cstr(pid))));
+          _rt_cat3("failed to send signal ", _rt_int_to_cstr(signal),
+            _rt_cat2(" to PID ", _rt_int_to_cstr(pid))));
         return STIVA_ERR_RUNTIME;
     }
     return STIVA_ERR_OK;
@@ -600,12 +600,12 @@ fn _rt_cgroup_base_from_content(content) {
             var line_len = i - start;
             # prefix "0::" ('0'=48, ':'=58) at the line start.
             if (line_len >= 3 && load8(content + start) == 48
-            && load8(content + start + 1) == 58 && load8(content + start + 2) == 58) {
+              && load8(content + start + 1) == 58 && load8(content + start + 2) == 58) {
                 var pstart = start + 3;
                 var pend = i;
                 # trim() both ends (space/tab/CR/LF).
                 while (pstart < pend
-                && (load8(content + pstart) == 32 || load8(content + pstart) == 9)) {
+                  && (load8(content + pstart) == 32 || load8(content + pstart) == 9)) {
                     pstart = pstart + 1;
                 }
                 while (pend > pstart) {
@@ -665,7 +665,7 @@ fn apply_cgroup_limits(pid, spec) {
     var base = resolve_cgroup_base(pid);
     if (base == 0) {
         sakshi_warn("could not resolve cgroup base, skipping limits",
-        strlen("could not resolve cgroup base, skipping limits"));
+          strlen("could not resolve cgroup base, skipping limits"));
         return 0;
     }
     var sp: RuntimeSpec = spec;
@@ -744,11 +744,11 @@ fn container_stats(pid) {
     var base = resolve_cgroup_base(pid);
     if (base == 0) { return 0; }
     return container_stats_new(
-    _rt_read_cgroup_u64(base, "memory.current"),
-    _rt_read_cgroup_u64(base, "memory.max"),
-    _rt_read_cpu_usage(base),
-    _rt_read_cgroup_u64(base, "pids.current"),
-    _rt_read_cgroup_u64(base, "pids.max"));
+      _rt_read_cgroup_u64(base, "memory.current"),
+      _rt_read_cgroup_u64(base, "memory.max"),
+      _rt_read_cpu_usage(base),
+      _rt_read_cgroup_u64(base, "pids.current"),
+      _rt_read_cgroup_u64(base, "pids.max"));
 }
 
 # Write to a cgroup v2 control file (rust-old: write_cgroup_file). Resolves the
@@ -817,7 +817,7 @@ fn build_sandbox(spec) {
 
     # Backend cascade (order load-bearing): explicit name > min-strength resolve >
     # OCI-if-available > Process.
-    var b = Backend.PROCESS;
+    var b = KavachBackend.PROCESS;
     if (sp.backend != 0) {
         b = backend_parse(sp.backend);
         if (b == 0 - 1) {
@@ -830,13 +830,13 @@ fn build_sandbox(spec) {
         b = resolve_min_strength_backend(policy, sp.min_isolation_score);
         if (b == 0 - 1) {
             stiva_err_print(STIVA_ERR_RUNTIME,
-            _rt_cat2("no backend meets minimum isolation score ", _rt_int_to_cstr(sp.min_isolation_score)));
+              _rt_cat2("no backend meets minimum isolation score ", _rt_int_to_cstr(sp.min_isolation_score)));
             return 0;
         }
-    } elif (backend_is_available(Backend.OCI) == 1) {
-        b = Backend.OCI;
+    } elif (backend_is_available(KavachBackend.OCI) == 1) {
+        b = KavachBackend.OCI;
     } else {
-        b = Backend.PROCESS;
+        b = KavachBackend.PROCESS;
     }
     var lm = _rt_cat2("selected sandbox backend: ", os_backend_name(b));
     sakshi_debug(lm, strlen(lm));
@@ -962,11 +962,11 @@ fn exec_container(spec) {
     var lc = _rt_cat2("container execution complete, exit_code=", _rt_int_to_cstr(ExecResult_exit_code(r)));
     sakshi_info(lc, strlen(lc));
     return container_exec_result_new(
-    ExecResult_exit_code(r),
-    ExecResult_stdout(r),
-    ExecResult_stderr(r),
-    ExecResult_duration_ms(r),
-    ExecResult_timed_out(r));
+      ExecResult_exit_code(r),
+      ExecResult_stdout(r),
+      ExecResult_stderr(r),
+      ExecResult_duration_ms(r),
+      ExecResult_timed_out(r));
 }
 
 # Write a container's exec output to its log file (rust-old: write_log). The
@@ -1031,7 +1031,7 @@ fn scan_output_last_findings() { return _rt_last_scan_findings; }
 #[must_use]
 fn scan_output(result, policy) {
     sakshi_info("scanning container output via externalization gate",
-    strlen("scanning container output via externalization gate"));
+      strlen("scanning container output via externalization gate"));
 
     if (result == 0) { return 0; }
     if (policy == 0) {
@@ -1064,19 +1064,19 @@ fn scan_output(result, policy) {
 
     sakshi_info("output scan passed", strlen("output scan passed"));
     return container_exec_result_new(
-    ExecResult_exit_code(er),
-    ExecResult_stdout(er),
-    ExecResult_stderr(er),
-    ExecResult_duration_ms(er),
-    ExecResult_timed_out(er));
+      ExecResult_exit_code(er),
+      ExecResult_stdout(er),
+      ExecResult_stderr(er),
+      ExecResult_duration_ms(er),
+      ExecResult_timed_out(er));
 }
 
 # ── Security scoring (rust-old: security_score / security_score_for) ──
 # kavach score_backend returns the isolation strength as an i64 (0..100); the
 # Rust StrengthScore wrapper collapses to that integer in the dist. No async.
 fn security_score() {
-    var backend = Backend.PROCESS;
-    if (backend_is_available(Backend.OCI) == 1) { backend = Backend.OCI; }
+    var backend = KavachBackend.PROCESS;
+    if (backend_is_available(KavachBackend.OCI) == 1) { backend = KavachBackend.OCI; }
     var lm = _rt_cat2("computing security strength score: ", os_backend_name(backend));
     sakshi_info(lm, strlen(lm));
     var policy = policy_basic();
@@ -1232,7 +1232,7 @@ fn container_top(pid) {
         ei = ei + 1;
     }
     var dm = _rt_cat3("container processes listed, pid=", _rt_int_to_cstr(pid),
-    _rt_cat2(" count=", _rt_int_to_cstr(vec_len(processes))));
+      _rt_cat2(" count=", _rt_int_to_cstr(vec_len(processes))));
     sakshi_info(dm, strlen(dm));
     return processes;
 }
@@ -1326,7 +1326,7 @@ fn copy_dir_recursive(src, dst) {
 # target's parent dirs; dirs are copied recursively. Returns 0 / -1.
 fn copy_into_container(rootfs, host_src, container_dst) {
     var lm = _rt_cat3("copying file into container: ", host_src,
-    _rt_cat2(" -> ", container_dst));
+      _rt_cat2(" -> ", container_dst));
     sakshi_info(lm, strlen(lm));
     var rel = container_dst;
     if (load8(rel) == 47) { rel = rel + 1; }      # strip leading '/'
@@ -1341,14 +1341,14 @@ fn copy_into_container(rootfs, host_src, container_dst) {
 # destination's parent dirs; dirs are copied recursively. Returns 0 / -1.
 fn copy_from_container(rootfs, container_src, host_dst) {
     var lm = _rt_cat3("copying file from container: ", container_src,
-    _rt_cat2(" -> ", host_dst));
+      _rt_cat2(" -> ", host_dst));
     sakshi_info(lm, strlen(lm));
     var rel = container_src;
     if (load8(rel) == 47) { rel = rel + 1; }
     var source = _rt_path_join(rootfs, rel);
     if (file_exists(source) == 0) {
         stiva_err_print(STIVA_ERR_STORAGE,
-        _rt_cat2("source path does not exist in container: ", container_src));
+          _rt_cat2("source path does not exist in container: ", container_src));
         return 0 - 1;
     }
     _stor_mkdir_parents(host_dst);
@@ -1690,7 +1690,7 @@ fn exec_in_container(root, pid, command, env, workdir) {
         # container escape, not a bad path. See _rt_workdir_is_safe.
         if (_rt_workdir_is_safe(workdir) == 0) {
             stiva_err_print(STIVA_ERR_INVALID_STATE,
-            _rt_cat2("exec workdir must be an absolute path inside the container, free of '..': ", workdir));
+              _rt_cat2("exec workdir must be an absolute path inside the container, free of '..': ", workdir));
             return 0;
         }
         var wd = _rt_cat2(_rt_cat2("--wd=/proc/", _rt_int_to_cstr(pid)), "/root");

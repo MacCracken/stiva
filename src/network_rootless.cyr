@@ -600,7 +600,7 @@ fn start_rootless_network(preference, pid, port_mappings, log_path) {
     var backend = select_backend(want);
     if (backend == NETWORK_ROOTLESS_BACKEND_AUTO) {
         stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK,
-        "no rootless network backend available (install slirp4netns or pasta)");
+          "no rootless network backend available (install slirp4netns or pasta)");
         return 0;
     }
     if (backend == NETWORK_ROOTLESS_BACKEND_PASTA) {

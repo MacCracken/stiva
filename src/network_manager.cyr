@@ -121,7 +121,7 @@ fn network_manager_create_network(m, name, subnet) {
         bridge_created = 1;
     } else {
         sakshi_warn("bridge creation skipped, requires root (roadmap v3.0.17 item 2):",
-        strlen("bridge creation skipped, requires root (roadmap v3.0.17 item 2):"));
+          strlen("bridge creation skipped, requires root (roadmap v3.0.17 item 2):"));
     }
 
     map_set(mgr.networks, name, _managed_network_new(pool, bridge_created));
@@ -207,7 +207,7 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
     if (host_veth == 0) {
         # ve-<first up-to-12 chars of id> — same as bridge.cyr host_veth_name.
         sakshi_warn("veth creation skipped, requires root (roadmap v3.0.17 item 2):",
-        strlen("veth creation skipped, requires root (roadmap v3.0.17 item 2):"));
+          strlen("veth creation skipped, requires root (roadmap v3.0.17 item 2):"));
         host_veth = host_veth_name(container_id);
     }
 

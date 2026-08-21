@@ -71,7 +71,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.0.16 — OCI container runtime (Cyrius port)";
+    return "3.0.17 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 33 subcommands (order = the verb ids above).
@@ -165,7 +165,7 @@ fn _cli_convert(h) {
     # user can see is fine — so refuse instead.
     if (n > 1048576) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-        _rt_cat2("input exceeds the 1 MiB convert limit: ", input));
+          _rt_cat2("input exceeds the 1 MiB convert limit: ", input));
         return CMDIT_EXIT_RUN;
     }
     store8(buf + n, 0);
@@ -371,9 +371,9 @@ fn _cli_info() {
     _cli_puts("stiva "); _cli_puts(_stiva_version_str()); _cli_puts("\n");
     _cli_puts("Security score: "); _cli_puts(_rt_int_to_cstr(security_score())); _cli_puts("/100\n");
     _cli_puts("Backends:\n");
-    _cli_puts("  process: "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.PROCESS))); _cli_puts("\n");
-    _cli_puts("  oci:     "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.OCI))); _cli_puts("\n");
-    _cli_puts("  noop:    "); _cli_puts(_rt_int_to_cstr(backend_is_available(Backend.NOOP))); _cli_puts("\n");
+    _cli_puts("  process: "); _cli_puts(_rt_int_to_cstr(backend_is_available(KavachBackend.PROCESS))); _cli_puts("\n");
+    _cli_puts("  oci:     "); _cli_puts(_rt_int_to_cstr(backend_is_available(KavachBackend.OCI))); _cli_puts("\n");
+    _cli_puts("  noop:    "); _cli_puts(_rt_int_to_cstr(backend_is_available(KavachBackend.NOOP))); _cli_puts("\n");
     # Accelerator inventory (roadmap §I). `registry_detect_no_exec` is
     # subprocess-free — pure sysfs and syscall reads — so it cannot hang on a
     # missing `nvidia-smi` and is safe inside a hardened context. The exec-based
@@ -724,7 +724,7 @@ fn _cli_events_scan(buf, len, since_ms, until_ms, printed, count) {
                 # allocations. The newline is restored immediately.
                 store8(buf + i, 0);
                 if (container_event_in_range(container_event_ts(buf + start),
-                since_ms, until_ms) == 1) {
+                    since_ms, until_ms) == 1) {
                     _cli_puts(buf + start);
                     _cli_puts("\n");
                     total = total + 1;
@@ -827,7 +827,7 @@ fn _cli_events(h, root) {
     var vh = cmdit_new("stiva events");
     var f_since = cmdit_int(vh, 0, "since", 0, "Only events at or after this Unix timestamp (seconds)");
     var f_until = cmdit_int(vh, 0, "until", 0,
-    "Only events at or before this Unix timestamp (seconds); with -f, stop there");
+      "Only events at or before this Unix timestamp (seconds); with -f, stop there");
     var f_count = cmdit_int(vh, 110, "count", 0, "Stop after N events (0 = unlimited)");
     var f_follow = cmdit_bool(vh, 102, "follow", "Keep polling for new events (until -n/--until, or interrupted)");
     var vr = cmdit_parse_verb(vh, h);
@@ -1378,7 +1378,7 @@ fn _cli_cron(h, root) {
             a = a + 1;
         }
         if (cron_add(root, cmdit_positional(vh, 1), cmdit_get_str(vh, f_expr),
-        cmdit_positional(vh, 2), cmd) == 0) {
+            cmdit_positional(vh, 2), cmd) == 0) {
             return CMDIT_EXIT_RUN;
         }
         _cli_puts(cmdit_positional(vh, 1)); _cli_puts("\n");
@@ -1564,7 +1564,7 @@ fn _cli_build(h, root) {
     if (n < 0) { stiva_err_print(STIVA_ERR_IO, spec_path); return CMDIT_EXIT_RUN; }
     if (n > 1048576) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-        _rt_cat2("build spec exceeds the 1 MiB limit: ", spec_path));
+          _rt_cat2("build spec exceeds the 1 MiB limit: ", spec_path));
         return CMDIT_EXIT_RUN;
     }
     store8(buf + n, 0);

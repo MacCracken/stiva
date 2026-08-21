@@ -105,10 +105,10 @@ fn cron_store_load(root) {
     var cell = alloc(8);
     var buf = _img_read_file(path, cell);
     if (buf == 0) { return out; }
-    var v = bayan_json_v_parse_str(buf, load64(cell));
+    var v = bayan_json_v_parse_buf(buf, load64(cell));
     if (v == 0) {
         sakshi_warn("cron.json is not valid JSON; treating the schedule as empty",
-        strlen("cron.json is not valid JSON; treating the schedule as empty"));
+          strlen("cron.json is not valid JSON; treating the schedule as empty"));
         return out;
     }
     var arr = json_v_obj_get(v, "jobs");
@@ -294,7 +294,7 @@ fn cron_due_at(jobs, now_ns) {
             var expr = _cron_parsed(cron_job_expr(j));
             if (expr != 0) {
                 var tmpl = cron_task_template_new(str_from(cron_job_name(j)),
-                str_from(""), str_from(""), 0, resource_req_default());
+                  str_from(""), str_from(""), 0, resource_req_default());
                 var e = cron_entry_new(str_from(cron_job_name(j)), expr, tmpl, 1, CRON_SKIP);
                 CronEntry_set_last_fired(e, cron_job_last_fired(j));
                 cron_scheduler_add_entry(sched, e);

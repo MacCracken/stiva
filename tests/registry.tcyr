@@ -178,7 +178,7 @@ fn _rg_canned_sink(ctx, url, cb, sink_ctx, headers) {
                 }
                 if (v < 0) {
                     return _sandhi_dl_result_a(default_alloc(), st, delivered,
-                    SANDHI_ERR_INTERNAL, 0);
+                      SANDHI_ERR_INTERNAL, 0);
                 }
                 delivered = delivered + take;
             }
@@ -212,7 +212,7 @@ fn _rg_client(ctx) {
 
 # Parse a JSON cstr into a bayan value graph.
 fn _rg_parse(s) {
-    return bayan_json_v_parse_str(s, strlen(s));
+    return bayan_json_v_parse_buf(s, strlen(s));
 }
 
 # The OCI manifest media type, as a fixture fragment (keeps JSON literals short).
@@ -232,7 +232,7 @@ fn test_rg_platform_from_jv() {
     assert_eq(p.os_version, 0, "os.version absent -> 0");
     # optional fields, incl. the dotted `os.version` key
     var q: Platform = platform_from_jv(_rg_parse(
-    "{\"architecture\":\"arm\",\"os\":\"linux\",\"variant\":\"v7\",\"os.version\":\"10.0.1\"}"));
+        "{\"architecture\":\"arm\",\"os\":\"linux\",\"variant\":\"v7\",\"os.version\":\"10.0.1\"}"));
     assert_eq(streq(q.variant, "v7"), 1, "variant");
     assert_eq(streq(q.os_version, "10.0.1"), 1, "os.version (dotted key)");
     # architecture/os are required
@@ -258,7 +258,7 @@ fn test_rg_platform_manifest_from_jv() {
     assert_neq(e.platform, 0, "platform attached");
     # platform is optional
     var e2: PlatformManifest = platform_manifest_from_jv(_rg_parse(
-    "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\",\"size\":1}"));
+        "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\",\"size\":1}"));
     assert_neq(e2, 0, "entry without platform parses");
     assert_eq(e2.platform, 0, "platform absent -> 0");
     # the three required fields are tag-guarded
@@ -267,7 +267,7 @@ fn test_rg_platform_manifest_from_jv() {
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\"}")), 0, "no size -> 0");
     # a STRING size is rejected, not silently coerced to 0
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\",\"size\":\"1\"}")), 0,
-    "string size rejected");
+      "string size rejected");
     return 0;
 }
 
@@ -340,11 +340,11 @@ fn test_rg_manifest_schema_version_guard() {
     # returns 0 for a non-INT tag — so a registry sending "2" as a STRING
     # silently produced schema_version 0.
     var good: OciManifest = oci_manifest_from_jv(_rg_parse(
-    "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
+        "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
     assert_neq(good, 0, "manifest parses");
     assert_eq(good.schema_version, 2, "int schemaVersion read");
     var bad: OciManifest = oci_manifest_from_jv(_rg_parse(
-    "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
+        "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
     assert_neq(bad, 0, "still parses (config is what matters)");
     # the guard leaves the constructor default rather than clobbering it to 0
     assert_eq(bad.schema_version, 2, "string schemaVersion does not clobber the default");
@@ -363,16 +363,16 @@ fn test_rg_api_base() {
     assert_neq(c, 0, "client built");
     # docker.io is rewritten to registry-1.docker.io (registry_host).
     assert_eq(streq(_reg_api_base(c, _rg_ref("docker.io", "library/nginx", "latest")),
-    "https://registry-1.docker.io"), 1, "docker.io rewritten");
+        "https://registry-1.docker.io"), 1, "docker.io rewritten");
     assert_eq(streq(_reg_api_base(c, _rg_ref("ghcr.io", "o/r", "v1")),
-    "https://ghcr.io"), 1, "ghcr.io as-is");
+        "https://ghcr.io"), 1, "ghcr.io as-is");
     # a host:port registry is left alone
     assert_eq(streq(_reg_api_base(c, _rg_ref("localhost:5000", "r", "v1")),
-    "https://localhost:5000"), 1, "host:port preserved");
+        "https://localhost:5000"), 1, "host:port preserved");
     # the base_url override wins outright, ignoring the registry entirely
     var t = registry_client_with_base_url("http://127.0.0.1:5999");
     assert_eq(streq(_reg_api_base(t, _rg_ref("docker.io", "library/nginx", "latest")),
-    "http://127.0.0.1:5999"), 1, "base_url overrides");
+        "http://127.0.0.1:5999"), 1, "base_url overrides");
     return 0;
 }
 
@@ -388,7 +388,7 @@ fn test_rg_urls() {
     # a digest pins over the tag on the manifest URL
     var pinned = image_ref_new("ghcr.io", "acme/app", "v1", "sha256:70696e0000000000000000000000000000000000000000000000000000000000");
     assert_eq(streq(_reg_manifest_url(c, pinned), "http://reg/v2/acme/app/manifests/sha256:70696e0000000000000000000000000000000000000000000000000000000000"), 1,
-    "digest wins over tag");
+      "digest wins over tag");
     return 0;
 }
 
@@ -410,14 +410,14 @@ fn test_rg_location_and_digest_query() {
     test_group("rg_location_and_digest_query");
     # an absolute Location is used as-is; a path is joined to the base
     assert_eq(streq(_reg_resolve_location("https://reg", "https://cdn/upload/1"), "https://cdn/upload/1"), 1,
-    "absolute location kept");
+      "absolute location kept");
     assert_eq(streq(_reg_resolve_location("https://reg", "/v2/x/blobs/uploads/1"),
-    "https://reg/v2/x/blobs/uploads/1"), 1, "relative location joined");
+        "https://reg/v2/x/blobs/uploads/1"), 1, "relative location joined");
     # the query separator flips once the URL already carries one
     assert_eq(streq(_reg_append_digest_query("https://reg/up/1", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
-    "https://reg/up/1?digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "first query param uses ?");
+        "https://reg/up/1?digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "first query param uses ?");
     assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
-    "https://reg/up/1?_state=xyz&digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "subsequent uses &");
+        "https://reg/up/1?_state=xyz&digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "subsequent uses &");
     return 0;
 }
 
@@ -457,7 +457,7 @@ fn test_rg_cache_key_scope_separation() {
     assert_eq(streq(_reg_get_cached_token_at(c, push, 1), "tok-push"), 1, "push token distinct");
     # different registries stay separate too
     assert_eq(_reg_get_cached_token_at(c, _reg_cache_key("quay.io", "repository:a/b:pull"), 1), 0,
-    "other registry not found");
+      "other registry not found");
     return 0;
 }
 
@@ -469,7 +469,7 @@ fn test_rg_token_cache_expiry() {
     _reg_cache_token_at(c, k, "tok", 1000);
     # live just before the deadline...
     assert_eq(streq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS - 1), "tok"), 1,
-    "valid before expiry");
+      "valid before expiry");
     # ...and gone at/after it (the TTL is 270s, despite the oracle's "5 minutes" comment)
     assert_eq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS), 0, "expired at the deadline");
     assert_eq(_reg_get_cached_token_at(c, k, 1000 + _REG_TOKEN_TTL_NS + 1), 0, "expired after");
@@ -482,12 +482,12 @@ fn test_rg_token_cache_expiry() {
 fn test_rg_token_url_and_basic_auth() {
     test_group("rg_token_url_and_basic_auth");
     assert_eq(streq(_reg_token_url("https://auth.example.com/token", "registry.example.com",
-    "repository:a/b:pull"),
-    "https://auth.example.com/token?scope=repository:a/b:pull&service=registry.example.com"), 1,
-    "realm + scope + service");
+          "repository:a/b:pull"),
+        "https://auth.example.com/token?scope=repository:a/b:pull&service=registry.example.com"), 1,
+      "realm + scope + service");
     # service is optional
     assert_eq(streq(_reg_token_url("https://auth/token", 0, "repository:a/b:pull"),
-    "https://auth/token?scope=repository:a/b:pull"), 1, "no service");
+        "https://auth/token?scope=repository:a/b:pull"), 1, "no service");
     # RFC 4648 base64 of "user:pass"
     assert_eq(streq(_reg_basic_auth_header("user", "pass"), "Basic dXNlcjpwYXNz"), 1, "basic auth header");
     assert_eq(_reg_basic_auth_header(0, "pass"), 0, "no username -> no header");
@@ -566,7 +566,7 @@ fn test_rg_auth_flow() {
     var ctx = _rg_ctx_new();
     var hdrs = sandhi_headers_new();
     sandhi_headers_add(hdrs, "WWW-Authenticate",
-    "Bearer realm=\"https://auth.test/token\",service=\"reg.test\"");
+      "Bearer realm=\"https://auth.test/token\",service=\"reg.test\"");
     store64(ctx + RG_CTX_HDRS, hdrs);
 
     # Unauthenticated probe 401s; the token endpoint mints; the retry succeeds.
@@ -575,7 +575,7 @@ fn test_rg_auth_flow() {
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    "repository:library/alpine:pull", 0);
+      "repository:library/alpine:pull", 0);
     # Always-401 resource -> terminal AUTH_FAILED after exactly one retry.
     assert_eq(r, 0, "second 401 is terminal");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "reports AUTH_FAILED");
@@ -583,7 +583,7 @@ fn test_rg_auth_flow() {
     assert_eq(_rg_log_len(ctx), 3, "probe + token + retry");
     assert_eq(_rg_auth_at(ctx, 0), 0, "probe carries no Authorization");
     assert_eq(_rg_contains(_rg_auth_at(ctx, 2), "Bearer test-bearer-token"), 1,
-    "retry carries the minted bearer token");
+      "retry carries the minted bearer token");
     return 0;
 }
 
@@ -601,7 +601,7 @@ fn test_rg_auth_flow_success() {
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var scope = "repository:library/alpine:pull";
     var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    scope, 0);
+      scope, 0);
     assert_eq(r, 0, "always-401 script fails");
     # But the token WAS cached, so a subsequent call skips the probe.
     # Key built from a LITERAL, deliberately not from the ref: if the client
@@ -636,7 +636,7 @@ fn test_rg_auth_basic_credentials_on_token_endpoint() {
     _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
     # base64("user:pass") == dXNlcjpwYXNz
     assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Basic dXNlcjpwYXNz"), 1,
-    "basic creds go to the TOKEN endpoint");
+      "basic creds go to the TOKEN endpoint");
     return 0;
 }
 
@@ -649,7 +649,7 @@ fn test_rg_cached_token_reused() {
     _reg_cache_token(c, key, "cached-tok");
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    "repository:library/alpine:pull", 0);
+      "repository:library/alpine:pull", 0);
     assert_neq(r, 0, "succeeds on the cached token");
     assert_eq(sandhi_http_status(r), 200, "200 returned");
     # THE assertion: a valid cached token costs exactly ONE request.
@@ -670,7 +670,7 @@ fn test_rg_cached_token_401_triggers_reauth() {
     _reg_cache_token(c, _reg_cache_key("reg.test", "repository:library/alpine:pull"), "stale");
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    "repository:library/alpine:pull", 0);
+      "repository:library/alpine:pull", 0);
     # 4 calls: stale-token attempt, unauthenticated probe, token endpoint, retry.
     assert_eq(_rg_log_len(ctx), 4, "stale token costs 3 resource calls + 1 token call");
     assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Bearer stale"), 1, "first uses the stale token");
@@ -686,7 +686,7 @@ fn test_rg_401_without_challenge_header() {
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    "repository:library/alpine:pull", 0);
+      "repository:library/alpine:pull", 0);
     assert_eq(r, 0, "401 without a challenge fails");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
     assert_eq(registry_last_status(), 401, "status recorded");
@@ -698,7 +698,7 @@ fn test_rg_challenge_without_realm() {
     test_group("rg_challenge_without_realm");   # oracle: registry.rs:2260
     var c = _rg_client(_rg_ctx_new());
     assert_eq(_reg_acquire_token(c, "Bearer service=\"reg.test\"", "repository:x:pull"), 0,
-    "no realm -> no token");
+      "no realm -> no token");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
     return 0;
 }
@@ -709,7 +709,7 @@ fn test_rg_token_endpoint_no_token_field() {
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"unexpected\":\"shape\"}");
     var c = _rg_client(ctx);
     assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
-    "no token/access_token field -> 0");
+      "no token/access_token field -> 0");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
     return 0;
 }
@@ -720,7 +720,7 @@ fn test_rg_token_endpoint_error_status() {
     _rg_route(ctx, "GET", "auth.test/token", 403, "denied");
     var c = _rg_client(ctx);
     assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
-    "403 from the token endpoint -> 0");
+      "403 from the token endpoint -> 0");
     assert_eq(registry_last_status(), 403, "status recorded");
     return 0;
 }
@@ -732,7 +732,7 @@ fn test_rg_server_error_is_registry_not_auth() {
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var r = _reg_authenticated_get(c, ref, "https://reg.test/v2/library/alpine/manifests/latest",
-    "repository:library/alpine:pull", 0);
+      "repository:library/alpine:pull", 0);
     assert_eq(r, 0, "500 fails");
     # A server error must NOT be reported as an auth failure — that would send
     # the operator chasing credentials for a registry outage.
@@ -751,10 +751,10 @@ fn test_rg_token_url_carries_caller_scope() {
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
     var c = _rg_client(ctx);
     _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\",scope=\"repository:other:pull\"",
-    "repository:library/alpine:push,pull");
+      "repository:library/alpine:push,pull");
     var sent = _rg_log_at(ctx, 0);
     assert_eq(_rg_contains(sent, "scope=repository:library/alpine:push,pull"), 1,
-    "caller's scope is sent");
+      "caller's scope is sent");
     assert_eq(_rg_contains(sent, "repository:other:pull"), 0, "challenge's scope discarded");
     return 0;
 }
@@ -893,7 +893,7 @@ fn test_rg_resolve_manifest_from_index() {
     assert_eq(m, 0, "nested index rejected");
     assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "REGISTRY error, not a digest failure");
     assert_eq(_rg_contains(_rg_log_at(ctx, 1), child_d), 1,
-    "second fetch pinned to the selected platform digest");
+      "second fetch pinned to the selected platform digest");
     return 0;
 }
 
@@ -1012,7 +1012,7 @@ fn test_rg_blob_limit_enforced() {
     assert_eq(load64(sink + REG_SINK_ERR), 2, "err 2 = limit exceeded");
     # And an honest size streams fine.
     assert_neq(registry_fetch_blob_to_store(c, store, ref, digest, strlen(payload)), 0,
-    "honest size streams");
+      "honest size streams");
     return 0;
 }
 
@@ -1045,7 +1045,7 @@ fn test_rg_blob_warm_cache_skips_probe() {
     _reg_cache_token(c, _reg_cache_key("reg.test", _reg_pull_scope(ref)), "tok-warm");
 
     assert_neq(registry_fetch_blob_to_store(c, store, ref, digest, strlen(payload)), 0,
-    "streamed");
+      "streamed");
     assert_eq(_rg_log_len(ctx), 1, "exactly one request — no challenge probe");
     assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-warm"), 1, "cached token on the stream");
     return 0;
@@ -1061,7 +1061,7 @@ fn test_rg_blob_stale_token_retries_once() {
     var ctx = _rg_ctx_new();
     var h = sandhi_headers_new();
     sandhi_headers_add(h, "WWW-Authenticate",
-    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+      "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
     store64(ctx + RG_CTX_HDRS, h);
     store64(ctx + RG_CTX_ACCEPT, "Bearer tok-fresh");   # only the fresh token works
     _rg_route(ctx, "HEAD", "/blobs/", 200, "");
@@ -1079,7 +1079,7 @@ fn test_rg_blob_stale_token_retries_once() {
     assert_eq(streq(_reg_get_cached_token(c, key), "tok-fresh"), 1, "cache refreshed");
     # The retry is bounded: the second attempt is the last one.
     assert_eq(_rg_contains(_rg_log_at(ctx, 0), "GET https://reg.test"), 1,
-    "first call is the stream, using the stale token");
+      "first call is the stream, using the stale token");
     assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-stale"), 1, "stale token tried first");
     return 0;
 }
@@ -1106,7 +1106,7 @@ fn test_rg_blob_error_status() {
     var d = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
     assert_eq(registry_fetch_blob_to_store(c, store, ref, d, 0), 0, "404 -> 0");
     assert_eq(file_exists(_reg_cat2(_img_blob_path(image_store_root(store), d), ".dl")), 0,
-    "no tempfile left after a failed fetch");
+      "no tempfile left after a failed fetch");
     return 0;
 }
 
@@ -1189,7 +1189,7 @@ fn test_rg_pull_image() {
     var mbuf = _il_read_blob(store, md, lc);
     assert_neq(mbuf, 0, "manifest blob readable");
     assert_eq(streq(sha256_digest(mbuf, load64(lc)), md), 1,
-    "stored manifest bytes hash to the digest it is stored under");
+      "stored manifest bytes hash to the digest it is stored under");
 
     # And it is listable.
     var listed = image_store_list(store);
@@ -1247,7 +1247,7 @@ fn _rg_foreign_ctx(with_urls) {
     sandhi_headers_add(h, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
     store64(ctx + RG_CTX_HDRS, h);
     _rg_route(ctx, "GET", "/manifests/", 200,
-    _rg_manifest_with_urls(cfg_d, strlen(cfg), lay_d, strlen(lay), with_urls));
+      _rg_manifest_with_urls(cfg_d, strlen(cfg), lay_d, strlen(lay), with_urls));
     _rg_route(ctx, "HEAD", "/blobs/", 200, "");
     _rg_route(ctx, "GET", cfg_d, 200, cfg);
     _rg_route(ctx, "GET", lay_d, 200, lay);
@@ -1270,7 +1270,7 @@ fn test_rg_pull_refuses_foreign_layer() {
     var ok_store = _rg_blob_store("foreignctl");
     var ok_ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     assert_neq(image_store_pull(ok_c, ok_store, ok_ref), 0,
-    "control: the identical manifest WITHOUT urls pulls fine");
+      "control: the identical manifest WITHOUT urls pulls fine");
 
     var ctx = _rg_foreign_ctx(1);
     var c = _rg_client(ctx);
@@ -1303,7 +1303,7 @@ fn test_rg_pull_partial_failure_leaves_no_image() {
     var cfg = _rg_cfg_json();
     var lay = _rg_layer_body();
     _rg_route(ctx2, "GET", "/manifests/", 200,
-    _rg_build_manifest(cfg_d, strlen(cfg), lay_d, strlen(lay)));
+      _rg_build_manifest(cfg_d, strlen(cfg), lay_d, strlen(lay)));
     _rg_route(ctx2, "HEAD", "/blobs/", 200, "");
     _rg_route(ctx2, "GET", cfg_d, 200, cfg);
     _rg_route(ctx2, "GET", lay_d, 404, "");
@@ -1350,9 +1350,9 @@ fn test_rg_push_blob_monolithic() {
     assert_eq(_rg_contains(_rg_log_at(ctx, 1), "POST "), 1, "2: open upload session");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "PUT "), 1, "3: upload");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "digest=sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 1,
-    "the PUT carries ?digest=");
+      "the PUT carries ?digest=");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "/blobs/uploads/uuid-1"), 1,
-    "the PUT targets the Location the registry handed back");
+      "the PUT targets the Location the registry handed back");
     return 0;
 }
 
@@ -1381,7 +1381,7 @@ fn test_rg_push_blob_chunked() {
     assert_eq(_rg_contains(_rg_log_at(ctx, 4), "PATCH "), 1, "chunk 3 is a PATCH");
     assert_eq(_rg_contains(_rg_log_at(ctx, 5), "PUT "), 1, "finalize is a PUT");
     assert_eq(_rg_contains(_rg_log_at(ctx, 5), "digest=sha256:bbb0000000000000000000000000000000000000000000000000000000000000"), 1,
-    "finalize carries ?digest=");
+      "finalize carries ?digest=");
     return 0;
 }
 
@@ -1392,7 +1392,7 @@ fn test_rg_push_chunk_size_guard() {
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     assert_eq(registry_push_blob_chunked(c, ref, "sha256:ccc0000000000000000000000000000000000000000000000000000000000000", "xyz", 3, 0), 0,
-    "zero chunk size refused");
+      "zero chunk size refused");
     assert_eq(_rg_log_len(ctx), 0, "no request issued");
     return 0;
 }
@@ -1433,11 +1433,11 @@ fn test_rg_push_uses_push_scope() {
 
     assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
     assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-push"), 1,
-    "the precheck uses the PUSH-scoped token");
+      "the precheck uses the PUSH-scoped token");
     assert_eq(streq(_rg_auth_at(ctx, 2), "Bearer tok-push"), 1,
-    "the upload PUT carries it too");
+      "the upload PUT carries it too");
     assert_eq(streq(_reg_push_scope(ref), "repository:library/alpine:push,pull"), 1,
-    "scope string matches the oracle");
+      "scope string matches the oracle");
     return 0;
 }
 
@@ -1458,14 +1458,14 @@ fn test_rg_push_roundtrip_preserves_manifest_bytes() {
     var pc = _rg_client(pctx);
     var target = image_ref_new("reg.test", "library/alpine", "latest", 0);
     assert_eq(image_store_push(pc, store, "reg.test/library/alpine:latest", target), 1,
-    "pushed");
+      "pushed");
 
     # config + layer + manifest, each: HEAD, POST, PUT = 9, plus the manifest
     # leg's own HEAD probe. Assert the shape rather than an exact count.
     var lc = alloc(8);
     var mbuf = _il_read_blob(store, md, lc);
     assert_eq(streq(sha256_digest(mbuf, load64(lc)), md), 1,
-    "the manifest still hashes to its original digest after the round trip");
+      "the manifest still hashes to its original digest after the round trip");
     var last = _rg_log_at(pctx, _rg_log_len(pctx) - 1);
     assert_eq(_rg_contains(last, "PUT "), 1, "manifest pushed last");
     assert_eq(_rg_contains(last, "/manifests/"), 1, "to the manifest endpoint");
@@ -1494,7 +1494,7 @@ fn test_rg_push_reauths_on_401_from_put() {
     var h = sandhi_headers_new();
     sandhi_headers_add(h, "Location", "/v2/library/alpine/blobs/uploads/uuid-1");
     sandhi_headers_add(h, "WWW-Authenticate",
-    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+      "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
     store64(ctx + RG_CTX_HDRS, h);
     store64(ctx + RG_CTX_ACCEPT, "Bearer tok-fresh");   # only the fresh token works
     _rg_route(ctx, "HEAD", "/blobs/", 404, "");
@@ -1515,12 +1515,12 @@ fn test_rg_same_origin() {
     test_group("rg_same_origin");
     assert_eq(_reg_same_origin("https://reg.test/v2/x", "https://reg.test"), 1, "same origin");
     assert_eq(_reg_same_origin("https://reg.test:443/v2/x", "https://reg.test"), 0,
-    "explicit port differs textually — treated as a different origin");
+      "explicit port differs textually — treated as a different origin");
     assert_eq(_reg_same_origin("https://evil.test/v2/x", "https://reg.test"), 0, "different host");
     assert_eq(_reg_same_origin("http://reg.test/v2/x", "https://reg.test"), 0,
-    "scheme downgrade is a different origin");
+      "scheme downgrade is a different origin");
     assert_eq(_reg_same_origin("https://reg.test.evil.com/x", "https://reg.test"), 0,
-    "prefix-extended host is NOT the same origin");
+      "prefix-extended host is NOT the same origin");
     assert_eq(_reg_same_origin("/v2/relative", "https://reg.test"), 0, "no origin -> not same");
     assert_eq(_reg_same_origin(0, "https://reg.test"), 0, "null is not same");
     return 0;
@@ -1547,7 +1547,7 @@ fn test_rg_push_no_token_to_foreign_location() {
     _reg_cache_token(c, _reg_cache_key("reg.test", _reg_push_scope(ref)), "tok-secret");
 
     assert_eq(registry_push_blob(c, ref, "sha256:aaa00000000000000000000000000000000000000000000000000000000000", "data", 4), 0,
-    "push refused");
+      "push refused");
     assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "reported as a registry error");
     # HEAD + POST only. Nothing was sent to evil.test at all.
     var i = 0;
@@ -1577,7 +1577,7 @@ fn test_rg_push_chunked_rejects_offorigin_relocation() {
     # The POST's own Location is already off-origin, so it is refused at the
     # session-open step — the earliest possible point.
     assert_eq(registry_push_blob_chunked(c, ref, "sha256:bbb00000000000000000000000000000000000000000000000000000000000", "0123456789", 10, 4), 0,
-    "refused");
+      "refused");
     var i = 0;
     var touched = 0;
     while (i < _rg_log_len(ctx)) {
@@ -1599,7 +1599,7 @@ fn test_rg_push_token_still_sent_same_origin() {
     assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
     var last = _rg_log_len(ctx) - 1;
     assert_eq(streq(_rg_auth_at(ctx, last), "Bearer tok-ok"), 1,
-    "same-origin upload keeps its Authorization");
+      "same-origin upload keeps its Authorization");
     return 0;
 }
 
@@ -1652,12 +1652,12 @@ fn test_rg_digest_is_valid() {
     assert_eq(digest_is_valid("sha256:abc"), 0, "too short");
     assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000000"), 0, "too long");
     assert_eq(digest_is_valid("sha256:AAAA000000000000000000000000000000000000000000000000000000000000"), 0,
-    "uppercase rejected — one blob must have exactly one path");
+      "uppercase rejected — one blob must have exactly one path");
     assert_eq(digest_is_valid("sha512:0000000000000000000000000000000000000000000000000000000000000000"), 0, "wrong algorithm");
     assert_eq(digest_is_valid("0000000000000000000000000000000000000000000000000000000000000000"), 0, "no prefix");
     assert_eq(digest_is_valid(0), 0, "null");
     assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000/g"), 0,
-    "slash rejected");
+      "slash rejected");
     return 0;
 }
 
@@ -1692,12 +1692,12 @@ fn test_rg_pull_rejects_traversal_digest() {
 fn test_rg_blob_path_fails_closed() {
     test_group("rg_blob_path_fails_closed");
     assert_eq(_img_blob_path("/tmp/store", "sha256:../../../etc/passwd"), 0,
-    "_img_blob_path refuses a malformed digest");
+      "_img_blob_path refuses a malformed digest");
     assert_neq(_img_blob_path("/tmp/store", "sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
-    "and still builds a path for a valid one");
+      "and still builds a path for a valid one");
     var store = _rg_blob_store("failclosed");
     assert_eq(image_store_has_blob(store, "sha256:../../../etc/passwd"), 0,
-    "has_blob reports absent rather than probing outside the store");
+      "has_blob reports absent rather than probing outside the store");
     assert_eq(image_store_store_blob(store, "sha256:../../x", "d", 1), 0, "store_blob refuses");
     return 0;
 }
@@ -1707,11 +1707,11 @@ fn test_rg_descriptor_rejects_bad_size() {
     # A negative size disabled the download ceiling entirely (`if (size > 0)`),
     # and i64max + 65536 wraps negative — both leave the transfer unbounded.
     var neg = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":-1}";
-    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(neg, strlen(neg))), 0, "negative size rejected");
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(neg, strlen(neg))), 0, "negative size rejected");
     var huge = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":9223372036854775807}";
-    assert_eq(descriptor_from_jv(bayan_json_v_parse_str(huge, strlen(huge))), 0, "i64max size rejected");
+    assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(huge, strlen(huge))), 0, "i64max size rejected");
     var okd = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":1024}";
-    assert_neq(descriptor_from_jv(bayan_json_v_parse_str(okd, strlen(okd))), 0, "a sane size parses");
+    assert_neq(descriptor_from_jv(bayan_json_v_parse_buf(okd, strlen(okd))), 0, "a sane size parses");
     return 0;
 }
 
@@ -1722,7 +1722,7 @@ fn test_rg_push_manifest_targets_the_tag() {
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "v1",
-    "sha256:2222222222222222222222222222222222222222222222222222222222222222");
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222");
     var body = "{\"schemaVersion\":2}";
     assert_eq(registry_push_manifest(c, ref, body, strlen(body), 0), 1, "pushed");
     var last = _rg_log_at(ctx, _rg_log_len(ctx) - 1);
@@ -1737,9 +1737,9 @@ fn test_rg_manifest_fetch_still_prefers_digest() {
     # outranks the tag.
     var c = _rg_client(_rg_ctx_new());
     var ref = image_ref_new("reg.test", "library/alpine", "v1",
-    "sha256:3333333333333333333333333333333333333333333333333333333333333333");
+      "sha256:3333333333333333333333333333333333333333333333333333333333333333");
     assert_eq(_rg_contains(_reg_manifest_url(c, ref), "/manifests/sha256:3333"), 1,
-    "fetch URL pins to the digest");
+      "fetch URL pins to the digest");
     return 0;
 }
 
@@ -1779,7 +1779,7 @@ fn test_rg_discovery_uses_pull_scope() {
     var ctx = _rg_ctx_new();
     var h = sandhi_headers_new();
     sandhi_headers_add(h, "WWW-Authenticate",
-    "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
+      "Bearer realm=\"https://auth.reg.test/token\",service=\"reg.test\"");
     store64(ctx + RG_CTX_HDRS, h);
     store64(ctx + RG_CTX_ACCEPT, "Bearer tok-x");
     _rg_route(ctx, "GET", "/token", 200, "{\"token\":\"tok-x\"}");
@@ -1898,7 +1898,7 @@ fn test_rg_referrers() {
     var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-    "{\"schemaVersion\":2,\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"schemaVersion\":2,\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var refs = registry_referrers(c, ref, d);
@@ -1918,7 +1918,7 @@ fn test_rg_referrers_skips_malformed() {
     var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"x\",\"digest\":\"sha256:bad\",\"size\":1},{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"size\":9}]}");
+      "{\"manifests\":[{\"mediaType\":\"x\",\"digest\":\"sha256:bad\",\"size\":1},{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"size\":9}]}");
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var refs = registry_referrers(c, ref, d);
@@ -1944,19 +1944,19 @@ fn test_rg_verify_signature() {
     # Signed (cosign).
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
     assert_eq(registry_verify_signature(_rg_client(ctx), ref, d), 1, "cosign signature found");
 
     # Signed (notation).
     var ctx2 = _rg_ctx_new();
     _rg_route(ctx2, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
     assert_eq(registry_verify_signature(_rg_client(ctx2), ref, d), 1, "notation signature found");
 
     # Present but not a signature.
     var ctx3 = _rg_ctx_new();
     _rg_route(ctx3, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
     assert_eq(registry_verify_signature(_rg_client(ctx3), ref, d), 0, "an SBOM is not a signature");
 
     # The signature must be found even when it is NOT first — an SBOM listed
@@ -1964,9 +1964,9 @@ fn test_rg_verify_signature() {
     # one entry reports a signed image as unsigned.
     var ctx5 = _rg_ctx_new();
     _rg_route(ctx5, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"size\":10},{\"mediaType\":\"application/vnd.example.attestation\",\"digest\":\"sha256:8888888888888888888888888888888888888888888888888888888888888888\",\"size\":11},{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:9999999999999999999999999999999999999999999999999999999999999999\",\"size\":12}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"size\":10},{\"mediaType\":\"application/vnd.example.attestation\",\"digest\":\"sha256:8888888888888888888888888888888888888888888888888888888888888888\",\"size\":11},{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:9999999999999999999999999999999999999999999999999999999999999999\",\"size\":12}]}");
     assert_eq(registry_verify_signature(_rg_client(ctx5), ref, d), 1,
-    "signature found even when it is the LAST referrer");
+      "signature found even when it is the LAST referrer");
 
     # THE distinction that matters: a failed query is -1, NOT 0. Collapsing it
     # into "unsigned" is how an unverifiable image gets treated as merely
@@ -1974,7 +1974,7 @@ fn test_rg_verify_signature() {
     var ctx4 = _rg_ctx_new();
     _rg_route(ctx4, "GET", "/referrers/", 500, "");
     assert_eq(registry_verify_signature(_rg_client(ctx4), ref, d), 0 - 1,
-    "query failure is -1, distinct from unsigned");
+      "query failure is -1, distinct from unsigned");
     return 0;
 }
 
@@ -2011,7 +2011,7 @@ fn test_rg_index_dedup_digest_aware() {
     assert_neq(image_store_add_to_index(store, imA), 0, "first pinned image added");
     assert_neq(image_store_add_to_index(store, imB), 0, "second pinned image added");
     assert_eq(vec_len(image_store_list(store)), 2,
-    "two distinct pinned digests COEXIST — the second does not evict the first");
+      "two distinct pinned digests COEXIST — the second does not evict the first");
 
     # Re-adding the same digest is still idempotent.
     assert_neq(image_store_add_to_index(store, imA), 0, "re-add A");
@@ -2125,7 +2125,7 @@ fn _bld_t_config_jv(store, image) {
     var cc = alloc(8);
     var buf = _img_read_file(p, cc);
     if (buf == 0) { return 0; }
-    return bayan_json_v_parse_str(buf, load64(cc));
+    return bayan_json_v_parse_buf(buf, load64(cc));
 }
 
 fn test_bld_copy_dir_end_to_end() {
@@ -2203,9 +2203,9 @@ fn test_bld_diff_ids_are_uncompressed() {
     if (n <= 0) { return 0; }
 
     assert_eq(streq(vec_get(diffs, 1), sha256_digest(out, n)), 1,
-    "diff_id == sha256 of the UNCOMPRESSED tar");
+      "diff_id == sha256 of the UNCOMPRESSED tar");
     assert_eq(streq(vec_get(diffs, 1), top.digest), 0,
-    "and is NOT the compressed blob digest the oracle would have stored");
+      "and is NOT the compressed blob digest the oracle would have stored");
     return 0;
 }
 
@@ -2367,18 +2367,18 @@ fn test_bld_malformed_step_is_a_parse_error_not_a_crash() {
     # driven by an untrusted Stivafile.
     var hdr = "[image]\nbase = \"local/b:v1\"\nname = \"n\"\ntag = \"v1\"\n\n";
     assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\nsource = \"a\"\n")), 0,
-    "copy without destination");
+      "copy without destination");
     assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\ndestination = \"/a\"\n")), 0,
-    "copy without source");
+      "copy without source");
     assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"env\"\nkey = \"K\"\n")), 0,
-    "env without value");
+      "env without value");
     assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"label\"\nvalue = \"v\"\n")), 0,
-    "label without key");
+      "label without key");
     assert_eq(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"workdir\"\n")), 0,
-    "workdir without path");
+      "workdir without path");
     # A well-formed step still parses.
     assert(parse_build_spec(_stor_cat2(hdr, "[[steps]]\ntype = \"copy\"\nsource = \"a\"\ndestination = \"/a\"\n")) != 0,
-    "a complete copy step still parses");
+      "a complete copy step still parses");
     return 0;
 }
 
@@ -2486,7 +2486,7 @@ fn test_bld_cache_invalidates_on_context_change() {
     }
     assert_eq(same_ref, 1, "exactly one index entry for the rebuilt tag");
     assert_eq(streq(_img_id(image_store_find(store, "local/s:v1")), _img_id(b)), 1,
-    "and resolving the tag yields the REBUILT image");
+      "and resolving the tag yields the REBUILT image");
 
     # An unchanged context must still hit the cache, or the fingerprint has made
     # the cache useless rather than correct.

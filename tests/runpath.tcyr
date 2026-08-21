@@ -185,7 +185,7 @@ fn test_build_sandbox_fallback() {
     var bk = SandboxConfig_backend(cfgp);
     # host-dependent: OCI(4) iff runc/crun on PATH, else PROCESS(0).
     var ok = 0;
-    if (bk == Backend.OCI || bk == Backend.PROCESS) { ok = 1; }
+    if (bk == KavachBackend.OCI || bk == KavachBackend.PROCESS) { ok = 1; }
     assert_eq(ok, 1, "fallback backend is OCI or PROCESS");
     return 0;
 }
@@ -250,7 +250,7 @@ fn test_scan_output_blocks_private_key() {
     test_group("scan_output_blocks_private_key");
     kavach_init();
     var r = container_exec_result_new(0,
-    "-----BEGIN RSA PRIVATE KEY-----\nMIIEp...", "", 10, 0);
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEp...", "", 10, 0);
     assert_eq(scan_output(r, ext_policy_default()), 0, "private key blocked");
     assert_eq(scan_output_last_verdict(), ScanVerdict.BLOCK, "verdict BLOCK");
     assert(scan_output_last_findings() > 0, "at least one finding");
@@ -300,7 +300,7 @@ fn test_scan_output_scans_stderr() {
     test_group("scan_output_scans_stderr");
     kavach_init();
     var r = container_exec_result_new(1, "",
-    "-----BEGIN OPENSSH PRIVATE KEY-----", 5, 0);
+      "-----BEGIN OPENSSH PRIVATE KEY-----", 5, 0);
     assert_eq(scan_output(r, ext_policy_default()), 0, "stderr secret blocked");
     return 0;
 }
@@ -319,7 +319,7 @@ fn test_security_score() {
 fn test_security_score_for() {
     test_group("security_score_for");
     kavach_init();
-    var s = security_score_for(Backend.PROCESS, policy_basic());
+    var s = security_score_for(KavachBackend.PROCESS, policy_basic());
     var ok = 0;
     if (s >= 0 && s <= 100) { ok = 1; }
     assert_eq(ok, 1, "explicit score in 0..100");
@@ -397,7 +397,7 @@ fn test_cm_create_start_oneshot() {
     sys_mkdir(root, 493);
     var store = image_store_new(root);
     var img = _test_import(store, "/tmp/stiva-cm-run.tar", "app", "v1",
-    "cm-rootfs", strlen("cm-rootfs"));
+      "cm-rootfs", strlen("cm-rootfs"));
     assert_neq(img, 0, "image imported");
 
     var mgr = container_manager_new(root, store);
@@ -696,7 +696,7 @@ fn test_image_index_remove_missing() {
     _test_store_reset(root);
     # rust-old: Err(ImageNotFound) → sentinel -1 here.
     assert_eq(image_store_remove(store, "sha256:d000000000000000000000000000000000000000000000000000000000000000"), 0 - 1,
-    "remove nonexistent -> -1");
+      "remove nonexistent -> -1");
     return 0;
 }
 
@@ -762,7 +762,7 @@ fn test_container_serde_roundtrip() {
     var env = map_new(); map_set(env, "K", "V"); cfg.env = env;
     var ctr = container_new("id1", "myname", "img1", "docker.io/x:1", CONTAINER_STATE_RUNNING, 42, 100, 200, cfg, 7);
     var s = json_v_build_pretty(container_to_jv(ctr), 2);
-    var back = container_from_jv(bayan_json_v_parse_str(str_data(s), str_len(s)));
+    var back = container_from_jv(bayan_json_v_parse_buf(str_data(s), str_len(s)));
     assert(back != 0, "parsed back");
     var bc: Container = back;
     assert_eq(streq(bc.id, "id1"), 1, "id");
@@ -786,7 +786,7 @@ fn test_container_serde_nulls() {
     # name/pid/started_at/exit_code None → JSON null → parse back to 0 / -1.
     var ctr = container_new("id2", 0, "img", "ref:2", CONTAINER_STATE_CREATED, 0 - 1, 5, 0 - 1, container_config_default(), 0 - 1);
     var s = json_v_build_pretty(container_to_jv(ctr), 2);
-    var bc: Container = container_from_jv(bayan_json_v_parse_str(str_data(s), str_len(s)));
+    var bc: Container = container_from_jv(bayan_json_v_parse_buf(str_data(s), str_len(s)));
     assert_eq(bc.name, 0, "name None");
     assert_eq(bc.pid, 0 - 1, "pid None");
     assert_eq(bc.started_at, 0 - 1, "started_at None");
@@ -886,23 +886,23 @@ fn test_require_pid_empty_allowed_list() {
     # every state; the CLI smoke test could not tell, because a stopped
     # container produces the same message either way.
     assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 1234, 0, 0), 0 - 1,
-    "empty allowed list rejects even RUNNING");
+      "empty allowed list rejects even RUNNING");
     assert_eq(container_require_pid(CONTAINER_STATE_PAUSED, 4321, 0, 0), 0 - 1,
-    "empty allowed list rejects even PAUSED");
+      "empty allowed list rejects even PAUSED");
 
     # A populated list is what actually admits a state.
     var allowed = vec_new();
     vec_push(allowed, CONTAINER_STATE_RUNNING);
     vec_push(allowed, CONTAINER_STATE_PAUSED);
     assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 1234, allowed, 2), 1234,
-    "RUNNING admitted, pid returned");
+      "RUNNING admitted, pid returned");
     assert_eq(container_require_pid(CONTAINER_STATE_PAUSED, 4321, allowed, 2), 4321,
-    "PAUSED admitted, pid returned");
+      "PAUSED admitted, pid returned");
     assert_eq(container_require_pid(CONTAINER_STATE_STOPPED, 1234, allowed, 2), 0 - 1,
-    "STOPPED still rejected");
+      "STOPPED still rejected");
     # A live state with no pid is still a refusal.
     assert_eq(container_require_pid(CONTAINER_STATE_RUNNING, 0 - 1, allowed, 2), 0 - 1,
-    "RUNNING with no pid rejected");
+      "RUNNING with no pid rejected");
     return 0;
 }
 
@@ -930,7 +930,7 @@ fn _t_exec_args(path) {
 fn test_exec_capture2_splits_streams() {
     test_group("exec_capture2_splits_streams");
     var stub = _t_exec_stub("/tmp/stiva-t-exec-split",
-    "#!/bin/sh\necho to-stdout\necho to-stderr >&2\nexit 7\n");
+      "#!/bin/sh\necho to-stdout\necho to-stderr >&2\nexit 7\n");
     var err_path = "/tmp/stiva-t-exec-split.err";
     var buf = alloc(65536);
     var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, 65535, err_path);
@@ -961,7 +961,7 @@ fn test_exec_capture2_large_stderr_does_not_deadlock() {
     # This test HANGS rather than fails if that regresses, which is the honest
     # signal — a deadlock is not an assertion failure.
     var stub = _t_exec_stub("/tmp/stiva-t-exec-bigerr",
-    "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
+      "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
     var err_path = "/tmp/stiva-t-exec-bigerr.err";
     var buf = alloc(65536);
     var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, 65535, err_path);
@@ -977,7 +977,7 @@ fn test_exec_capture2_large_stderr_does_not_deadlock() {
 fn test_exec_capture2_env_and_workdir() {
     test_group("exec_capture2_env_and_workdir");
     var stub = _t_exec_stub("/tmp/stiva-t-exec-env",
-    "#!/bin/sh\necho \"V=$STIVA_T_VAR\"\npwd\n");
+      "#!/bin/sh\necho \"V=$STIVA_T_VAR\"\npwd\n");
     var err_path = "/tmp/stiva-t-exec-env.err";
     var env = vec_new();
     vec_push(env, "STIVA_T_VAR=hello");
@@ -1000,7 +1000,7 @@ fn test_exec_capture2_missing_binary() {
     test_group("exec_capture2_missing_binary");
     var buf = alloc(1024);
     var n = _exec_capture2(_t_exec_args("/definitely/not/here"), 0, 0, buf, 1023,
-    "/tmp/stiva-t-exec-missing.err");
+      "/tmp/stiva-t-exec-missing.err");
     assert_eq(n, 0, "no output from a binary that never executed");
     assert_eq(rt_last_exec_exit(), 127, "a failed execve is 127, not 0");
     _rt_take_file("/tmp/stiva-t-exec-missing.err", 1024);
@@ -1027,7 +1027,7 @@ fn test_exec_capture2_large_output_is_not_a_signal_death() {
     # on its next write, and a successful command looked like a signal death —
     # with the truncation silent besides.
     var stub = _t_exec_stub("/tmp/stiva-t-exec-big",
-    "#!/bin/sh\ni=0\nwhile [ $i -lt 3000 ]; do echo 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; i=$((i+1)); done\nexit 5\n");
+      "#!/bin/sh\ni=0\nwhile [ $i -lt 3000 ]; do echo 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; i=$((i+1)); done\nexit 5\n");
     var err_path = "/tmp/stiva-t-exec-big.err";
     var cap = 4096;
     var buf = alloc(cap + 1);
@@ -1053,7 +1053,7 @@ fn test_exec_capture2_empty_args() {
     test_group("exec_capture2_empty_args");
     var buf = alloc(64);
     assert_eq(_exec_capture2(vec_new(), 0, 0, buf, 63, "/tmp/stiva-t-exec-empty.err"), 0 - 1,
-    "an empty argv is refused, not forked");
+      "an empty argv is refused, not forked");
     return 0;
 }
 
@@ -1091,7 +1091,7 @@ fn test_exec_scratch_path_is_per_exec() {
     var b = _rt_exec_tag(1234);
     assert_eq(streq(a, b), 0, "two execs against the same pid get distinct tags");
     assert_eq(streq(_rt_exec_err_path("/tmp", a), _rt_exec_err_path("/tmp", b)), 0,
-    "and therefore distinct scratch paths");
+      "and therefore distinct scratch paths");
     return 0;
 }
 
@@ -1274,9 +1274,9 @@ fn test_scan_policy_partial_object_keeps_defaults() {
     if (p == 0) { return 0; }
     var d = ext_policy_default();
     assert_eq(ExternalizationPolicy_block_threshold(p),
-    ExternalizationPolicy_block_threshold(d), "omitted block_threshold keeps the default");
+      ExternalizationPolicy_block_threshold(d), "omitted block_threshold keeps the default");
     assert_eq(ExternalizationPolicy_redact_secrets(p),
-    ExternalizationPolicy_redact_secrets(d), "omitted redact_secrets keeps the default");
+      ExternalizationPolicy_redact_secrets(d), "omitted redact_secrets keeps the default");
     return 0;
 }
 

@@ -145,128 +145,128 @@ fn tool_list() {
     # stiva_pull — read-only
     var pull_props = vec_new();
     vec_push(pull_props, schema_prop_new("image",
-    "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
+        "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
     var pull_req = vec_new();
     vec_push(pull_req, "image");
     var pull = tool_def_new("stiva_pull",
-    "Pull an OCI container image from a registry",
-    schema_new("object", pull_props, pull_req));
+      "Pull an OCI container image from a registry",
+      schema_new("object", pull_props, pull_req));
     tool_def_with_annotations(pull, ann_read_only());
     vec_push(tools, pull);
 
     # stiva_run — destructive
     var run_props = vec_new();
     vec_push(run_props, schema_prop_new("image",
-    "{\"type\": \"string\", \"description\": \"Image reference to run\"}"));
+        "{\"type\": \"string\", \"description\": \"Image reference to run\"}"));
     vec_push(run_props, schema_prop_new("name",
-    "{\"type\": \"string\", \"description\": \"Container name (optional)\"}"));
+        "{\"type\": \"string\", \"description\": \"Container name (optional)\"}"));
     vec_push(run_props, schema_prop_new("command",
-    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command to execute (overrides entrypoint)\"}"));  #skip-lint
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command to execute (overrides entrypoint)\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("env",
-    "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}, \"description\": \"Environment variables\"}"));  #skip-lint
+        "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}, \"description\": \"Environment variables\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("ports",
-    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Port mappings (e.g., '8080:80')\"}"));  #skip-lint
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Port mappings (e.g., '8080:80')\"}"));  #skip-lint
     vec_push(run_props, schema_prop_new("volumes",
-    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Volume mounts (e.g., '/host:/container:ro')\"}"));  #skip-lint
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Volume mounts (e.g., '/host:/container:ro')\"}"));  #skip-lint
     var run_req = vec_new();
     vec_push(run_req, "image");
     var run = tool_def_new("stiva_run",
-    "Run a container from an image",
-    schema_new("object", run_props, run_req));
+      "Run a container from an image",
+      schema_new("object", run_props, run_req));
     tool_def_with_annotations(run, ann_destructive());
     vec_push(tools, run);
 
     # stiva_ps — read-only, no params
     var ps = tool_def_new("stiva_ps",
-    "List all containers",
-    schema_new("object", vec_new(), vec_new()));
+      "List all containers",
+      schema_new("object", vec_new(), vec_new()));
     tool_def_with_annotations(ps, ann_read_only());
     vec_push(tools, ps);
 
     # stiva_stop — destructive
     var stop_props = vec_new();
     vec_push(stop_props, schema_prop_new("id",
-    "{\"type\": \"string\", \"description\": \"Container ID to stop\"}"));
+        "{\"type\": \"string\", \"description\": \"Container ID to stop\"}"));
     var stop_req = vec_new();
     vec_push(stop_req, "id");
     var stop = tool_def_new("stiva_stop",
-    "Stop a running container",
-    schema_new("object", stop_props, stop_req));
+      "Stop a running container",
+      schema_new("object", stop_props, stop_req));
     tool_def_with_annotations(stop, ann_destructive());
     vec_push(tools, stop);
 
     # stiva_ansamblu — destructive
     var ans_props = vec_new();
     vec_push(ans_props, schema_prop_new("action",
-    "{\"type\": \"string\", \"enum\": [\"up\", \"down\"], \"description\": \"Ansamblu action to perform\"}"));
+        "{\"type\": \"string\", \"enum\": [\"up\", \"down\"], \"description\": \"Ansamblu action to perform\"}"));
     vec_push(ans_props, schema_prop_new("file",
-    "{\"type\": \"string\", \"description\": \"TOML ansamblu file content\"}"));
+        "{\"type\": \"string\", \"description\": \"TOML ansamblu file content\"}"));
     vec_push(ans_props, schema_prop_new("session_id",
-    "{\"type\": \"string\", \"description\": \"Session ID (required for 'down')\"}"));
+        "{\"type\": \"string\", \"description\": \"Session ID (required for 'down')\"}"));
     var ans_req = vec_new();
     vec_push(ans_req, "action");
     var ans = tool_def_new("stiva_ansamblu",
-    "Manage multi-service deployments via ansamblu files",
-    schema_new("object", ans_props, ans_req));
+      "Manage multi-service deployments via ansamblu files",
+      schema_new("object", ans_props, ans_req));
     tool_def_with_annotations(ans, ann_destructive());
     vec_push(tools, ans);
 
     # stiva_exec — destructive
     var exec_props = vec_new();
     vec_push(exec_props, schema_prop_new("id",
-    "{\"type\": \"string\", \"description\": \"Container ID\"}"));
+        "{\"type\": \"string\", \"description\": \"Container ID\"}"));
     vec_push(exec_props, schema_prop_new("command",
-    "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command and arguments to execute\"}"));  #skip-lint
+        "{\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"description\": \"Command and arguments to execute\"}"));  #skip-lint
     var exec_req = vec_new();
     vec_push(exec_req, "id");
     vec_push(exec_req, "command");
     var exec = tool_def_new("stiva_exec",
-    "Execute a command inside a running container",
-    schema_new("object", exec_props, exec_req));
+      "Execute a command inside a running container",
+      schema_new("object", exec_props, exec_req));
     tool_def_with_annotations(exec, ann_destructive());
     vec_push(tools, exec);
 
     # stiva_build — destructive
     var build_props = vec_new();
     vec_push(build_props, schema_prop_new("spec",
-    "{\"type\": \"string\", \"description\": \"TOML build spec content\"}"));
+        "{\"type\": \"string\", \"description\": \"TOML build spec content\"}"));
     vec_push(build_props, schema_prop_new("context_dir",
-    "{\"type\": \"string\", \"description\": \"Build context directory path\"}"));
+        "{\"type\": \"string\", \"description\": \"Build context directory path\"}"));
     var build_req = vec_new();
     vec_push(build_req, "spec");
     vec_push(build_req, "context_dir");
     var build = tool_def_new("stiva_build",
-    "Build an image from a Stivafile specification",
-    schema_new("object", build_props, build_req));
+      "Build an image from a Stivafile specification",
+      schema_new("object", build_props, build_req));
     tool_def_with_annotations(build, ann_destructive());
     vec_push(tools, build);
 
     # stiva_push — destructive
     var push_props = vec_new();
     vec_push(push_props, schema_prop_new("image",
-    "{\"type\": \"string\", \"description\": \"Image ID or reference to push\"}"));
+        "{\"type\": \"string\", \"description\": \"Image ID or reference to push\"}"));
     vec_push(push_props, schema_prop_new("target",
-    "{\"type\": \"string\", \"description\": \"Target registry reference (optional)\"}"));
+        "{\"type\": \"string\", \"description\": \"Target registry reference (optional)\"}"));
     var push_req = vec_new();
     vec_push(push_req, "image");
     var push = tool_def_new("stiva_push",
-    "Push a local image to a registry",
-    schema_new("object", push_props, push_req));
+      "Push a local image to a registry",
+      schema_new("object", push_props, push_req));
     tool_def_with_annotations(push, ann_destructive());
     vec_push(tools, push);
 
     # stiva_inspect — read-only
     var insp_props = vec_new();
     vec_push(insp_props, schema_prop_new("id",
-    "{\"type\": \"string\", \"description\": \"Container or image ID\"}"));
+        "{\"type\": \"string\", \"description\": \"Container or image ID\"}"));
     vec_push(insp_props, schema_prop_new("type",
-    "{\"type\": \"string\", \"enum\": [\"container\", \"image\"], \"description\": \"What to inspect\"}"));
+        "{\"type\": \"string\", \"enum\": [\"container\", \"image\"], \"description\": \"What to inspect\"}"));
     var insp_req = vec_new();
     vec_push(insp_req, "id");
     vec_push(insp_req, "type");
     var insp = tool_def_new("stiva_inspect",
-    "Inspect a container or image",
-    schema_new("object", insp_props, insp_req));
+      "Inspect a container or image",
+      schema_new("object", insp_props, insp_req));
     tool_def_with_annotations(insp, ann_read_only());
     vec_push(tools, insp);
 

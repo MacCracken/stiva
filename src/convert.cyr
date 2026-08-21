@@ -638,7 +638,7 @@ fn _cv_sorted_idx(obj) {
                         # Strict `<` on the right operand keeps the merge
                         # stable: ties take from the left run.
                         if (_cv_key_lt(bayan_json_v_obj_key(obj, vec_get(idx, b)),
-                        bayan_json_v_obj_key(obj, vec_get(idx, a))) == 0) { take_a = 1; }
+                            bayan_json_v_obj_key(obj, vec_get(idx, a))) == 0) { take_a = 1; }
                     }
                 }
                 if (take_a == 1) { vec_set(buf, o, vec_get(idx, a)); a = a + 1; }
@@ -883,7 +883,7 @@ fn _cv_v_to_str_into(sb, v) {
                 var idx = vec_get(order, i);
                 # serde_json always writes object keys as JSON strings.
                 str_builder_add(sb, bayan_json_v_build(
-                bayan_json_v_str_new(bayan_json_v_obj_key(v, idx))));
+                    bayan_json_v_str_new(bayan_json_v_obj_key(v, idx))));
                 str_builder_putc(sb, 58);
                 _cv_v_to_str_into(sb, bayan_json_v_obj_val(v, idx));
                 i = i + 1;
@@ -1105,14 +1105,14 @@ fn _cv_emit_compose_str_field(sb, v, field, key) {
 #[must_use]
 fn compose_yaml_to_toml(yaml) {
     sakshi_info("converting docker-compose YAML to stiva TOML",
-    strlen("converting docker-compose YAML to stiva TOML"));
+      strlen("converting docker-compose YAML to stiva TOML"));
 
     _cv_compose_err = 0;
 
-    # bayan_yaml_parse_str, NOT bayan_yaml_parse — the latter takes a
+    # bayan_yaml_parse_buf, NOT bayan_yaml_parse — the latter takes a
     # 16-byte Str, and handing it a cstr compiles with only an arity
     # warning before silently yielding a non-object.
-    var doc = bayan_yaml_parse_str(yaml, strlen(yaml));
+    var doc = bayan_yaml_parse_buf(yaml, strlen(yaml));
     if (doc == 0) {
         var esb = str_builder_new();
         str_builder_add_cstr(esb, "invalid YAML: ");
@@ -1197,7 +1197,7 @@ fn compose_yaml_to_toml(yaml) {
             if (bayan_json_v_is_arr(cfg) == 1) {
                 if (bayan_json_v_arr_len(cfg) > 0) {
                     _cv_emit_compose_str_field(out,
-                    bayan_json_v_arr_get(cfg, 0), "subnet", "subnet");
+                      bayan_json_v_arr_get(cfg, 0), "subnet", "subnet");
                 }
             }
             str_builder_add_cstr(out, "\n");
@@ -1217,7 +1217,7 @@ fn compose_yaml_to_toml(yaml) {
             _cv_emit_toml_key(out, bayan_json_v_obj_key(volumes, vidx));
             str_builder_add_cstr(out, "]\n");
             _cv_emit_compose_str_field(out,
-            bayan_json_v_obj_val(volumes, vidx), "driver", "driver");
+              bayan_json_v_obj_val(volumes, vidx), "driver", "driver");
             str_builder_add_cstr(out, "\n");
             vi = vi + 1;
         }

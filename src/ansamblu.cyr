@@ -689,8 +689,8 @@ fn parse_ansamblu(toml_str) {
             var env = _ans_inline_table(_bld_val_cstr(bayan_toml_get(pairs, "env")));
             if (env == 0 - 1) { return 0; }                  # non-string env value (serde: HashMap<String,String>)
             var svc = service_def_new(image, _bld_str_vec(pairs, "command"), env,
-            _bld_str_vec(pairs, "ports"), _bld_str_vec(pairs, "volumes"),
-            _bld_str_vec(pairs, "depends_on"));
+              _bld_str_vec(pairs, "ports"), _bld_str_vec(pairs, "volumes"),
+              _bld_str_vec(pairs, "depends_on"));
             var ss: ServiceDef = svc;
             var rep = bayan_toml_get(pairs, "replicas");
             if (rep != 0) { ss.replicas = atoi(str_cstr(rep)); }

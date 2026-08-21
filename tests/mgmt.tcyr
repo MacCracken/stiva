@@ -42,7 +42,7 @@ fn _cm_test_root() {
 
 fn _cm_mk_record(id, name, state, pid) {
     return container_new(id, name, "img-id", "local/app:v1", state, pid,
-    1700000000000, 0 - 1, container_config_default(), 0 - 1);
+      1700000000000, 0 - 1, container_config_default(), 0 - 1);
 }
 
 fn test_cm_new_empty_and_list() {
@@ -235,7 +235,7 @@ fn test_stiva_run_ps_stop_rm() {
     var root = _cm_test_root();
     var s = stiva_new(_stiva_test_config(root));
     var img = _test_import(image_store_new(root), "/tmp/stiva-fac.tar", "app", "v1",
-    "fac-rootfs", strlen("fac-rootfs"));
+      "fac-rootfs", strlen("fac-rootfs"));
     assert_neq(img, 0, "image imported");
 
     var cfg: ContainerConfig = container_config_default();
@@ -672,8 +672,8 @@ fn test_agent_build_registration_from_container() {
     vec_push(ports, "8080:80");
     var cfg = _agent_test_config(ports);
     var c = _agent_test_container("abc123def456", "web-server",
-    "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
-    CONTAINER_STATE_RUNNING, cfg);
+      "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
+      CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);
     var r: AgentRegistration = reg;
@@ -681,7 +681,7 @@ fn test_agent_build_registration_from_container() {
     assert_eq(streq(r.name, "web-server"), 1, "name");
     assert_eq(streq(r.agent_type, "container"), 1, "agent_type is container");
     assert_eq(_agent_caps_contains(r.capabilities, "stiva"), 1,
-    "capabilities contains stiva");
+      "capabilities contains stiva");
     return 0;
 }
 
@@ -691,8 +691,8 @@ fn test_agent_build_registration_no_name() {
     var cfg = _agent_test_config(ports);
     # name = 0 (None) → falls back to first 12 chars of id.
     var c = _agent_test_container("abc123def456", 0,
-    "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
-    CONTAINER_STATE_RUNNING, cfg);
+      "sha256:696d670000000000000000000000000000000000000000000000000000000000", "docker.io/library/nginx:latest",
+      CONTAINER_STATE_RUNNING, cfg);
 
     var reg = build_registration(c);
     var r: AgentRegistration = reg;
@@ -743,7 +743,7 @@ fn test_agent_status_serde() {
 fn test_agent_default_registry_url() {
     test_group("agent_default_registry_url");
     assert_eq(streq(agent_default_registry_url(), "http://localhost:8090"), 1,
-    "default registry url");
+      "default registry url");
     return 0;
 }
 
@@ -855,7 +855,7 @@ fn _mg_send(ctx, method, url, headers, body, body_len) {
             if (strstr(url, vec_get(routes, i + 1)) >= 0) {
                 var bd = vec_get(routes, i + 3);
                 return _sandhi_resp_new(vec_get(routes, i + 2), bd, strlen(bd),
-                sandhi_headers_new(), SANDHI_OK);
+                  sandhi_headers_new(), SANDHI_OK);
             }
         }
         i = i + 4;
@@ -898,7 +898,7 @@ fn _mg_stiva(ctx, root) {
     var s = stiva_new(cfg);
     if (s == 0) { return 0; }
     registry_client_set_transport(stiva_registry_client(s),
-    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+      registry_transport_new(&_mg_send, &_mg_sink, ctx));
     return s;
 }
 
@@ -940,7 +940,7 @@ fn test_mg_stiva_pull() {
     assert_neq(im, 0, "pull succeeded through the facade");
     var cfg = _mg_cfg_json();
     assert_eq(streq(_img_id(im), sha256_digest(cfg, strlen(cfg))), 1,
-    "image id is the config digest");
+      "image id is the config digest");
     var ii: Image = im;
     assert_eq(vec_len(ii.layers), 1, "one layer recorded");
     # The CALLER's reference must reach the wire. Asserting the URL of THIS
@@ -948,18 +948,18 @@ fn test_mg_stiva_pull() {
     # still match. So pull a DIFFERENT one and check the URL follows it; that
     # is the assertion a hardcoded argument cannot satisfy.
     assert_eq(strstr(_mg_log_at(ctx, 0), "reg.test/v2/library/alpine/manifests/latest") >= 0, 1,
-    "the requested reference is what got fetched");
+      "the requested reference is what got fetched");
     assert_eq(streq(image_ref_full_ref(ii.reference), "reg.test/library/alpine:latest"), 1,
-    "and it is recorded under that reference");
+      "and it is recorded under that reference");
 
     var before = _mg_log_len(ctx);
     var im2 = stiva_pull(s, "reg.test/team/other:v9");
     assert_neq(im2, 0, "second pull, different reference");
     assert_eq(strstr(_mg_log_at(ctx, before), "reg.test/v2/team/other/manifests/v9") >= 0, 1,
-    "a DIFFERENT reference produces a different URL — the argument is threaded");
+      "a DIFFERENT reference produces a different URL — the argument is threaded");
     var i2: Image = im2;
     assert_eq(streq(image_ref_full_ref(i2.reference), "reg.test/team/other:v9"), 1,
-    "and is recorded under the reference it was asked for");
+      "and is recorded under the reference it was asked for");
     return 0;
 }
 
@@ -984,11 +984,11 @@ fn test_mg_stiva_push() {
     _mg_route(ctx, "POST", "/blobs/uploads/", 202, "");
     _mg_route(ctx, "PUT", "/", 201, "");
     registry_client_set_transport(stiva_registry_client(s),
-    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+      registry_transport_new(&_mg_send, &_mg_sink, ctx));
     # No Location header in this script, so the upload session has none to
     # resolve — assert the failure is reported rather than silently ignored.
     assert_eq(stiva_push(s, "reg.test/library/alpine:latest", 0), 0,
-    "a Location-less upload response fails loudly");
+      "a Location-less upload response fails loudly");
     assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "reported as a registry error");
     return 0;
 }
@@ -1010,7 +1010,7 @@ fn test_mg_stiva_push_default_target_is_the_image_ref() {
     _mg_route(ctx, "HEAD", "/manifests/", 404, "");
     _mg_route(ctx, "PUT", "/manifests/", 201, "");
     registry_client_set_transport(stiva_registry_client(s),
-    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+      registry_transport_new(&_mg_send, &_mg_sink, ctx));
 
     assert_eq(stiva_push(s, id, 0), 1, "push by id, no target");
     # Every request must be aimed at reg.test/library/alpine — never docker.io,
@@ -1049,7 +1049,7 @@ fn test_mg_stiva_list_tags() {
     # Pin the URL: the facade must thread the caller's reference through, not
     # some other repository's.
     assert_eq(strstr(_mg_log_at(ctx, 0), "reg.test/v2/library/alpine/tags/list") >= 0, 1,
-    "queried the requested repository");
+      "queried the requested repository");
     return 0;
 }
 
@@ -1080,9 +1080,9 @@ fn test_mg_stiva_verify_signature_by_id() {
 
     var ctx = _mg_ctx_new();
     _mg_route(ctx, "GET", "/referrers/", 200,
-    "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
     registry_client_set_transport(stiva_registry_client(s),
-    registry_transport_new(&_mg_send, &_mg_sink, ctx));
+      registry_transport_new(&_mg_send, &_mg_sink, ctx));
 
     assert_eq(stiva_verify_signature(s, id), 1, "signed, looked up by id");
     var url = _mg_log_at(ctx, 0);
@@ -1109,14 +1109,14 @@ fn test_mg_pull_index_dedup_by_digest() {
     assert_neq(stiva_pull(s, "reg.test/library/alpine:latest"), 0, "second pull");
     var ss: Stiva = s;
     assert_eq(vec_len(image_store_list(ss.image_store)), 1,
-    "re-pulling the same tag stays one entry");
+      "re-pulling the same tag stays one entry");
     return 0;
 }
 
 # ══ MCP live dispatch (§E) ═══════════════════════════════
 
 fn _mg_mcp_params(json) {
-    return bayan_json_v_parse_str(json, strlen(json));
+    return bayan_json_v_parse_buf(json, strlen(json));
 }
 
 # The result's content JSON (McpResult -> first content part's text).
@@ -1173,7 +1173,7 @@ fn test_mg_mcp_missing_params() {
     assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_push", e)), 0, "push needs image");
     assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_inspect", e)), 0, "inspect needs id");
     assert_eq(strstr(_mg_mcp_text(mcp_handle_tool(s, "stiva_pull", e)), "missing required") >= 0, 1,
-    "and says which parameter");
+      "and says which parameter");
     return 0;
 }
 
@@ -1227,7 +1227,7 @@ fn test_mg_mcp_build() {
     }
 
     assert_eq(mcp_result_success(mcp_handle_tool(s, "stiva_build", _mg_mcp_params("{}"))), 0,
-    "missing spec -> err");
+      "missing spec -> err");
     return 0;
 }
 
@@ -1236,7 +1236,7 @@ fn test_mg_mcp_pull_and_inspect_image() {
     var ctx = _mg_pull_ctx();
     var s = _mg_stiva(ctx, "/tmp/stiva-mg-mcp-pull");
     var r = mcp_handle_tool(s, "stiva_pull",
-    _mg_mcp_params("{\"image\":\"reg.test/library/alpine:latest\"}"));
+      _mg_mcp_params("{\"image\":\"reg.test/library/alpine:latest\"}"));
     assert_eq(mcp_result_success(r), 1, "pull succeeded");
     var txt = _mg_mcp_text(r);
     assert_eq(strstr(txt, "\"reference\"") >= 0, 1, "payload carries the reference");
@@ -1247,13 +1247,13 @@ fn test_mg_mcp_pull_and_inspect_image() {
     var cfg = _mg_cfg_json();
     var id = sha256_digest(cfg, strlen(cfg));
     var ir = mcp_handle_tool(s, "stiva_inspect",
-    _mg_mcp_params(_reg_cat2(_reg_cat2("{\"type\":\"image\",\"id\":\"", id), "\"}")));
+      _mg_mcp_params(_reg_cat2(_reg_cat2("{\"type\":\"image\",\"id\":\"", id), "\"}")));
     assert_eq(mcp_result_success(ir), 1, "inspect image succeeded");
     assert_eq(strstr(_mg_mcp_text(ir), id) >= 0, 1, "returns that image");
 
     # An unknown inspect type is an error, not a silent default to container.
     var br = mcp_handle_tool(s, "stiva_inspect",
-    _mg_mcp_params("{\"type\":\"volume\",\"id\":\"x\"}"));
+      _mg_mcp_params("{\"type\":\"volume\",\"id\":\"x\"}"));
     assert_eq(mcp_result_success(br), 0, "unknown inspect type rejected");
     assert_eq(strstr(_mg_mcp_text(br), "unknown inspect type") >= 0, 1, "says so");
     return 0;
@@ -1294,7 +1294,7 @@ fn test_mg_mcp_resources() {
     # but the caller can tell them apart from the error channel.
     assert_eq(mcp_read_resource(s, "stiva://volumes/x"), 0, "unknown scheme -> 0");
     assert_eq(mcp_read_resource(s, "stiva://images/sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
-    "missing image -> 0");
+      "missing image -> 0");
     assert_eq(mcp_read_resource(s, 0), 0, "null uri -> 0");
     # A bare prefix with no id must not be treated as a lookup.
     assert_eq(mcp_read_resource(s, "stiva://images/"), 0, "bare prefix -> 0");
@@ -1338,9 +1338,9 @@ fn test_ev_path_is_per_root() {
     # {root}/containers/{id}, so a per-container log would destroy the `removed`
     # event at the moment it was written.
     assert_eq(streq(container_events_path("/var/lib/stiva"), "/var/lib/stiva/events.jsonl"), 1,
-    "log sits directly under the root");
+      "log sits directly under the root");
     assert_eq(strstr(container_events_path("/r"), "/containers/") >= 0, 0,
-    "and NOT under the per-container directory");
+      "and NOT under the per-container directory");
     return 0;
 }
 
@@ -1415,7 +1415,7 @@ fn test_ev_publish_persists_and_stamps_wall_clock() {
     # boot — lib/chrono.cyr:45) and reads as ~uptime, which would make
     # `--since $(date +%s)` compare a date against an uptime and silently match
     # nothing. Bound it against clock_epoch_secs to catch that substitution.
-    var v = bayan_json_v_parse_str(body, strstr(body, "\n"));
+    var v = bayan_json_v_parse_buf(body, strstr(body, "\n"));
     var ts = _ct_jv_int_or(v, "ts", 0 - 1);
     assert_neq(ts, 0 - 1, "the line carries a ts");
     var now = clock_epoch_secs();
@@ -1433,13 +1433,13 @@ fn test_ev_survives_container_removal() {
     var mgr = container_manager_new(root, store);
     var cfg = container_config_default();
     var rec = container_new("evcid", "evname", "img", "local/a:v1",
-    CONTAINER_STATE_STOPPED, 0 - 1, 1700000000000, 0 - 1, cfg, 0 - 1);
+      CONTAINER_STATE_STOPPED, 0 - 1, 1700000000000, 0 - 1, cfg, 0 - 1);
     vec_push(container_manager_list(mgr), rec);
     assert_eq(container_manager_remove(mgr, "evcid"), STIVA_ERR_OK, "removed");
     assert_eq(is_dir(str_new(_rt_cat3(root, "/containers/", "evcid"),
-    strlen(_rt_cat3(root, "/containers/", "evcid")))), 0, "container dir is gone");
+          strlen(_rt_cat3(root, "/containers/", "evcid")))), 0, "container dir is gone");
     assert_eq(strstr(_ev_read(root), "\"event\":\"removed\"") >= 0, 1,
-    "but the removal event survives it");
+      "but the removal event survives it");
     return 0;
 }
 
@@ -1534,7 +1534,7 @@ fn test_fleet_draining_and_cordoned_take_no_new_work() {
     var c = deployment_constraints_default();
     # Even though the ready node has FEWER slots, it is the only schedulable one.
     assert_eq(streq(select_migration_target(nodes, 3, c), "ready"), 1,
-    "migration target skips draining/cordoned");
+      "migration target skips draining/cordoned");
     var cands = _fleet_candidates(nodes, 3, c);
     assert_eq(vec_len(cands), 1, "only the ready node is a candidate");
     return 0;
@@ -1552,7 +1552,7 @@ fn test_fleet_preferred_nodes_are_honoured() {
     c.preferred_nodes = pref;
     # `wanted` has far fewer free slots, so only the preference can select it.
     assert_eq(streq(select_migration_target(nodes, 2, c), "wanted"), 1,
-    "a preferred node outranks a roomier one");
+      "a preferred node outranks a roomier one");
     var cands = _fleet_candidates(nodes, 2, c);
     assert_eq(vec_len(cands), 2, "but the others are still candidates");
     assert_eq(streq(_fleet_node_id(vec_get(cands, 0)), "wanted"), 1, "preferred comes first");
@@ -1562,7 +1562,7 @@ fn test_fleet_preferred_nodes_are_honoured() {
     vec_push(nodes2, _fl_node("roomy", 16, 0, FLEET_NODE_READY));
     vec_push(nodes2, _fl_node("wanted", 1, 1, FLEET_NODE_READY));
     assert_eq(streq(select_migration_target(nodes2, 2, c), "roomy"), 1,
-    "a full preferred node falls back rather than failing");
+      "a full preferred node falls back rather than failing");
     return 0;
 }
 

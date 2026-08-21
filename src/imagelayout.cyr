@@ -177,7 +177,7 @@ fn _il_config_diff_ids(store, image) {
     var cc = alloc(8);
     var cbuf = _img_read_file(cfg_path, cc);
     if (cbuf == 0) { return out; }
-    var cv = bayan_json_v_parse_str(cbuf, load64(cc));
+    var cv = bayan_json_v_parse_buf(cbuf, load64(cc));
     if (cv == 0) { return out; }
     var rootfs = json_v_obj_get(cv, "rootfs");
     if (rootfs == 0) { return out; }
@@ -260,7 +260,7 @@ fn _il_index_read_jv(store) {
     var n = load64(len_cell);
     if (buf == 0) { return 0; }
     if (n <= 0) { return 0; }
-    return bayan_json_v_parse_str(buf, n);
+    return bayan_json_v_parse_buf(buf, n);
 }
 
 # The `manifests` array jv from a parsed index root, or 0.
@@ -326,7 +326,7 @@ fn _il_manifest_descriptor_jv(store, image, manifest_size) {
         var cc = alloc(8);
         var cbuf = _img_read_file(cfg_path, cc);
         if (cbuf != 0) {
-            var cv = bayan_json_v_parse_str(cbuf, load64(cc));
+            var cv = bayan_json_v_parse_buf(cbuf, load64(cc));
             if (cv != 0) {
                 arch = _il_jv_str_field(cv, "architecture");
                 os = _il_jv_str_field(cv, "os");
@@ -361,7 +361,7 @@ fn _il_read_manifest(store, digest) {
     var n = load64(len_cell);
     if (buf == 0) { return 0; }
     if (n <= 0) { return 0; }
-    var jv = bayan_json_v_parse_str(buf, n);
+    var jv = bayan_json_v_parse_buf(buf, n);
     if (jv == 0) { return 0; }
     return oci_manifest_from_jv(jv);
 }
@@ -798,7 +798,7 @@ fn _il_load_oci_layout(store, layout) {
         stiva_err_print(STIVA_ERR_STORAGE, "archive index.json is unreadable");
         return 0 - 1;
     }
-    var manifests = _il_index_manifests(bayan_json_v_parse_str(ibuf, load64(il_cell)));
+    var manifests = _il_index_manifests(bayan_json_v_parse_buf(ibuf, load64(il_cell)));
     if (manifests == 0) { return 0; }
 
     var loaded = 0;
@@ -889,7 +889,7 @@ fn _il_load_docker_archive(store, dir) {
     var mc = alloc(8);
     var mbuf = _img_read_file(mpath, mc);
     if (mbuf == 0) { return 0 - 1; }
-    var root = bayan_json_v_parse_str(mbuf, load64(mc));
+    var root = bayan_json_v_parse_buf(mbuf, load64(mc));
     if (json_v_is_arr(root) == 0) { return 0 - 1; }
 
     var loaded = 0;
@@ -1082,7 +1082,7 @@ fn image_store_pull(client, store, ref) {
         if (ld.urls != 0) {
             if (vec_len(ld.urls) > 0) {
                 stiva_err_print(STIVA_ERR_PULL_FAILED,
-                "foreign layer (descriptor carries urls); refusing to fetch from an external host");
+                  "foreign layer (descriptor carries urls); refusing to fetch from an external host");
                 return 0;
             }
         }

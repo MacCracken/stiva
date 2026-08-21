@@ -546,13 +546,13 @@ fn _ct_scan_policy_to_jv(p) {
     var o = json_v_obj_new();
     json_v_obj_set(o, str_from("enabled"), json_v_int_new(ExternalizationPolicy_enabled(p)));
     json_v_obj_set(o, str_from("max_artifact_size_bytes"),
-    json_v_int_new(ExternalizationPolicy_max_artifact_size_bytes(p)));
+      json_v_int_new(ExternalizationPolicy_max_artifact_size_bytes(p)));
     json_v_obj_set(o, str_from("block_threshold"),
-    json_v_int_new(ExternalizationPolicy_block_threshold(p)));
+      json_v_int_new(ExternalizationPolicy_block_threshold(p)));
     json_v_obj_set(o, str_from("quarantine_threshold"),
-    json_v_int_new(ExternalizationPolicy_quarantine_threshold(p)));
+      json_v_int_new(ExternalizationPolicy_quarantine_threshold(p)));
     json_v_obj_set(o, str_from("redact_secrets"),
-    json_v_int_new(ExternalizationPolicy_redact_secrets(p)));
+      json_v_int_new(ExternalizationPolicy_redact_secrets(p)));
     return o;
 }
 
@@ -785,10 +785,10 @@ fn container_state_load(root) {
     var buf = alloc(cap);
     var n = file_read_all(path, buf, cap);
     if (n <= 0) { return out; }
-    var rv = bayan_json_v_parse_str(buf, n);
+    var rv = bayan_json_v_parse_buf(buf, n);
     if (rv == 0) {
         sakshi_warn("failed to parse container state, starting fresh",
-        strlen("failed to parse container state, starting fresh"));
+          strlen("failed to parse container state, starting fresh"));
         return out;
     }
     if (json_v_is_arr(rv) == 0) { return out; }
@@ -867,7 +867,7 @@ fn to_oci_status(state) {
 fn build_state(container, bundle_path) {
     var ct: Container = container;
     return oci_state_new(oci_version(), ct.id, to_oci_status(ct.state), ct.pid,
-    bundle_path, 0);
+      bundle_path, 0);
 }
 
 # OciState* → JSON object (rust-old: serde Serialize on OciState). `pid` and
@@ -921,7 +921,7 @@ fn parse_bundle(bundle_path) {
     var buf = alloc(cap);
     var n = file_read_all(config_path, buf, cap);
     if (n <= 0) { return 0; }
-    var root = bayan_json_v_parse_str(buf, n);
+    var root = bayan_json_v_parse_buf(buf, n);
     if (root == 0) { return 0; }
 
     var config = container_config_default();
@@ -1186,7 +1186,7 @@ fn _cm_events_enabled() {
     if (streq(e, "off") == 1) { return 0; }
     if (streq(e, "on") == 1) { return 1; }
     sakshi_warn("STIVA_EVENTS: expected \"on\" or \"off\"; using \"on\"",
-    strlen("STIVA_EVENTS: expected \"on\" or \"off\"; using \"on\""));
+      strlen("STIVA_EVENTS: expected \"on\" or \"off\"; using \"on\""));
     return 1;
 }
 
@@ -1201,7 +1201,7 @@ fn _cm_events_int_env(name, dflt) {
     var v = atoi(e);
     if (v > 0) { return v; }
     sakshi_warn("events: ignoring a non-positive rotation limit from the environment",
-    strlen("events: ignoring a non-positive rotation limit from the environment"));
+      strlen("events: ignoring a non-positive rotation limit from the environment"));
     return dflt;
 }
 
@@ -1256,7 +1256,7 @@ fn container_events_append_with(root, event_json, max_bytes, max_files) {
     sys_mkdir(root, 493);
     if (file_append_locked(path, line, jlen + 1) >= 0) { return 1; }
     sakshi_warn("events: failed to append to the lifecycle event log",
-    strlen("events: failed to append to the lifecycle event log"));
+      strlen("events: failed to append to the lifecycle event log"));
     return 0;
 }
 
@@ -1265,8 +1265,8 @@ fn container_events_append_with(root, event_json, max_bytes, max_files) {
 fn container_events_append(root, event_json) {
     if (_cm_events_enabled() == 0) { return 0; }
     return container_events_append_with(root, event_json,
-    _cm_events_int_env("STIVA_EVENTS_MAX_BYTES", _CM_EVENTS_MAX_BYTES),
-    _cm_events_int_env("STIVA_EVENTS_MAX_FILES", _CM_EVENTS_MAX_FILES));
+      _cm_events_int_env("STIVA_EVENTS_MAX_BYTES", _CM_EVENTS_MAX_BYTES),
+      _cm_events_int_env("STIVA_EVENTS_MAX_FILES", _CM_EVENTS_MAX_FILES));
 }
 
 # The `ts` of one event-log line as epoch millis, or -1 when the line carries no
@@ -1275,7 +1275,7 @@ fn container_events_append(root, event_json) {
 #[must_use]
 fn container_event_ts(line) {
     if (line == 0) { return 0 - 1; }
-    var v = bayan_json_v_parse_str(line, strlen(line));
+    var v = bayan_json_v_parse_buf(line, strlen(line));
     if (v == 0) { return 0 - 1; }
     return _ct_jv_int_or(v, "ts", 0 - 1);
 }
@@ -1389,7 +1389,7 @@ fn _cm_flatten_fallback_enabled() {
     if (streq(e, "none") == 1) { return 0; }
     if (streq(e, "copy") == 1) { return 1; }
     sakshi_warn("STIVA_ROOTFS_FALLBACK: expected \"copy\" or \"none\"; using \"copy\"",
-    strlen("STIVA_ROOTFS_FALLBACK: expected \"copy\" or \"none\"; using \"copy\""));
+      strlen("STIVA_ROOTFS_FALLBACK: expected \"copy\" or \"none\"; using \"copy\""));
     return 1;
 }
 
@@ -1453,7 +1453,7 @@ fn container_manager_create(mgr, image, config) {
                 # otherwise a failed create leaks a whole image's worth of disk.
                 _stor_remove_dir_all(rootfs);
                 stiva_err_print(STIVA_ERR_STORAGE,
-                _container_cat2("cannot materialize container rootfs from image ", _img_id(image)));
+                  _container_cat2("cannot materialize container rootfs from image ", _img_id(image)));
                 return 0;
             }
             file_write_all(_cm_flatten_marker(croot), "", 0);
@@ -1462,7 +1462,7 @@ fn container_manager_create(mgr, image, config) {
 
     var full_ref = image_ref_full_ref(_image_reference(image));
     var rec = container_new(id, name, _img_id(image), full_ref,
-    CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, config, 0 - 1);
+      CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, config, 0 - 1);
     var spec = generate_spec(rec, rootfs);
     if (spec == 0) {
         # Reclaim the container directory. Everything expensive has already
@@ -1541,7 +1541,7 @@ fn container_manager_start(mgr, id) {
             cc.state = CONTAINER_STATE_STOPPED;
             cc.pid = 0 - 1;
             container_manager_publish_event(mgr,
-            _cm_event_json("start_failed", id, "error", "spawn failed"));
+              _cm_event_json("start_failed", id, "error", "spawn failed"));
             _cm_persist(mgr);
             return STIVA_ERR_SANDBOX;
         }
@@ -1654,7 +1654,7 @@ fn _cm_start_rootless_net(mgr, cc_in, croot) {
     var h = start_rootless_network(NETWORK_ROOTLESS_BACKEND_AUTO, cc.pid, ports, logp);
     if (h == 0) {
         sakshi_warn("rootless network unavailable; the container has no external connectivity",
-        strlen("rootless network unavailable; the container has no external connectivity"));
+          strlen("rootless network unavailable; the container has no external connectivity"));
         return 0;
     }
     var pf = _container_cat2(croot, "/rootless-net.pid");
@@ -1829,7 +1829,7 @@ fn container_manager_remove(mgr, id) {
     var cc: Container = c;
     if (cc.state == CONTAINER_STATE_RUNNING) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-        _container_cat2("cannot remove running container — stop it first: ", id));
+          _container_cat2("cannot remove running container — stop it first: ", id));
         return STIVA_ERR_INVALID_STATE;
     }
     # Tear down the overlay if we still hold its internals.
@@ -1901,7 +1901,7 @@ fn container_manager_restart(mgr, id) {
     var cc: Container = c;
     if (cc.state != CONTAINER_STATE_STOPPED) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
-        _container_cat2("cannot restart: container is not stopped: ", id));
+          _container_cat2("cannot restart: container is not stopped: ", id));
         return STIVA_ERR_INVALID_STATE;
     }
     cc.state = CONTAINER_STATE_CREATED;
@@ -2075,7 +2075,7 @@ fn _cm_diff_apply_wh(dir, prefix, view) {
                             _cm_diff_drop_subtree(view, prefix);
                         } else {
                             _cm_diff_drop_subtree(view,
-                            _container_cat2(_container_cat2(prefix, "/"), named + 4));
+                              _container_cat2(_container_cat2(prefix, "/"), named + 4));
                         }
                     } else {
                         var child = _container_cat2(_container_cat2(dir, "/"), named);
@@ -2095,7 +2095,7 @@ fn _cm_diff_apply_wh(dir, prefix, view) {
     while (s < vec_len(subs)) {
         var sn = vec_get(subs, s);
         _cm_diff_apply_wh(_container_cat2(_container_cat2(dir, "/"), sn),
-        _container_cat2(_container_cat2(prefix, "/"), sn), view);
+          _container_cat2(_container_cat2(prefix, "/"), sn), view);
         s = s + 1;
     }
     return 0;

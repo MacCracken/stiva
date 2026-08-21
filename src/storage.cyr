@@ -864,7 +864,7 @@ fn unpack_layer(blob_path, dest) {
     var is_zstd = 0;
     if (blob_len >= 4) {
         if ((load8(blob) & 0xFF) == 0x28 && (load8(blob + 1) & 0xFF) == 0xB5
-        && (load8(blob + 2) & 0xFF) == 0x2F && (load8(blob + 3) & 0xFF) == 0xFD) {
+          && (load8(blob + 2) & 0xFF) == 0x2F && (load8(blob + 3) & 0xFF) == 0xFD) {
             is_zstd = 1;
         }
     }
@@ -1296,7 +1296,7 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                                                 # make an unprivileged run reject
                                                 # images a privileged one accepts.
                                                 sakshi_warn("flatten: skipping unreadable source file",
-                                                strlen("flatten: skipping unreadable source file"));
+                                                  strlen("flatten: skipping unreadable source file"));
                                             } elif (crc != 0) {
                                                 rc = 0 - 1;
                                             } else {

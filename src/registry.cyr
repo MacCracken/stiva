@@ -431,7 +431,7 @@ fn platform_manifest_from_jv(v) {
     if (json_v_is_str(df) == 0) { return 0; }
     if (json_v_is_int(sf) == 0) { return 0; }
     return platform_manifest_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(df)),
-    json_v_int(sf), platform_from_jv(json_v_obj_get(v, "platform")));
+      json_v_int(sf), platform_from_jv(json_v_obj_get(v, "platform")));
 }
 
 # A manifest list / image index (rust-old: registry.rs:111-118).
@@ -882,7 +882,7 @@ fn _credential_store_load_from(path) {
         stiva_err_print(STIVA_ERR_REGISTRY, "failed to read credentials");
         return 0;
     }
-    var v = bayan_json_v_parse_str(buf, n);
+    var v = bayan_json_v_parse_buf(buf, n);
     if (v == 0) {
         stiva_err_print(STIVA_ERR_REGISTRY, "invalid credentials file");
         return 0;
@@ -1127,7 +1127,7 @@ fn _reg_send(client, method, url, headers, body, body_len) {
         return sandhi_http_request_auto(method, url, headers, body, body_len, opts);
     }
     return fncall6(load64(t + REG_TP_SEND), load64(t + REG_TP_CTX),
-    method, url, headers, body, body_len);
+      method, url, headers, body, body_len);
 }
 
 # One streaming download. Returns a sandhi download-result*, or 0.
@@ -1400,7 +1400,7 @@ fn registry_fetch_manifest(client, ref) {
     _reg_last_manifest_body_len = blen;
     _reg_last_manifest_digest = actual;
 
-    var v = bayan_json_v_parse_str(body, blen);
+    var v = bayan_json_v_parse_buf(body, blen);
     if (v == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "manifest is not valid JSON", st); }
 
     # Index vs manifest: Content-Type first (the oracle's only test), then the
@@ -1778,7 +1778,7 @@ fn registry_blob_exists(client, ref, digest) {
     # blob, which reads like a failure while the push is working perfectly.
     _reg_quiet = 1;
     var r = _reg_authenticated_request(client, ref, "HEAD",
-    _reg_blob_url(client, ref, digest), _reg_push_scope(ref), 0);
+      _reg_blob_url(client, ref, digest), _reg_push_scope(ref), 0);
     _reg_quiet = 0;
     if (r == 0) { return 0; }
     var st = sandhi_http_status(r);
@@ -1789,7 +1789,7 @@ fn registry_blob_exists(client, ref, digest) {
 # Open an upload session. Returns the absolute upload URL, or 0.
 fn _reg_start_upload(client, ref, scope) {
     var r = _reg_authenticated_request(client, ref, "POST",
-    _reg_uploads_url(client, ref), scope, 0);
+      _reg_uploads_url(client, ref), scope, 0);
     if (r == 0) { return 0; }
     var st = sandhi_http_status(r);
     if (st < 200 || st >= 300) {
@@ -1894,7 +1894,7 @@ fn registry_push_blob(client, ref, digest, data, len) {
     if (up == 0) { return 0; }
 
     var r = _reg_push_send(client, ref, "PUT", _reg_append_digest_query(up, digest),
-    scope, "application/octet-stream", 0, 0, data, len);
+      scope, "application/octet-stream", 0, 0, data, len);
     if (r == 0) { return 0; }
     var st = sandhi_http_status(r);
     if (st < 200 || st >= 300) {
@@ -1929,7 +1929,7 @@ fn registry_push_blob_chunked(client, ref, digest, data, len, chunk_size) {
         # (OCI distribution spec; oracle registry.rs:693).
         var rng = _reg_cat2(_reg_cat2(_reg_uint_str(off), "-"), _reg_uint_str(end - 1));
         var r = _reg_push_send(client, ref, "PATCH", loc, scope,
-        "application/octet-stream", "Content-Range", rng, data + off, end - off);
+          "application/octet-stream", "Content-Range", rng, data + off, end - off);
         if (r == 0) { return 0; }
         var st = sandhi_http_status(r);
         if (st < 200 || st >= 300) {
@@ -1946,7 +1946,7 @@ fn registry_push_blob_chunked(client, ref, digest, data, len, chunk_size) {
                 # foreign host is the same attack, once per chunk.
                 if (_reg_same_origin(nabs, nbase) == 0) {
                     return _reg_fail(STIVA_ERR_REGISTRY,
-                    "upload Location is off-origin; refusing", 0);
+                      "upload Location is off-origin; refusing", 0);
                 }
                 loc = nabs;
             }
@@ -1956,7 +1956,7 @@ fn registry_push_blob_chunked(client, ref, digest, data, len, chunk_size) {
 
     # Finalize: PUT with an empty body.
     var fr = _reg_push_send(client, ref, "PUT", _reg_append_digest_query(loc, digest),
-    scope, 0, 0, 0, 0, 0);
+      scope, 0, 0, 0, 0, 0);
     if (fr == 0) { return 0; }
     var fst = sandhi_http_status(fr);
     if (fst < 200 || fst >= 300) {
@@ -1990,7 +1990,7 @@ fn registry_push_manifest(client, ref, body, blen, ctype) {
     # (rust-old/src/registry.rs:761).
     var rr: ImageRef = ref;
     var url = _reg_cat2(_reg_cat2(_reg_cat2(_reg_api_base(client, ref), "/v2/"),
-    rr.repository), _reg_cat2("/manifests/", rr.tag));
+        rr.repository), _reg_cat2("/manifests/", rr.tag));
 
     if (_reg_get_cached_token(client, _reg_cache_key(load64(ref + 0), scope)) == 0) {
         # Quiet for the same reason as the blob precheck: a 404 here means "no
@@ -2029,7 +2029,7 @@ fn registry_push_manifest(client, ref, body, blen, ctype) {
 # `.unwrap_or_default()` (registry.rs:826, :866). Non-string elements are
 # skipped, matching its `filter_map`.
 fn _reg_str_array_field(body, blen, key) {
-    var v = bayan_json_v_parse_str(body, blen);
+    var v = bayan_json_v_parse_buf(body, blen);
     if (v == 0) { return 0; }
     var out = vec_new();
     var f = json_v_obj_get(v, key);
@@ -2051,7 +2051,7 @@ fn _reg_str_array_field(body, blen, key) {
 fn registry_list_tags(client, ref) {
     _reg_clear_err();
     var r = _reg_authenticated_get(client, ref, _reg_tags_url(client, ref),
-    _reg_pull_scope(ref), 0);
+      _reg_pull_scope(ref), 0);
     if (r == 0) { return 0; }
     var st = sandhi_http_status(r);
     if (st < 200 || st >= 300) {
@@ -2118,7 +2118,7 @@ fn registry_referrers(client, ref, digest) {
         return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "malformed digest", 0);
     }
     var r = _reg_authenticated_get(client, ref, _reg_referrers_url(client, ref, digest),
-    _reg_pull_scope(ref), 0);
+      _reg_pull_scope(ref), 0);
     if (r == 0) { return 0; }
     var st = sandhi_http_status(r);
     if (st < 200 || st >= 300) {
@@ -2129,7 +2129,7 @@ fn registry_referrers(client, ref, digest) {
     if (body == 0 || blen <= 0) {
         return _reg_fail(STIVA_ERR_REGISTRY, "empty referrers body", st);
     }
-    var v = bayan_json_v_parse_str(body, blen);
+    var v = bayan_json_v_parse_buf(body, blen);
     if (v == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "failed to parse referrers", st); }
     var out = vec_new();
     var f = json_v_obj_get(v, "manifests");
@@ -2376,7 +2376,7 @@ fn _reg_auth_token_new(token, expires_at_ns) {
 # pattern as _credential_store_save_to.
 fn _reg_cache_token_at(client, key, token, now_ns) {
     map_set(load64(client + REG_CL_TOKENS), key,
-    _reg_auth_token_new(token, now_ns + _REG_TOKEN_TTL_NS));
+      _reg_auth_token_new(token, now_ns + _REG_TOKEN_TTL_NS));
     return 0;
 }
 
@@ -2424,7 +2424,7 @@ fn _reg_basic_auth_header(username, password) {
 # (rust-old: registry.rs:541-545). Returns a cstr, or 0 when neither is present.
 #[must_use]
 fn _reg_token_from_body(body, body_len) {
-    var v = bayan_json_v_parse_str(body, body_len);
+    var v = bayan_json_v_parse_buf(body, body_len);
     if (v == 0) { return 0; }
     var t = json_v_obj_get(v, "token");
     if (json_v_is_str(t) == 1) { return str_cstr(json_v_str(t)); }

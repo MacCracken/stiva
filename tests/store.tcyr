@@ -236,7 +236,7 @@ fn test_credential_store_json_round_trip() {
     credential_store_set(store, "docker.io", "alice", "pw1");
     credential_store_set(store, "ghcr.io", "bob", "pw2");
     var json = json_v_build(credential_store_to_jv(store));
-    var back = credential_store_from_jv(bayan_json_v_parse_str(str_data(json), str_len(json)));
+    var back = credential_store_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var c1: RegistryCredential = credential_store_get(back, "docker.io");
     assert(c1 != 0, "docker.io present");
     assert_eq(streq(c1.username, "alice"), 1, "docker user");
@@ -1294,7 +1294,7 @@ fn test_flatten_layers_escape_readonly_parent_file() {
     if (n < 0) { n = 0; }
     store8(buf + n, 0);
     assert_eq(streq(buf, "HOST-ORIGINAL"), 1,
-    "host file NOT overwritten through a surviving symlink");
+      "host file NOT overwritten through a surviving symlink");
     sys_chmod(e1, 493);
     return 0;
 }
@@ -1320,7 +1320,7 @@ fn test_flatten_layers_readonly_dir_still_populates() {
     sys_mkdir(dst, 493);
     assert_eq(flatten_layers(layers, dst), 0, "0555 directory does not fail the flatten");
     assert_eq(file_exists(_stor_join(_stor_join(dst, "opt"), "app")), 1,
-    "and its contents landed");
+      "and its contents landed");
     sys_chmod(opt, 493);
     sys_chmod(_stor_join(dst, "opt"), 493);
     return 0;
