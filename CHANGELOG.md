@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.18] — 2026-08-21 — three shipped defects: no env, no shell, and a latent aarch64 process-killer
+
+Every one was found by adversarially re-testing claims the tree already made about itself,
+and **none was on any roadmap.** Two were live on x86_64; the third would have killed the
+first aarch64 build silently. 2181 → **2189** tests.
+
+### Fixed — `stiva run <image>` was refused for most images: `blocked command: sh`
+
+Reproduced end to end, not inferred:
+
+```
+$ stiva run <image>          # no CMD, so the command defaults to /bin/sh
+[INFO] executing one-shot container via kavach: /bin/sh
+[INFO] container execution complete, exit_code=126
+blocked command: sh
+```
+
+kavach's runtime guard enforces an interpreter blocklist — `sh`, `bash`, `zsh`, `dash`,
+`python`, `python3`, `perl`, `ruby`, `php`, `lua`, `node`, `deno`, `bun`, `gcc` — on **every**
+backend, unconditionally. `generate_spec` defaults an empty command to `/bin/sh`
+(`src/runtime.cyr:481`, `:485`), so a container with no `CMD` was refused before fork. So was
+any image whose entrypoint is a shell or an interpreter, which is most of them.
+
+**Fixed upstream in kavach 3.12.1**, pinned here. The blocklist exists to stop an agent
+sandbox shelling out to an interpreter *on the host*; once the sandbox has a rootfs the name
+resolves **inside the container**, to a binary the caller supplied, after chroot and with
+namespaces up. `runtime_guard_config_for_rootfs` clears only the blocklist, only when a
+rootfs is set — sensitive-path and shell-metacharacter detection still apply inside a
+container, and a rootfs-less agent sandbox is completely unchanged.
+
+### Fixed — `_stor_lchown` was `syscall(94, …)`, which is `exit_group` on aarch64
+
+`src/storage.cyr` issued a bare `syscall(94, path, uid, gid)` for every tar entry of every
+layer unpack, `import` and `load`. 94 is `lchown` on x86_64 and **`__NR_exit_group` on
+aarch64** — so the first aarch64 build would have terminated silently on the first entry of
+the first image it touched. Now `sys_fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW)`,
+correct on both arches.
+
+⚠ **It sat behind a comment asserting it could not be fixed** — *"the cyrius stdlib exposes
+neither a `sys_lchown` wrapper nor a `SYS_LCHOWN`/`SYS_FCHOWNAT` per-arch constant"*. That was
+false, and false at the pin in force when it was written. All four symbols are in stiva's own
+`lib/`: `sys_fchownat` (`syscalls_x86_64_linux.cyr:393`, `syscalls_aarch64_linux.cyr:611`),
+`SYS_FCHOWNAT` (`:116`, `:109`), `AT_FDCWD` and `AT_SYMLINK_NOFOLLOW`
+(`syscalls_linux_common.cyr:38`/`:41`, `:61`/`:68`). The stdlib's own header documents this
+exact use: *"with AT_FDCWD + AT_SYMLINK_NOFOLLOW it gives lchown semantics."*
+
+This is the same class agnos's roadmap already tracks as *"Raw `syscall(N,…)` with LINUX
+numbers on agnos paths"*, where `read`(0) becomes `exit`. Latent here only because x86_64 is
+the sole built target.
+
 ### Fixed — containers never received the environment their image declared
 
 An OCI image's `process.env` was parsed into `ContainerConfig.env`
@@ -42,6 +92,17 @@ Delivery to a live payload is asserted upstream by kavach's `test_confine_captur
 **still write-only**, the same shape. `namespaces` is roadmap v3.1.0 item 3; `mounts` is not
 yet on the roadmap and should be, since `standard_mounts()` builds a `/dev` entry that never
 reaches a mount.
+
+⚠ **KNOWN GAP — AGNOS-native payloads still see nothing, and it is `mounts` that blocks it.**
+Cyrius's `getenv` on Linux reads `/proc/self/environ` (`lib/io.cyr:779-780`), not the stack
+`envp`. On `run -d` nothing mounts `/proc` — `confine_child` chroots and mounts nothing, and
+stiva's own `/proc` entry sits in the write-only `mounts` field — so `getenv` returns 0 with
+no error and no log line. glibc and busybox payloads are fine, because they read the real
+`envp` this release now populates. **Anything built with cyrius — daimon, sutra — is not**,
+which is to say stiva's own intended workloads. Tracked in the agnos roadmap ("AGNOS-native
+binaries cannot read their environment inside a container"); the fix is either cyrius
+preferring the stack `envp` on Linux, or stiva wiring `mounts`. Do not assume this release
+closed it for AGNOS consumers.
 
 2181 → **2189** tests.
 

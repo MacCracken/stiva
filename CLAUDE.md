@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.5.33** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.17
+- **Version**: SemVer, currently 3.0.18
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -21,7 +21,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2175 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 347 ·
+**2189 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 347 ·
 mgmt 325 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.5.33**.
 
@@ -112,7 +112,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.12.0** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.12.1** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.6.7** |
 | nein | nftables firewall, NAT, port mapping — pin **1.6.10** |
 | bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.2** |
@@ -245,7 +245,44 @@ Stiva uses these kavach features — keep them wired:
 9. If audit heavy → return to step 5
 10. Documentation — update CHANGELOG, roadmap, docs, ADRs for design decisions, source citations for algorithms/formulas, update docs/sources.md, guides and examples for new API surface, verify recipe version in zugot
 11. Version check — VERSION (cyrius.cyml reads it via `${file:VERSION}`) + recipe (in zugot) in sync
-12. Return to step 1
+12. **Claim check — after ANY dep or toolchain bump.** Re-run the probes behind every `block`
+    stanza in the roadmap and re-grep every symbol-absence claim. A pin move invalidates the
+    conclusions drawn from the old pin, not just the version string. See **Blocks and claims** below.
+13. Return to step 1
+
+### Blocks and claims — the rule that came out of the v3.1.0 audit
+
+An adversarial re-audit on 2026-08-21 found that **eight of eight "blocked on upstream" claims in
+the v3.1.0 roadmap were wrong.** Seven items were never blocked at all. The same habit had shipped
+three live defects — containers got no environment, `stiva run` was refused for most images, and
+`_stor_lchown` was a latent aarch64 process-killer sitting behind a false "cannot be fixed".
+
+The cause is mechanical: this tree writes a conclusion about a dependency once, cites a symbol as
+evidence, and never re-runs the evidence. When every pin moved on 2026-08-21 the roadmap edit was
+one line — the version inventory.
+
+Four rules, binding on new work:
+
+- **Never write "cannot", "impossible", or "not on stiva effort" without a probe.** The full
+  stanza format and the seven rules are in `docs/development/roadmap.md` → **Recording a block**.
+  No stanza means the item is *unstarted*, not blocked.
+- **A symbol's absence is not a capability's absence.** The unstated premise is always "…and stiva
+  must go through this library's API." Check it. stiva bypasses kavach for `exec`
+  (`src/runtime.cyr:1359-1363`) and nein for `apply` (`src/network_manager.cyr:358-361`), both
+  deliberately and both documented. A library boundary here is a choice, never a wall.
+- **Never type a number about a dependency** — struct sizes, field counts, version-gated
+  behaviour. Read it out of `lib/` at the moment you write it, or leave it out. "`SandboxConfig`
+  is 8 fields / 64 bytes" was wrong on the day it was typed.
+- **Assemble and deliver are separate steps; test the delivery.** Five `RuntimeSpec` fields were
+  written and never read (`env`, `mounts`, `namespaces`, `workdir`, `user`). `env` shipped that way
+  through 2175 green tests because the test asserted the spec *carried* the value, mirroring the
+  oracle's own unit test, and nothing asserted a container could *read* it. When you add a field to
+  a spec struct, **grep for a reader before assuming it is wired**, and assert on what the payload
+  observes.
+
+⚠ **Inherited oracle prose is not evidence.** Comments ported from `rust-old/` carry claims that
+may have been false before the oracle froze — `src/intents.cyr:4` still says agnoshi "does not
+exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive the claim.
 
 ### Key Principles
 
