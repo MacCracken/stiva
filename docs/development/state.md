@@ -23,8 +23,8 @@
 
 ## Tests
 
-**2186** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 358 ·
-mgmt 325 · store 299 · convert 116 — plus **87** CLI smoke assertions
+**2188** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 299 · convert 116 — plus **87** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 and **14** benchmarks.
 

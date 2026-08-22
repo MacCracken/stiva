@@ -8,7 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [3.0.19] — 2026-08-21 — `run -w` was accepted and ignored; the MCP `stiva_run` message named a blocker retired in v3.0.14
 
 Both found by the 3.0.18 documentation audit, which verified every doc claim against the code
-rather than against the previous doc. 2183 → **2186** assertions.
+rather than against the previous doc. 2183 → **2188** assertions.
 
 ### Fixed — `stiva run -w /app` was accepted and silently ignored
 
@@ -35,6 +35,17 @@ runc does too.
 `test_build_sandbox_threads_workdir` asserts the value crosses the boundary and is
 mutation-proven; kavach's `test_confine_capture_workdir` asserts the payload's `$PWD` is
 actually the requested directory.
+
+### Fixed — `test_mg_mcp_advertised_but_unavailable` pinned the stale claim in place
+
+The test asserted the `stiva_run` error contains the word `sandbox_spawn`, under the label
+**"names the actual blocker"** — and `sandbox_spawn` was not the blocker. Correcting the message
+turned the test red, which is how it should work; the point worth recording is that **the test
+was one of the reasons the false claim survived**. A test that asserts on the text of a
+diagnosis will hold that diagnosis in place long after it stops being true.
+
+It now asserts the message names the real gap (`mcp_handle_run`) *and* explicitly asserts the
+retired `sandbox_spawn` blocker is **not** resurrected.
 
 ### Fixed — the MCP `stiva_run` error named a prerequisite that shipped in v3.0.14
 

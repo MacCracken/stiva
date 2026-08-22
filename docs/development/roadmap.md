@@ -23,7 +23,7 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2186 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Tests | 2188 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
 | Deps | cyrius 6.5.33 · kavach 3.12.2 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
@@ -85,7 +85,7 @@ with no release since 2026-07-21, so this is a watch item, not a blocker.
 
 ### Open cleanliness item — `cyrius audit` exits 1 on 43 undocumented public fns
 
-Every other audit stage is clean at 3.0.18 — `fmt` ok, `lint` ok, tests 2186/0, bench 1/0 — and
+Every other audit stage is clean at 3.0.18 — `fmt` ok, `lint` ok, tests 2188/0, bench 1/0 — and
 `rc = 1` comes solely from the docs stage counting **43 undocumented public fns** across `src/`.
 It is not a CI gate (`.github/workflows/ci.yml` runs deps/build/test, not `cyrius audit`), but it
 does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until the count is

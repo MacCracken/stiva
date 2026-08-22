@@ -1148,7 +1148,16 @@ fn test_mg_mcp_advertised_but_unavailable() {
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-unavail");
     var r = mcp_handle_tool(s, "stiva_run", _mg_mcp_params("{\"image\":\"x\"}"));
     assert_eq(mcp_result_success(r), 0, "stiva_run reports unavailable");
-    assert_eq(strstr(_mg_mcp_text(r), "sandbox_spawn") >= 0, 1, "names the actual blocker");
+    # ⚠ This assertion used to require the word "sandbox_spawn", under the label
+    # "names the actual blocker" — and sandbox_spawn was NOT the blocker. It has
+    # existed since kavach 3.9.x and stiva's own detached path has used it since
+    # v3.0.14. The test was pinning a stale claim in place, which is part of why
+    # that claim survived into v3.0.18. Assert the message names the REAL gap
+    # instead: there is no handler.
+    assert_eq(strstr(_mg_mcp_text(r), "mcp_handle_run") >= 0, 1,
+      "names the real gap — no handler");
+    assert_eq(strstr(_mg_mcp_text(r), "sandbox_spawn") >= 0, 0,
+      "and does NOT resurrect the retired sandbox_spawn blocker");
     var r2 = mcp_handle_tool(s, "stiva_exec", _mg_mcp_params("{\"id\":\"x\"}"));
     assert_eq(mcp_result_success(r2), 0, "stiva_exec reports unavailable");
     # And they are still advertised — dropping them would churn the client's

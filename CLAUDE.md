@@ -21,8 +21,8 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2186 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 358 ·
-mgmt 325 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
+**2188 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.5.33**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
@@ -287,6 +287,14 @@ Four rules, binding on new work:
 - **Never type a number about a dependency** — struct sizes, field counts, version-gated
   behaviour. Read it out of `lib/` at the moment you write it, or leave it out. "`SandboxConfig`
   is 8 fields / 64 bytes" was wrong on the day it was typed.
+- **A green report is not a green suite — check the EXIT CODE.** `cyrius tests tests/` exits
+  non-zero on any failure and prints `  FAIL:` lines; that is the signal. Do not summarise the
+  run by parsing the summary lines unless you have verified the parse against a line that
+  actually contains a failure. ⚠ In 3.0.19 an aggregate `awk -F'[ ,]' '{f+=$3}'` over
+  `"324 passed, 1 failed (325 total)"` read the **empty field** produced by `", "` and reported
+  `0 failed` regardless of the truth — so a real failure was reported as green for several
+  turns, and CI caught what local verification had said was clean. Prefer `exit code`, then
+  `grep -c '^  FAIL'`, and only then a count.
 - **Assemble and deliver are separate steps; test the delivery.** Five `RuntimeSpec` fields were
   written and never read (`env`, `mounts`, `namespaces`, `workdir`, `user`). `env` shipped that way
   through 2175 green tests because the test asserted the spec *carried* the value, mirroring the
@@ -301,7 +309,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2186 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2188 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -336,8 +344,8 @@ docs/ (when earned):
 
 ## Testing
 
-**2186 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 355 ·
-mgmt 325 · store 299 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
+**2188 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 299 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
 
