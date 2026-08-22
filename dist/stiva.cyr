@@ -14034,8 +14034,35 @@ fn build_sandbox(spec) {
     # for the SandboxConfig.rootfs field; before that stiva could not express it
     # through the API at all (roadmap §K).
     if (sp.rootfs != 0) { config_rootfs(cfg, sp.rootfs); }
-    # scan_policy + secret injection need a SandboxConfig setter kavach does not
-    # expose — roadmap v3.1.0 item 1.
+    # The image's declared environment (OCI `process.env`, parsed into
+    # ContainerConfig.env and folded to "K=V" by generate_spec).
+    #
+    # ⚠ Before kavach 3.12.0 this line could not be written THROUGH THE KAVACH
+    # API: every exec path built a hardcoded empty envp and SandboxConfig had no
+    # field to carry one, so `sp.env` was assembled correctly and then DROPPED
+    # here. Containers ran without the environment their image declared, which
+    # the Rust oracle applied via `Command::env` (rust-old/src/runtime.rs:176,
+    # :515) — a parity regression.
+    #
+    # ⚠ "Through the API" is load-bearing and the distinction is not pedantry.
+    # stiva COULD have fixed this alone: `confine_child` is public and returns
+    # rather than exec'ing, so forking here and calling it, then execve'ing with
+    # our own envp, was available the whole time — demonstrated by execution, not
+    # argued. We took the upstream setter because it keeps runc/gVisor/Firecracker
+    # working, keeps the confinement audit trail, and is one line instead of
+    # three hundred. That is a trade, not an impossibility. The first draft of
+    # this comment said "no amount of stiva-side work could fix" and was wrong —
+    # which is precisely the sentence shape that produced eight bad "blocked"
+    # labels on the v3.1.0 roadmap. Do not write that sentence without a probe.
+    #
+    # It survived the suite because the test asserted the wrong half: that the
+    # spec CARRIED the env, never that a container could READ it. If you touch
+    # this, assert on what the payload observes.
+    if (sp.env != 0) { config_env(cfg, sp.env); }
+    # secret injection still needs a SandboxConfig setter kavach does not expose
+    # — roadmap v3.1.0 item 1. scan_policy is threaded via
+    # `sandbox_exec_set_ext_policy`, NOT `config_externalization`, which kavach
+    # stores and never reads.
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {

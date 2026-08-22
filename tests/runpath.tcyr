@@ -163,6 +163,54 @@ fn test_build_sandbox_noop() {
     return 0;
 }
 
+# ⚠ THE ASSERTION THAT WAS MISSING. `test_generate_spec_env_kv` above proves the
+# spec CARRIES the env — and it passed for every release in which containers got
+# no environment at all, because build_sandbox dropped it at the kavach boundary
+# (no setter existed before kavach 3.12.0). Assert on what crosses the boundary,
+# not on what this side assembled. Delivery to the payload is covered upstream by
+# kavach's `test_confine_capture_env`.
+fn test_build_sandbox_threads_env() {
+    test_group("build_sandbox_threads_env");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var m = map_new();
+    map_set(m, "PORT", "8080");
+    cfg.env = m;
+    var sp: RuntimeSpec = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(vec_len(sp.env), 1, "spec carries the var (the half that always worked)");
+    var sb = build_sandbox(sp);
+    assert(sb != 0, "sandbox created");
+    var kcfg = Sandbox_config(sb);
+    assert(kcfg != 0, "sandbox has a config");
+    var kenv = SandboxConfig_env(kcfg);
+    assert(kenv != 0, "and the env REACHED kavach — 0 here is the bug this test exists for");
+    # Guard before dereferencing: when the boundary drops the env this is 0, and
+    # `vec_len(0)` segfaults. A failed assertion must read as a failed assertion,
+    # not as a crash — ADR-001's rule that a signal is worse evidence than a value.
+    if (kenv == 0) { return 0; }
+    assert_eq(vec_len(kenv), 1, "with the one entry");
+    assert_eq(streq(vec_get(kenv, 0), "PORT=8080"), 1, "folded K=V, intact across the boundary");
+    return 0;
+}
+
+# An empty env must stay unset rather than handing kavach an empty vec, so the
+# default path is byte-identical to pre-3.12.0 behaviour.
+fn test_build_sandbox_no_env_stays_unset() {
+    test_group("build_sandbox_no_env_stays_unset");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    var sp: RuntimeSpec = generate_spec(_rt_make_container(cfg), "/rootfs");
+    var sb = build_sandbox(sp);
+    assert(sb != 0, "sandbox created");
+    var kenv = SandboxConfig_env(Sandbox_config(sb));
+    if (kenv != 0) {
+        assert_eq(vec_len(kenv), 0, "no env declared -> nothing handed to the payload");
+    }
+    return 0;
+}
+
 fn test_build_sandbox_bad_backend() {
     test_group("build_sandbox_bad_backend");
     kavach_init();
@@ -1462,6 +1510,8 @@ fn main() {
     test_cpu_quota_formula();
     test_apply_cgroup_limits_besteffort();
     test_build_sandbox_noop();
+    test_build_sandbox_threads_env();
+    test_build_sandbox_no_env_stays_unset();
     test_build_sandbox_bad_backend();
     test_build_sandbox_fallback();
     test_build_sandbox_min_score_none();

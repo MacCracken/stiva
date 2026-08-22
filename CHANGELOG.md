@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — containers never received the environment their image declared
+
+An OCI image's `process.env` was parsed into `ContainerConfig.env`
+(`src/container.cyr:945-964`), persisted to `state.json`, folded to `"KEY=VALUE"` and
+threaded into `RuntimeSpec.env` (`src/runtime.cyr:531`) — and then **read by nothing**.
+`build_sandbox` never passed it on, so every container ran with no environment beyond
+whatever the backend hardcoded. An image declaring `ENV PATH=/opt/bin` or `ENV LANG=C.UTF-8`
+had it silently discarded.
+
+**A parity regression against the frozen oracle**, which builds env into the spec
+(`rust-old/src/runtime.rs:176`) and applies it at exec (`:515` — `cmd.env(k, v)`). The port
+reproduced the assembling half faithfully and dropped the delivering half at the kavach
+boundary, where the oracle had used `std::process::Command` directly.
+
+It could not be fixed on this side: every kavach exec path built a hardcoded empty `envp`
+and `SandboxConfig` had no field to carry one. **Fixed upstream in kavach 3.12.0**
+(`config_env`, honoured by the process backend, `sandbox_spawn`, and the OCI spec's
+`process.env`), pinned here; `build_sandbox` now calls it.
+
+⚠ **Why 2175 tests did not catch this, which is the more useful half of the finding.**
+`test_generate_spec_env_kv` asserted that the *spec carried* the env — mirroring the oracle's
+own unit test, which asserted the same thing — and it passed throughout. Neither suite ever
+asserted that a container could *read* a variable. The delivery step was the one line with no
+test on either side of the port.
+
+Two tests now cover the boundary, and both were mutation-proven by reverting the fix and
+confirming they go red:
+- `test_build_sandbox_threads_env` — the env reaches kavach's config, not just the spec.
+- `test_build_sandbox_no_env_stays_unset` — an undeclared env stays unset, so the default
+  path is byte-identical to the old behaviour.
+
+Delivery to a live payload is asserted upstream by kavach's `test_confine_capture_env`.
+
+⚠ `RuntimeSpec.mounts` (`src/runtime.cyr:539`) and `RuntimeSpec.namespaces` (`:532`) are
+**still write-only**, the same shape. `namespaces` is roadmap v3.1.0 item 3; `mounts` is not
+yet on the roadmap and should be, since `standard_mounts()` builds a `/dev` entry that never
+reaches a mount.
+
+2181 → **2189** tests.
+
 ### Changed — nein `1.6.6` → `1.6.10`
 
 nein's 1.6.7–1.6.10 line closed a Rust→Cyrius port-completeness audit, deleted its

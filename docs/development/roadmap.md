@@ -23,8 +23,8 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2175 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
-| Deps | cyrius 6.5.33 · kavach 3.11.15 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
+| Tests | 2189 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Deps | cyrius 6.5.33 · kavach 3.12.0 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
 
 **Three facts that constrain everything below**, all verified by execution rather than by reading:
 
@@ -40,6 +40,12 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 - **Containers have no secrets.** `secrets` still serializes as an empty array and
   `build_sandbox` has no kavach setter to thread one through — v3.1.0 item 1. (Rootless networking
   and `scan_policy` persistence, the two siblings found in the same sweep, shipped in v3.0.17.)
+- **Three `RuntimeSpec` fields were write-only, in the `RUNTIME_NS_PID` shape.** `env` is FIXED
+  (kavach 3.12.0's `config_env`; see the CHANGELOG). `namespaces` is v3.1.0 item 3. **`mounts` is
+  not tracked anywhere below and needs to be** — `standard_mounts()` (`src/runtime.cyr:228`) builds
+  a `/dev` entry that never reaches a mount. When adding a field to a spec struct, grep for a
+  READER before assuming it is wired; assembling a value and delivering it are separate steps and
+  this codebase has now lost three of them at the same boundary.
 
 ---
 

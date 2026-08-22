@@ -112,7 +112,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.11.15** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.12.0** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.6.7** |
 | nein | nftables firewall, NAT, port mapping — pin **1.6.10** |
 | bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.2** |

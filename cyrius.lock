@@ -4,7 +4,7 @@ commit	02b9d3fe90f94c51e95ee1a663d481e890dd1502	libro	https://github.com/MacCrac
 commit	0135725ce114608ed0296adb36ffd28391f8703e	majra	https://github.com/MacCracken/majra.git	2.6.7
 commit	f2651c5393008c2f90c91642e7db781c94e228e9	bote	https://github.com/MacCracken/bote.git	3.3.2
 commit	47a79e9c88105fe21508616af1e0cd65f32a5935	nein	https://github.com/MacCracken/nein.git	1.6.10
-commit	347f6648d35488c602e1b05978a8ff96231012d2	kavach	https://github.com/MacCracken/kavach.git	3.11.15
+commit	76ae0280df4e61f7b6b5d4f87efdbbb4b97270b7	kavach	https://github.com/MacCracken/kavach.git	3.12.0
 commit	9dbba878de6a6097a4086a9d7c34c4b49bb5feca	samay	https://github.com/MacCracken/samay.git	1.0.1
 commit	c2404c1bf97b071c283b5fbcbbda9292dcf0eb6d	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.18
 commit	7b79a189c1ba5dc0a6f05dc0049113414286fa12	agnodrm	https://github.com/MacCracken/agnodrm.git	1.5.1
@@ -84,7 +84,7 @@ e46a35925484d3afbfaaac02676f51adaab953608879158d52f1b997fb5920a8  lib/vec.cyr
 f249b6c3236cb0b497abd6e74b7d5829bf6f4ca47d27078c72f337b2a75df346  lib/tls_native_hs12.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 39ee5f438c5b693c8837eda3138a471aac8f0d10f8bdeb1aea2b737bf1f7937b  lib/fnptr.cyr
-a0049f4d34277945ce6f4b1c989a1db766f5cbe6838d802580780f2c3ca22153  lib/kavach.cyr
+a0972390b5f0474b8746cf4127729187aec9ce5ef3c36abad5c1d3eed4e96589  lib/kavach.cyr
 93aaa29cd8aebcd0a7b4de1b13541d7ebca6dfd5caf104c03fecdf19560d2910  lib/syscalls_windows.cyr
 79ca32e3a458700e60401cdda69bf4a10743b0086428449b3f65faa0a0ca48da  lib/tls_native_hs13.cyr
 de4598e4862fdc8d02195688b9aacc91e888d5f6b85d9fac08f4b7af9daaca19  lib/random.cyr
