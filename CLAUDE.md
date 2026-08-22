@@ -161,6 +161,15 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > the dep and bump the `tag` here** before committing `cyrius.lock`. Do not commit a lock
 > produced through a path override.
 
+> ⚠ **Bumping a `tag` and re-resolving `cyrius.lock` are ONE change. Never commit them apart.**
+> A pin bumped without `cyrius deps` leaves the lock recording the *previous* release, and the
+> CI dep-bundle gate then fails with a hash mismatch — correctly, but its message used to name
+> a path override as the cause, which sent 3.0.18 looking for an override that did not exist.
+> The tell is in the lock itself: its `commit <sha> <dep> <url> <tag>` line names a different
+> version than the `[deps.<dep>]` tag it is supposed to describe. If a dep is not tagged yet,
+> **do not bump the pin** — finish the upstream release first, or the tree cannot resolve and
+> the lock cannot be regenerated. (The gate's message now names this cause first.)
+
 ## Consumers
 
 daimon (container management), sutra (fleet deployment)

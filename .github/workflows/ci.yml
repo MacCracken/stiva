@@ -89,8 +89,18 @@ jobs:
           if bad:
               print("::error::Dep bundles do not match the pinned tags:", file=sys.stderr)
               print("\n".join(bad), file=sys.stderr)
-              print("A local 'path = \"../<dep>\"' override vendored something the tag does not.", file=sys.stderr)
-              print("Tag the sibling (and bump the pin), or re-resolve without the override.", file=sys.stderr)
+              # Two causes, and the message used to assert only the second — which
+              # cost a debugging cycle in 3.0.18, where the real cause was (1) and
+              # the operator was sent looking for an override that did not exist.
+              # Order matters: (1) is the common one and the cheap one to check.
+              print("", file=sys.stderr)
+              print("Most likely: the LOCK IS STALE. A `tag` in cyrius.cyml was bumped without", file=sys.stderr)
+              print("re-running `cyrius deps`, so cyrius.lock still records the previous release.", file=sys.stderr)
+              print("Check: does the `commit ... <dep> ... <tag>` line in cyrius.lock name the same", file=sys.stderr)
+              print("version as its [deps.<dep>] tag? If not, run `cyrius deps` and commit the lock.", file=sys.stderr)
+              print("", file=sys.stderr)
+              print("Otherwise: a local 'path = \"../<dep>\"' override vendored something the tag does", file=sys.stderr)
+              print("not. Tag the sibling (and bump the pin), or re-resolve without the override.", file=sys.stderr)
               sys.exit(1)
           print(f"{len(resolved)} dep bundle(s) match their pinned tags")
 
