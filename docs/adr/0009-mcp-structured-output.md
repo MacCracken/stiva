@@ -9,7 +9,7 @@ Stiva exposes 9 MCP tools for AI agent integration via daimon. The MCP 2025-03-2
 ## Decision
 `McpResult` returns a `Vec<ContentPart>` where each part is either `ContentPart::Text` (plain text or pretty-printed JSON) or `ContentPart::Resource` (a JSON payload with a URI and MIME type). The `success` field indicates whether the tool invocation succeeded.
 
-Text parts carry human-readable summaries. Resource parts carry structured data with URIs like `container://<id>` or `image://<ref>` that agents can dereference for direct access.
+Text parts carry human-readable summaries. Resource parts carry structured data with URIs of the form `stiva://containers/<id>` or `stiva://images/<image-id>` that agents can dereference for direct access.
 
 The `ContentPart` enum is `#[non_exhaustive]` and tagged via `#[serde(tag = "type")]` so new part types (e.g., binary blobs) can be added without breaking existing consumers.
 

@@ -9,7 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 Every one was found by adversarially re-testing claims the tree already made about itself,
 and **none was on any roadmap.** Two were live on x86_64; the third would have killed the
-first aarch64 build silently. 2181 → **2189** tests.
+first aarch64 build silently. 2175 → **2183** assertions across `tests/*.tcyr`.
 
 ### Fixed — `stiva run <image>` was refused for most images: `blocked command: sh`
 
@@ -104,13 +104,13 @@ binaries cannot read their environment inside a container"); the fix is either c
 preferring the stack `envp` on Linux, or stiva wiring `mounts`. Do not assume this release
 closed it for AGNOS consumers.
 
-2181 → **2189** tests.
+2175 → **2183** assertions across `tests/*.tcyr`.
 
 ### Changed — nein `1.6.6` → `1.6.10`
 
 nein's 1.6.7–1.6.10 line closed a Rust→Cyrius port-completeness audit, deleted its
 `rust-old/` tree, and ran a P(-1) hardening review that produced 1 CRITICAL / 6 HIGH /
-10 MEDIUM confirmed findings. 2181 tests and 87 CLI smoke assertions unchanged; all 13
+10 MEDIUM confirmed findings. 2175 assertions and 87 CLI smoke assertions unchanged; all 13
 nein functions stiva calls still exist with the same signatures.
 
 ⚠ **stiva was not exposed to any of the three HIGH findings, and the reason is worth

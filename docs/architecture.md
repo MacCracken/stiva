@@ -58,7 +58,7 @@ stiva (this crate)
 | `fleet` | Edge fleet scheduling (spread, bin-pack, pinned), accelerator-aware placement |
 | `agent` | Daimon agent registration |
 | `mcp` | MCP tools for AI agent integration, live dispatch over the `Stiva` facade |
-| `encrypted` | LUKS + dm-verity (optional, feature-gated) |
+| `encrypted` | LUKS + dm-verity — ⛔ **STUBBED.** There is no `encrypted` feature in `cyrius.cyml`; every entry point returns the disabled-path error |
 | `intents` | Agnoshi intent stubs |
 | `stiva_core` | The top-level `Stiva` facade + `StivaConfig`; MCP dispatch |
 | `oci` · `audit` · `error` | OCI type substrate · audit trail · error types |
@@ -70,7 +70,7 @@ stiva (this crate)
 | Container runtime | Missing | OCI-compatible runtime |
 | Pod sandbox | kavach (process-level) | kavach + stiva (full container isolation) |
 | Image registry | ark packages only | OCI images + ark packages |
-| Docker Compose | Not supported | `stiva ansamblu` (TOML-based) |
-| Container networking | agnosys netns only | Full bridge/NAT/custom networks |
+| Docker Compose | Not supported | `stiva convert -f compose` → Stivafile TOML, driven by the `ansamblu` module (library + MCP `stiva_ansamblu`; there is **no** `stiva ansamblu` CLI verb) |
+| Container networking | agnosys netns only | Rootless slirp4netns/pasta on `run -d` (with port forwarding). ⛔ The bridge/NAT/DNS/IP-pool layer is **library-only** — no run path constructs a `NetworkManager` |
 | Health/restart | Manual | Heartbeat FSM + restart policies |
 | Orchestration | None | DAG-ordered ansamblu + sutra playbooks |

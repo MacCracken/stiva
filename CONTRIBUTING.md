@@ -62,7 +62,7 @@ parity oracle; do not edit it.
   last-def-wins, so prefixes keep them unique); `0` for null/None, `-1` sentinels for
   `Option<int>`; preserve exact error-display strings from the oracle.
 
-The `~35` benign cross-bundle "duplicate fn (last definition wins)" warnings from the
+The **25** benign cross-bundle "duplicate fn (last definition wins)" warnings from the
 vendored AGNOS bundles are expected — they are shared agnos error helpers each bundle vendors.
 
 ### Three traps specific to this codebase

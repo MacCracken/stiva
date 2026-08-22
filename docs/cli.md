@@ -33,14 +33,14 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 | Command | Status | Description |
 |---------|--------|-------------|
 | `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot) |
-| `stiva ps` | **Live** | List containers |
+| `stiva ps [-a]` | **Live** | List **running** containers; `-a`/`--all` includes stopped ones |
 | `stiva stop <ID>` | **Live** | Stop a container (SIGTERM → SIGKILL) |
 | `stiva rm <ID>` | **Live** | Remove a stopped container |
 | `stiva pause <ID>` | **Live** | Pause via cgroups v2 freezer |
 | `stiva unpause <ID>` | **Live** | Unpause a paused container |
-| `stiva inspect <ID>` | **Live** | Inspect container or image (JSON output) |
+| `stiva inspect <ID>` | **Live** | Inspect a **container** (JSON output). Images are not inspectable — the lookup is container-only; use `stiva images` for the store index |
 | `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
-| `stiva logs <ID> [-n LINES] [-f] [--scan]` | **Live** | Show last N lines, or `-f` to follow until the container stops (polls the log file — the lifecycle bus is process-local). `--scan` runs the output through kavach's externalization gate first; it cannot be combined with `-f` |
+| `stiva logs <ID> [-n LINES] [-f] [--scan]` | **Live** | Show last N lines, or `-f` to follow, which returns once the log has been **quiet for 2 s** (`_CLI_FOLLOW_QUIET_MS`) — **not** when the container stops, so a `run -d` container that pauses output for longer ends the follow (polls the log file; the lifecycle bus is process-local). `--scan` runs the output through kavach's externalization gate first; it cannot be combined with `-f` |
 | `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
 | `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
 | `stiva run -d <IMAGE> [CMD...]` | **Live** | Detached run over kavach 3.9.0 `sandbox_spawn`. Returns the container id immediately; state survives into other stiva processes, and `stop` signals the recorded pid when the in-memory handle is gone. **See the rootfs caveat below.** |
@@ -75,7 +75,7 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 |------|-------------|
 | `--name <NAME>` | Container name |
 | `--backend <NAME>` | Sandbox backend override (`process`, `oci`, `noop`, …) |
-| `-w, --workdir <DIR>` | Working directory inside the container |
+| `-w, --workdir <DIR>` | ⛔ **Accepted and silently ignored.** Registered, stored on the spec, and never read — `build_sandbox` does not call `config_workdir` and the OCI spec hardcodes `"cwd":"/"`. Roadmap v3.1.0 item 10 |
 | `-d, --detach` | Run detached over kavach `sandbox_spawn`; prints the container id and returns |
 
 > These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
@@ -262,7 +262,7 @@ user = "nobody"
 stiva run --name web nginx:latest
 
 # Pick the sandbox backend explicitly and set a working directory
-stiva run --backend oci -w /srv myapp:latest /bin/sh -c 'echo hi'
+stiva run --backend oci myapp:latest /bin/echo hi
 
 # Check status
 stiva ps
@@ -402,6 +402,8 @@ rootless (user namespace + uid/gid mappings, `/proc` and a `/dev` tmpfs mounted,
 directly rather than through `/bin/sh`). Without one, the process backend enters the rootfs via
 `unshare(CLONE_NEWUSER|CLONE_NEWNS)` + `chroot`.
 
-**Known limitation:** layers whose uncompressed tar exceeds roughly 1 MB currently fail to unpack
-(`layer unpack error`) — a pre-existing defect in `_stor_extract_tar`, unrelated to the rootfs
-work, and tracked separately. It rules out most real base images today.
+**Decompression-bomb ceiling:** a layer blob is refused when its uncompressed size exceeds
+**min(1000× the compressed length, 8 GiB)** (`_STOR_MAX_RATIO` / `_STOR_MAX_OUT`,
+`src/storage.cyr:751-752`). Real base images are far below both bounds.
+*(A previous revision of this page claimed layers over "roughly 1 MB" fail to unpack and that
+this "rules out most real base images". That was false.)*

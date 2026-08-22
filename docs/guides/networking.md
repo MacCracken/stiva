@@ -12,12 +12,20 @@ On startup, stiva creates a default bridge network:
 
 Every container connected to a bridge gets an IPv4 address from the subnet pool, a veth pair linking it to the bridge, and NAT masquerade for outbound traffic.
 
-> ⚠️ **The network stack is not attached on the `run` path yet.** Everything below —
-> bridge creation, IP allocation, NAT, DNS injection, policies — is implemented and
-> tested as a **library API**, and ansamblu drives it. What `stiva run` does not yet do
-> is call `network_manager_connect_container` for the container it just started. That
-> is roadmap **v3.1 §J**, and it is why `run` accepts no `-p` flag. Use the library API
-> or an ansamblu file until it lands.
+> ⛔ **The bridge/NAT/DNS network stack is NOT ATTACHED TO ANY CONTAINER.** Everything
+> below — bridge creation, IP allocation, NAT, DNS injection, policies — is implemented
+> and tested as a **library API**, and it has **no caller in `src/` at all** — not `run`,
+> and not ansamblu. `network_manager_new` is invoked only from the test suite;
+> `ContainerManager.network_manager` is initialised to 0 (`src/container.cyr:1051`) and
+> never assigned, so the connect hook short-circuits (`:1627`). `build_sandbox`
+> additionally hard-disables networking outright (`src/runtime.cyr:811`).
+>
+> ⚠️ Attaching the network on the `run` path — and the `-p` flag that depends on it — is
+> **not currently a numbered v3.1 item**; it needs filing. (A previous revision labelled
+> it "§J", which is a different item: device and accelerator passthrough.)
+>
+> The one network capability a container *does* get is **rootless slirp4netns/pasta**, and
+> only on `run -d` — see **Rootless Networking** below.
 
 ### Library
 
@@ -63,7 +71,11 @@ run path.
 
 An unprivileged container cannot create a veth pair, so rootless containers get a userspace
 network stack instead — **slirp4netns** or **pasta**, spawned as a daemon alongside the
-container and torn down with it. Port forwarding goes through the helper's own control
+container and torn down with it.
+
+⚠️ **Only on the `run -d` path.** `_cm_start_rootless_net` is called from inside the detach
+branch (`src/container.cyr:1563`, under the `cfg.detach == 1` test at `:1537`), so a
+foreground `stiva run` gets no network at all. Port forwarding goes through the helper's own control
 socket rather than nftables.
 
 ```cyrius
@@ -101,9 +113,12 @@ Each container gets DNS configuration injected into its rootfs at connect time:
 - `/etc/hosts` -- contains the container's own hostname and IP
 - `/etc/hostname` -- set to the container name or ID
 
-### Ansamblu Service Discovery
+### Ansamblu Service Discovery — not implemented
 
-Within an ansamblu session, containers can resolve each other by service name. The `DnsRegistry` maintains a mapping of container names to IPs. When containers are connected to the same network, their `/etc/hosts` entries include sibling services.
+⛔ `DnsRegistry` (`src/network_mod.cyr:213-260`) has register / resolve / `to_hosts_entries`
+built and tested, but **no caller outside the test suite**. Nothing writes sibling entries
+into a container's `/etc/hosts`, because nothing constructs a `NetworkManager` on any run
+path. The design below is what the library supports, not what a running ansamblu does.
 
 ```toml
 # ansamblu.toml
@@ -113,7 +128,7 @@ ports = ["8080:80"]
 
 [services.api]
 image = "myapp:latest"
-environment = { NGINX_HOST = "web" }
+env = { NGINX_HOST = "web" }
 ```
 
 In this example, the `api` container can reach `web` by hostname.

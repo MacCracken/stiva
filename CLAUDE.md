@@ -21,7 +21,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2189 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 347 ·
+**2183 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 355 ·
 mgmt 325 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.5.33**.
 
@@ -49,11 +49,16 @@ than extracted literally); and **`save`/`load` as `oci-archive`** plus a
 The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.cyr`) is
 ready and the runtime is single-threaded run-to-completion, so the container-orchestration
 surface was blocking work over the ported sync core, and it all landed on the v3.0.x line.
-What remains for **v3.1** is real work with named prerequisites (secret injection,
-interactive `exec -it` over cyrius coroutines, CRIU checkpoint/restore, §J live network
-attach, an audit ledger, concurrent layer pulls) — not a Cyrius gap. JSON/TOML/YAML/base64
-(`bayan`), HTTP/TLS (`sandhi`/`tls_native`), gzip/zstd/xz/lz4/bzip2 (`sankoch`) and async
-(`lib/async.cyr`) all EXIST.
+
+⛔ **v3.1 is NOT blocked on anything upstream.** An adversarial audit on 2026-08-21 attacked
+all eight v3.1.0 items and found **zero** genuinely blocked — including CRIU, whose stated
+kavach prerequisite was mis-diagnosed (a PID namespace is one `clone()` with constants already
+in the tree), and `exec -it`, whose cyrius-coroutine prerequisite had been resolved eight
+toolchain releases below the current pin. Read `docs/development/roadmap.md`'s rewritten v3.1.0
+section before believing any "blocked" label, and see **Blocks and claims** below for why they
+were wrong. JSON/TOML/YAML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
+gzip/zstd/xz/lz4/bzip2 (`sankoch`), threads (`lib/thread.cyr`) and async (`lib/async.cyr`)
+all EXIST.
 
 `rust-old/` stays the oracle for the ported modules; the group A OCI-layout/transfer
 surface, `cron.cyr`, whiteouts and `diff` are **net-new**, so the OCI **image-spec** (not
@@ -296,7 +301,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2175 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2183 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -331,10 +336,16 @@ docs/ (when earned):
 
 ## Testing
 
-**2175 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 347 ·
+**2183 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 355 ·
 mgmt 325 · store 299 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
+
+⚠ **Mirroring the oracle's tests is necessary and NOT sufficient.** The oracle's unit tests
+assert what a function *assembles*; several of stiva's bugs have been in what it *delivers*
+across a library boundary, which neither suite tested. `env` shipped broken through 2175 green
+tests for exactly this reason. When a value crosses into kavach, assert on what the payload
+observes — see **Blocks and claims** above.
 
 `src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**87** assertions
 against the built binary) — the `.tcyr` files cannot include `main.cyr`.

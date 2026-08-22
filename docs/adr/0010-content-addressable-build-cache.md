@@ -16,6 +16,6 @@ Cache files are stored under the image store's `cache/` directory, one file per 
 ## Consequences
 - **Positive**: Repeated builds with unchanged steps complete in milliseconds instead of seconds.
 - **Positive**: Cache invalidation is automatic -- changing a step or its predecessors produces new keys.
-- **Positive**: No separate garbage collection needed; `stiva prune` can clean the cache directory.
+- **Negative**: Nothing garbage-collects the cache. `stiva prune` removes stopped containers and unreferenced images, and `image_store_gc` sweeps `blobs/sha256` only — reclaiming cache space means `rm -rf {root}/cache` by hand.
 - **Negative**: Cache directory grows with each unique build step. Large projects may accumulate stale entries.
 - **Negative**: Cache is local to the image store; no shared cache across machines.

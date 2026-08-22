@@ -45,6 +45,9 @@ Detached:
 stiva run -d alpine:3.19 sleep 3600   # prints the container id and returns
 ```
 
+⛔ **`-w/--workdir` is accepted and silently ignored** — the value reaches
+`RuntimeSpec.workdir` and nothing reads it (roadmap v3.1.0 item 10).
+
 The complete set of flags `run` accepts is `--name`, `--backend`, `-w/--workdir` and
 `-d/--detach`.
 
@@ -75,7 +78,7 @@ stiva cp ./local.txt <id>:/app/    # copy in; reverse the operands to copy out
 ## Inspecting and Managing
 
 ```bash
-stiva inspect <id>    # detailed JSON output (includes security score)
+stiva inspect <id>    # detailed JSON output (no security score — that is `stiva info`)
 stiva stats <id>      # CPU, memory, PID stats from cgroups v2
 stiva events -f       # follow the lifecycle event stream
 stiva info            # host info, security score, accelerator inventory

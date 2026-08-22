@@ -23,10 +23,10 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2189 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Tests | 2183 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
 | Deps | cyrius 6.5.33 · kavach 3.12.1 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
 
-**Three facts that constrain everything below**, all verified by execution rather than by reading:
+**Four facts that constrain everything below**, all verified by execution rather than by reading:
 
 - **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
   it has not been re-verified at the 6.5.33 pin, so assume live.** A typed
@@ -36,40 +36,56 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
   green in *every* unit shape including the 6-module `store.tcyr`, and an assertion that fails on a
   silent wrong value rather than only on a segfault. Full write-up:
   [`docs/architecture/001-cycc-struct-id-miscompile.md`](../architecture/001-cycc-struct-id-miscompile.md).
-- **Only x86_64 works.** See v3.2.0.
-- **Containers have no secrets.** `secrets` still serializes as an empty array and
-  `build_sandbox` has no kavach setter to thread one through — v3.1.0 item 1. (Rootless networking
-  and `scan_policy` persistence, the two siblings found in the same sweep, shipped in v3.0.17.)
-- **Three `RuntimeSpec` fields were write-only, in the `RUNTIME_NS_PID` shape.** `env` is FIXED
-  (kavach 3.12.0's `config_env`; see the CHANGELOG). `namespaces` is v3.1.0 item 3. **`mounts` is
-  not tracked anywhere below and needs to be** — `standard_mounts()` (`src/runtime.cyr:228`) builds
-  a `/dev` entry that never reaches a mount. When adding a field to a spec struct, grep for a
-  READER before assuming it is wired; assembling a value and delivering it are separate steps and
-  this codebase has now lost three of them at the same boundary.
+- **Only x86_64 is BUILT AND TESTED. aarch64 is untested, not broken** — its one known blocker
+  (`_stor_lchown`'s `syscall(94, …)`, which is `exit_group` on aarch64) was fixed in v3.0.18, and
+  the claim that it "cannot be fixed in stiva" was false. See v3.2.0.
+- **Containers have no secrets.** `secrets` still serializes as an empty array and nothing threads
+  one into `build_sandbox` — v3.1.0 item 1. ⚠ The old wording ("`build_sandbox` has no kavach
+  setter to thread one through") is no longer the blocker: kavach ships `SecretRef`,
+  `CredentialProxy`, `credential_proxy_env_vars` and `credential_inject_files`, and the env channel
+  they needed landed in kavach 3.12.0. This is stiva-side work now.
+- **⛔ FIVE `RuntimeSpec` fields were write-only — assembled correctly, then dropped at the kavach
+  boundary. Two are still live bugs.** This is the single most productive defect shape in this
+  codebase and it has now produced four shipped bugs.
+
+  | Field | State |
+  |---|---|
+  | `env` | **FIXED in v3.0.18** — kavach 3.12.0's `config_env`, called at `src/runtime.cyr:872` |
+  | `workdir` | ⛔ **LIVE BUG** — `stiva run -w /app` is accepted (`src/main.cyr:255`, `:285`) and silently ignored. `config_workdir` exists in kavach and is never called; the OCI spec emitter hardcodes `"cwd":"/"`. Tracked as v3.1.0 item 10 |
+  | `user` | ⛔ **LIVE** — same shape, never read. v3.1.0 item 10 |
+  | `mounts` | Tracked as v3.1.0 item 9 — and it is what still starves AGNOS-native payloads of their environment |
+  | `namespaces` | Tracked as v3.1.0 item 3 (CRIU) |
+
+  ⚠ **When you add a field to a spec struct, grep for a READER before assuming it is wired.**
+  Assembling a value and delivering it are separate steps, and only the assembling half has ever
+  had tests here — `env` shipped broken through 2175 green tests because the test asserted the spec
+  *carried* the value, mirroring the Rust oracle's own unit test, and nothing asserted a container
+  could *read* it.
 
 ---
 
-## v3.0.17 — finish the single-node runtime — COMPLETE
+## Open cleanliness
 
-All of v3.0.17 has landed — see the CHANGELOG. `accel` is now `default = ["accel"]`, `stiva cron`
-schedules containers, `stiva info` reports accelerators, fleet placement has an accelerator
-dimension, and CI checks the vendored files against the pinned tags.
+*(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
+not here. What follows is only what is still open.)*
 
-The release also moved the toolchain **6.4.78 → 6.5.33** and every dependency pin to its current
-tag, which forced three source-level adjustments (the bayan `_str` → `_buf` rename, kavach's
-`Backend` → `KavachBackend`, and a samay 1.0.1 shim in `src/error.cyr` to retire when samay
-≥ 1.0.2 lands). It also surfaced a latent packaging bug in nein that broke `cyrius deps`
-outright — fixed upstream in **nein 1.6.6**, pinned here. The CHANGELOG carries the full account;
-the short version is that a dep's `.deps` sidecar may name stdlib leaves only, and reverting the
-toolchain would not have helped.
+### Carried debt — the samay 1.0.1 shim in `src/error.cyr`
+
+`json_v_parse_str` forwards to `bayan_json_v_parse_buf` because samay 1.0.1 still calls the
+unprefixed bayan name that bayan 1.3.0 removed, leaving the symbol undefined at link time. It sits
+in `error.cyr` rather than beside the samay consumer in `cron.cyr` because cyrius auto-prepends
+every active `[deps.*]` module into *every* compilation unit, and `error.cyr` is the one module
+every unit includes. **Retire it the moment samay ≥ 1.0.2 lands** with the call updated — past that
+point it shadows a real definition instead of supplying a missing one. samay's latest tag is 1.0.1
+with no release since 2026-07-21, so this is a watch item, not a blocker.
 
 ### Open cleanliness item — `cyrius audit` exits 1 on 43 undocumented public fns
 
-Every other audit stage is clean at 3.0.17 — `fmt` ok, `lint` ok, tests 2175/0, bench 1/0 — and
+Every other audit stage is clean at 3.0.18 — `fmt` ok, `lint` ok, tests 2183/0, bench 1/0 — and
 `rc = 1` comes solely from the docs stage counting **43 undocumented public fns** across `src/`.
 It is not a CI gate (`.github/workflows/ci.yml` runs deps/build/test, not `cyrius audit`), but it
 does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until the count is
-zero. Pre-existing and unchanged by the 3.0.17 release work.
+zero. Pre-existing and unchanged by the 3.0.17 / 3.0.18 release work.
 
 ### Open cleanliness item — 163 line-length warnings in `tests/`
 
@@ -268,6 +284,21 @@ builds `/proc` and `/dev` entries that never reach a mount.
 are fine. daimon and sutra are not. Tracked in the agnos roadmap; the alternative fix is
 cyrius-side.
 
+### 10. Wire `RuntimeSpec.workdir` and `.user` — NEW, and `workdir` is a LIVE BUG
+
+`stiva run -w /app` registers the flag (`src/main.cyr:255`), reads it (`:285`), stores it on the
+config, and `generate_spec` puts it on the spec (`src/runtime.cyr:536`) — **and nothing reads it.**
+`build_sandbox` never calls `config_workdir`, which exists in kavach; the OCI spec emitter
+hardcodes `"cwd":"/"`. So the flag is accepted and silently ignored. `user` is the same shape.
+
+Both are one line each in `build_sandbox`, the way `env` was — plus the boundary test that would
+have caught them. ⚠ `config_workdir` needs checking before it is trusted: kavach's only reader of
+`SandboxConfig_workdir` is the WASM backend's `--dir` preopen, so it may be decorative for the
+process and OCI backends the way `config_externalization` is. **Verify it reaches a `chdir` before
+declaring this fixed** — a green call to a setter nothing reads is exactly how `env` looked.
+
+Small, and it closes the last two of the five write-only fields.
+
 
 ## v3.2.0 — non-x86: aarch64, then AGNOS
 
@@ -307,6 +338,14 @@ Unblocked by the agnos 1.45.x ring-3 net/socket syscall surface (#45–#57, incl
   ark+nous server-side) in AGNOS containers.
 - Soak and weak-point sweep: connection floods, fuzzed input, resource exhaustion — including the
   kernel's 8-connection TCP and 8-listener UDP caps.
+
+⚠ **An AGNOS-native payload cannot read its environment in a stiva container today**, and that
+lands on this line before any of the above matters. cyrius's `getenv` reads `/proc/self/environ`
+on the Linux target, `run -d` mounts no `/proc`, and the workloads named above are all
+cyrius-built. Filed on the agnos roadmap ("AGNOS-native binaries cannot read their environment
+inside a container"); the two candidate fixes are **not** equivalent — cyrius preferring the stack
+`envp` fixes every consumer, stiva wiring `mounts` (item 9) fixes only stiva. A design call is
+owed before either is built.
 
 `epoll` is a portability trap on this line: its event struct is packed differently on x86_64 (data at
 +4, stride 12) and aarch64 (+8, stride 16), and the AGNOS wrappers take a **different arity** (3-arg
@@ -362,9 +401,16 @@ here so it can be argued with, not so it can be forgotten.
   RAM cannot be exported. rust-old streamed via `tar::Builder`; a streaming writer lands if it ever
   matters. A 16 GiB assembly ceiling and a null-alloc check make the failure an error rather than a
   crash.
-- **`policy_strict` cannot run on the OCI backend unprivileged** — the generated spec always emits
-  `linux.resources`, which runc refuses without the cgroup delegation an unprivileged user lacks. A
-  kavach-side fix; raise it there if a consumer needs strict policy on OCI.
+- **A policy carrying any resource limit fails on the OCI backend unprivileged.** runc refuses
+  `linux.resources` without the cgroup delegation an unprivileged user lacks. ⚠ The previous
+  wording — "`policy_strict` cannot run … the generated spec **always** emits `linux.resources`" —
+  overstated the mechanism: kavach builds `resources` as `""` and populates it only when the policy
+  carries a memory or pid limit (`lib/kavach.cyr:7980-7981`). `policy_strict` happens to set
+  `memory_limit_mb = 512` and `max_pids = 64` (`:3188-3190`), which is why it trips; a
+  limit-free policy emits no `resources` and runs fine. So the limitation is about **limits**, not
+  about `policy_strict`, and not about the emitter being unconditional.
+  A kavach-side fix (emit `resources` only when delegation is available, or degrade with a
+  warning); raise it there if a consumer needs limits on OCI unprivileged.
 
 ---
 

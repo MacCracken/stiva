@@ -74,7 +74,8 @@ fn _stiva_version_str() {
     return "3.0.18 — OCI container runtime (Cyrius port)";
 }
 
-# Register all 33 subcommands (order = the verb ids above).
+# Register all 36 subcommands (order = the verb ids above; APPEND ONLY — inserting a verb
+# anywhere but the end silently renumbers every verb after it).
 fn _cli_register_verbs(h) {
     cmdit_verb(h, "pull", "Pull an image from a registry");
     cmdit_verb(h, "build", "Build an image from a Stivafile");

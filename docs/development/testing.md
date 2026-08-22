@@ -16,7 +16,7 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**2175 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `registry.tcyr` (421),
+**2183 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `registry.tcyr` (421),
 `runpath.tcyr` (347), `mgmt.tcyr` (325), `store.tcyr` (299), `convert.tcyr` (116).
 Plus **87** CLI smoke assertions and **14** benchmarks.
 
@@ -73,7 +73,7 @@ many small tests.)
 |------|-------|
 | `tests/stiva.tcyr` (667) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
 | `tests/registry.tcyr` (421) | the registry client: auth challenge/token cache, manifest resolution, streamed blob fetch with digest verification, blob upload + manifest PUT, discovery. Includes 6 `src/` modules |
-| `tests/runpath.tcyr` (347) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `exec_in_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`), `scan_output` over kavach's externalization gate, and `container_manager_diff` |
+| `tests/runpath.tcyr` (355) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `exec_in_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`), `scan_output` over kavach's externalization gate, and `container_manager_diff` |
 | `tests/mgmt.tcyr` (325) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling + accelerator placement, `cron`, `agent` registration records, `health` policies |
 | `tests/store.tcyr` (299) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), OCI whiteouts, `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout) |
 | `tests/convert.tcyr` (116) | `dockerfile_to_toml` (all instruction arms) and `compose_yaml_to_toml`: the four oracle fixtures, BTreeMap-order parity at all five sorted sites, every per-field arm, the `Ok("")` cases, one test per construct bayan rejects, and one per finding from the v3.0.6 adversarial review. Includes only 2 `src/` modules (error, convert) — the cheapest unit here |
