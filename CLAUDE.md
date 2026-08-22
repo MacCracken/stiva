@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.5.33** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.18
+- **Version**: SemVer, currently 3.0.19
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -21,7 +21,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2183 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 355 ·
+**2186 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 358 ·
 mgmt 325 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.5.33**.
 
@@ -117,7 +117,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.12.1** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.12.2** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.6.7** |
 | nein | nftables firewall, NAT, port mapping — pin **1.6.10** |
 | bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.2** |
@@ -301,7 +301,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2183 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2186 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -336,7 +336,7 @@ docs/ (when earned):
 
 ## Testing
 
-**2183 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 355 ·
+**2186 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 355 ·
 mgmt 325 · store 299 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.

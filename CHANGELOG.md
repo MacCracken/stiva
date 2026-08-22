@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.19] — 2026-08-21 — `run -w` was accepted and ignored; the MCP `stiva_run` message named a blocker retired in v3.0.14
+
+Both found by the 3.0.18 documentation audit, which verified every doc claim against the code
+rather than against the previous doc. 2183 → **2186** assertions.
+
+### Fixed — `stiva run -w /app` was accepted and silently ignored
+
+The flag is registered (`src/main.cyr:255`), read (`:285`), stored on the config, and threaded
+onto `RuntimeSpec.workdir` by `generate_spec` (`src/runtime.cyr:536`) — **and nothing read it.**
+The container ran in `/` regardless. `RuntimeSpec.user` is the same shape and is still open
+(roadmap v3.1.0 item 10).
+
+This is the **fourth** bug of this exact shape — a value assembled correctly and dropped at the
+kavach boundary — after `env` (3.0.18) and alongside `mounts` and `namespaces`.
+
+⚠ **Wiring it on this side alone would not have worked, and checking that first is the point.**
+`config_workdir` has existed in kavach for many releases and was **decorative**: its only reader
+was the WASM backend's `--dir` preopen, so on the process and OCI backends the value was stored
+and never consulted — exactly what `config_externalization` still does. Calling it would have
+produced a green diff and no behaviour change. **Fixed upstream in kavach 3.12.2**
+(`_spawn_enter_workdir`, applied after the chroot so the path resolves inside the container;
+`process.cwd` emitted in the OCI spec instead of a hardcoded `"/"`), pinned here.
+
+kavach fails closed: a workdir that cannot be entered `_exit`s the child with
+`SPAWN_EXIT_WORKDIR` rather than running the payload from the wrong directory, which is what
+runc does too.
+
+`test_build_sandbox_threads_workdir` asserts the value crosses the boundary and is
+mutation-proven; kavach's `test_confine_capture_workdir` asserts the payload's `$PWD` is
+actually the requested directory.
+
+### Fixed — the MCP `stiva_run` error named a prerequisite that shipped in v3.0.14
+
+`stiva_run` is the one tool of nine with no handler — 8 of 9 dispatch live. It returned:
+
+> `stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)`
+
+`sandbox_spawn` exists, and stiva's own detached path has used it since **v3.0.14**:
+`container_manager_start`'s `detach == 1` branch calls `spawn_container`, records the pid and
+returns without blocking — which is exactly what an MCP handler needs. The message sent readers
+looking for an upstream dependency that had already landed.
+
+Now states the real gap: there is no `mcp_handle_run` yet. This is unstarted stiva-side work —
+write it over the `stiva_run` facade the way `mcp_handle_exec` wraps `stiva_exec`.
+
 ## [3.0.18] — 2026-08-21 — three shipped defects: no env, no shell, and a latent aarch64 process-killer
 
 Every one was found by adversarially re-testing claims the tree already made about itself,

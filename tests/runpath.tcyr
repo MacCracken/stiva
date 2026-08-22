@@ -196,6 +196,28 @@ fn test_build_sandbox_threads_env() {
 
 # An empty env must stay unset rather than handing kavach an empty vec, so the
 # default path is byte-identical to pre-3.12.0 behaviour.
+# ⛔ The `-w` bug. `generate_spec` set `ss.workdir` and NOTHING read it, so
+# `stiva run -w /app` was accepted and silently ignored through v3.0.18 — and
+# `config_workdir` was itself decorative in kavach until 3.12.2, so even calling
+# it would not have been enough. Assert the value crosses the boundary; kavach's
+# `test_confine_capture_workdir` asserts the payload actually lands there.
+fn test_build_sandbox_threads_workdir() {
+    test_group("build_sandbox_threads_workdir");
+    kavach_init();
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    cfg.workdir = "/app";
+    var sp: RuntimeSpec = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert_eq(streq(sp.workdir, "/app"), 1, "spec carries the workdir (the half that always worked)");
+    var sb = build_sandbox(sp);
+    assert(sb != 0, "sandbox created");
+    var kwd = SandboxConfig_workdir(Sandbox_config(sb));
+    assert(kwd != 0, "and the workdir REACHED kavach — 0 here is the bug this test exists for");
+    if (kwd == 0) { return 0; }
+    assert_eq(streq(kwd, "/app"), 1, "intact across the boundary");
+    return 0;
+}
+
 fn test_build_sandbox_no_env_stays_unset() {
     test_group("build_sandbox_no_env_stays_unset");
     kavach_init();
@@ -1511,6 +1533,7 @@ fn main() {
     test_apply_cgroup_limits_besteffort();
     test_build_sandbox_noop();
     test_build_sandbox_threads_env();
+    test_build_sandbox_threads_workdir();
     test_build_sandbox_no_env_stays_unset();
     test_build_sandbox_bad_backend();
     test_build_sandbox_fallback();

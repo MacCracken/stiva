@@ -5,7 +5,7 @@
 
 ## Version
 
-**3.0.18** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.0.19** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
@@ -23,7 +23,7 @@
 
 ## Tests
 
-**2183** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 355 ·
+**2186** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 358 ·
 mgmt 325 · store 299 · convert 116 — plus **87** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 and **14** benchmarks.
@@ -39,7 +39,7 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.12.9 | kavach | 3.12.1 |
+| sigil | 3.12.9 | kavach | 3.12.2 |
 | sakshi | 2.4.11 | samay | 1.0.1 (optional) |
 | libro | 2.8.8 | ai-hwaccel | 2.3.18 (optional, on by default) |
 | majra | 2.6.7 | agnodrm | 1.5.1 |

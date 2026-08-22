@@ -878,6 +878,16 @@ fn build_sandbox(spec) {
     # spec CARRIED the env, never that a container could READ it. If you touch
     # this, assert on what the payload observes.
     if (sp.env != 0) { config_env(cfg, sp.env); }
+    # The container's working directory (`stiva run -w`, or the image config's
+    # `process.cwd`).
+    #
+    # ⚠ Needs kavach >= 3.12.2. `config_workdir` existed long before that and was
+    # DECORATIVE — its only reader was the WASM backend's `--dir` preopen, so on
+    # the process and OCI backends a caller set a workdir and the payload ran in
+    # `/`. `stiva run -w /app` was accepted and silently ignored for every release
+    # up to 3.0.18. Same shape as `env`, found the same way: by grepping for a
+    # READER rather than trusting the setter.
+    if (sp.workdir != 0) { config_workdir(cfg, sp.workdir); }
     # secret injection still needs a SandboxConfig setter kavach does not expose
     # — roadmap v3.1.0 item 1. scan_policy is threaded via
     # `sandbox_exec_set_ext_policy`, NOT `config_externalization`, which kavach

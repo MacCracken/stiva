@@ -833,9 +833,18 @@ fn mcp_handle_tool(s, name, params) {
     if (streq(name, "stiva_inspect") == 1) { return mcp_handle_inspect(s, params); }
     if (streq(name, "stiva_build") == 1) { return mcp_handle_build(s, params); }
     if (streq(name, "stiva_ansamblu") == 1) { return mcp_handle_ansamblu(params); }
+    # ⚠ The only tool in `tool_list()` with no handler. 8 of 9 dispatch live.
+    #
+    # The blocker this message used to name — "MCP run is detached, needing kavach
+    # sandbox_spawn" — was RETIRED IN v3.0.14: `sandbox_spawn` exists, and stiva's
+    # own detached path already uses it (`container_manager_start`'s `detach == 1`
+    # branch → `spawn_container`) and returns without blocking, which is exactly
+    # what an MCP handler needs. Nothing upstream is missing; this is unstarted
+    # stiva-side work — write `mcp_handle_run` over the `stiva_run` facade the way
+    # `mcp_handle_exec` wraps `stiva_exec`. Roadmap v3.1.0.
     if (streq(name, "stiva_run") == 1) {
         return mcp_result_err(
-          "stiva_run unavailable: MCP run is detached, needing kavach sandbox_spawn (v3.1)");
+          "stiva_run is not wired: no mcp_handle_run yet (the detached-run path it needs has existed since v3.0.14)");
     }
     if (streq(name, "stiva_exec") == 1) { return mcp_handle_exec(s, params); }
     return mcp_result_err(_img_cat2("unknown tool: ", name));

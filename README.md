@@ -38,7 +38,7 @@ What that means concretely:
   containers, rootless networking (slirp4netns/pasta), 9 MCP tools with live dispatch,
   and `convert` from a Dockerfile or a docker-compose YAML.
 
-**2183 tests** across `tests/*.tcyr`, plus **87** CLI smoke assertions against the built
+**2186 tests** across `tests/*.tcyr`, plus **87** CLI smoke assertions against the built
 binary. Toolchain pin **6.5.33**.
 
 Two verbs are not wired: `checkpoint` and `restore`, both gated on CRIU integration and
@@ -54,7 +54,7 @@ for the full setup.
 ```bash
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
-cyrius tests tests/                      # run the test suite (2183 tests)
+cyrius tests tests/                      # run the test suite (2186 tests)
 ./scripts/cli-smoke.sh                   # CLI smoke assertions (87) against the binary
 ```
 
@@ -166,7 +166,7 @@ itself consumable as a single-file bundle, `dist/stiva.cyr` (built by `cyrius di
 
 ```bash
 cyrius build src/main.cyr build/stiva          # build
-cyrius tests tests/                            # 2183 tests
+cyrius tests tests/                            # 2186 tests
 ./scripts/cli-smoke.sh                         # 87 CLI smoke assertions
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
