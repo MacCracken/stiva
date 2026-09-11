@@ -5,6 +5,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.20] — 2026-09-10 — cyrius 6.6.2 value form, eleven dep pins, and a duplicate-key message that stopped naming the key
+
+Toolchain **6.5.33 → 6.6.2** — the `Result` / `Option` / `Either` value form — plus every
+dependency pin refreshed. **2188** assertions hold across six suites, fuzz and bench clean.
+
+### Changed — toolchain and all eleven dependency pins
+
+| dep | was | now | | dep | was | now |
+|---|---|---|---|---|---|---|
+| cyrius | 6.5.33 | **6.6.2** | | nein | 1.6.10 | **1.6.11** |
+| sigil | 3.12.9 | **3.12.16** | | kavach | 3.12.2 | **3.12.5** |
+| sakshi | 2.4.11 | **2.5.1** | | samay | 1.0.1 | **1.1.2** |
+| libro | 2.8.8 | **2.10.0** | | ai-hwaccel | 2.3.18 | **2.3.22** |
+| majra | 2.6.7 | **2.7.2** | | agnodrm | 1.5.1 | **1.6.0** |
+| bote | 3.3.2 | **3.3.7** | | cmdit | 1.2.2 | **1.2.4** |
+
+The **majra** bump is load-bearing, not housekeeping. majra ≤ 2.7.0 defines
+`_sub_new(chan, filter_fn)` while libro defines `_sub_new(pattern)`, and stiva pulls
+both. cyrius 6.6.2 promotes that same-name/different-arity pair from a silent
+"last definition wins" warning to a **hard error**, so the old pin cannot build at all
+on this toolchain. majra 2.7.1 renamed it `_majra_sub_new`.
+
+### Changed — value-form migration
+
+Two sites in stiva's own source. `src/network_manager.cyr`'s `bf_add_port_mapping`
+result and `src/cron.cyr`'s `cron_expr_parse` result now bind both halves, and
+`result_unwrap` takes the pair. `cron.cyr:86`'s
+`is_ok(cron_expr_parse(...))` needed no change — a Result passed directly as a call
+argument lands its tag in the first parameter register, which is what `is_ok` wants.
+
+### Fixed — the duplicate-key error stopped naming the key
+
+The stdlib `bayan` that ships with cyrius 6.6.x rejects duplicate mapping keys itself,
+at **parse** time. `_cv_validate_doc` — the recursive pass that names the offending key
+— walks a parsed document, so for a duplicate it now never runs, and the message
+degraded from
+
+```
+invalid YAML: duplicate mapping key: a
+```
+
+to bare `invalid YAML: duplicate mapping key (byte 34)`. The document is still correctly
+rejected; only the diagnostic regressed, which is exactly the kind of quiet loss a test
+exists to catch — `tests/convert.tcyr`'s "names the key" / "names the field" caught it.
+
+Rather than relax those assertions, the name is recovered: bayan reports the byte offset
+of the offending key, so `_cv_key_at` reads it back out of the source and the parse-error
+path re-attaches it. Both messages read as they did before. Verified by measurement, not
+assumption — byte 34 is the key start in both fixtures (`a`, and the second `image`).
+
+
 ## [3.0.19] — 2026-08-21 — `run -w` was accepted and ignored; the MCP `stiva_run` message named a blocker retired in v3.0.14
 
 Both found by the 3.0.18 documentation audit, which verified every doc claim against the code

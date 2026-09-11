@@ -89,9 +89,9 @@ fn cron_expr_is_valid(expr) {
 # The parsed CronExpr for `expr`, or 0 when it does not parse.
 #[must_use]
 fn _cron_parsed(expr) {
-    var r = cron_expr_parse(str_from(expr));
-    if (is_ok(r) == 0) { return 0; }
-    return result_unwrap(r);
+    var r_t, r_v = cron_expr_parse(str_from(expr));
+    if (is_ok(r_t) == 0) { return 0; }
+    return result_unwrap(r_t, r_v);
 }
 
 # Load the job table, or an empty vec. A malformed file yields an empty vec

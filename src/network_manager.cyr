@@ -232,8 +232,8 @@ fn network_manager_connect_container(m, container_id, network_name, port_specs, 
                 return 0;
             }
             var mapping = network_nat_to_nein_port_mapping(port_spec, ip);
-            var addres = bf_add_port_mapping(bf, mapping);
-            if (is_err_result(addres) == 1) {
+            var addres_t, addres_v = bf_add_port_mapping(bf, mapping);
+            if (is_err_result(addres_t) == 1) {
                 # "port mapping error: {e}" (Rust mapped to StivaError::Network).
                 return 0;
             }

@@ -1102,6 +1102,46 @@ fn _cv_emit_compose_str_field(sb, v, field, key) {
 # detail available from compose_last_error(). Same contract as
 # dockerfile_to_toml: 0 is the unambiguous error sentinel, because an
 # empty builder still returns a non-zero pointer to "".
+# _cv_key_at: the YAML scalar key starting at byte `off` in `buf`.
+#
+# bayan rejects a duplicate mapping key at PARSE time and reports the byte
+# offset of the offending key, but its message is unqualified — just
+# "duplicate mapping key". `_cv_validate_doc` below names the key, but it
+# walks a PARSED document, so it never runs for an input bayan refused. This
+# recovers the name from the offset so the message keeps naming the key
+# either way. Reads to the first ':' or whitespace, and unwraps one layer of
+# quoting if present.
+fn _cv_key_at(buf, len, off) {
+    if (off < 0) { return str_new(buf, 0); }
+    if (off >= len) { return str_new(buf, 0); }
+    var q = load8(buf + off) & 0xFF;
+    if (q == 34 || q == 39) {
+        var qs = off + 1;
+        var qe = qs;
+        while (qe < len) {
+            if ((load8(buf + qe) & 0xFF) == q) { qe = len + 1; }
+            else { qe = qe + 1; }
+        }
+        if (qe > len) {
+            var qn = 0;
+            var qi = qs;
+            while (qi < len) {
+                if ((load8(buf + qi) & 0xFF) == q) { qi = len; }
+                else { qn = qn + 1; qi = qi + 1; }
+            }
+            return str_new(buf + qs, qn);
+        }
+    }
+    var n = 0;
+    var i = off;
+    while (i < len) {
+        var c2 = load8(buf + i) & 0xFF;
+        if (c2 == 58 || c2 == 32 || c2 == 9 || c2 == 10 || c2 == 13) { i = len; }
+        else { n = n + 1; i = i + 1; }
+    }
+    return str_new(buf + off, n);
+}
+
 #[must_use]
 fn compose_yaml_to_toml(yaml) {
     sakshi_info("converting docker-compose YAML to stiva TOML",
@@ -1116,9 +1156,20 @@ fn compose_yaml_to_toml(yaml) {
     if (doc == 0) {
         var esb = str_builder_new();
         str_builder_add_cstr(esb, "invalid YAML: ");
-        str_builder_add_cstr(esb, bayan_yaml_last_error());
+        var yerr = bayan_yaml_last_error();
+        var ypos = bayan_yaml_last_error_pos();
+        str_builder_add_cstr(esb, yerr);
+        # The stdlib bayan that ships with cyrius 6.6.x rejects duplicate
+        # mapping keys itself, at parse time — so `_cv_validate_doc`'s
+        # named message below is unreachable for that input, and the error
+        # lost the key it used to name. bayan gives the key's byte offset;
+        # re-attach the name so the message reads the same either way.
+        if (streq(yerr, "duplicate mapping key") == 1) {
+            str_builder_add_cstr(esb, ": ");
+            str_builder_add(esb, _cv_key_at(yaml, strlen(yaml), ypos));
+        }
         str_builder_add_cstr(esb, " (byte ");
-        str_builder_add_int(esb, bayan_yaml_last_error_pos());
+        str_builder_add_int(esb, ypos);
         str_builder_add_cstr(esb, ")");
         _cv_compose_err = str_cstr(str_builder_build(esb));
         return 0;
