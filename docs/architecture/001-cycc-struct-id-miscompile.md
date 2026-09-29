@@ -1,10 +1,11 @@
 # 001 — Typed struct field access can silently read garbage (cycc)
 
 **Status: last verified live at cyrius 6.4.78, by execution rather than by reading.
-NOT re-verified at 6.5.33** — the pin moved at 3.0.17 and no probe was run against it, so
-treat the status as *unknown at the current pin, and assume live*.
+NOT re-verified at 6.5.33, 6.6.2 or 6.6.10** — the pin moved at 3.0.17, 3.0.20 and 3.0.21 and
+no probe was run against any of them, so treat the status as *unknown at the current pin, and
+assume live*.
 
-The full suite (2183 assertions) and the 87 CLI smoke assertions are green at 6.5.33 with the
+The full suite (2188 assertions) and the 87 CLI smoke assertions are green at 6.6.10 with the
 workarounds below still in place. **That is not evidence the bug is gone** — see "the
 expensive lesson" below, where a green probe and a green suite coexisted with live silent
 corruption. Assume live until someone runs the retirement checklist at the end of this

@@ -97,7 +97,7 @@ was found.
 ## Writing tests under the cycc struct-id miscompile
 
 The struct-id 20/21 ↔ SIMD-sentinel miscompile was **last verified live at 6.4.78 and has
-not been re-verified at the current 6.5.33 pin — assume live**: a typed
+not been re-verified at the current 6.6.10 pin — assume live**: a typed
 `var x: T = p; x.field` can silently read garbage, and it varies per function *and*
 per compilation unit. Two consequences for tests:
 

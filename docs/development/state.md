@@ -5,12 +5,12 @@
 
 ## Version
 
-**3.0.19** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.0.21** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.33` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.6.10` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -39,12 +39,12 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.12.9 | kavach | 3.12.2 |
-| sakshi | 2.4.11 | samay | 1.0.1 (optional) |
-| libro | 2.8.8 | ai-hwaccel | 2.3.18 (optional, on by default) |
-| majra | 2.6.7 | agnodrm | 1.5.1 |
-| bote | 3.3.2 | cmdit | 1.2.2 |
-| nein | 1.6.10 | | |
+| sigil | 3.12.16 | kavach | 3.13.1 |
+| sakshi | 2.5.1 | samay | 1.1.2 (optional) |
+| libro | 2.10.0 | ai-hwaccel | 2.3.22 (optional, on by default) |
+| majra | 2.7.2 | agnodrm | 1.6.0 |
+| bote | 3.3.7 | cmdit | 1.2.4 |
+| nein | 1.6.11 | | |
 
 `sigil` is declared **first** and deliberately — it claims the name before libro's transitive
 thin sub-bundle selection, which would otherwise collide with the full bundle and break the

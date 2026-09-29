@@ -113,6 +113,43 @@ jobs:
           cyrius distlib
           git diff --exit-code -- dist/
 
+      - name: Docs state the pins cyrius.cyml declares
+        # 3.0.21: the pin moved 6.6.2 -> 6.6.10 and kavach 3.12.5 -> 3.13.1, but
+        # CLAUDE.md, README, CONTRIBUTING, quick-start and state.md still said
+        # toolchain 6.5.33 and the dep pins of 3.0.17. Every current-pin
+        # statement below must equal cyrius.cyml.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          cyml = open("cyrius.cyml").read()
+          tool = re.search(r'^cyrius = "([^"]+)"', cyml, re.M).group(1)
+          tags = dict(re.findall(r'^\[deps\.([\w-]+)\][^\[]*?^tag = "([^"]+)"', cyml, re.M | re.S))
+          rd = lambda p: open(p).read()
+          claims = []  # (where, what, stated, declared)
+          for p, rx in [("CLAUDE.md", r"\*\*Toolchain\*\*: Cyrius, pin \*\*([\d.]+)\*\*"),
+                        ("CLAUDE.md", r"built, pin \*\*([\d.]+)\*\*"),
+                        ("README.md", r"[Tt]oolchain pin \*\*([\d.]+)\*\*"),
+                        ("CONTRIBUTING.md", r"pinned to \*\*([\d.]+)\*\*"),
+                        ("docs/development/state.md", r"\*\*Cyrius pin\*\*: `([\d.]+)`"),
+                        ("docs/guides/quick-start.md", r"\(pin ([\d.]+)\)")]:
+              hits = re.findall(rx, rd(p))
+              if not hits: claims.append((p, "toolchain", "<missing>", tool))
+              claims += [(p, "toolchain", v, tool) for v in hits]
+          claude = rd("CLAUDE.md")
+          for dep, v in re.findall(r"^\| ([\w-]+) \|[^\n]*— pin \*\*([\d.]+)\*\* \|$", claude, re.M):
+              claims.append(("CLAUDE.md Stack", dep, v, tags.get(dep, "<not a dep>")))
+          m = re.search(r"^\| sakshi · libro \|[^\n]*pins \*\*([\d.]+)\*\* / \*\*([\d.]+)\*\*", claude, re.M)
+          claims += [("CLAUDE.md Stack", "sakshi", m.group(1) if m else "<missing>", tags["sakshi"]),
+                     ("CLAUDE.md Stack", "libro", m.group(2) if m else "<missing>", tags["libro"])]
+          for dep, v in re.findall(r"\| ([\w-]+) \| ([\d.]+)(?: \([^)]*\))? (?=\|)", rd("docs/development/state.md")):
+              claims.append(("state.md deps", dep, v, tags.get(dep, "<not a dep>")))
+          bad = [c for c in claims if c[2] != c[3]]
+          for w, what, st, dec in bad:
+              print(f"::error::{w}: {what} stated {st}, cyrius.cyml declares {dec}")
+          print(f"{len(claims)} pin statement(s) checked, {len(bad)} stale")
+          sys.exit(1 if bad else 0)
+          PY
+
       - name: Build
         run: |
           mkdir -p build

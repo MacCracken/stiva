@@ -38,6 +38,27 @@ The break above was invisible to CI: `Build` and `Test` stayed green because not
 `dist/` diff. Verified to fail against a copy with the kavach pin put back to 3.12.5
 (`distlib: sidecar verify ... sidecar NOT written`).
 
+### Fixed — the docs named the pins of 3.0.17
+
+CLAUDE.md, README.md, CONTRIBUTING.md, `docs/guides/quick-start.md`,
+`docs/development/testing.md`, `docs/development/state.md` and the ADR index still stated
+toolchain **6.5.33**, and CLAUDE.md's Stack table and state.md's dependency table still
+carried the 3.0.17 dep pins (kavach 3.12.2, sigil 3.12.9, libro 2.8.8, …). 3.0.20 moved the
+toolchain to 6.6.2 and eleven dep pins without touching them, and 3.0.21 moved the toolchain
+and kavach again. Every current-pin statement now matches `cyrius.cyml`: toolchain 6.6.10,
+kavach 3.13.1, majra 2.7.2, nein 1.6.11, bote 3.3.7, agnodrm 1.6.0, cmdit 1.2.4, samay
+1.1.2, ai-hwaccel 2.3.22, sakshi 2.5.1, libro 2.10.0, sigil 3.12.16. state.md's version line
+moves 3.0.19 → 3.0.21. ADR 001 now says the struct-id miscompile is un-re-verified at
+6.5.33, 6.6.2 and 6.6.10, and that the suite (2188 assertions, re-counted at 6.6.10) and the
+87 CLI smoke assertions are green at 6.6.10. Historical 6.5.33 prose is unchanged.
+
+### Added — CI checks the docs' pin statements against `cyrius.cyml`
+
+A new `ci.yml` step reads the toolchain pin and every `[deps.<name>]` tag from
+`cyrius.cyml` and requires the 29 current-pin statements above (7 toolchain, 11 in the
+CLAUDE.md Stack table, 11 in the state.md table) to match; a statement that goes missing
+also fails. Verified to fail on the 3.0.21-as-first-committed docs (29 of 29 stale).
+
 ## [3.0.20] — 2026-09-10 — cyrius 6.6.2 value form, eleven dep pins, and a duplicate-key message that stopped naming the key
 
 Toolchain **6.5.33 → 6.6.2** — the `Result` / `Option` / `Either` value form — plus every
