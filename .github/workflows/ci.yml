@@ -105,6 +105,14 @@ jobs:
           print(f"{len(resolved)} dep bundle(s) match their pinned tags")
 
           PY
+      - name: Verify dist/ regenerates byte-identical (bundle + .deps sidecar)
+        # 3.0.21: kavach <= 3.12.8 and stiva both declared `struct AuditEntry`,
+        # so `cyrius distlib` refused the sidecar (exit 1) while Build and Test
+        # stayed green — nothing here ran distlib, so the break was invisible.
+        run: |
+          cyrius distlib
+          git diff --exit-code -- dist/
+
       - name: Build
         run: |
           mkdir -p build

@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.21] — 2026-09-29 — kavach 3.13.1: one `AuditEntry` again, so `cyrius distlib` writes the sidecar
+
+Toolchain **6.6.2 → 6.6.10**, kavach **3.12.5 → 3.13.1**. No stiva source change beyond
+the version string.
+
+### Fixed — two `struct AuditEntry` layouts in one unit
+
+kavach ≤ 3.12.8 declares a 6-field `struct AuditEntry` (serial / event_type / payload /
+timestamp / hmac / prev_hmac); stiva's `src/audit.cyr` declares its own 8-field
+`#derive(accessors) struct AuditEntry`. The namespace is flat, so the pinned kavach 3.12.5
+put both in stiva's unit. On cyrius 6.6.10 `cyrius distlib` reported
+`struct 'AuditEntry' redefined with a different layout` plus duplicate
+`AuditEntry_timestamp` / `AuditEntry_set_timestamp`, the `#derive` offset `#assert` fired, and
+the sidecar was NOT written. Under last-definition-wins stiva's derived
+`AuditEntry_timestamp` (offset 0) had also been replacing kavach's (offset 24) for any kavach
+code that read it.
+
+kavach renamed its struct to `KavachAuditEntry` at 3.12.9 (and de-duplicated its two
+`struct SpawnedProcess` at the same time). The pin moves to kavach **3.13.1**, which needs
+cyrius ≥ 6.6.6, so the toolchain pin moves to the released **6.6.10**. `lib/kavach.cyr` is
+byte-identical to kavach's `3.13.1:dist/kavach.cyr`.
+
+- `cyrius distlib` writes `dist/stiva.deps` again (38 stdlib leaves, unchanged).
+- `cyrius build` → OK, 4,985,680 B, no redefinition warning.
+- `cyrius test` → 6 suites passed.
+
+### Added — CI regenerates `dist/` and requires it byte-identical
+
+The break above was invisible to CI: `Build` and `Test` stayed green because nothing ran
+`cyrius distlib`. `ci.yml` now runs it after dependency resolution and fails on any
+`dist/` diff. Verified to fail against a copy with the kavach pin put back to 3.12.5
+(`distlib: sidecar verify ... sidecar NOT written`).
+
 ## [3.0.20] — 2026-09-10 — cyrius 6.6.2 value form, eleven dep pins, and a duplicate-key message that stopped naming the key
 
 Toolchain **6.5.33 → 6.6.2** — the `Result` / `Option` / `Either` value form — plus every
