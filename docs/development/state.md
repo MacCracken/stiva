@@ -5,7 +5,7 @@
 
 ## Version
 
-**3.0.21** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.0.22** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain

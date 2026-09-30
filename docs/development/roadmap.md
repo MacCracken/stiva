@@ -24,12 +24,13 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
 | Tests | 2188 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
-| Deps | cyrius 6.5.33 · kavach 3.12.2 · cmdit 1.2.2 · majra 2.6.7 · nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay 1.0.1 · ai-hwaccel 2.3.18 |
+| Deps | pinned in [`cyrius.cyml`](../../cyrius.cyml) (`[package].cyrius` and the `[deps.*]` tags); [`state.md`](state.md) lists them and CI checks that list against the manifest. Not restated here. |
 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
 
 - **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
-  it has not been re-verified at the 6.5.33 pin, so assume live.** A typed
+  it has not been re-verified at any later pin, including the cyrius 6.6.10 pin in force at
+  v3.0.22, so assume live.** A typed
   `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
@@ -295,7 +296,7 @@ Work: a main-thread TLS warm-up covering **every handshake shape the pull touche
 cache (`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl`
 scratch), then a fixed 4-worker pool with layer order taken from the descriptor list.
 ⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn — that is the
-struct-id 20/21 shape and it is unverified at 6.5.33.
+struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.6.10.
 File the sigil issue in the same sweep; until it lands the warm-up is load-bearing.
 
 ### 9. Wire `RuntimeSpec.mounts` — NEW, and it gates more than it looks

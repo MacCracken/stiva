@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.0.22] — 2026-09-30 — the roadmap stops restating dependency pins
+
+Docs only. No stiva source change beyond the version string; the cyrius 6.6.10 pin and every
+`[deps.*]` tag are unchanged.
+
+### Fixed — `docs/development/roadmap.md` named pins two minors stale
+
+The status table's *Deps* row read "cyrius 6.5.33 · kavach 3.12.2 · cmdit 1.2.2 · majra 2.6.7 ·
+nein 1.6.10 · bote 3.3.2 · agnodrm 1.5.1 · sigil 3.12.9 · sakshi 2.4.11 · libro 2.8.8 · samay
+1.0.1 · ai-hwaccel 2.3.18" while `cyrius.cyml` pins cyrius 6.6.10, kavach 3.13.1, cmdit 1.2.4,
+majra 2.7.2, nein 1.6.11, bote 3.3.7, agnodrm 1.6.0, sigil 3.12.16, sakshi 2.5.1, libro 2.10.0,
+samay 1.1.2 and ai-hwaccel 2.3.22. It was restated by hand and missed the 3.0.18–3.0.21 pin
+moves. The row now points at `cyrius.cyml` and at `state.md`, whose dependency list CI already
+checks against the manifest, instead of restating versions. The two struct-id 20/21 notes that
+said "not re-verified at the 6.5.33 pin" now say it has not been re-verified at any pin since
+6.4.78, including the 6.6.10 one in force.
+
+### Changed
+
+- `dist/stiva.cyr` regenerated (version header only).
+
 ## [3.0.21] — 2026-09-29 — kavach 3.13.1: one `AuditEntry` again, so `cyrius distlib` writes the sidecar
 
 Toolchain **6.6.2 → 6.6.10**, kavach **3.12.5 → 3.13.1**. No stiva source change beyond
