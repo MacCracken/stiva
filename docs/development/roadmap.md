@@ -14,7 +14,7 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.0.19
+## Where stiva is — v3.0.22
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 

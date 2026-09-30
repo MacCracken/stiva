@@ -21,6 +21,9 @@ moves. The row now points at `cyrius.cyml` and at `state.md`, whose dependency l
 checks against the manifest, instead of restating versions. The two struct-id 20/21 notes that
 said "not re-verified at the 6.5.33 pin" now say it has not been re-verified at any pin since
 6.4.78, including the 6.6.10 one in force.
+The table's heading, which still read *Where stiva is — v3.0.19* above rows that now name
+v3.0.22, reads v3.0.22; its test, verb and benchmark counts match `README.md` and `CLAUDE.md` at
+this version.
 
 ### Changed
 
