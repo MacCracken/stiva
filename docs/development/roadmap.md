@@ -68,6 +68,27 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 
 ---
 
+## Moving the cyrius pin to 6.6.5
+
+Nothing breaks at this bump; one check starts giving the right answer. cyrius 6.6.5 is not tagged
+yet, and nothing below can land against the pin until it is. The pin is 6.6.2 today, and this
+section lists only what 6.6.5 itself changes.
+
+- [ ] `node_matches_constraints`' memory check (`src/fleet.cyr:257-262`) is silently wrong on
+      cyrius ≤ 6.6.4: `var cap: FleetNodeCapacity = n.capacity;` follows a closed loop body, and the
+      compiler guessed the aggregate's layout wrong, so **a 512 MB node passes a 1024 MB memory
+      constraint**. It is correct from 6.6.5 with no source change. Add a test for exactly that case
+      in the bump commit. See the cyrius CHANGELOG [6.6.5] entry "A struct literal inside a fn was a
+      GLOBAL slot, and whether an aggregate local was INLINE or a POINTER was GUESSED".
+- [ ] The RAW OFFSETS workaround and its comment (`src/fleet.cyr:271-285`) blame the retired
+      "struct-id 20/21" miscompile. The real cause was the same aggregate-layout guess, so after the
+      bump the typed `cap.accel_profiles` / `c.accel_req` / `c.accel_min_chips` form can come back.
+      Rewrite the comment either way.
+- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved SYS_UNLINKAT 35 → 263, so
+      an un-re-vendored peer's sys_unlink would run nanosleep.
+
+---
+
 ## Open cleanliness
 
 *(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
@@ -478,3 +499,105 @@ Seven rules, each mapping to a specific way this went wrong:
 does not exist yet" — copied verbatim from `rust-old/`, where it was **already false when the
 oracle froze**, and carried unread through a whole-language port. When porting a comment, port
 the behaviour and re-derive the claim.
+
+---
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin:** `cyrius = "6.6.2"` (`cyrius.cyml`).
+
+No source change is needed. The reason this note is long anyway is that stiva has
+by far the largest struct surface in this slice of the ecosystem, and 6.6.6 turns
+several previously-silent struct miscompiles into hard compile errors — so the
+honest answer to "will this build stop?" needed measuring rather than assuming.
+
+### The struct audit: 635 sites, zero hits
+
+6.6.6 rejects copying between two **different** struct/vector types, in both the
+`var p: T = q;` and the bare `p = q` shape. stiva has **91 structs and 635
+struct-typed `var` declarations** across `src/`, `tests/` and `programs/`, so this
+was the real question for the pin. A scope-aware scan (reset at each `fn`, then
+matching every typed declaration and every bare assignment against the types in
+scope) found **zero** sites where both sides are struct-typed vars of different
+types.
+
+Every site is the same safe idiom — viewing a raw pointer as a struct:
+
+```cyrius
+var p = alloc(24);
+var s: AgentStatus = p;     # src/agent.cyr:60
+s.id = id;
+```
+
+The right-hand side is an untyped `alloc()` result or an untyped parameter, never
+a struct-typed var, so 6.6.6 has nothing to reject. Confirmed by compiling that
+exact shape against `cycc 6.6.6` — it builds and runs. The same holds for the
+`src/ansamblu.cyr` cluster (`var s: ServiceDef = service;`,
+`var sess: AnsambluSession = session;`, ~30 more), `src/image.cyr`,
+`src/registry.cyr` and `src/cron.cyr`: the right-hand side is always a plain
+parameter.
+
+Two related rules also come up empty:
+
+- **By-value >8 B struct params are now deep-copied** where they used to alias a
+  pointer. stiva has **no struct-typed by-value params** — the two `fn f(x: T)`
+  grep hits (`src/health.cyr:294`, `src/oci.cyr:106`) are Rust-origin signatures
+  quoted in comments. So the aliasing-to-copy behaviour change has no site, and
+  nothing that relied on the old aliasing can shift underneath stiva.
+- **An `async fn` with a vector param or a >8 B struct return is now an error.**
+  All 18 `async fn` hits in stiva are Rust-origin prose in `src/mcp.cyr`,
+  `src/agent.cyr`, `src/image.cyr` and `src/network_rootless.cyr` comments —
+  stiva defines no real `async fn`.
+
+### Windows: not exposed today, but this pin is a prerequisite for v3.4
+
+stiva has **zero `CYRIUS_TARGET_WIN` guards** in its own `src/`, and the README
+lists "**v3.4 — Windows containers**" as a *future* milestone, so the PE
+`O_APPEND`/`O_TRUNC` data-corruption bug is not biting stiva today. It would bite
+the moment that milestone starts, because stiva writes exactly the kind of file
+the bug destroys:
+
+- **`src/network_rootless.cyr:429`** — `sys_open(log_path, 1089, 384)`
+  (`O_WRONLY|O_CREAT|O_APPEND`, 0600), `dup2`'d onto fd 2 as the
+  slirp4netns/pasta child's stderr log. Structurally POSIX-only (it sits inside a
+  forked child and PE has no `fork`), but it is the canonical append-a-journal
+  shape and the one to re-check when a Windows path appears.
+- **97 `file_write_all` sites** — `lib/io.cyr:546` opens
+  `O_WRONLY|O_CREAT|O_TRUNC`, so on a pre-6.6.6 PE build every one of them would
+  have left the old tail behind when the new content was shorter. For a container
+  runtime that means state files, image manifests and layout JSON.
+- **152 `file_exists` / `file_read_all` sites** — both open read-only, and 6.6.6
+  stops PE requesting write access for a read, so they begin succeeding on
+  read-only files and volumes. Relevant for a read-only image store.
+
+One thing worth recording while it is in view, because the comment above it is
+already careful about this: **`src/runtime.cyr:1533` is not an append.** Flags
+`131265` = `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, exactly as the comment at
+`:1527-1532` says — it explicitly is *not* `1089`. No action; noted so a future
+reader grepping for "1089-shaped" flags does not mis-file it.
+
+### Everything else checked and clear
+
+- 0 `operator` fns, 0 `ret2`/`rethi`, 0 `: cstring` params, no SIMD intrinsics.
+- **40 globals, none redeclared**, so 6.6.6's "a later redeclaration now wins
+  everywhere from program start" flip and the new different-type-co-linked-global
+  error change nothing here.
+- **No `var` in a top-level block** anywhere in the tree, so the new block
+  scoping is a heads-up only.
+- No own `vec_*` definitions, so `assert.cyr`'s new transitive `vec.cyr` include
+  cannot collide.
+- No raw `SYS_STATFS`. No `lib/` symlinks, `cyrius.lock` present and writable, so
+  6.6.6's fail-hard `cyrius deps` / `publish` is a no-op.
+- `lib/regression.cyr` is not vendored, so the new exec deadline and
+  `PR_SET_PDEATHSIG` behaviour does not reach stiva.
+
+### Verify after bumping
+
+1. `cyrius build` — the point of the struct audit above is that this should
+   simply succeed. If it *does* stop on a "cannot copy … into a variable of a
+   different struct/vector type" error, that is a real latent miscompile the scan
+   missed, not a regression to work around: fix the copy.
+2. `cyrius test` plus the `tests/*.tcyr` suite — `mgmt.tcyr`, `runpath.tcyr` and
+   `stiva.tcyr` carry the densest struct use.
+3. Nothing Windows-specific to check until v3.4 opens, at which point the
+   `O_APPEND` / `O_TRUNC` notes above are the acceptance list.
