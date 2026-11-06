@@ -30,7 +30,7 @@ A crash or a hang in `cyrius fuzz` fails the run and leaves its input at
 
 **2649 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `runpath.tcyr` (659),
 `registry.tcyr` (444), `store.tcyr` (387), `mgmt.tcyr` (354), `convert.tcyr` (138).
-Plus **102** CLI smoke assertions, **18** fuzz targets and **14** benchmarks.
+Plus **108** CLI smoke assertions, **18** fuzz targets and **14** benchmarks.
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
 > global counter per `assert*()` call and `assert_summary()` prints it.
@@ -97,9 +97,17 @@ Run one group by grepping its `test_group("...")` label, or run everything with
 
 A `.tcyr` file cannot include `main.cyr` — it has its own entry point. CLI coverage
 therefore lives in `./scripts/cli-smoke.sh`, which drives the **built binary** and
-asserts on its stdout, stderr and exit code (102 assertions). Anything that only
+asserts on its stdout, stderr and exit code (108 assertions). Anything that only
 exists in `main.cyr` — flag registration, verb dispatch, usage strings, exit codes —
-is covered there or not at all.
+is covered there or not at all. CI runs it against the default binary and the `--dce`
+one `release.yml` ships.
+
+Its groups that start a container depend on the host, so they can skip. **Gate on the
+host, never on stiva:** `unshare -Urm true` and a runtime binary on disk, not "did
+`stiva run` work", which would turn a broken `run` into a green skip. A skip goes through
+`skip`, which counts it into the summary line, and CI turns each one into a warning.
+Read those: a skipped "confinement" group means nothing checked that a payload has a
+filter.
 
 **Verb ids are registration-ordered.** A verb inserted anywhere but the end of
 `main.cyr`'s registration list silently renumbers every verb after it, and the smoke

@@ -47,9 +47,11 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
   [`docs/architecture/001-cycc-struct-id-miscompile.md`](../architecture/001-cycc-struct-id-miscompile.md).
 - **Only x86_64 is built and tested in CI.** aarch64 builds and its suite is run by hand under
   qemu; see v3.5.0.
-- **The default foreground path has no seccomp and no NO_NEW_PRIVS.** See the first
-  [upstream item](#kavach). Only the process backend and `run -d` have both, and `exec` has
-  NO_NEW_PRIVS alone. This is the largest security gap in stiva.
+- **A container keeps every capability but CAP_SYS_ADMIN, and `/proc` is unmasked**, on the default
+  path. See the first [upstream item](#kavach). Every container also runs as root (v3.2.2), so when
+  stiva itself runs as root those should be real capabilities on the host, and the seccomp filter
+  does not cover a write to `/proc/sys`. This is the largest security gap in stiva. `exec` has
+  NO_NEW_PRIVS and no filter (v3.2.2).
 - **Three `RuntimeSpec` fields are still write-only.** `mounts` and `user` are v3.2.2 and
   `namespaces` is v3.4.1. `env` and `workdir` were the other two, and each needed a kavach change
   first because the setter stiva wanted was decorative: a green call to a setter nothing reads is
@@ -66,9 +68,12 @@ depend on them say what to do in the meantime.
 
 ### kavach
 
-- **Seccomp and NO_NEW_PRIVS on the OCI backend.** `oci_generate_spec` emits neither, and a
-  foreground `stiva run` takes the OCI backend whenever runc is present. Emit
-  `process.noNewPrivileges` and a `linux.seccomp` profile. Until then SECURITY.md says so plainly.
+- **Capabilities and `/proc` on the OCI backend.** `oci_generate_spec` drops only CAP_SYS_ADMIN, and
+  only under a filter, and writes no `maskedPaths` or `readonlyPaths`. A foreground `stiva run` takes
+  this backend whenever runc is present. Filed as kavach's
+  `docs/development/issues/2026-11-06-oci-spec-keeps-every-capability.md`. A bounded set is a policy
+  decision, and it decides what images can do, so check what `build` and the v3.2 items need first.
+  Until then SECURITY.md says so plainly.
 - **`SPAWN_MAX_FD`.** Its fd sweep stops at 1024. stiva marks every descriptor close-on-exec before
   it reaches kavach (`_stor_cloexec_fds`), so this is defence in depth and not a live hole.
 - **Landlock is never applied** to a sandbox, on any path. Either apply it or remove it from what

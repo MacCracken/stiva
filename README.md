@@ -16,8 +16,8 @@ isolation), [majra](https://github.com/MacCracken/majra) (scheduling / pub-sub),
 Stiva was ported from Rust to Cyrius (the frozen Rust crate lives at `rust-old/` as the
 parity oracle). It pulls, builds, imports, runs, execs into, inspects and removes real
 containers end-to-end from the CLI, with the algorithm-dense subsystems at 85–100% parity
-with the oracle. ⛔ It does not honour an image's own config yet, and the default foreground path
-has no seccomp filter: read [What's next](#whats-next) before relying on it.
+with the oracle. ⛔ It does not honour an image's own config yet, and a container keeps almost
+every capability: read [What's next](#whats-next) before relying on it.
 
 What that means concretely:
 
@@ -39,7 +39,7 @@ What that means concretely:
   that the CLI does not reach yet: ansamblu orchestration, fleet scheduling with
   **accelerator-aware placement**, and 9 MCP tool definitions.
 
-**2649 tests** across `tests/*.tcyr`, plus **102** CLI smoke assertions against the built
+**2649 tests** across `tests/*.tcyr`, plus **108** CLI smoke assertions against the built
 binary. Toolchain pin **6.7.18**.
 
 Two verbs are not wired, `checkpoint` and `restore`, which need CRIU, and `restart` cannot succeed
@@ -56,7 +56,7 @@ for the full setup.
 cyrius deps                              # resolve AGNOS + stdlib deps into lib/
 cyrius build src/main.cyr build/stiva    # build the stiva binary
 cyrius test tests/                       # run the test suite (2649 tests)
-./scripts/cli-smoke.sh                   # CLI smoke assertions (102) against the binary
+./scripts/cli-smoke.sh                   # CLI smoke assertions (108) against the binary
 ```
 
 ### CLI
@@ -101,7 +101,7 @@ container that shares its cgroup, which is nearly all of them until v3.2.1.
 | **Networking** | bridge/NAT/DNS/IP-pool/port-map/policy logic (IPv4 + IPv6 dual-stack); **rootless networking** — slirp4netns/pasta spawn + port forwarding | attaching any of it to a container (v3.3.1): nothing constructs a `NetworkManager` |
 | **Storage** | overlay FS, **gzip + zstd layer unpack** with **OCI whiteouts** applied, cgroups v2 (CPU/mem/PID/IO); **perms-preserving tar** (mode/uid/gid + dir/symlink, GNU longname, base-256; traversal/symlink/DoS-hardened) | volume mounts — `RuntimeSpec.mounts` is assembled but never applied, and `run` has no `-v` flag (v3.2.2) |
 | **Orchestration** | TOML ansamblu parse, DAG ordering, health-check / restart-policy / rolling-update / scaling logic; fleet scheduling (spread / bin-pack / pinned) with **accelerator-aware placement**; **`stiva cron`** scheduled containers | a verb that runs an ansamblu, and health and restart policies applied (v3.3.2) |
-| **Security** | seccomp and NO_NEW_PRIVS on the process backend and `run -d` (⛔ neither on the default foreground path, and no Landlock anywhere: see [SECURITY.md](SECURITY.md)), fd cleanup, strength scoring; **`scan_output` secret/PII scanning** via `stiva logs --scan` (the per-container `scan_policy` field round-trips through `state.json`, but nothing sets it yet — `--scan` is the only way to turn scanning on; a `--scan-policy` producer is v3.2.2) | seccomp on the foreground path (kavach); **secret injection** and a non-root `user` (v3.2.2); a device-allocation ledger (v3.4.2) |
+| **Security** | seccomp and NO_NEW_PRIVS on `run`, on both backends, and on `run -d` (⛔ no filter on `exec`, no Landlock anywhere, and an OCI container keeps every capability but CAP_SYS_ADMIN: see [SECURITY.md](SECURITY.md)), fd cleanup, strength scoring; **`scan_output` secret/PII scanning** via `stiva logs --scan` (the per-container `scan_policy` field round-trips through `state.json`, but nothing sets it yet — `--scan` is the only way to turn scanning on; a `--scan-policy` producer is v3.2.2) | seccomp on the foreground path (kavach); **secret injection** and a non-root `user` (v3.2.2); a device-allocation ledger (v3.4.2) |
 | **Integration** | 9 MCP tool definitions with dispatch for 7 (`stiva_run` is unwired and `stiva_ansamblu` does nothing), and no server yet, so no client can reach them; **`stiva events`** over the persisted lifecycle log; **`convert`** from a Dockerfile **or a docker-compose YAML** (documented subset); **accelerator inventory** in `stiva info` | an MCP server (v3.3.3); daimon agent registration (v3.3.2); `parse_intent` is slated for **removal** (v3.3.3) — agnoshi calls the stiva CLI, not the reverse |
 
 ## <a name="whats-next"></a>What's next
@@ -120,8 +120,8 @@ full picture; the shape of it:
 - **v3.6 — ecosystem.** CRI, metrics, deploy strategies, plugins.
 
 Five limitations are worth reading before you rely on stiva:
-**the default foreground path has no seccomp and no NO_NEW_PRIVS** (a kavach change; see
-[SECURITY.md](SECURITY.md)); **an image's Entrypoint and Env are ignored** (v3.2.0); **every container
+**on the default path a container keeps every capability but CAP_SYS_ADMIN, and `/proc` is
+unmasked** (a kavach change; see [SECURITY.md](SECURITY.md)); **an image's Entrypoint and Env are ignored** (v3.2.0); **every container
 runs as root and gets no secrets or mounts** (v3.2.2); **only x86_64 is built and tested in CI**; and
 the **cycc struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and is
 un-re-verified at the current 6.7.18 pin**, which is why several hot paths use raw-offset accessors
@@ -163,7 +163,7 @@ itself consumable as a single-file bundle, `dist/stiva.cyr` (built by `cyrius di
 ```bash
 cyrius build src/main.cyr build/stiva          # build
 cyrius test tests/                             # 2649 tests
-./scripts/cli-smoke.sh                         # 102 CLI smoke assertions
+./scripts/cli-smoke.sh                         # 108 CLI smoke assertions
 cyrius bench tests/stiva.bcyr                   # benchmarks
 cyrius fmt src/main.cyr --check                # format check (per file)
 cyrius lint src/main.cyr                       # lint (per file)

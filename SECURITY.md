@@ -48,17 +48,34 @@ If you discover a security vulnerability, please report it privately:
 
 | Path | Seccomp | NO_NEW_PRIVS | PID namespace | Rootfs entry |
 |------|---------|--------------|---------------|--------------|
-| `stiva run`, OCI backend (the default where runc is present) | ⛔ **no** | ⛔ **no** | yes | runc |
+| `stiva run`, OCI backend (the default where runc is present) | `basic` profile | yes | yes | runc |
 | `stiva run`, process backend | `basic` profile | yes | no | chroot + user and mount namespaces |
 | `stiva run -d` | `basic` profile | yes | ⛔ no | chroot + user and mount namespaces |
 | `stiva exec` | ⛔ **no** | yes | the container's | nsenter |
 
-⛔ **The default foreground path has no seccomp filter and no NO_NEW_PRIVS.** kavach's
-`oci_generate_spec` emits neither. Until that changes, use `--backend process` or `run -d` where you
-need them. See the roadmap's upstream section.
+`scripts/cli-smoke.sh`'s "confinement" group reads these from inside the payload, except the `exec`
+row. The first row has held since kavach 3.14.4; through 3.14.3 a payload on the default path read
+`Seccomp: 0` and `NoNewPrivs: 0`, and its `mount` succeeded.
+
+The `basic` profile is kavach's exec filter, a deny list and not an allowlist. A payload calling
+`mount`, `unshare`, `ptrace`, `init_module`, `bpf` and the like is killed, and the container exits 159.
+
+⛔ **The default path still keeps almost every capability, and `/proc` is unmasked.** A payload reads
+`CapEff: 0000003fffdfffff`, every capability but CAP_SYS_ADMIN, and `/proc` is neither masked nor
+read-only. Rootless, those capabilities are held in a user namespace that owns nothing on the host.
+Run as root they should be real capabilities on the host, and the filter does not help there: it
+filters syscalls, not files, so a write to `/proc/sys` is an ordinary `open` and `write`. That is
+reasoned from the spec; no run as root was made. Run stiva rootless where you can. See the roadmap's
+upstream section.
+
+⚠ **On the OCI path the filter is only as complete as runc's libseccomp**, which skips a syscall name
+it does not know, silently. Under libseccomp 2.6.0 that is `open_tree_attr`, which reads EPERM for want
+of CAP_SYS_ADMIN instead, the reason kavach drops that capability. An older libseccomp may skip more.
 
 ⛔ **Other things that are not there yet:**
 
+- **`exec` has no seccomp filter**: a process entering a container that has one runs without it
+  (roadmap v3.2.2).
 - **Landlock is not applied** on any path. stiva builds from `policy_basic()`, which carries no
   Landlock rules, and nothing calls `policy_landlock_add`. Filesystem confinement comes from the
   rootfs entry and the mount namespace.

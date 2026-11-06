@@ -26,9 +26,9 @@ Last reviewed: 2026-11-06 (v3.1.2)
     `config_env`. ⛔ The **image's** `Env` is not applied (roadmap v3.2.0).
   - Cgroups v2 resource limits (**memory, PIDs, CPU**) through the kavach policy, though no CLI flag
     sets one (roadmap v3.2.2)
-  - Seccomp filters and `NO_NEW_PRIVS` on the process backend and `run -d`. ⛔ A foreground run on the
-    OCI backend, the default where runc is present, gets **neither**, and `exec` gets `NO_NEW_PRIVS`
-    alone. See SECURITY.md.
+  - Seccomp filters and `NO_NEW_PRIVS` on `run`, on both backends, and on `run -d`. ⛔ `exec` gets
+    `NO_NEW_PRIVS` alone, and the OCI backend's spec keeps every capability but CAP_SYS_ADMIN and
+    sets no `maskedPaths` or `readonlyPaths`. See SECURITY.md.
   - Signal forwarding
   - FD cleanup before exec (CVE-2024-21626 mitigation)
 - **Gaps**:

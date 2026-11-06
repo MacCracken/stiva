@@ -5,7 +5,7 @@
 
 ## Version
 
-**3.1.2** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.1.3** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
@@ -24,7 +24,7 @@
 ## Tests
 
 **2649** assertions across 6 `tests/*.tcyr` files — stiva 667 · runpath 659 · registry 444 ·
-store 387 · mgmt 354 · convert 138 — plus **102** CLI smoke assertions
+store 387 · mgmt 354 · convert 138 — plus **108** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 **18** fuzz targets (`tests/stiva.fcyr`) and **14** benchmarks.
 
@@ -39,7 +39,7 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.13.15 | kavach | 3.14.3 |
+| sigil | 3.13.15 | kavach | 3.14.4 |
 | sakshi | 2.5.10 | samay | 1.5.1 |
 | libro | 2.11.3 | ai-hwaccel | 2.5.6 |
 | majra | 2.13.0 | cmdit | 1.5.0 |
@@ -66,5 +66,5 @@ See [`roadmap.md`](roadmap.md). v3.2 is making one container correct: honouring 
 manageable lifecycle, and mounts, user and secrets. Its **Recording a block** convention says what it
 takes to call anything blocked in this tree.
 
-⛔ The largest open security gap is upstream: the default foreground path, the OCI backend, has no
-seccomp filter and no NO_NEW_PRIVS. See SECURITY.md.
+⛔ The largest open security gap is upstream: on the default path, the OCI backend, a container keeps
+every capability but CAP_SYS_ADMIN, and `/proc` is unmasked. See SECURITY.md.

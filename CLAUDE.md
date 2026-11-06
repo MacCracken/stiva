@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.7.18** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.1.2
+- **Version**: SemVer, currently 3.1.3
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -22,7 +22,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 "not yet wired" (they need CRIU, roadmap v3.4.1), and `restart` cannot succeed (v3.2.1).
 
 **2649 tests** across the `.tcyr` files (stiva 667 · runpath 659 · registry 444 ·
-store 387 · mgmt 354 · convert 138; run via `cyrius test tests/`), **102** CLI smoke
+store 387 · mgmt 354 · convert 138; run via `cyrius test tests/`), **108** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
@@ -117,7 +117,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.3** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.4** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.13.0** |
 | nein | nftables firewall, NAT, port mapping — pin **1.9.1** |
 | bote-core | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.8.15** |
@@ -239,8 +239,9 @@ Stiva uses these kavach features — keep them wired:
 - **StrengthScore / score_backend** — security scoring in inspect/info
 - **ExternalizationGate** — output scanning for secrets/PII in exec/logs
 - **User namespaces** — rootless containers (UID/GID mapping)
-- **NO_NEW_PRIVS** — on the process backend, `run -d` and `exec`. ⛔ Not on the OCI backend, the default
-  foreground path, which has no seccomp filter either: kavach's `oci_generate_spec` emits neither
+- **NO_NEW_PRIVS** — on every path. The OCI backend, the default foreground path, gets it and the
+  seccomp filter from kavach's `oci_generate_spec` since 3.14.4, with CAP_SYS_ADMIN dropped under the
+  filter. ⛔ `exec` has no filter, and an OCI container keeps every other capability (`SECURITY.md`)
 - **FD cleanup** — `_stor_cloexec_fds` marks every fd above stderr close-on-exec before a payload
   starts (CVE-2024-21626 mitigation). kavach's own sweep stops at 1024
 
@@ -376,8 +377,14 @@ whole document, and several callers read that 0 as an empty store (`container.cy
 fresh", `cron.cyr` "treating the schedule as empty"). A writer whose keys come from data must
 iterate a hashmap or de-duplicate first, as `_il_kv_obj` does, and its test must parse what it wrote.
 
-`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**102** assertions
-against the built binary) — the `.tcyr` files cannot include `main.cyr`.
+`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**108** assertions
+against the built binary, run in CI on the default and `--dce` binaries) — the `.tcyr` files
+cannot include `main.cyr`.
+
+⚠ **A smoke gate asks the host, never stiva.** `unshare -Urm true`, not "did `stiva run` work",
+which turns a broken `run` into a green skip. A `skip` is counted in the summary, and CI turns each
+into a warning, so read them. ⛔ The CI step's `sudo sysctl` is for the runner: never run it on a
+developer's machine, and strip it from any local replay of the step.
 
 ```bash
 cyrius test tests/             # run every tests/*.tcyr (the full suite)

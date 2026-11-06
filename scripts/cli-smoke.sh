@@ -29,9 +29,12 @@ trap 'rm -rf "$ROOT" "$WORK"' EXIT
 
 PASS=0
 FAIL=0
+SKIP=0
 
 ok ()   { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
 bad ()  { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; printf '       %s\n' "$2"; }
+# A skip is counted and printed, because a quietly-skipped test reads like a pass.
+skip () { SKIP=$((SKIP + 1)); printf '  skip %s\n' "$1"; }
 
 # assert_contains <label> <needle> <haystack>
 assert_contains () {
@@ -82,13 +85,37 @@ if command -v cc >/dev/null 2>&1; then
     # `argvp` prints each argument it received between brackets, so a test reads
     # what the payload observed rather than what the spec carried.
     printf '#include <stdio.h>\nint main(int c,char**v){for(int i=1;i<c;i++)printf("[%%s]",v[i]);putchar(10);return 0;}\n' > "$WORK/a.c"
+    # `secprobe` prints what the kernel says of the payload, through prctl because
+    # the process backend's rootfs has no /proc. Given an argument it tries a mount,
+    # which exits 1 if it merely fails: 159 can only be a filter's kill.
+    printf '#include <stdio.h>\n#include <sys/mount.h>\n#include <sys/prctl.h>\nint main(int c,char**v){if(c>1)return mount("t","/","tmpfs",0,0)?1:0;printf("seccomp=%%d nnp=%%d\\n",prctl(PR_GET_SECCOMP,0,0,0,0),prctl(PR_GET_NO_NEW_PRIVS,0,0,0,0));return 0;}\n' > "$WORK/p.c"
     if cc -static -o "$WORK/rootfs/bin/sleeper" "$WORK/s.c" 2>/dev/null \
        && cc -static -o "$WORK/rootfs/bin/errw" "$WORK/e.c" 2>/dev/null \
-       && cc -static -o "$WORK/rootfs/bin/argvp" "$WORK/a.c" 2>/dev/null; then
+       && cc -static -o "$WORK/rootfs/bin/argvp" "$WORK/a.c" 2>/dev/null \
+       && cc -static -o "$WORK/rootfs/bin/secprobe" "$WORK/p.c" 2>/dev/null; then
         HAVE_PAYLOAD=1
     fi
 fi
 tar -cf "$WORK/rf.tar" -C "$WORK/rootfs" .
+
+# ── what this host can run ───────────────────────
+# Asked of the HOST, and never of stiva. A gate of "did `stiva run` work" turns a
+# broken `run` into a green skip, so these are what stiva depends on, tested with
+# no stiva in the way: past them a failure is stiva's. `unshare -Urm` is the test
+# because both the process backend and rootless runc need a mount namespace inside
+# a user namespace, and Ubuntu's AppArmor restriction lets the unshare through and
+# denies the mount, so a bare `unshare -U` would read as fine.
+HAVE_USERNS=0
+if unshare -Urm true 2>/dev/null; then HAVE_USERNS=1; fi
+HAVE_OCI=0
+for rt in /usr/local/bin/runc /usr/bin/runc /usr/local/bin/crun /usr/bin/crun; do
+    if [ -x "$rt" ]; then HAVE_OCI=1; fi
+done
+CAN_RUN=0
+WHY_NOT='no static compiler for an in-image payload'
+if [ "$HAVE_PAYLOAD" -eq 1 ]; then
+    if [ "$HAVE_USERNS" -eq 1 ]; then CAN_RUN=1; else WHY_NOT='this host refuses user namespaces'; fi
+fi
 
 group "version + help"
 out="$(run --version)"
@@ -281,8 +308,8 @@ fi
 rm -rf "$OFF_ROOT"
 
 group "run -d (detached)"
-if [ "$HAVE_PAYLOAD" -eq 0 ]; then
-    printf '  skip (no static compiler for an in-image payload)\n'
+if [ "$CAN_RUN" -eq 0 ]; then
+    skip "run -d ($WHY_NOT)"
 else
 # The whole point of detach: the call returns while the process keeps running,
 # and the state survives into a DIFFERENT stiva process. /bin/sleep is a host
@@ -458,7 +485,7 @@ group "arguments"
 # Until kavach 3.14.3 stiva could only hand over one string, which was split on
 # spaces and tabs: an argument could hold neither, and an empty one vanished, so
 # `sh -c 'echo one; echo two'` ran `echo`. Each case reads what the payload received.
-if [ "$HAVE_PAYLOAD" -eq 1 ]; then
+if [ "$CAN_RUN" -eq 1 ]; then
     TAB="$(printf '\t')"
     out="$(run run local/demo:v1 -- /bin/argvp "a  b" "" "c${TAB}d")"
     assert_contains "run keeps each argument whole" "[a  b][][c${TAB}d]" "$out"
@@ -469,7 +496,35 @@ if [ "$HAVE_PAYLOAD" -eq 1 ]; then
     out="$(run run local/demo:v1 "/bin/argvp one two")"
     assert_contains "one quoted string is still a command line" "[one][two]" "$out"
 else
-    printf '  skip (no static compiler for an in-image payload)\n'
+    skip "arguments ($WHY_NOT)"
+fi
+
+group "confinement"
+# What a payload reads from the kernel, on each path `run` can take. Through kavach
+# 3.14.3 the OCI backend, the default where runc is installed, read seccomp=0 nnp=0
+# and its mount succeeded, under every test here: they asserted the policy, and the
+# spec dropped it. `exec` is left out: it has no filter yet (roadmap v3.2.2).
+if [ "$CAN_RUN" -eq 1 ]; then
+    out="$(run run local/demo:v1 /bin/secprobe)"
+    assert_contains "the default path has both" "seccomp=2 nnp=1" "$out"
+    out="$(run run --backend process local/demo:v1 /bin/secprobe)"
+    assert_contains "process backend: a filter and no_new_privs" "seccomp=2 nnp=1" "$out"
+    "$STIVA" run --backend process local/demo:v1 /bin/secprobe mount >/dev/null 2>&1
+    assert_exit "process backend: a mount is killed" 159 "$?"
+    run run -d --name confd local/demo:v1 /bin/secprobe >/dev/null 2>&1
+    sleep 1
+    out="$(run logs confd)"
+    assert_contains "run -d: a filter and no_new_privs" "seccomp=2 nnp=1" "$out"
+    if [ "$HAVE_OCI" -eq 1 ]; then
+        out="$(run run --backend oci local/demo:v1 /bin/secprobe)"
+        assert_contains "OCI backend: a filter and no_new_privs" "seccomp=2 nnp=1" "$out"
+        "$STIVA" run --backend oci local/demo:v1 /bin/secprobe mount >/dev/null 2>&1
+        assert_exit "OCI backend: a mount is killed, as the container's own exit" 159 "$?"
+    else
+        skip "confinement on the OCI backend (no runc or crun here)"
+    fi
+else
+    skip "confinement ($WHY_NOT)"
 fi
 
 group "exec"
@@ -488,8 +543,10 @@ assert_exit "a bare --env NAME is a usage error" 2 "$?"
 out="$(run exec definitely-no-such-container /bin/true 2>&1)"
 assert_contains "exec on an unknown container says so" "not found" "$out"
 
-if [ "$HAVE_PAYLOAD" -eq 0 ] || ! command -v nsenter >/dev/null 2>&1; then
-    printf '  skip exec-into-a-live-container (needs nsenter + an in-image payload)\n'
+if [ "$CAN_RUN" -eq 0 ]; then
+    skip "exec into a live container ($WHY_NOT)"
+elif ! command -v nsenter >/dev/null 2>&1; then
+    skip "exec into a live container (no nsenter here)"
 else
     run run -d --name execsmoke local/demo:v1 /bin/sleeper >/dev/null 2>&1
     sleep 1
@@ -554,5 +611,5 @@ out="$(STIVA_ROOT="$ODD" "$STIVA" export odd1 "$WORK/odd.tar" 2>&1 | grep -v '^\
 assert_contains "export says why it failed" "cannot read" "$out"
 
 printf '\n────────────────────────────\n'
-printf '  %d passed, %d failed\n' "$PASS" "$FAIL"
+printf '  %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -31,13 +31,13 @@ idmap work is assembled ahead of the consumer that will use it.
 
 ## Seccomp Filters
 
-kavach applies seccomp-bpf filters to restrict the syscalls available inside a container, on the
-process backend and on `run -d`.
+kavach applies a seccomp-bpf filter to restrict the syscalls available inside a container, on `run`
+with either backend and on `run -d`, and every path sets NO_NEW_PRIVS. It is a deny list: a payload
+calling `mount`, `unshare`, `ptrace` and the like is killed, and the container exits 159.
 
-⛔ **A foreground `stiva run` on the OCI backend gets no seccomp filter and no NO_NEW_PRIVS**, and
-that is the default wherever runc is installed: kavach's `oci_generate_spec` emits neither. `exec`
-sets NO_NEW_PRIVS and installs no filter. Use `--backend process` or `run -d` where you need both.
-SECURITY.md has the table.
+⛔ `exec` installs no filter. And on the OCI backend, the default wherever runc is installed, a
+container keeps every capability but CAP_SYS_ADMIN and `/proc` is unmasked, which a syscall filter
+does not cover. SECURITY.md has the table and what that means when stiva runs as root.
 
 The policy is part of the `SandboxPolicy` passed to kavach, and it is reflected in the security
 score, which describes the policy and not the path a container took.

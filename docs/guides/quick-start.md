@@ -11,7 +11,7 @@ cyrius deps
 cyrius build src/main.cyr build/stiva
 ```
 
-The `stiva` binary registers 36 subcommands, 34 of which run end-to-end. Run
+The `stiva` binary registers 36 subcommands, 33 of which run end-to-end. Run
 `stiva --help` for the full list, or see the [CLI reference](../cli.md).
 
 ## Getting an Image

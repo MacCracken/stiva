@@ -171,7 +171,7 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 # path = "../kavach"   # see "Local dep development" above
-tag = "3.14.3"
+tag = "3.14.4"
 modules = ["dist/kavach.cyr"]
 
 # ── samay + ai-hwaccel — required ─────────────

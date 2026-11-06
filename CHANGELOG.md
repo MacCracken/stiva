@@ -5,6 +5,81 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.1.3] — 2026-11-06 — the default path is confined, and CI checks it
+
+The default foreground path now has a seccomp filter and NO_NEW_PRIVS. The fix is kavach's, so this is
+a pin move, kavach 3.14.3 → 3.14.4, and stiva's only source change is its version string. CI now runs
+`cli-smoke.sh`, the only check that a payload on that path really has the filter.
+
+### Security
+
+- **A foreground `stiva run` on the OCI backend, the default where runc is installed, is now
+  confined.** Through kavach 3.14.3 its spec carried neither. Measured through `stiva run` under runc
+  1.5.2:
+
+  | Inside the container | kavach 3.14.3 | kavach 3.14.4 |
+  |---|---|---|
+  | seccomp mode | 0 | 2 |
+  | `no_new_privs` | 0 | 1 |
+  | `CapEff` | `000001ffffffffff` | `0000003fffdfffff` |
+  | `mount` | succeeds | killed, exit 159 |
+
+  Other kavach fixes arrive with the pin: a `config_stdin` payload can no longer outlive its deadline
+  or kill the host with SIGPIPE, though stiva hands kavach no stdin today.
+
+### ⚠ Behaviour changes
+
+- **A container calling a denied syscall dies** on the default path, with exit 159 as the container's
+  own exit: `mount`, `unshare`, `ptrace` (so `strace`), `bpf`, and a `clone` asking for a namespace.
+  Nested containers stop working on this path. They already did on the process backend.
+- **A setuid or file-capability binary in an image no longer raises privilege** on this path.
+- **A container on this path has no CAP_SYS_ADMIN**, so `sethostname` and the like read EPERM.
+
+### Not closed
+
+- An OCI container still keeps every other capability, and `/proc` is unmasked, which matters most
+  when stiva runs as root: the largest gap now, and in the roadmap's upstream section. `exec` still
+  has no filter (roadmap v3.2.2).
+
+### Tests
+
+- **`cli-smoke.sh` 102 → 108: a "confinement" group** reads seccomp and `no_new_privs` from the payload
+  on `run` with each backend and on `run -d`, and requires a `mount` to exit 159, which only a
+  filter's kill can do. Against a 3.14.3 build the three OCI assertions fail, reading `seccomp=0 nnp=0`
+  and exit 0, and the process-backend ones pass.
+
+### CI
+
+- **`cli-smoke.sh` runs in CI**, against the default binary and the `--dce` one `release.yml` ships.
+  No workflow ran it before, so `src/main.cyr` had no CI coverage. `release.yml` gates on this
+  workflow, so a smoke failure stops a release too.
+- **Its gates ask the host, never stiva:** a compiler for the payloads, `unshare -Urm` for user
+  namespaces, and a runtime on disk. A gate of "did `stiva run` work" would turn a broken `run` into
+  a green skip. Measured with a stand-in whose `run` always fails: 38 failures and no skips. On a host
+  that refuses user namespaces, where it used to fail 14 assertions: 86 passed, 0 failed, 4 skipped.
+- **A skip is counted**, in a summary that now reads `108 passed, 0 failed, 0 skipped`. In CI each skip
+  is a warning, and the counts are a notice the checks API serves without authentication. A skip does
+  not fail the step, so a confinement skip is something to read, not something that stops the build.
+- ⚠ **The step lifts Ubuntu's AppArmor restriction on unprivileged user namespaces** with a `sysctl` on
+  the runner, which both backends need. It was not run on a real runner, or on any host here: the rest
+  of the step was run under a minimal environment, no stdin and SIGPIPE ignored, as a runner starts it,
+  and against a tree pinned to kavach 3.14.3, where it exits 1.
+
+### Performance
+
+A real foreground `stiva run`, 12 interleaved runs a side: 44 ms (42–131) with kavach 3.14.3, 49 ms
+(43–132) with 3.14.4. The ranges overlap, which reads as no measured change.
+
+The `bench-history.csv` row is not comparable with the last one. It was recorded unpinned, with other
+work holding two CPUs at 100 %, and nearly every benchmark rose 6–9 %, `gzip_compress_2mib` and
+`event_ts_parse` among them, in code this release did not touch.
+
+### Docs
+
+- `SECURITY.md`, the README, the security guide, `spec-compliance.md`, the roadmap, `state.md` and
+  `CLAUDE.md` no longer call this gap open. Each now names the capabilities as what is left.
+- `quick-start.md` said 34 verbs run. It is 33, as everywhere else since 3.1.2.
+
 ## [3.1.2] — 2026-11-06 — P(-1) audit: security repairs, a real fuzzer, and a roadmap for what is left
 
 A hardening release: no new dep, no pin moved, no new verb. Seven reviews by attack surface found the
