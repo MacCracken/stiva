@@ -36,7 +36,7 @@ fn _rt_make_container(cfg) {
     return container_new("cid", 0, "img", "ref", CONTAINER_STATE_CREATED, 0 - 1, 0, 0 - 1, cfg, 0 - 1);
 }
 
-fn test_generate_spec_defaults() {
+fn _test_generate_spec_defaults() {
     test_group("generate_spec_defaults");
     var cfg = container_config_default();
     var ctr = _rt_make_container(cfg);
@@ -60,7 +60,7 @@ fn test_generate_spec_defaults() {
     return 0;
 }
 
-fn test_generate_spec_rootless() {
+fn _test_generate_spec_rootless() {
     test_group("generate_spec_rootless");
     var cfg: ContainerConfig = container_config_default();
     cfg.rootless = 1;
@@ -71,7 +71,7 @@ fn test_generate_spec_rootless() {
     return 0;
 }
 
-fn test_generate_spec_env_kv() {
+fn _test_generate_spec_env_kv() {
     test_group("generate_spec_env_kv");
     var cfg: ContainerConfig = container_config_default();
     # env map MUST be map_new (cstr keys) — generate_spec iterates map_keys/map_get.
@@ -84,7 +84,7 @@ fn test_generate_spec_env_kv() {
     return 0;
 }
 
-fn test_generate_spec_bad_volume() {
+fn _test_generate_spec_bad_volume() {
     test_group("generate_spec_bad_volume");
     var cfg: ContainerConfig = container_config_default();
     var vols = vec_new();
@@ -95,7 +95,7 @@ fn test_generate_spec_bad_volume() {
 }
 
 # ── send_signal (rust-old runtime.rs:996) ──
-fn test_send_signal_bad_signal() {
+fn _test_send_signal_bad_signal() {
     test_group("send_signal_bad_signal");
     # signal out of the named range → STIVA_ERR_RUNTIME sentinel (non-OK).
     assert_eq(send_signal(1234, 999), STIVA_ERR_RUNTIME, "signal 999 -> runtime err");
@@ -103,13 +103,13 @@ fn test_send_signal_bad_signal() {
     return 0;
 }
 
-fn test_send_signal_bad_pid() {
+fn _test_send_signal_bad_pid() {
     test_group("send_signal_bad_pid");
     assert_eq(send_signal(0, 15), STIVA_ERR_RUNTIME, "pid 0 -> runtime err");
     return 0;
 }
 
-fn test_send_signal_self_signal0_range() {
+fn _test_send_signal_self_signal0_range() {
     test_group("send_signal_self_signal0_range");
     # Deliver SIGCONT (18) to our own process — harmless, must succeed.
     assert_eq(send_signal(getpid(), 18), STIVA_ERR_OK, "SIGCONT self -> OK");
@@ -117,7 +117,7 @@ fn test_send_signal_self_signal0_range() {
 }
 
 # ── cgroup base parsing (rust-old runtime.rs:1038) ──
-fn test_resolve_cgroup_base_parse() {
+fn _test_resolve_cgroup_base_parse() {
     test_group("resolve_cgroup_base_parse");
     var base = _rt_cgroup_base_from_content("0::/foo/bar\n");
     assert_eq(streq(base, "/sys/fs/cgroup/foo/bar"), 1, "0:: line -> base path");
@@ -129,7 +129,7 @@ fn test_resolve_cgroup_base_parse() {
     return 0;
 }
 
-fn test_cpu_quota_formula() {
+fn _test_cpu_quota_formula() {
     test_group("cpu_quota_formula");
     # shares * 100000 / 1024
     assert_eq(_rt_cpu_quota(1024), 100000, "1024 shares -> 1 core quota");
@@ -137,7 +137,7 @@ fn test_cpu_quota_formula() {
     return 0;
 }
 
-fn test_apply_cgroup_limits_besteffort() {
+fn _test_apply_cgroup_limits_besteffort() {
     test_group("apply_cgroup_limits_besteffort");
     # No real writable cgroup in the harness — must NOT crash and must return 0
     # (best-effort: write failures are swallowed).
@@ -151,7 +151,7 @@ fn test_apply_cgroup_limits_besteffort() {
 }
 
 # ── build_sandbox (rust-old runtime.rs:276) — kavach, synchronous ──
-fn test_build_sandbox_noop() {
+fn _test_build_sandbox_noop() {
     test_group("build_sandbox_noop");
     kavach_init();   # register backends (idempotent alloc_init)
     var cfg: ContainerConfig = container_config_default();
@@ -163,13 +163,13 @@ fn test_build_sandbox_noop() {
     return 0;
 }
 
-# ⚠ THE ASSERTION THAT WAS MISSING. `test_generate_spec_env_kv` above proves the
+# ⚠ THE ASSERTION THAT WAS MISSING. `_test_generate_spec_env_kv` above proves the
 # spec CARRIES the env — and it passed for every release in which containers got
 # no environment at all, because build_sandbox dropped it at the kavach boundary
 # (no setter existed before kavach 3.12.0). Assert on what crosses the boundary,
 # not on what this side assembled. Delivery to the payload is covered upstream by
 # kavach's `test_confine_capture_env`.
-fn test_build_sandbox_threads_env() {
+fn _test_build_sandbox_threads_env() {
     test_group("build_sandbox_threads_env");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -201,7 +201,7 @@ fn test_build_sandbox_threads_env() {
 # `config_workdir` was itself decorative in kavach until 3.12.2, so even calling
 # it would not have been enough. Assert the value crosses the boundary; kavach's
 # `test_confine_capture_workdir` asserts the payload actually lands there.
-fn test_build_sandbox_threads_workdir() {
+fn _test_build_sandbox_threads_workdir() {
     test_group("build_sandbox_threads_workdir");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -218,7 +218,7 @@ fn test_build_sandbox_threads_workdir() {
     return 0;
 }
 
-fn test_build_sandbox_no_env_stays_unset() {
+fn _test_build_sandbox_no_env_stays_unset() {
     test_group("build_sandbox_no_env_stays_unset");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -233,7 +233,7 @@ fn test_build_sandbox_no_env_stays_unset() {
     return 0;
 }
 
-fn test_build_sandbox_bad_backend() {
+fn _test_build_sandbox_bad_backend() {
     test_group("build_sandbox_bad_backend");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -243,7 +243,7 @@ fn test_build_sandbox_bad_backend() {
     return 0;
 }
 
-fn test_build_sandbox_fallback() {
+fn _test_build_sandbox_fallback() {
     test_group("build_sandbox_fallback");
     kavach_init();
     # backend None, min_isolation_score None → OCI-if-available else PROCESS.
@@ -260,7 +260,7 @@ fn test_build_sandbox_fallback() {
     return 0;
 }
 
-fn test_build_sandbox_min_score_none() {
+fn _test_build_sandbox_min_score_none() {
     test_group("build_sandbox_min_score_none");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -271,7 +271,7 @@ fn test_build_sandbox_min_score_none() {
 }
 
 # ── exec_container (rust-old runtime.rs:365) — full generate→build→exec→map ──
-fn test_exec_container_noop() {
+fn _test_exec_container_noop() {
     test_group("exec_container_noop");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -291,7 +291,7 @@ fn test_exec_container_noop() {
 # The noop backend takes a command line, so it shows which form the spec reached
 # kavach in: it refuses an argument real argv would keep, and only real argv can
 # be refused. The run itself is covered against a real payload in cli-smoke.sh.
-fn test_exec_container_argv_forms() {
+fn _test_exec_container_argv_forms() {
     test_group("exec_container_argv_forms");
     kavach_init();
     assert_eq(_rt_is_command_line(_rp_cmd1("/bin/sleeper now")), 1, "one element is a command line");
@@ -322,7 +322,844 @@ fn _rp_cmd2(a, b) {
     return v;
 }
 
-fn test_exec_container_bad_backend() {
+# ── 3.1.2 audit ──
+
+# A fresh rootfs at /tmp/stiva_cp2/rootfs with symlinks and a FIFO the container "planted", a host
+# file and a host directory they aim at, and a source file to copy in.
+fn _rp_cp_fixture() {
+    _stor_remove_dir_all("/tmp/stiva_cp2");
+    sys_mkdir("/tmp/stiva_cp2", 493);
+    sys_mkdir("/tmp/stiva_cp2/rootfs", 493);
+    sys_mkdir("/tmp/stiva_cp2/rootfs/data", 493);
+    sys_mkdir("/tmp/stiva_cp2/hostdir", 493);
+    file_write_all("/tmp/stiva_cp2/secret", "secret", 6);
+    file_write_all("/tmp/stiva_cp2/hostdir/inner", "inner", 5);
+    file_write_all("/tmp/stiva_cp2/src.txt", "PWNED", 5);
+    sys_symlink("/tmp/stiva_cp2/secret", "/tmp/stiva_cp2/rootfs/data/rd");
+    sys_symlink("/tmp/stiva_cp2/hostdir", "/tmp/stiva_cp2/rootfs/data/dirlink");
+    sys_mknodat(AT_FDCWD, "/tmp/stiva_cp2/rootfs/data/ff", 4516, 0);    # S_IFIFO | 0644
+    return 0;
+}
+
+# 1 iff the fixture's host file still reads "secret".
+fn _rp_secret_intact() {
+    var buf = alloc(16);
+    var n = file_read_all("/tmp/stiva_cp2/secret", buf, 15);
+    if (n != 6) { return 0; }
+    return memeq(buf, "secret", 6);
+}
+
+# `cp` used to follow what the container planted, on the host, in both directions.
+fn _test_rp_cp_never_follows_a_planted_symlink() {
+    test_group("rp_cp_never_follows_a_planted_symlink");
+    _rp_cp_fixture();
+    var r = "/tmp/stiva_cp2/rootfs";
+    var src = "/tmp/stiva_cp2/src.txt";
+    assert_eq(copy_from_container(r, "/data/rd", "/tmp/stiva_cp2/out1"), 0 - 1, "out: a file link");
+    assert_eq(file_exists("/tmp/stiva_cp2/out1"), 0, "nothing was read through it");
+    assert_eq(copy_from_container(r, "/data/dirlink/inner", "/tmp/stiva_cp2/out2"), 0 - 1,
+      "out: through a directory link");
+    assert_eq(file_exists("/tmp/stiva_cp2/out2"), 0, "nothing was read through that either");
+    assert_eq(copy_into_container(r, src, "/data/rd"), 0 - 1, "in: a file link");
+    assert_eq(_rp_secret_intact(), 1, "the host file is untouched");
+    assert_eq(copy_into_container(r, src, "/data/dirlink/new/sub/planted"), 0 - 1,
+      "in: through a directory link");
+    assert_eq(file_exists("/tmp/stiva_cp2/hostdir/new"), 0, "no directory appeared on the host");
+    assert_eq(copy_into_container(r, src, "/data/dirlink/inner"), 0 - 1, "in: over a host file");
+    assert_eq(file_exists("/tmp/stiva_cp2/hostdir/src.txt"), 0, "nor a file beside it");
+    # A tree is copied without its links.
+    assert_eq(copy_from_container(r, "/data", "/tmp/stiva_cp2/tree"), 0, "a tree copies");
+    assert_eq(_stor_lkind("/tmp/stiva_cp2/tree/rd"), 0 - 1, "its links are left behind");
+    return 0;
+}
+
+# A FIFO the container planted used to hang `cp` for ever.
+fn _test_rp_cp_does_not_block_on_a_fifo() {
+    test_group("rp_cp_does_not_block_on_a_fifo");
+    _rp_cp_fixture();
+    var r = "/tmp/stiva_cp2/rootfs";
+    assert_eq(copy_from_container(r, "/data/ff", "/tmp/stiva_cp2/o"), 0 - 1, "out is refused");
+    assert_eq(copy_into_container(r, "/tmp/stiva_cp2/src.txt", "/data/ff"), 0 - 1, "in is refused");
+    return 0;
+}
+
+fn _test_rp_cp_into_a_directory() {
+    test_group("rp_cp_into_a_directory");
+    _rp_cp_fixture();
+    var r = "/tmp/stiva_cp2/rootfs";
+    var src = "/tmp/stiva_cp2/src.txt";
+    assert_eq(copy_into_container(r, src, "/app/"), 0, "a trailing slash means a directory");
+    assert_eq(file_exists("/tmp/stiva_cp2/rootfs/app/src.txt"), 1, "the file keeps its name");
+    assert_eq(copy_into_container(r, src, "/data"), 0, "so does an existing directory");
+    assert_eq(file_exists("/tmp/stiva_cp2/rootfs/data/src.txt"), 1, "the file is inside it");
+    assert_eq(copy_into_container(r, src, "/one/two/f.txt"), 0, "parents are created");
+    assert_eq(file_exists("/tmp/stiva_cp2/rootfs/one/two/f.txt"), 1, "at the name given");
+    return 0;
+}
+
+fn _test_rp_container_names() {
+    test_group("rp_container_names");
+    assert_eq(container_name_is_valid("web-1_a.b"), 1, "a plain name");
+    assert_eq(container_name_is_valid("0abc"), 1, "a leading digit");
+    assert_eq(container_name_is_valid(""), 0, "empty");
+    assert_eq(container_name_is_valid("-x"), 0, "a leading dash");
+    assert_eq(container_name_is_valid(".."), 0, "dots");
+    assert_eq(container_name_is_valid("../../x"), 0, "a path");
+    assert_eq(container_name_is_valid("a/b"), 0, "a slash");
+    assert_eq(container_name_is_valid("a\nb"), 0, "a newline");
+    assert_eq(container_name_is_valid("a\x1b[31m"), 0, "an escape sequence");
+    return 0;
+}
+
+# A container for the state tests, on the noop backend.
+fn _rp_noop_cfg(name) {
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    cfg.name = name;
+    return cfg;
+}
+
+# `rm <name>` built its path from the argument: the rootfs stayed behind for ever, and a container
+# named `../../x` deleted outside the store.
+fn _test_rp_rm_goes_by_the_record() {
+    test_group("rp_rm_goes_by_the_record");
+    kavach_init();
+    var root = "/tmp/stiva-rm-store";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = _test_import(store, "/tmp/stiva-rm.tar", "app", "v1", "x", 1);
+    var mgr = container_manager_new(root, store);
+    assert_eq(container_manager_create(mgr, img, _rp_noop_cfg("../../x")), 0, "a path is no name");
+    var rec = container_manager_create(mgr, img, _rp_noop_cfg("byname"));
+    assert(rec != 0, "created");
+    var rr: Container = rec;
+    var dir = _cm_container_dir(root, rr.id);
+    assert_eq(file_exists(dir), 1, "it has a directory");
+    assert_eq(container_manager_remove(mgr, "byname"), STIVA_ERR_OK, "removed by name");
+    assert_eq(file_exists(dir), 0, "the directory went with it");
+    return 0;
+}
+
+# Two commands are two processes, so each holds its own copy. Saving used to mean overwriting.
+fn _test_rp_state_survives_parallel_commands() {
+    test_group("rp_state_survives_parallel_commands");
+    kavach_init();
+    var root = "/tmp/stiva-merge";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = _test_import(store, "/tmp/stiva-merge.tar", "app", "v1", "x", 1);
+    var a = container_manager_new(root, store);
+    var b = container_manager_new(root, store);
+    assert(container_manager_create(a, img, _rp_noop_cfg("one")) != 0, "a creates one");
+    assert(container_manager_create(b, img, _rp_noop_cfg("two")) != 0, "b creates two, unaware");
+    assert_eq(vec_len(container_state_load(root)), 2, "both records are on disk");
+
+    # Each changes one record; neither loses the other's.
+    var c = container_manager_new(root, store);
+    var d = container_manager_new(root, store);
+    assert_eq(container_manager_rename(c, "one", "uno"), STIVA_ERR_OK, "c renames one");
+    assert_eq(container_manager_rename(d, "two", "dos"), STIVA_ERR_OK, "d renames two");
+    var all = container_state_load(root);
+    assert_neq(container_state_find(all, "uno"), 0, "c's change survived d's save");
+    assert_neq(container_state_find(all, "dos"), 0, "d's change is there too");
+
+    # A removal stays removed, though another process still holds the record.
+    var e = container_manager_new(root, store);
+    var f = container_manager_new(root, store);
+    assert_eq(container_manager_remove(e, "uno"), STIVA_ERR_OK, "e removes it");
+    assert_eq(container_manager_rename(f, "dos", "two"), STIVA_ERR_OK, "f saves, holding it");
+    assert_eq(vec_len(container_state_load(root)), 1, "it did not come back");
+    return 0;
+}
+
+# An unparseable file used to be overwritten by the next save, every record with it.
+fn _test_rp_corrupt_state_is_set_aside() {
+    test_group("rp_corrupt_state_is_set_aside");
+    var root = "/tmp/stiva-corrupt";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    file_write_all("/tmp/stiva-corrupt/state.json", "[{not json", 10);
+    assert_eq(vec_len(container_state_read(root)), 0, "it reads as empty");
+    assert_eq(file_exists("/tmp/stiva-corrupt/state.json"), 0, "and is out of the way");
+    var aside = _img_scratch_path("/tmp/stiva-corrupt/state.json", ".corrupt");
+    assert_eq(file_exists(aside), 1, "with its bytes kept");
+    return 0;
+}
+
+# A descriptor stiva holds must not reach a payload: a directory fd defeats a chroot.
+fn _test_rp_high_fds_do_not_reach_the_payload() {
+    test_group("rp_high_fds_do_not_reach_the_payload");
+    var fd = file_open("/tmp", O_RDONLY, 0);
+    assert(fd >= 0, "opened");
+    assert_eq(sys_dup2(fd, 1500), 1500, "a descriptor well past 1024");
+    var args = vec_new();
+    vec_push(args, "/bin/ls");
+    vec_push(args, "/proc/self/fd");
+    var buf = alloc(65536);
+    var n = _exec_capture2(args, 0, 0, buf, 65535, "/tmp/stiva-fd-err");
+    assert(n > 0, "the payload ran");
+    if (n > 0) {
+        store8(buf + n, 0);
+        assert_eq(strstr(buf, "1500") >= 0, 0, "it does not see the descriptor");
+    }
+    sys_close(1500);
+    sys_close(fd);
+    return 0;
+}
+
+# A paused container still has a process. Removing its record used to orphan it, frozen.
+fn _test_rp_rm_refuses_a_paused_container() {
+    test_group("rp_rm_refuses_a_paused_container");
+    kavach_init();
+    var root = "/tmp/stiva-rm-paused";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = _test_import(store, "/tmp/stiva-rm-paused.tar", "app", "v1", "x", 1);
+    var mgr = container_manager_new(root, store);
+    var rec = container_manager_create(mgr, img, _rp_noop_cfg("frozen"));
+    assert(rec != 0, "created");
+    var rr: Container = rec;
+    rr.state = CONTAINER_STATE_PAUSED;
+    assert_eq(container_manager_remove(mgr, "frozen"), STIVA_ERR_INVALID_STATE, "refused");
+    assert_eq(file_exists(_cm_container_dir(root, rr.id)), 1, "its directory stays");
+    rr.state = CONTAINER_STATE_STOPPED;
+    assert_eq(container_manager_remove(mgr, "frozen"), STIVA_ERR_OK, "a stopped one goes");
+    return 0;
+}
+
+# `env` is in here, which is where secrets usually travel.
+fn _test_rp_state_file_is_private() {
+    test_group("rp_state_file_is_private");
+    var root = "/tmp/stiva-state-mode";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    assert_eq(container_state_save(root, vec_new()), 1, "saved");
+    var sb = alloc(STAT_BUFSZ);
+    assert_eq(sys_stat("/tmp/stiva-state-mode/state.json", sb), 0, "it exists");
+    assert_eq(_stor_st_mode(sb) & 511, 384, "0600");
+    return 0;
+}
+
+# 1 iff `path` still reads exactly `text`.
+fn _rp_file_is(path, text) {
+    var buf = alloc(4096);
+    var n = file_read_all(path, buf, 4095);
+    if (n != strlen(text)) { return 0; }
+    return memeq(buf, text, n);
+}
+
+# One stray byte used to mean the next add or check wrote the whole schedule away.
+fn _test_rp_cron_unreadable_store_is_left_alone() {
+    test_group("rp_cron_unreadable_store_is_left_alone");
+    var root = "/tmp/stiva-cron-bad";
+    var path = "/tmp/stiva-cron-bad/cron.json";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var bad = vec_new();
+    vec_push(bad, "{\"jobs\":[{\"name\":\"a\"");                                # truncated
+    vec_push(bad, "{\"jobs\":7}");                                              # wrong type
+    vec_push(bad, "[]");                                                        # no object
+    vec_push(bad, "{}");                                                        # no table
+    vec_push(bad, "{\"jobs\":[{\"name\":5,\"expr\":\"* * * * *\",\"image\":\"i\"}]}");
+    vec_push(bad, "{\"jobs\":[{\"name\":\"a\",\"expr\":\"* * * * *\",\"image\":\"i\",\"command\":3}]}");  #skip-lint
+    vec_push(bad, "{\"jobs\":[{\"name\":\"a\",\"expr\":\"* * * * *\",\"image\":\"i\",\"enabled\":\"y\"}]}");  #skip-lint
+    var i = 0;
+    while (i < vec_len(bad)) {
+        var text = vec_get(bad, i);
+        file_write_all(path, text, strlen(text));
+        assert_eq(cron_store_load(root), 0, "refused, not empty");
+        assert_eq(cron_add(root, "new", "* * * * *", "img", vec_new()), 0, "add refuses");
+        assert_eq(cron_remove(root, "new"), 0, "remove refuses");
+        assert_eq(cron_set_enabled(root, "new", 0), 0, "disable refuses");
+        assert_eq(cron_check_claim(root, 1804636800000000000), 0, "check refuses");
+        assert_eq(_rp_file_is(path, text), 1, "and none of them wrote");
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 2027-03-10 at the given UTC time, in ns.
+fn _rp_cron_at(h, m, s) {
+    return (1804636800 + h * 3600 + m * 60 + s) * 1000000000;
+}
+
+# How many jobs one `cron check` at `now_ns` fires, across a save and a reload, as the CLI does.
+fn _rp_cron_tick(root, now_ns) {
+    var due = cron_check_claim(root, now_ns);
+    assert(due != 0, "the check ran");
+    if (due == 0) { return 0 - 1; }
+    return vec_len(due);
+}
+
+# Writing `now` over the watermark moved it backwards on a clock step, and what had fired fired again.
+fn _test_rp_cron_clock_steps_fire_nothing_twice() {
+    test_group("rp_cron_clock_steps_fire_nothing_twice");
+    var root = "/tmp/stiva-cron-step";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    assert_eq(cron_add(root, "job", "30 3 * * *", "img", vec_new()), 1, "added");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 29, 0)), 0, "not yet");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 30, 0)), 1, "fires");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 30, 30)), 0, "once");
+    # A small step back waits.
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 27, 0)), 0, "stepped back");
+    assert_eq(cron_job_last_fired(vec_get(cron_store_load(root), 0)), _rp_cron_at(3, 30, 30),
+      "the watermark did not move");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 31, 0)), 0, "03:30 does not fire twice");
+    # A large one starts again from then, and what had fired is remembered across the reload.
+    assert_eq(_rp_cron_tick(root, 1767225600000000000), 0, "a year back");
+    var j: CronJob = vec_get(cron_store_load(root), 0);
+    assert_eq(j.reset_from_ns, _rp_cron_at(3, 31, 0), "how far it had got is on disk");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 32, 0)), 0, "03:30 still does not fire twice");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(3, 30, 0) + 86400000000000), 1, "the next day's does");
+    return 0;
+}
+
+# A disabled job tracks the clock, or re-enabling it counts the gap as missed.
+fn _test_rp_cron_enabling_owes_nothing() {
+    test_group("rp_cron_enabling_owes_nothing");
+    var root = "/tmp/stiva-cron-gap";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    assert_eq(cron_add(root, "job", "0 12 * * *", "img", vec_new()), 1, "added");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(11, 59, 0)), 0, "not yet");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(12, 0, 0)), 1, "fires");
+    assert_eq(cron_set_enabled(root, "job", 0), 1, "disabled");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(13, 0, 0)), 0, "does not fire");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(12, 0, 0) + 864000000000000), 0, "ten days on");
+    assert_eq(cron_set_enabled(root, "job", 1), 1, "enabled");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(17, 0, 0) + 864000000000000), 0, "owes nothing");
+    return 0;
+}
+
+# Adding the same schedule again must not fire this minute a second time.
+fn _test_rp_cron_replacing_keeps_its_place() {
+    test_group("rp_cron_replacing_keeps_its_place");
+    var root = "/tmp/stiva-cron-again";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    assert_eq(cron_add(root, "job", "* * * * *", "img", vec_new()), 1, "added");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(5, 0, 10)), 1, "fires");
+    assert_eq(cron_add(root, "job", "* * * * *", "img2", vec_new()), 1, "replaced");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(5, 0, 20)), 0, "this minute is spent");
+    assert_eq(cron_add(root, "job", "*/2 * * * *", "img2", vec_new()), 1, "rescheduled");
+    assert_eq(cron_job_last_fired(vec_get(cron_store_load(root), 0)), 0, "which starts fresh");
+    return 0;
+}
+
+# Two timers at one instant are two processes. Each job goes to exactly one of them.
+fn _test_rp_cron_checks_race() {
+    test_group("rp_cron_checks_race");
+    var root = "/tmp/stiva-cron-race";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    assert_eq(cron_add(root, "job", "* * * * *", "img", vec_new()), 1, "added");
+    assert_eq(_rp_cron_tick(root, _rp_cron_at(5, 0, 0)), 1, "anchored");
+    var status = alloc(8);
+    var round = 1;
+    while (round <= 12) {
+        var pids = vec_new();
+        var c = 0;
+        while (c < 8) {
+            var pid = sys_fork();
+            if (pid == 0) {
+                var due = cron_check_claim(root, _rp_cron_at(5, round, 0));
+                if (due == 0) { sys_exit_group(100); }
+                sys_exit_group(vec_len(due));
+            }
+            vec_push(pids, pid);
+            c = c + 1;
+        }
+        var fired = 0;
+        var w = 0;
+        while (w < vec_len(pids)) {
+            sys_waitpid(vec_get(pids, w), status, 0);
+            fired = fired + WEXITSTATUS(load32(status));
+            w = w + 1;
+        }
+        assert_eq(fired, 1, "one claim for one minute");
+        round = round + 1;
+    }
+    return 0;
+}
+
+# Run a fake pasta that writes its argv one per line. Returns what it wrote, or 0.
+fn _rp_pasta_argv(ports) {
+    var bin = "/tmp/stiva-fake-pasta";
+    var out = "/tmp/stiva-fake-pasta.argv";
+    var script = "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > /tmp/stiva-fake-pasta.tmp\nmv /tmp/stiva-fake-pasta.tmp /tmp/stiva-fake-pasta.argv\n";  #skip-lint
+    sys_unlink(bin);
+    sys_unlink(out);
+    file_write_all(bin, script, strlen(script));
+    sys_chmod(bin, 493);
+    assert(_rl_start_pasta(bin, 4242, ports, "/tmp/stiva-fake-pasta.log") != 0, "started");
+    var tries = 0;
+    while (tries < 300 && file_exists(out) == 0) {
+        sleep_ms(10);
+        tries = tries + 1;
+    }
+    var buf = alloc(4096);
+    var n = file_read_all(out, buf, 4095);
+    if (n <= 0) { return 0; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+fn _rp_port(host, container, protocol) {
+    var pm: PortMapping = alloc(24);
+    pm.host_port = host;
+    pm.container_port = container;
+    pm.protocol = protocol;
+    return pm;
+}
+
+# pasta's defaults forward the host's ports in and the container's out, and expose host loopback.
+# What is checked is the argv pasta receives. Whether pasta honours it needs pasta itself.
+fn _test_rp_pasta_flags_close_its_defaults() {
+    test_group("rp_pasta_flags_close_its_defaults");
+    var argv = _rp_pasta_argv(0);
+    assert(argv != 0, "the fake ran");
+    if (argv == 0) { return 0; }
+    assert(strstr(argv, "--config-net\n") >= 0, "configures the interface");
+    assert(strstr(argv, "--no-map-gw\n") >= 0, "keeps host loopback out of reach");
+    assert(strstr(argv, "-T\nnone\n") >= 0, "no tcp from the namespace to the host");
+    assert(strstr(argv, "-U\nnone\n") >= 0, "no udp from the namespace to the host");
+    assert(strstr(argv, "-t\nnone\n") >= 0, "no tcp published by default");
+    assert(strstr(argv, "-u\nnone\n") >= 0, "no udp published by default");
+    assert(strstr(argv, "\n4242\n") >= 0, "attaches to the pid");
+
+    var ports = vec_new();
+    vec_push(ports, _rp_port(8080, 80, "tcp"));
+    argv = _rp_pasta_argv(ports);
+    assert(argv != 0, "the fake ran again");
+    if (argv == 0) { return 0; }
+    assert(strstr(argv, "-t\n8080:80\n") >= 0, "publishes what was asked");
+    assert_eq(strstr(argv, "-t\nnone\n") >= 0, 0, "and is not told not to");
+    assert(strstr(argv, "-u\nnone\n") >= 0, "udp stays closed");
+    return 0;
+}
+
+# The ruleset used to be written to a fixed /tmp name: a planted symlink redirected the write, and
+# a local user could swap the rules before nft read them.
+fn _test_rp_nft_ruleset_never_touches_the_disk() {
+    test_group("rp_nft_ruleset_never_touches_the_disk");
+    var bin = "/tmp/stiva-fake-nft";
+    var seen = "/tmp/stiva-fake-nft.seen";
+    var old = "/tmp/stiva-nft-ruleset.nft";
+    var canary = "/tmp/stiva-fake-nft.canary";
+    var script = "#!/bin/sh\ncat \"$2\" > /tmp/stiva-fake-nft.seen\n";
+    sys_unlink(bin);
+    sys_unlink(seen);
+    sys_unlink(old);
+    file_write_all(bin, script, strlen(script));
+    sys_chmod(bin, 493);
+    file_write_all(canary, "keep", 4);
+    sys_symlink(canary, old);
+    var rules = "table inet stiva {}\n";
+    assert_eq(_network_manager_run_nft(bin, rules, strlen(rules)), 0, "it ran");
+    assert_eq(_rp_file_is(seen, rules), 1, "and read the whole ruleset");
+    assert_eq(_rp_file_is(canary, "keep"), 1, "the planted link was not written through");
+    sys_unlink(old);
+    return 0;
+}
+
+# A process that init reaps once it is done, since a test cannot wait on a grandchild. Returns its
+# pid. It sleeps for `ms`.
+fn _rp_orphan(ms) {
+    var note = "/tmp/stiva-orphan.pid";
+    sys_unlink(note);
+    var c = sys_fork();
+    if (c == 0) {
+        var g = sys_fork();
+        if (g == 0) {
+            sleep_ms(ms);
+            sys_exit_group(0);
+        }
+        var txt = _rt_int_to_cstr(g);
+        file_write_all(note, txt, strlen(txt));
+        sys_exit_group(0);
+    }
+    var status = alloc(8);
+    sys_waitpid(c, status, 0);
+    var buf = alloc(32);
+    var n = file_read_all(note, buf, 31);
+    if (n <= 0) { return 0 - 1; }
+    store8(buf + n, 0);
+    return atoi(buf);
+}
+
+# `wait` used to answer at once for a running container, and say 0.
+fn _test_rp_wait_outlasts_the_process() {
+    test_group("rp_wait_outlasts_the_process");
+    kavach_init();
+    var root = "/tmp/stiva-wait-gone";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    var store = image_store_new(root);
+    var img = _test_import(store, "/tmp/stiva-wait-gone.tar", "app", "v1", "x", 1);
+    var mgr = container_manager_new(root, store);
+    var rec = container_manager_create(mgr, img, _rp_noop_cfg("w"));
+    assert(rec != 0, "created");
+    var rr: Container = rec;
+    var pid = _rp_orphan(400);
+    assert(pid > 0, "a process to wait for");
+    rr.state = CONTAINER_STATE_RUNNING;
+    rr.pid = pid;
+    rr.start_ticks = _cm_proc_start_ticks(pid);
+    assert(rr.start_ticks > 0, "it is alive");
+    container_manager_wait_gone(mgr, "w");
+    assert_eq(_cm_proc_start_ticks(pid), 0, "wait came back after the process had gone");
+    # A recycled pid must not hold it up: these ticks belong to nothing.
+    rr.pid = sys_getpid();
+    rr.start_ticks = 1;
+    container_manager_wait_gone(mgr, "w");
+    # Nor does a state with no process.
+    rr.state = CONTAINER_STATE_STOPPED;
+    rr.start_ticks = _cm_proc_start_ticks(sys_getpid());
+    container_manager_wait_gone(mgr, "w");
+    assert_eq(1, 1, "and the rest returned at once");
+    return 0;
+}
+
+# pasta forks into the background and goes away by itself, so its recorded pid is usually stale
+# and may be someone else's by the time a container stops.
+fn _test_rp_rootless_helper_is_only_signalled_with_its_ticks() {
+    test_group("rp_rootless_helper_is_only_signalled_with_its_ticks");
+    var root = "/tmp/stiva-rl-stop";
+    _stor_remove_dir_all(root);
+    sys_mkdir(root, 493);
+    sys_mkdir("/tmp/stiva-rl-stop/containers", 493);
+    sys_mkdir(_cm_container_dir(root, "abc"), 493);
+    var pf = _cm_rootless_pidfile(root, "abc");
+    var pid = _rp_orphan(10000);
+    assert(pid > 0, "a helper");
+    var ticks = _cm_proc_start_ticks(pid);
+    var wrong = _rt_cat2(_rt_int_to_cstr(pid), " 1");
+    file_write_all(pf, wrong, strlen(wrong));
+    _cm_stop_rootless_net(root, "abc");
+    sleep_ms(100);                              # a signal, had one gone out, would have landed
+    assert_eq(_cm_proc_start_ticks(pid), ticks, "wrong ticks: it lives");
+    assert_eq(file_exists(pf), 0, "and the record is gone");
+    var old = _rt_int_to_cstr(pid);
+    file_write_all(pf, old, strlen(old));
+    _cm_stop_rootless_net(root, "abc");
+    sleep_ms(100);
+    assert_eq(_cm_proc_start_ticks(pid), ticks, "a record with no ticks: it lives");
+    _cm_rootless_record(pf, pid);
+    _cm_stop_rootless_net(root, "abc");
+    var tries = 0;
+    while (tries < 200 && _cm_proc_start_ticks(pid) != 0) {
+        sleep_ms(10);
+        tries = tries + 1;
+    }
+    assert_eq(_cm_proc_start_ticks(pid), 0, "its own record stops it");
+    return 0;
+}
+
+fn _test_rp_no_backend_means_no_helper() {
+    test_group("rp_no_backend_means_no_helper");
+    assert_eq(start_rootless_network(99, 1, 0, "/tmp/stiva-rl-none.log"), 0, "nothing was started");
+    return 0;
+}
+
+fn _test_rp_proc_ppid() {
+    test_group("rp_proc_ppid");
+    var me = sys_getpid();
+    assert(_rt_proc_ppid(me) > 0, "reads a parent");
+    assert_eq(_rt_proc_ppid(4194305), 0, "no such process");
+    assert_eq(_rt_pid_descends_from(me, me), 1, "itself");
+    assert_eq(_rt_pid_descends_from(_rt_proc_ppid(me), me), 0, "not its parent");
+    var c = sys_fork();
+    if (c == 0) {
+        sleep_ms(200);
+        sys_exit_group(0);
+    }
+    assert_eq(_rt_pid_descends_from(c, me), 1, "its child");
+    var status = alloc(8);
+    sys_waitpid(c, status, 0);
+    return 0;
+}
+
+# Writes to a cgroup apply to everything in it. Freezing a shared one froze the operator's session.
+fn _test_rp_cgroup_must_be_the_containers_alone() {
+    test_group("rp_cgroup_must_be_the_containers_alone");
+    var d = "/tmp/stiva-fake-cg";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    var procs = "/tmp/stiva-fake-cg/cgroup.procs";
+    var me = sys_getpid();
+    var mine = _rt_cat2(_rt_int_to_cstr(me), "\n");
+    file_write_all(procs, mine, strlen(mine));
+    assert_eq(_rt_cgroup_holds_only(d, me), 1, "only its own process");
+    var c = sys_fork();
+    if (c == 0) {
+        sleep_ms(200);
+        sys_exit_group(0);
+    }
+    var both = _rt_cat3(mine, _rt_int_to_cstr(c), "\n");
+    file_write_all(procs, both, strlen(both));
+    assert_eq(_rt_cgroup_holds_only(d, me), 1, "and its child");
+    var status = alloc(8);
+    sys_waitpid(c, status, 0);
+    var other = _rt_cat2(mine, "1\n");
+    file_write_all(procs, other, strlen(other));
+    assert_eq(_rt_cgroup_holds_only(d, me), 0, "anyone else");
+    file_write_all(procs, mine, strlen(mine));
+    sys_mkdir("/tmp/stiva-fake-cg/child", 493);
+    assert_eq(_rt_cgroup_holds_only(d, me), 0, "a child cgroup, whose processes it cannot list");
+    assert_eq(_rt_cgroup_holds_only("/tmp/stiva-no-such-cg", me), 0, "unreadable");
+    # A test runs alongside its parent, so this has to refuse rather than freeze itself.
+    assert_eq(pause_container(me), STIVA_ERR_RUNTIME, "pause refuses a shared cgroup");
+    return 0;
+}
+
+# Write `lines` copies of `line` to `path`, then `last` once.
+fn _rp_write_long_log(path, line, lines, last) {
+    sys_unlink(path);
+    var fd = file_open(path, O_WRONLY | O_CREAT, 420);
+    var n = strlen(line);
+    var i = 0;
+    while (i < lines) {
+        sys_write(fd, line, n);
+        i = i + 1;
+    }
+    sys_write(fd, last, strlen(last));
+    sys_close(fd);
+    return 0;
+}
+
+# Past the cap both readers used to read the oldest bytes, so the newest were never shown.
+fn _test_rp_long_logs_read_their_newest_end() {
+    test_group("rp_long_logs_read_their_newest_end");
+    var p = "/tmp/stiva-long.log";
+    _rp_write_long_log(p, "an old line of the log\n", 250000, "the newest\n");
+    var t = container_log_tail(p, 1);
+    assert(t != 0, "read");
+    if (t == 0) { return 0; }
+    assert_eq(streq(t, "the newest\n"), 1, "the last line is the last line");
+    var all = container_log_tail(p, 0);
+    assert_eq(memeq(all, "an old line", 11), 1, "a cut starts on a whole line");
+    var cell = alloc(8);
+    assert(_img_read_tail(p, 64, cell) != 0, "a small window");
+    assert(load64(cell) < 63, "the partial first line went");
+    _rp_write_long_log(p, "short\n", 3, "end\n");
+    var small = _img_read_tail(p, 4194304, cell);
+    assert_eq(load64(cell), 22, "a short file comes back whole");
+    assert_eq(memeq(small, "short\n", 6), 1, "from its start");
+    assert_eq(_img_read_tail("/tmp/stiva-no-such.log", 64, cell), 0, "an absent file");
+    var ap = "/tmp/stiva-long-audit.log";
+    var older = audit_entry_container(AUDIT_OP_START, "old", AUDIT_RESULT_SUCCESS, 0);
+    var newer = audit_entry_container(AUDIT_OP_START, "fresh", AUDIT_RESULT_SUCCESS, 0);
+    var line = _rt_cat2(audit_entry_to_json(older), "\n");
+    var fresh = _rt_cat2(audit_entry_to_json(newer), "\n");
+    _rp_write_long_log(ap, line, 1048576 / strlen(line) + 10, fresh);
+    var log = stiva_audit_log_new(ap);
+    var got = audit_log_read_entries(log, 1);
+    assert_eq(vec_len(got), 1, "one entry");
+    if (vec_len(got) == 1) {
+        var e = vec_get(got, 0);
+        assert_eq(streq(AuditEntry_container_id(e), "fresh"), 1, "the audit log's newest");
+    }
+    return 0;
+}
+
+# Nothing below the cap can be fingerprinted, so a deep tree must never match a cached layer.
+fn _test_rp_a_too_deep_source_is_never_cached() {
+    test_group("rp_a_too_deep_source_is_never_cached");
+    var top = "/tmp/stiva-deep-src";
+    _stor_remove_dir_all(top);
+    sys_mkdir(top, 493);
+    var at = top;
+    var i = 0;
+    while (i < 70) {
+        at = _rt_cat2(at, "/d");
+        sys_mkdir(at, 493);
+        i = i + 1;
+    }
+    var a = _bld_source_fingerprint("/tmp", "stiva-deep-src");
+    var b = _bld_source_fingerprint("/tmp", "stiva-deep-src");
+    assert_eq(streq(a, b), 0, "no two keys match");
+    var shallow = "/tmp/stiva-shallow-src";
+    _stor_remove_dir_all(shallow);
+    sys_mkdir(shallow, 493);
+    file_write_all("/tmp/stiva-shallow-src/f", "x", 1);
+    assert_eq(streq(_bld_source_fingerprint("/tmp", "stiva-shallow-src"),
+        _bld_source_fingerprint("/tmp", "stiva-shallow-src")), 1, "an ordinary one is stable");
+    return 0;
+}
+
+fn _test_rp_stivafile_names() {
+    test_group("rp_stivafile_names");
+    assert_eq(_bld_name_is_valid("app"), 1, "plain");
+    assert_eq(_bld_name_is_valid("team/app-1.x_y"), 1, "with a path");
+    assert_eq(_bld_name_is_valid(""), 0, "empty");
+    assert_eq(_bld_name_is_valid("a b"), 0, "a space");
+    assert_eq(_bld_name_is_valid("../x"), 0, "a dot first");
+    assert_eq(_bld_name_is_valid("a/"), 0, "an empty component");
+    assert_eq(_bld_name_is_valid("a//b"), 0, "an empty component inside");
+    assert_eq(_bld_name_is_valid("a:b"), 0, "a tag inside");
+    assert_eq(_bld_name_is_valid("a\x1b[2J"), 0, "an escape sequence");
+    assert_eq(_bld_tag_is_valid("v1.2-rc_3"), 1, "a tag");
+    assert_eq(_bld_tag_is_valid("_x"), 1, "an underscore first");
+    assert_eq(_bld_tag_is_valid(""), 0, "empty");
+    assert_eq(_bld_tag_is_valid(".x"), 0, "a dot first");
+    assert_eq(_bld_tag_is_valid("a/b"), 0, "a slash");
+    var head = "[image]\nbase = \"local/b:v1\"\nname = \"app\"\n";
+    assert(parse_build_spec(head) != 0, "a good spec parses");
+    assert_eq(parse_build_spec("[image]\nbase = \"b\"\nname = \"a b\"\n"), 0, "a bad name refuses");
+    assert_eq(parse_build_spec("[image]\nbase = \"b\"\nname = \"a\"\ntag = \"x y\"\n"), 0,
+      "a bad tag refuses");
+    assert(parse_build_spec(_rt_cat2(head, "[config]\nexpose = [80, 65535]\n")) != 0, "ports parse");
+    assert_eq(parse_build_spec(_rt_cat2(head, "[config]\nexpose = [65536]\n")), 0, "too high");
+    assert_eq(parse_build_spec(_rt_cat2(head, "[config]\nexpose = [0]\n")), 0, "zero");
+    return 0;
+}
+
+fn _test_rp_replicas() {
+    test_group("rp_replicas");
+    assert_eq(_ans_parse_replicas("0"), 0, "zero");
+    assert_eq(_ans_parse_replicas("3"), 3, "three");
+    assert_eq(_ans_parse_replicas("65535"), 65535, "the most");
+    assert_eq(_ans_parse_replicas("65536"), 0 - 1, "one more");
+    assert_eq(_ans_parse_replicas("99999999999999999999"), 0 - 1, "wraps in atoi");
+    assert_eq(_ans_parse_replicas("-1"), 0 - 1, "negative");
+    assert_eq(_ans_parse_replicas("x"), 0 - 1, "text");
+    assert_eq(parse_ansamblu("[services.a]\nimage = \"x\"\nreplicas = 99999999999999999999\n"), 0,
+      "a file that asks for that is refused");
+    return 0;
+}
+
+# A silently shorter key is a different key.
+fn _test_rp_load_key_is_never_cut_short() {
+    test_group("rp_load_key_is_never_cut_short");
+    var p = "/tmp/stiva-long-key";
+    var big = alloc(4097);
+    memset(big, 66, 4097);
+    var len = alloc(8);
+    file_write_all(p, big, 4097);
+    assert_eq(load_key(key_source_new_file(p), len), 0, "one byte too many");
+    file_write_all(p, big, 4096);
+    assert(load_key(key_source_new_file(p), len) != 0, "the most");
+    assert_eq(load64(len), 4096, "all of it");
+    file_write_all(p, big, 0);
+    assert_eq(load_key(key_source_new_file(p), len), 0, "nothing at all");
+    return 0;
+}
+
+fn _test_rp_audit_identity_is_the_kernels() {
+    test_group("rp_audit_identity_is_the_kernels");
+    var u = current_user();
+    assert_eq(memeq(u, "uid:", 4), 1, "not what $USER claims");
+    assert_eq(atoi(u + 4), sys_geteuid(), "the effective uid");
+    return 0;
+}
+
+# The reader skips lines it cannot parse, so a stray byte in a name hid the entry from its own log.
+fn _test_rp_audit_lines_stay_json() {
+    test_group("rp_audit_lines_stay_json");
+    assert_eq(streq(_audit_json_escape("caf\xc3\xa9"), "caf\xc3\xa9"), 1, "two-byte UTF-8 passes");
+    assert_eq(streq(_audit_json_escape("\xf0\x9f\x93\xa6"), "\xf0\x9f\x93\xa6"), 1, "four-byte too");
+    assert_eq(streq(_audit_json_escape("a\xffb"), "a\\ufffdb"), 1, "a lone byte is replaced");
+    assert_eq(streq(_audit_json_escape("a\xc3"), "a\\ufffd"), 1, "a cut sequence");
+    assert_eq(streq(_audit_json_escape("\xc0\xaf"), "\\ufffd\\ufffd"), 1, "an overlong form");
+    assert_eq(streq(_audit_json_escape("\xed\xa0\x80"), "\\ufffd\\ufffd\\ufffd"), 1, "a surrogate");
+    var line = audit_entry_to_json(audit_entry_container(AUDIT_OP_START, "bad\xffname", AUDIT_RESULT_SUCCESS, 0));
+    assert(bayan_json_v_parse_buf(line, strlen(line)) != 0, "a line with one parses");
+    return 0;
+}
+
+fn _test_rp_ipv6_formatting() {
+    test_group("rp_ipv6_formatting");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("2001:db8::1")), "2001:db8::1"), 1, "a gap in the middle");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("::1")), "::1"), 1, "a gap at the start");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("fd00::")), "fd00::"), 1, "a gap at the end");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("::")), "::"), 1, "all gap");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("1:0:0:2:0:0:0:3")), "1:0:0:2::3"), 1, "the longest gap");
+    assert_eq(streq(_np_fmt_ipv6(_np_parse_ipv6("1:2:3:4:5:6:7:8")), "1:2:3:4:5:6:7:8"), 1, "no gap");
+    return 0;
+}
+
+# The pool ran on past its subnet, handing out addresses no route reaches.
+fn _test_rp_ipv6_pool_stays_in_its_subnet() {
+    test_group("rp_ipv6_pool_stays_in_its_subnet");
+    var pool = ipv6_pool_new("fd00::/124");
+    assert(pool != 0, "a pool");
+    if (pool == 0) { return 0; }
+    var got = 0;
+    var first = 0;
+    var ip = ipv6_pool_allocate(pool);
+    while (ip != 0 && got < 40) {
+        var masked = _np_ipv6_dup(ip);
+        _np_ipv6_mask(masked, 124);
+        assert_eq(streq(_np_fmt_ipv6(masked), "fd00::"), 1, "inside the subnet");
+        if (first == 0) { first = ip; }
+        got = got + 1;
+        ip = ipv6_pool_allocate(pool);
+    }
+    assert_eq(got, 14, "all the room there is, then none");
+    assert_eq(ipv6_pool_release(pool, first), 1, "one back");
+    var again = ipv6_pool_allocate(pool);
+    assert(again != 0, "and it can go out again");
+    if (again != 0) { assert_eq(_np_ipv6_eq(again, first), 1, "the same one"); }
+    return 0;
+}
+
+fn _test_rp_prefix_cannot_wrap() {
+    test_group("rp_prefix_cannot_wrap");
+    assert_eq(ipv6_pool_new("fd00::/18446744073709551680"), 0, "wraps round to 64");
+    assert_eq(ip_pool_new("10.0.0.0/18446744073709551640"), 0, "wraps round to 24");
+    assert(ipv6_pool_new("fd00::/64") != 0, "a real one");
+    return 0;
+}
+
+fn _test_rp_dns_names_and_servers() {
+    test_group("rp_dns_names_and_servers");
+    assert_eq(network_dns_name_is_valid("web-1.svc_x"), 1, "a hostname");
+    assert_eq(network_dns_name_is_valid(""), 0, "empty");
+    assert_eq(network_dns_name_is_valid("a b"), 0, "a space");
+    assert_eq(network_dns_name_is_valid("a\n10.0.0.1 evil"), 0, "a line of its own");
+    var reg = dns_registry_new();
+    assert_eq(dns_registry_register(reg, "web", "172.17.0.2"), 0, "registered");
+    assert_eq(dns_registry_register(reg, "a\nb", "172.17.0.3"), STIVA_ERR_NETWORK, "refused");
+    assert_eq(dns_registry_resolve(reg, "a\nb"), 0, "and absent");
+    var d = "/tmp/stiva-dns-root";
+    _stor_remove_dir_all(d);
+    sys_mkdir(d, 493);
+    assert_eq(network_dns_inject_hosts(d, network_dns_parse_ipv4("172.17.0.2"), "a\nb"), STIVA_ERR_IO,
+      "/etc/hosts refuses it");
+    assert_eq(network_dns_inject_hostname(d, "a\nb"), STIVA_ERR_IO, "/etc/hostname refuses it");
+    assert_eq(dns_registry_inject_into(reg, d, "172.17.0.2", "a\nb"), STIVA_ERR_IO, "so does the registry");
+    assert_eq(dns_registry_inject_into(reg, d, "172.17.0.2", "web"), STIVA_ERR_OK, "a good one writes");
+    var sb = alloc(STAT_BUFSZ);
+    assert_eq(sys_stat("/tmp/stiva-dns-root/etc", sb), 0, "/etc exists");
+    assert_eq(_stor_st_mode(sb) & 511, 493, "and a payload that is not root can read it");
+    var servers = network_dns_parse_resolv_conf("nameserver 127.0.0.53\nnameserver 1.1.1.1\n");
+    assert_eq(vec_len(_network_dns_reachable(servers)), 1, "loopback does not reach the host");
+    assert_eq(vec_len(_network_dns_reachable(network_dns_parse_resolv_conf("nameserver 127.0.0.1\n"))), 0,
+      "so a host with only that has none to offer");
+    return 0;
+}
+
+fn _test_rp_port_protocols() {
+    test_group("rp_port_protocols");
+    var one = vec_new();
+    vec_push(one, "8080:80/udp");
+    assert(parse_port_mappings(one) != 0, "udp");
+    vec_set(one, 0, "8080:80/tcp");
+    assert(parse_port_mappings(one) != 0, "tcp");
+    vec_set(one, 0, "8080:80");
+    assert(parse_port_mappings(one) != 0, "tcp by default");
+    vec_set(one, 0, "8080:80/sctp");
+    assert_eq(parse_port_mappings(one), 0, "nothing else");
+    vec_set(one, 0, "80/tcp\",\"guest_addr\":\"1.2.3.4");
+    assert_eq(parse_port_mappings(one), 0, "least of all JSON");
+    return 0;
+}
+
+fn _test_exec_container_bad_backend() {
     test_group("exec_container_bad_backend");
     kavach_init();
     var cfg: ContainerConfig = container_config_default();
@@ -337,7 +1174,7 @@ fn test_exec_container_bad_backend() {
 # Rust hid: the verdict accessor, and QUARANTINE-vs-BLOCK. ContainerExecResult
 # fields are read by raw offset (exit_code@0 stdout@8 stderr@16 duration@24
 # timed_out@32) per the cycc struct-id 20/21 workaround.
-fn test_scan_output_clean_passes() {
+fn _test_scan_output_clean_passes() {
     test_group("scan_output_clean_passes");
     kavach_init();
     var r = container_exec_result_new(0, "hello world", "", 10, 0);
@@ -350,7 +1187,7 @@ fn test_scan_output_clean_passes() {
     return 0;
 }
 
-fn test_scan_output_blocks_private_key() {
+fn _test_scan_output_blocks_private_key() {
     test_group("scan_output_blocks_private_key");
     kavach_init();
     var r = container_exec_result_new(0,
@@ -361,7 +1198,7 @@ fn test_scan_output_blocks_private_key() {
     return 0;
 }
 
-fn test_scan_output_disabled_passes_everything() {
+fn _test_scan_output_disabled_passes_everything() {
     test_group("scan_output_disabled_passes_everything");
     kavach_init();
     var p = ext_policy_default();
@@ -373,7 +1210,7 @@ fn test_scan_output_disabled_passes_everything() {
     return 0;
 }
 
-fn test_scan_output_blocks_oversized() {
+fn _test_scan_output_blocks_oversized() {
     test_group("scan_output_blocks_oversized");
     kavach_init();
     var p = ext_policy_default();
@@ -389,7 +1226,7 @@ fn test_scan_output_blocks_oversized() {
 }
 
 # Beyond the oracle: the null guards Rust's borrow checker made unreachable.
-fn test_scan_output_null_guards() {
+fn _test_scan_output_null_guards() {
     test_group("scan_output_null_guards");
     kavach_init();
     var r = container_exec_result_new(0, "clean", "", 0, 0);
@@ -400,7 +1237,7 @@ fn test_scan_output_null_guards() {
 
 # stderr is scanned too — gate_apply concatenates stdout + "\n" + stderr
 # (kavach.cyr:5148), so a secret on stderr alone must still block.
-fn test_scan_output_scans_stderr() {
+fn _test_scan_output_scans_stderr() {
     test_group("scan_output_scans_stderr");
     kavach_init();
     var r = container_exec_result_new(1, "",
@@ -410,7 +1247,7 @@ fn test_scan_output_scans_stderr() {
 }
 
 # ── security_score (rust-old runtime.rs:615) — score_backend passthrough ──
-fn test_security_score() {
+fn _test_security_score() {
     test_group("security_score");
     kavach_init();
     var s = security_score();
@@ -420,7 +1257,7 @@ fn test_security_score() {
     return 0;
 }
 
-fn test_security_score_for() {
+fn _test_security_score_for() {
     test_group("security_score_for");
     kavach_init();
     var s = security_score_for(KavachBackend.PROCESS, policy_basic());
@@ -431,7 +1268,7 @@ fn test_security_score_for() {
 }
 
 # ── sakshi logging actually emits (not just compiles) ──
-fn test_runpath_logging_emits() {
+fn _test_runpath_logging_emits() {
     test_group("runpath_logging_emits");
     kavach_init();
     sakshi_output_buffer();      # route emits to the in-memory ring
@@ -493,7 +1330,7 @@ fn _test_import(store, tmpfile, name, tag, content, clen) {
 # the persisted record, the container.log, and a lifecycle event on the bus.
 # This unit includes all 26 modules — the cycc-sensitive shape for Image /
 # ContainerExecResult field access on the create/start path.
-fn test_cm_create_start_oneshot() {
+fn _test_cm_create_start_oneshot() {
     test_group("cm_create_start_oneshot");
     kavach_init();
     var root = _rt_cat2("/tmp/stiva-cm-run-", _rt_int_to_cstr(getpid()));
@@ -554,7 +1391,7 @@ fn test_cm_create_start_oneshot() {
 # filesystem. Asserted through container_manager_get_rootfs so the test is
 # mode-agnostic: it must hold whether the overlay mounted or the flatten
 # fallback ran, and the CI user has no CAP_SYS_ADMIN so it is the latter here.
-fn test_cm_create_rootfs_populated() {
+fn _test_cm_create_rootfs_populated() {
     test_group("cm_create_rootfs_populated");
     kavach_init();
     var root = _rt_cat2("/tmp/stiva-cm-rootfs-", _rt_int_to_cstr(getpid()));
@@ -590,7 +1427,7 @@ fn test_cm_create_rootfs_populated() {
     # container, so the mode matters as much as the presence of the file.
     var sb = alloc(144);
     assert_eq(sys_lstat(_rt_cat2(rootfs, "/entry.sh"), sb), 0, "lstat entry.sh");
-    assert_eq(load64(sb + 24) & 4095, 493, "entrypoint kept its exec bit");
+    assert_eq(_stor_st_mode(sb) & 4095, 493, "entrypoint kept its exec bit");
 
     # When the fallback ran, it left the marker `diff` needs to tell a flattened
     # rootfs from an overlay merged dir (internals is never persisted).
@@ -602,7 +1439,7 @@ fn test_cm_create_rootfs_populated() {
 }
 
 # ── moved from stiva.tcyr (image ref/digest/blob/index) — cycc identifier cap ──
-fn test_image_ref_parse() {
+fn _test_image_ref_parse() {
     test_group("image_ref_parse");
     _img_ck_ref("nginx", "docker.io", "library/nginx", "latest");
     _img_ck_ref("nginx:1.25", "docker.io", "library/nginx", "1.25");
@@ -618,27 +1455,30 @@ fn test_image_ref_parse() {
     return 0;
 }
 
-fn test_image_ref_digest() {
+fn _test_image_ref_digest() {
     test_group("image_ref_digest");
     var r = image_ref_parse("nginx@sha256:abcdef1234567890000000000000000000000000000000000000000000000000");
     var rr: ImageRef = r;
     assert_eq(streq(rr.repository, "library/nginx"), 1, "digest repo");
     assert_eq(streq(rr.tag, "latest"), 1, "digest tag latest");
-    assert_eq(streq(rr.digest, "sha256:abcdef1234567890000000000000000000000000000000000000000000000000"), 1, "digest value");
+    assert_eq(streq(rr.digest, "sha256:abcdef1234567890000000000000000000000000000000000000000000000000"), 1,
+      "digest value");
     var r2 = image_ref_parse("nginx:1.25@sha256:abc1230000000000000000000000000000000000000000000000000000000000");
     var rr2: ImageRef = r2;
     assert_eq(streq(rr2.tag, "1.25"), 1, "tagged-digest tag");
-    assert_eq(streq(rr2.digest, "sha256:abc1230000000000000000000000000000000000000000000000000000000000"), 1, "tagged-digest digest");
-    var r3 = image_ref_parse("ghcr.io/user/repo:v1@sha256:deadbeef00000000000000000000000000000000000000000000000000000000");
+    assert_eq(streq(rr2.digest, "sha256:abc1230000000000000000000000000000000000000000000000000000000000"), 1,
+      "tagged-digest digest");
+    var r3 = image_ref_parse("ghcr.io/user/repo:v1@sha256:deadbeef00000000000000000000000000000000000000000000000000000000");   #skip-lint
     var rr3: ImageRef = r3;
     assert_eq(streq(rr3.registry, "ghcr.io"), 1, "fulldigest reg");
     assert_eq(streq(rr3.repository, "user/repo"), 1, "fulldigest repo");
     assert_eq(streq(rr3.tag, "v1"), 1, "fulldigest tag");
-    assert_eq(streq(rr3.digest, "sha256:deadbeef00000000000000000000000000000000000000000000000000000000"), 1, "fulldigest digest");
+    assert_eq(streq(rr3.digest, "sha256:deadbeef00000000000000000000000000000000000000000000000000000000"), 1,
+      "fulldigest digest");
     return 0;
 }
 
-fn test_image_full_ref() {
+fn _test_image_full_ref() {
     test_group("image_full_ref");
     var r = image_ref_parse("ghcr.io/user/repo:v1");
     assert_eq(streq(image_ref_full_ref(r), "ghcr.io/user/repo:v1"), 1, "full_ref exact");
@@ -647,7 +1487,7 @@ fn test_image_full_ref() {
     return 0;
 }
 
-fn test_image_digest_helpers() {
+fn _test_image_digest_helpers() {
     test_group("image_digest_helpers");
     var d1 = sha256_digest("test", 4);
     var d2 = sha256_digest("test", 4);
@@ -659,7 +1499,7 @@ fn test_image_digest_helpers() {
     return 0;
 }
 
-fn test_image_blob_store() {
+fn _test_image_blob_store() {
     test_group("image_blob_store");
     var root = "/tmp/stiva_img_test_store";
     var store = image_store_new(root);
@@ -689,7 +1529,7 @@ fn test_image_blob_store() {
     return 0;
 }
 
-fn test_image_index_round_trip() {
+fn _test_image_index_round_trip() {
     test_group("image_index_round_trip");
     var root = "/tmp/stiva_img_idx_rt";
     var store = image_store_new(root);
@@ -732,7 +1572,7 @@ fn test_image_index_round_trip() {
     return 0;
 }
 
-fn test_image_index_dedup_on_re_add() {
+fn _test_image_index_dedup_on_re_add() {
     test_group("image_index_dedup_on_re_add");
     var root = "/tmp/stiva_img_idx_dedup";
     var store = image_store_new(root);
@@ -752,7 +1592,7 @@ fn test_image_index_dedup_on_re_add() {
     return 0;
 }
 
-fn test_image_index_multiple() {
+fn _test_image_index_multiple() {
     test_group("image_index_multiple");
     var root = "/tmp/stiva_img_idx_multi";
     var store = image_store_new(root);
@@ -769,7 +1609,7 @@ fn test_image_index_multiple() {
     return 0;
 }
 
-fn test_image_index_remove() {
+fn _test_image_index_remove() {
     test_group("image_index_remove");
     var root = "/tmp/stiva_img_idx_rm";
     var store = image_store_new(root);
@@ -793,13 +1633,14 @@ fn test_image_index_remove() {
     return 0;
 }
 
-fn test_image_index_remove_missing() {
+fn _test_image_index_remove_missing() {
     test_group("image_index_remove_missing");
     var root = "/tmp/stiva_img_idx_rmmiss";
     var store = image_store_new(root);
     _test_store_reset(root);
     # rust-old: Err(ImageNotFound) → sentinel -1 here.
-    assert_eq(image_store_remove(store, "sha256:d000000000000000000000000000000000000000000000000000000000000000"), 0 - 1,
+    assert_eq(image_store_remove(store, "sha256:d000000000000000000000000000000000000000000000000000000000000000"),
+      0 - 1,
       "remove nonexistent -> -1");
     return 0;
 }
@@ -808,7 +1649,7 @@ fn test_image_index_remove_missing() {
 # drops blobs no surviving image references. (Single-layer imports don't share
 # blobs across distinct content, so this exercises isolation rather than a
 # shared layer; a genuine cross-image shared layer awaits multi-layer builds.)
-fn test_image_index_remove_shared_blob() {
+fn _test_image_index_remove_shared_blob() {
     test_group("image_index_remove_shared_blob");
     var root = "/tmp/stiva_img_idx_shared";
     var store = image_store_new(root);
@@ -839,7 +1680,7 @@ fn test_image_index_remove_shared_blob() {
 
 # A present-but-corrupt index.json must NOT be silently overwritten by the next
 # add (which would orphan every other image). The add is refused instead.
-fn test_image_index_corrupt_guard() {
+fn _test_image_index_corrupt_guard() {
     test_group("image_index_corrupt_guard");
     var root = "/tmp/stiva_img_idx_corrupt";
     var store = image_store_new(root);
@@ -858,7 +1699,7 @@ fn test_image_index_corrupt_guard() {
 }
 
 # ── container state serde + persistence (rust-old state.json round-trip) ──
-fn test_container_serde_roundtrip() {
+fn _test_container_serde_roundtrip() {
     test_group("container_serde_roundtrip");
     var cfg: ContainerConfig = container_config_default();
     var cmd = vec_new(); vec_push(cmd, "echo"); vec_push(cmd, "hi"); cfg.command = cmd;
@@ -885,10 +1726,11 @@ fn test_container_serde_roundtrip() {
     return 0;
 }
 
-fn test_container_serde_nulls() {
+fn _test_container_serde_nulls() {
     test_group("container_serde_nulls");
     # name/pid/started_at/exit_code None → JSON null → parse back to 0 / -1.
-    var ctr = container_new("id2", 0, "img", "ref:2", CONTAINER_STATE_CREATED, 0 - 1, 5, 0 - 1, container_config_default(), 0 - 1);
+    var ctr = container_new("id2", 0, "img", "ref:2", CONTAINER_STATE_CREATED, 0 - 1, 5, 0 - 1,
+      container_config_default(), 0 - 1);
     var s = json_v_build_pretty(container_to_jv(ctr), 2);
     var bc: Container = container_from_jv(bayan_json_v_parse_buf(str_data(s), str_len(s)));
     assert_eq(bc.name, 0, "name None");
@@ -898,12 +1740,14 @@ fn test_container_serde_nulls() {
     return 0;
 }
 
-fn test_container_state_save_load() {
+fn _test_container_state_save_load() {
     test_group("container_state_save_load");
     var root = _rt_cat2("/tmp/stiva-st-", _rt_int_to_cstr(getpid()));
     sys_mkdir(root, 493);
-    var c1 = container_new("aaa", 0, "img", "ref:1", CONTAINER_STATE_STOPPED, 0 - 1, 10, 0 - 1, container_config_default(), 0);
-    var c2 = container_new("bbb", "web", "img2", "ref:2", CONTAINER_STATE_RUNNING, 99, 20, 21, container_config_default(), 0 - 1);
+    var c1 = container_new("aaa", 0, "img", "ref:1", CONTAINER_STATE_STOPPED, 0 - 1, 10, 0 - 1,
+      container_config_default(), 0);
+    var c2 = container_new("bbb", "web", "img2", "ref:2", CONTAINER_STATE_RUNNING, 99, 20, 21,
+      container_config_default(), 0 - 1);
     var cs = vec_new(); vec_push(cs, c1); vec_push(cs, c2);
     assert_eq(container_state_save(root, cs), 1, "saved");
 
@@ -920,7 +1764,7 @@ fn test_container_state_save_load() {
     return 0;
 }
 
-fn test_container_state_load_missing() {
+fn _test_container_state_load_missing() {
     test_group("container_state_load_missing");
     # No state.json → fresh empty vec (rust-old Ok(HashMap::new())).
     assert_eq(vec_len(container_state_load("/tmp/stiva-nonexistent-root-xyz")), 0, "missing -> empty");
@@ -928,14 +1772,14 @@ fn test_container_state_load_missing() {
 }
 
 # ── image_ref_new + tag (rust-old lib.rs tag) ──
-fn test_image_ref_new() {
+fn _test_image_ref_new() {
     test_group("image_ref_new");
     var r = image_ref_new("local", "demo", "v1", 0);
     assert_eq(streq(image_ref_full_ref(r), "local/demo:v1"), 1, "full_ref local/demo:v1");
     return 0;
 }
 
-fn test_image_store_tag() {
+fn _test_image_store_tag() {
     test_group("image_store_tag");
     var root = _rt_cat2("/tmp/stiva-tag-", _rt_int_to_cstr(getpid()));
     sys_mkdir(root, 493);
@@ -945,14 +1789,15 @@ fn test_image_store_tag() {
     var img = _test_import(store, _rt_cat2(root, "/src.tar"), "src", "1", content, strlen(content));
     var im: Image = img;
     assert_eq(image_store_tag(store, im.id, "dest:2"), 1, "tag by id ok");
-    assert_eq(image_store_tag(store, "sha256:6d697373696e6700000000000000000000000000000000000000000000000000", "x:1"), 0, "tag missing -> 0");
+    assert_eq(image_store_tag(store, "sha256:6d697373696e6700000000000000000000000000000000000000000000000000", "x:1"),
+      0, "tag missing -> 0");
     # local/src:1 + the new dest alias → 2 index entries (manifest blob shared).
     assert_eq(vec_len(image_store_load_index(store)), 2, "2 index entries after tag");
     return 0;
 }
 
 # ── cgroup stats read helpers (rust-old container_stats/read_cgroup_u64) ──
-fn test_cgroup_read_helpers() {
+fn _test_cgroup_read_helpers() {
     test_group("cgroup_read_helpers");
     var d = _rt_cat2("/tmp/stiva-cg-", _rt_int_to_cstr(getpid()));
     sys_mkdir(d, 493);
@@ -970,7 +1815,7 @@ fn test_cgroup_read_helpers() {
 }
 
 # ── container_log_tail (rust-old log_tail) ──
-fn test_container_log_tail() {
+fn _test_container_log_tail() {
     test_group("container_log_tail");
     var lp = _rt_cat2("/tmp/stiva-log-", _rt_int_to_cstr(getpid()));
     var content = "line1\nline2\nline3\nline4\n";
@@ -982,7 +1827,7 @@ fn test_container_log_tail() {
     return 0;
 }
 
-fn test_require_pid_empty_allowed_list() {
+fn _test_require_pid_empty_allowed_list() {
     test_group("require_pid_empty_allowed_list");
     # _container_state_allowed loops `i < n`, so n=0 matches NOTHING — an empty
     # allowed list means "no state is permitted", the inverse of "any state".
@@ -1031,7 +1876,7 @@ fn _t_exec_args(path) {
     return v;
 }
 
-fn test_exec_capture2_splits_streams() {
+fn _test_exec_capture2_splits_streams() {
     test_group("exec_capture2_splits_streams");
     var stub = _t_exec_stub("/tmp/stiva-t-exec-split",
       "#!/bin/sh\necho to-stdout\necho to-stderr >&2\nexit 7\n");
@@ -1053,7 +1898,7 @@ fn test_exec_capture2_splits_streams() {
     return 0;
 }
 
-fn test_exec_capture2_large_stderr_does_not_deadlock() {
+fn _test_exec_capture2_large_stderr_does_not_deadlock() {
     test_group("exec_capture2_large_stderr_does_not_deadlock");
     # THE test that matters. A child writing well past a pipe buffer to stderr
     # BEFORE its first stdout byte deadlocks any single-threaded parent that
@@ -1065,7 +1910,7 @@ fn test_exec_capture2_large_stderr_does_not_deadlock() {
     # This test HANGS rather than fails if that regresses, which is the honest
     # signal — a deadlock is not an assertion failure.
     var stub = _t_exec_stub("/tmp/stiva-t-exec-bigerr",
-      "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");
+      "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done\necho done-stdout\nexit 3\n");   #skip-lint
     var err_path = "/tmp/stiva-t-exec-bigerr.err";
     var buf = alloc(65536);
     var n = _exec_capture2(_t_exec_args(stub), 0, 0, buf, 65535, err_path);
@@ -1078,7 +1923,7 @@ fn test_exec_capture2_large_stderr_does_not_deadlock() {
     return 0;
 }
 
-fn test_exec_capture2_env_and_workdir() {
+fn _test_exec_capture2_env_and_workdir() {
     test_group("exec_capture2_env_and_workdir");
     var stub = _t_exec_stub("/tmp/stiva-t-exec-env",
       "#!/bin/sh\necho \"V=$STIVA_T_VAR\"\npwd\n");
@@ -1100,7 +1945,7 @@ fn test_exec_capture2_env_and_workdir() {
     return 0;
 }
 
-fn test_exec_capture2_missing_binary() {
+fn _test_exec_capture2_missing_binary() {
     test_group("exec_capture2_missing_binary");
     var buf = alloc(1024);
     var n = _exec_capture2(_t_exec_args("/definitely/not/here"), 0, 0, buf, 1023,
@@ -1111,7 +1956,7 @@ fn test_exec_capture2_missing_binary() {
     return 0;
 }
 
-fn test_exec_capture2_signalled_child() {
+fn _test_exec_capture2_signalled_child() {
     test_group("exec_capture2_signalled_child");
     var stub = _t_exec_stub("/tmp/stiva-t-exec-sig", "#!/bin/sh\nkill -9 $$\n");
     var buf = alloc(1024);
@@ -1124,14 +1969,14 @@ fn test_exec_capture2_signalled_child() {
     return 0;
 }
 
-fn test_exec_capture2_large_output_is_not_a_signal_death() {
+fn _test_exec_capture2_large_output_is_not_a_signal_death() {
     test_group("exec_capture2_large_output_is_not_a_signal_death");
     # A command that merely produces more than the cap used to be reported as
     # exit 141 (SIGPIPE): the parent closed the pipe at the cap, the child died
     # on its next write, and a successful command looked like a signal death —
     # with the truncation silent besides.
     var stub = _t_exec_stub("/tmp/stiva-t-exec-big",
-      "#!/bin/sh\ni=0\nwhile [ $i -lt 3000 ]; do echo 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; i=$((i+1)); done\nexit 5\n");
+      "#!/bin/sh\ni=0\nwhile [ $i -lt 3000 ]; do echo 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; i=$((i+1)); done\nexit 5\n");   #skip-lint
     var err_path = "/tmp/stiva-t-exec-big.err";
     var cap = 4096;
     var buf = alloc(cap + 1);
@@ -1153,7 +1998,7 @@ fn test_exec_capture2_large_output_is_not_a_signal_death() {
     return 0;
 }
 
-fn test_exec_capture2_empty_args() {
+fn _test_exec_capture2_empty_args() {
     test_group("exec_capture2_empty_args");
     var buf = alloc(64);
     assert_eq(_exec_capture2(vec_new(), 0, 0, buf, 63, "/tmp/stiva-t-exec-empty.err"), 0 - 1,
@@ -1161,7 +2006,7 @@ fn test_exec_capture2_empty_args() {
     return 0;
 }
 
-fn test_exec_workdir_escape_refused() {
+fn _test_exec_workdir_escape_refused() {
     test_group("exec_workdir_escape_refused");
     # `--wd` is spliced onto /proc/<pid>/root, so a '..' component walks back OUT
     # of the container: the process stays chrooted in but its cwd lands on the
@@ -1186,7 +2031,7 @@ fn test_exec_workdir_escape_refused() {
     return 0;
 }
 
-fn test_exec_scratch_path_is_per_exec() {
+fn _test_exec_scratch_path_is_per_exec() {
     test_group("exec_scratch_path_is_per_exec");
     # Keying the stderr scratch file on the container's pid alone meant two
     # concurrent execs into ONE container shared it, and one exec's stderr was
@@ -1199,7 +2044,7 @@ fn test_exec_scratch_path_is_per_exec() {
     return 0;
 }
 
-fn test_exec_in_container_empty_command() {
+fn _test_exec_in_container_empty_command() {
     test_group("exec_in_container_empty_command");
     # The oracle's only test for this function (rust-old/src/runtime.rs:1745).
     assert_eq(exec_in_container("/tmp", 1, vec_new(), 0, 0), 0, "empty command -> failure");
@@ -1207,7 +2052,7 @@ fn test_exec_in_container_empty_command() {
     return 0;
 }
 
-fn test_cm_exec_requires_running() {
+fn _test_cm_exec_requires_running() {
     test_group("cm_exec_requires_running");
     var root = "/tmp/stiva-t-cm-exec";
     _stor_remove_dir_all(root);
@@ -1245,7 +2090,7 @@ fn _dv_find(entries, status, path) {
     return 0;
 }
 
-fn test_cm_diff_flattened_reports_a_c_d() {
+fn _test_cm_diff_flattened_reports_a_c_d() {
     test_group("cm_diff_flattened_reports_a_c_d");
     var root = "/tmp/stiva-t-diff";
     _stor_remove_dir_all(root);
@@ -1259,6 +2104,7 @@ fn test_cm_diff_flattened_reports_a_c_d() {
     vec_push(entries, _tar_entry_new("app/orig.txt", 48, 420, 0, 0, 5, "orig\n"));
     vec_push(entries, _tar_entry_new("app/gone.txt", 48, 420, 0, 0, 5, "gone\n"));
     vec_push(entries, _tar_entry_new("app/same.txt", 48, 420, 0, 0, 5, "same\n"));
+    vec_push(entries, _tar_entry_new("app/size.txt", 48, 420, 0, 0, 5, "size\n"));
     var tarp = "/tmp/stiva-t-diff.tar";
     xunlink(tarp);
     _stor_write_tar(entries, tarp);
@@ -1280,12 +2126,14 @@ fn test_cm_diff_flattened_reports_a_c_d() {
     var rfs = _container_cat2(_cm_container_dir(root, rc.id), "/rootfs");
     _dv_write(_container_cat2(rfs, "/app/orig.txt"), "CHANGED-AND-LONGER\n");
     _dv_write(_container_cat2(rfs, "/app/added.txt"), "new\n");
+    _dv_write(_container_cat2(rfs, "/app/size.txt"), "SIZE\n");
     xunlink(_container_cat2(rfs, "/app/gone.txt"));
 
     var d = container_manager_diff(mgr, rc.id);
     assert(d != 0, "diff returned");
     if (d == 0) { return 0; }
     assert_eq(_dv_find(d, _CM_DIFF_CHG, "/app/orig.txt"), 1, "C for a modified file");
+    assert_eq(_dv_find(d, _CM_DIFF_CHG, "/app/size.txt"), 1, "C for an edit of the same size");
     assert_eq(_dv_find(d, _CM_DIFF_ADD, "/app/added.txt"), 1, "A for a new file");
     assert_eq(_dv_find(d, _CM_DIFF_DEL, "/app/gone.txt"), 1, "D for a removed file");
     # An untouched file must NOT appear — the fingerprint excludes mtime, so
@@ -1295,7 +2143,7 @@ fn test_cm_diff_flattened_reports_a_c_d() {
     return 0;
 }
 
-fn test_cm_diff_unknown_container() {
+fn _test_cm_diff_unknown_container() {
     test_group("cm_diff_unknown_container");
     var root = "/tmp/stiva-t-diff2";
     _stor_remove_dir_all(root);
@@ -1305,7 +2153,7 @@ fn test_cm_diff_unknown_container() {
     return 0;
 }
 
-fn test_cm_diff_meta_type_parse() {
+fn _test_cm_diff_meta_type_parse() {
     test_group("cm_diff_meta_type_parse");
     # The S_IFMT prefix of a "<type>:<size>:<mode>" fingerprint. 8192 = S_IFCHR,
     # which is how an overlayfs whiteout is spelled.
@@ -1315,7 +2163,7 @@ fn test_cm_diff_meta_type_parse() {
     return 0;
 }
 
-fn test_cm_diff_wh_path_detection() {
+fn _test_cm_diff_wh_path_detection() {
     test_group("cm_diff_wh_path_detection");
     assert_eq(_cm_diff_is_wh_path("/app/.wh.gone"), 1, "a marker component");
     assert_eq(_cm_diff_is_wh_path("/.wh..wh..opq"), 1, "the opaque marker");
@@ -1329,7 +2177,7 @@ fn test_cm_diff_wh_path_detection() {
 # externalization policy never survived a save/load — which is why `logs --scan`
 # had to be an explicit flag.
 
-fn test_scan_policy_round_trips() {
+fn _test_scan_policy_round_trips() {
     test_group("scan_policy_round_trips");
     var cfg: ContainerConfig = container_config_default();
     assert_eq(cfg.scan_policy, 0, "default has no policy");
@@ -1354,7 +2202,7 @@ fn test_scan_policy_round_trips() {
     return 0;
 }
 
-fn test_scan_policy_absent_stays_absent() {
+fn _test_scan_policy_absent_stays_absent() {
     test_group("scan_policy_absent_stays_absent");
     # Every state.json written before this change has `"scan_policy": null`, and
     # must keep meaning "no policy" rather than becoming a zeroed one — a 0
@@ -1368,7 +2216,7 @@ fn test_scan_policy_absent_stays_absent() {
     return 0;
 }
 
-fn test_scan_policy_partial_object_keeps_defaults() {
+fn _test_scan_policy_partial_object_keeps_defaults() {
     test_group("scan_policy_partial_object_keeps_defaults");
     # A field the writer omitted must keep kavach's default, not become 0.
     var o = json_v_obj_new();
@@ -1389,7 +2237,7 @@ fn test_scan_policy_partial_object_keeps_defaults() {
 # and carried on — so an unprivileged `stiva run`, stiva's DEFAULT mode, produced
 # a container with no connectivity and only a warning.
 
-fn test_rootless_bin_path_is_absolute() {
+fn _test_rootless_bin_path_is_absolute() {
     test_group("rootless_bin_path_is_absolute");
     # execve does NOT search PATH, and the child gets an empty environment, so a
     # bare name would always fail.
@@ -1399,7 +2247,7 @@ fn test_rootless_bin_path_is_absolute() {
     return 0;
 }
 
-fn test_rootless_sock_path_is_per_pid() {
+fn _test_rootless_sock_path_is_per_pid() {
     test_group("rootless_sock_path_is_per_pid");
     # Two containers must not share slirp4netns' API socket.
     assert_eq(streq(_rl_sock_path(111), _rl_sock_path(222)), 0, "distinct per pid");
@@ -1407,7 +2255,7 @@ fn test_rootless_sock_path_is_per_pid() {
     return 0;
 }
 
-fn test_rootless_spawn_detached_does_not_wait() {
+fn _test_rootless_spawn_detached_does_not_wait() {
     test_group("rootless_spawn_detached_does_not_wait");
     # THE property that makes this different from _exec_capture2: slirp4netns and
     # pasta run for the container's lifetime, so a primitive that waits would
@@ -1431,13 +2279,13 @@ fn test_rootless_spawn_detached_does_not_wait() {
     return 0;
 }
 
-fn test_rootless_spawn_reports_failure() {
+fn _test_rootless_spawn_reports_failure() {
     test_group("rootless_spawn_reports_failure");
     assert_eq(_rl_spawn_detached(vec_new(), 0), 0 - 1, "an empty argv is refused");
     return 0;
 }
 
-fn test_rootless_handle_accessors() {
+fn _test_rootless_handle_accessors() {
     test_group("rootless_handle_accessors");
     var h = alloc(24);
     store64(h, 4242);
@@ -1456,7 +2304,7 @@ fn test_rootless_handle_accessors() {
 # semantics come from samay; what is tested here is stiva's side — validation,
 # persistence, and the mapping back from a fired task to a container spec.
 
-fn test_cron_expr_validation() {
+fn _test_cron_expr_validation() {
     test_group("cron_expr_validation");
     assert_eq(cron_expr_is_valid("* * * * *"), 1, "every minute");
     assert_eq(cron_expr_is_valid("0 3 * * *"), 1, "daily at 03:00");
@@ -1472,7 +2320,7 @@ fn test_cron_expr_validation() {
     return 0;
 }
 
-fn test_cron_store_round_trip() {
+fn _test_cron_store_round_trip() {
     test_group("cron_store_round_trip");
     var root = "/tmp/stiva-t-cron";
     _stor_remove_dir_all(root);
@@ -1512,7 +2360,7 @@ fn test_cron_store_round_trip() {
     return 0;
 }
 
-fn test_cron_due_uses_injected_clock() {
+fn _test_cron_due_uses_injected_clock() {
     test_group("cron_due_uses_injected_clock");
     # samay's check_due_at takes the clock, so this is deterministic.
     var jobs = vec_new();
@@ -1527,7 +2375,7 @@ fn test_cron_due_uses_injected_clock() {
     return 0;
 }
 
-fn test_cron_disabled_never_fires() {
+fn _test_cron_disabled_never_fires() {
     test_group("cron_disabled_never_fires");
     var jobs = vec_new();
     vec_push(jobs, cron_job_new("off", "* * * * *", "local/x:v1", vec_new(), 0, 0));
@@ -1535,7 +2383,7 @@ fn test_cron_disabled_never_fires() {
     return 0;
 }
 
-fn test_cron_strip_task_suffix() {
+fn _test_cron_strip_task_suffix() {
     test_group("cron_strip_task_suffix");
     # samay appends " (cron)" to the fired task name; it has to come off before
     # the job lookup or nothing maps back.
@@ -1545,88 +2393,123 @@ fn test_cron_strip_task_suffix() {
     return 0;
 }
 
+# Runs every case in runpath.tcyr, and returns the failure count as the exit status.
 fn main() {
     alloc_init();
-    test_container_log_tail();
-    test_cgroup_read_helpers();
-    test_image_ref_new();
-    test_image_store_tag();
-    test_container_serde_roundtrip();
-    test_container_serde_nulls();
-    test_container_state_save_load();
-    test_container_state_load_missing();
-    test_generate_spec_defaults();
-    test_generate_spec_rootless();
-    test_generate_spec_env_kv();
-    test_generate_spec_bad_volume();
-    test_send_signal_bad_signal();
-    test_send_signal_bad_pid();
-    test_send_signal_self_signal0_range();
-    test_resolve_cgroup_base_parse();
-    test_cpu_quota_formula();
-    test_apply_cgroup_limits_besteffort();
-    test_build_sandbox_noop();
-    test_build_sandbox_threads_env();
-    test_build_sandbox_threads_workdir();
-    test_build_sandbox_no_env_stays_unset();
-    test_build_sandbox_bad_backend();
-    test_build_sandbox_fallback();
-    test_build_sandbox_min_score_none();
-    test_exec_container_noop();
-    test_exec_container_argv_forms();
-    test_exec_container_bad_backend();
-    test_scan_output_clean_passes();
-    test_scan_output_blocks_private_key();
-    test_scan_output_disabled_passes_everything();
-    test_scan_output_blocks_oversized();
-    test_scan_output_null_guards();
-    test_scan_output_scans_stderr();
-    test_cm_create_start_oneshot();
-    test_cm_create_rootfs_populated();
-    test_security_score();
-    test_security_score_for();
-    test_runpath_logging_emits();
-    test_image_ref_parse();
-    test_image_ref_digest();
-    test_image_full_ref();
-    test_image_digest_helpers();
-    test_image_blob_store();
-    test_image_index_round_trip();
-    test_image_index_dedup_on_re_add();
-    test_image_index_multiple();
-    test_image_index_remove();
-    test_image_index_remove_missing();
-    test_image_index_remove_shared_blob();
-    test_image_index_corrupt_guard();
-    test_require_pid_empty_allowed_list();
-    test_exec_capture2_splits_streams();
-    test_exec_capture2_large_stderr_does_not_deadlock();
-    test_exec_capture2_env_and_workdir();
-    test_exec_capture2_missing_binary();
-    test_exec_capture2_signalled_child();
-    test_exec_capture2_large_output_is_not_a_signal_death();
-    test_exec_capture2_empty_args();
-    test_exec_workdir_escape_refused();
-    test_exec_scratch_path_is_per_exec();
-    test_exec_in_container_empty_command();
-    test_cm_exec_requires_running();
-    test_cm_diff_flattened_reports_a_c_d();
-    test_cm_diff_unknown_container();
-    test_cm_diff_meta_type_parse();
-    test_cm_diff_wh_path_detection();
-    test_scan_policy_round_trips();
-    test_scan_policy_absent_stays_absent();
-    test_scan_policy_partial_object_keeps_defaults();
-    test_rootless_bin_path_is_absolute();
-    test_rootless_sock_path_is_per_pid();
-    test_rootless_spawn_detached_does_not_wait();
-    test_rootless_spawn_reports_failure();
-    test_rootless_handle_accessors();
-    test_cron_expr_validation();
-    test_cron_store_round_trip();
-    test_cron_due_uses_injected_clock();
-    test_cron_disabled_never_fires();
-    test_cron_strip_task_suffix();
+    _test_container_log_tail();
+    _test_cgroup_read_helpers();
+    _test_image_ref_new();
+    _test_image_store_tag();
+    _test_container_serde_roundtrip();
+    _test_container_serde_nulls();
+    _test_container_state_save_load();
+    _test_container_state_load_missing();
+    _test_generate_spec_defaults();
+    _test_generate_spec_rootless();
+    _test_generate_spec_env_kv();
+    _test_generate_spec_bad_volume();
+    _test_send_signal_bad_signal();
+    _test_send_signal_bad_pid();
+    _test_send_signal_self_signal0_range();
+    _test_resolve_cgroup_base_parse();
+    _test_cpu_quota_formula();
+    _test_apply_cgroup_limits_besteffort();
+    _test_build_sandbox_noop();
+    _test_build_sandbox_threads_env();
+    _test_build_sandbox_threads_workdir();
+    _test_build_sandbox_no_env_stays_unset();
+    _test_build_sandbox_bad_backend();
+    _test_build_sandbox_fallback();
+    _test_build_sandbox_min_score_none();
+    _test_exec_container_noop();
+    _test_exec_container_argv_forms();
+    _test_rp_cp_never_follows_a_planted_symlink();
+    _test_rp_cp_does_not_block_on_a_fifo();
+    _test_rp_cp_into_a_directory();
+    _test_rp_container_names();
+    _test_rp_rm_goes_by_the_record();
+    _test_rp_state_survives_parallel_commands();
+    _test_rp_corrupt_state_is_set_aside();
+    _test_rp_high_fds_do_not_reach_the_payload();
+    _test_rp_rm_refuses_a_paused_container();
+    _test_rp_wait_outlasts_the_process();
+    _test_rp_rootless_helper_is_only_signalled_with_its_ticks();
+    _test_rp_no_backend_means_no_helper();
+    _test_rp_proc_ppid();
+    _test_rp_cgroup_must_be_the_containers_alone();
+    _test_rp_long_logs_read_their_newest_end();
+    _test_rp_a_too_deep_source_is_never_cached();
+    _test_rp_stivafile_names();
+    _test_rp_replicas();
+    _test_rp_load_key_is_never_cut_short();
+    _test_rp_audit_identity_is_the_kernels();
+    _test_rp_audit_lines_stay_json();
+    _test_rp_ipv6_formatting();
+    _test_rp_ipv6_pool_stays_in_its_subnet();
+    _test_rp_prefix_cannot_wrap();
+    _test_rp_dns_names_and_servers();
+    _test_rp_port_protocols();
+    _test_rp_state_file_is_private();
+    _test_rp_cron_unreadable_store_is_left_alone();
+    _test_rp_cron_clock_steps_fire_nothing_twice();
+    _test_rp_cron_enabling_owes_nothing();
+    _test_rp_cron_replacing_keeps_its_place();
+    _test_rp_cron_checks_race();
+    _test_rp_pasta_flags_close_its_defaults();
+    _test_rp_nft_ruleset_never_touches_the_disk();
+    _test_exec_container_bad_backend();
+    _test_scan_output_clean_passes();
+    _test_scan_output_blocks_private_key();
+    _test_scan_output_disabled_passes_everything();
+    _test_scan_output_blocks_oversized();
+    _test_scan_output_null_guards();
+    _test_scan_output_scans_stderr();
+    _test_cm_create_start_oneshot();
+    _test_cm_create_rootfs_populated();
+    _test_security_score();
+    _test_security_score_for();
+    _test_runpath_logging_emits();
+    _test_image_ref_parse();
+    _test_image_ref_digest();
+    _test_image_full_ref();
+    _test_image_digest_helpers();
+    _test_image_blob_store();
+    _test_image_index_round_trip();
+    _test_image_index_dedup_on_re_add();
+    _test_image_index_multiple();
+    _test_image_index_remove();
+    _test_image_index_remove_missing();
+    _test_image_index_remove_shared_blob();
+    _test_image_index_corrupt_guard();
+    _test_require_pid_empty_allowed_list();
+    _test_exec_capture2_splits_streams();
+    _test_exec_capture2_large_stderr_does_not_deadlock();
+    _test_exec_capture2_env_and_workdir();
+    _test_exec_capture2_missing_binary();
+    _test_exec_capture2_signalled_child();
+    _test_exec_capture2_large_output_is_not_a_signal_death();
+    _test_exec_capture2_empty_args();
+    _test_exec_workdir_escape_refused();
+    _test_exec_scratch_path_is_per_exec();
+    _test_exec_in_container_empty_command();
+    _test_cm_exec_requires_running();
+    _test_cm_diff_flattened_reports_a_c_d();
+    _test_cm_diff_unknown_container();
+    _test_cm_diff_meta_type_parse();
+    _test_cm_diff_wh_path_detection();
+    _test_scan_policy_round_trips();
+    _test_scan_policy_absent_stays_absent();
+    _test_scan_policy_partial_object_keeps_defaults();
+    _test_rootless_bin_path_is_absolute();
+    _test_rootless_sock_path_is_per_pid();
+    _test_rootless_spawn_detached_does_not_wait();
+    _test_rootless_spawn_reports_failure();
+    _test_rootless_handle_accessors();
+    _test_cron_expr_validation();
+    _test_cron_store_round_trip();
+    _test_cron_due_uses_injected_clock();
+    _test_cron_disabled_never_fires();
+    _test_cron_strip_task_suffix();
     return assert_summary();
 }
 

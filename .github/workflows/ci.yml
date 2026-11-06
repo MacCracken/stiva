@@ -173,3 +173,12 @@ jobs:
           cyrius build --dce src/main.cyr build/${{ github.event.repository.name }}-dce
           build/${{ github.event.repository.name }}-dce --version
           build/${{ github.event.repository.name }}-dce --help > /dev/null
+
+      - name: Fuzz
+        # tests/stiva.fcyr forks every batch, so a crash or a hang in any parser fails this step
+        # and leaves its input at build/fuzz-crash-<target>.bin. --poison scribbles over what the
+        # allocator hands out, which turns a read of uninitialised memory into a failure.
+        run: |
+          mkdir -p build
+          cyrius fuzz tests/stiva.fcyr
+          cyrius fuzz --poison tests/stiva.fcyr

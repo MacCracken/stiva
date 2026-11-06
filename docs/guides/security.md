@@ -17,30 +17,37 @@ Stiva supports rootless operation via Linux user namespaces. When `rootless` is 
 
 ### Library
 
-⛔ **`rootless` is a config field that `build_sandbox` never reads** (`src/runtime.cyr:798-897`).
+⛔ **`rootless` is a config field that `build_sandbox` never reads**.
 It feeds only the mount and namespace lists on `RuntimeSpec`, and **both are still write-only**
-(roadmap v3.1.0 items 9 and 3). stiva creates no user namespace of its own.
+(roadmap v3.2.2 and v3.4.1). stiva creates no user namespace of its own.
 
 The rootless *network* helper is real, but it is selected independently — by `is_unprivileged()`,
 from the real uid and capabilities, not from this flag.
 
 When rootless is set, `volume_mounts` appends OCI runtime-spec v1.2.0 ID-mapped mount options
-(`X-mount.idmap=`, `src/runtime.cyr:335`) to `RuntimeSpec.mounts` — but since that field has no
+(`X-mount.idmap=`) to `RuntimeSpec.mounts` — but since that field has no
 reader, **stiva performs no mounts at all**, so volume bind-mounting does not happen yet. The
 idmap work is assembled ahead of the consumer that will use it.
 
 ## Seccomp Filters
 
-kavach applies seccomp-bpf filters to restrict the syscalls available inside the container. The default policy blocks dangerous syscalls while allowing normal operation.
+kavach applies seccomp-bpf filters to restrict the syscalls available inside a container, on the
+process backend and on `run -d`.
 
-Seccomp filtering is part of the `SandboxPolicy` passed to kavach when creating a sandbox. The policy is reflected in the security score.
+⛔ **A foreground `stiva run` on the OCI backend gets no seccomp filter and no NO_NEW_PRIVS**, and
+that is the default wherever runc is installed: kavach's `oci_generate_spec` emits neither. `exec`
+sets NO_NEW_PRIVS and installs no filter. Use `--backend process` or `run -d` where you need both.
+SECURITY.md has the table.
+
+The policy is part of the `SandboxPolicy` passed to kavach, and it is reflected in the security
+score, which describes the policy and not the path a container took.
 
 ## Landlock
 
 ⛔ **Landlock is not currently enabled for stiva containers.**
 
 kavach implements it (`security_apply_landlock`, `policy_landlock_add`), but `build_sandbox`
-builds its sandbox from `policy_basic()` (`src/runtime.cyr:800`), which carries **no landlock
+builds its sandbox from `policy_basic()`, which carries **no landlock
 rules** — and kavach applies no ruleset at all when the rule count is zero. No stiva code path
 calls `policy_landlock_add`; the only occurrence of the word in `src/` is a comment.
 
@@ -50,7 +57,7 @@ not from Landlock. Do not rely on a Landlock boundary that is not being installe
 ## Credential Management
 
 > ⚠️ **Containers currently receive no secrets.** This is the single largest gap in the
-> port, and it is roadmap **v3.1.0 item 1**. Concretely: `secrets` serializes as an empty
+> port, and it is roadmap **v3.2.2**. Concretely: `secrets` serializes as an empty
 > array, **nothing in stiva threads one into `build_sandbox`**, and `stiva run` registers no
 > `-s` flag — passing one is a usage error, not a silent no-op.
 >
@@ -90,15 +97,15 @@ body through the gate before printing it:
 stiva logs <ID> --scan
 ```
 
-A `PASS` prints normally. A `WARN` prints with secrets replaced by
-`[REDACTED:<category>]`. A `QUARANTINE` or `BLOCK` prints nothing and exits non-zero
+A `PASS` prints normally, and so does a `WARN`: every secret pattern is `HIGH` or `CRITICAL`, so no
+secret reaches `WARN` to be redacted. A `QUARANTINE` or `BLOCK` prints nothing and exits non-zero
 with `stiva: sandbox error: output scan: block`.
 
 It is **opt-in** because scanning changes what `logs` prints, which should never
 happen behind an operator's back. The per-container `scan_policy` the Rust original gated
-this on is round-tripped through `state.json` (`src/container.cyr:600`, `:710`) and honoured
-by `logs` (`src/main.cyr:654`) — but ⛔ **nothing sets it yet**: there is no `run` flag and no
-Stivafile key, so it is always absent in practice (roadmap v3.1.0 item 1). **`--scan` is
+this on is round-tripped through `state.json` and honoured by `logs`, but ⛔ **nothing sets it
+yet**: there is no `run` flag and no Stivafile key, so it is always absent in practice (roadmap
+v3.2.2). **`--scan` is
 therefore the only way to scan a log today.**
 
 The library entry point is `scan_output(result, policy)` in `src/runtime.cyr`, with
@@ -109,7 +116,7 @@ The gate runs three scanner categories:
 
 1. **Secrets** -- API keys, tokens, passwords
 2. **Code** -- source code patterns that should not appear in output
-3. **Data** -- PII patterns (emails, phone numbers, etc.)
+3. **Data** -- PII patterns. ⚠ Email addresses and phone numbers pass at this policy.
 
 Severity maps to verdict through the policy's thresholds: `CRITICAL` → `BLOCK`,
 `HIGH` → `QUARANTINE`, anything above `INFO` → `WARN`.
@@ -127,9 +134,9 @@ stiva info              # includes overall security score
 ### Library
 
 Scoring goes through kavach's `score_backend(backend, policy)`. stiva calls it from **`info`
-only** (`security_score()`, `src/runtime.cyr:1104` → `src/main.cyr:372`), over `policy_basic()`
-and the best available backend. ⚠ The per-container entry point `security_score_for` exists
-(`src/runtime.cyr:1115`) but **has no caller** — `stiva inspect` reports no score.
+only** (`security_score()`), over `policy_basic()` and the best available backend. ⚠ The
+per-container entry point `security_score_for` exists but **has no caller**, so `stiva inspect`
+reports no score.
 
 Factors that increase the score:
 
@@ -143,16 +150,17 @@ Factors that increase the score:
 
 1. **Minimal base images** -- use small base images (e.g., `alpine`) to reduce attack surface.
 2. **Non-root user** -- ⛔ **not yet enforced.** `user = "nobody"` in Stivafile `[config]` is
-   recorded in the image config and in `state.json`, but `RuntimeSpec.user`
-   (`src/runtime.cyr:536`) has no reader — nothing drops privileges before exec (roadmap
-   v3.1.0 item 10). **Until it lands, treat every container as running as root** and rely on
+   recorded in the image config and in `state.json`, but `RuntimeSpec.user` has no reader, so
+   nothing drops privileges before exec (roadmap v3.2.2). **Until it lands, treat every container as running as root** and rely on
    the sandbox boundary, not the user field.
-3. **Read-only rootfs** -- mount the container rootfs read-only where possible.
-4. **Resource limits** -- set memory, CPU, and PID limits in `SandboxPolicy` to prevent resource exhaustion.
+3. **Read-only rootfs** -- ⛔ **not available.** `read_only_rootfs` is hardcoded off, and no flag sets
+   it (roadmap v3.2.2).
+4. **Resource limits** -- ⛔ **not available from the CLI.** `SandboxPolicy` carries memory, CPU and
+   PID limits, and no flag sets them (roadmap v3.2.2).
 5. **Dependency auditing** -- run `cyrius audit` regularly on stiva itself.
 6. **Image provenance** -- verify image digests after pull. Stiva stores and validates content digests for all layers.
-7. **Network isolation** -- place containers on separate bridge networks to limit lateral movement.
-8. **Secret rotation** -- planned, once secret injection lands (v3.1.0 item 1). Until then,
+7. **Network isolation** -- a container has no network of its own yet (roadmap v3.3.1).
+8. **Secret rotation** -- planned, once secret injection lands (v3.2.2). Until then,
    treat any credential a container can read as baked in and rotate it out of band.
 
 ## Further Reading

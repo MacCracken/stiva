@@ -14,11 +14,23 @@ cyrius test tests/stiva.tcyr
 
 # Benchmarks
 cyrius bench tests/stiva.bcyr
+
+# Fuzz: 18 parsers in forked batches, in plain and poisoned-allocator modes
+cyrius fuzz tests/stiva.fcyr
+cyrius fuzz --poison tests/stiva.fcyr
+
+# The suite on aarch64, under qemu-aarch64. Not in CI yet (roadmap v3.5.0)
+cyrius test --aarch64 tests/
 ```
 
-**2197 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `registry.tcyr` (421),
-`runpath.tcyr` (363), `mgmt.tcyr` (326), `store.tcyr` (304), `convert.tcyr` (116).
-Plus **92** CLI smoke assertions and **14** benchmarks.
+A crash or a hang in `cyrius fuzz` fails the run and leaves its input at
+`build/fuzz-crash-<target>.bin`. `STIVA_FUZZ_ROUNDS` sets how long it runs.
+
+⚠ Tests use fixed `/tmp` paths, so two runs at once interfere, on one architecture or across two.
+
+**2649 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `runpath.tcyr` (659),
+`registry.tcyr` (444), `store.tcyr` (387), `mgmt.tcyr` (354), `convert.tcyr` (138).
+Plus **102** CLI smoke assertions, **18** fuzz targets and **14** benchmarks.
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
 > global counter per `assert*()` call and `assert_summary()` prints it.
@@ -85,7 +97,7 @@ Run one group by grepping its `test_group("...")` label, or run everything with
 
 A `.tcyr` file cannot include `main.cyr` — it has its own entry point. CLI coverage
 therefore lives in `./scripts/cli-smoke.sh`, which drives the **built binary** and
-asserts on its stdout, stderr and exit code (92 assertions). Anything that only
+asserts on its stdout, stderr and exit code (102 assertions). Anything that only
 exists in `main.cyr` — flag registration, verb dispatch, usage strings, exit codes —
 is covered there or not at all.
 
@@ -114,8 +126,7 @@ where a crash happened.
 ## Coverage
 
 **Uncoverable without root**: Linux mount syscalls, overlay mounts, veth creation,
-live namespace entry. **Not yet implemented**: CRIU checkpoint/restore (roadmap v3.1.0
-item 3).
+live namespace entry. **Not yet implemented**: CRIU checkpoint/restore (roadmap v3.4.1).
 
 ## Linux-Only Code
 

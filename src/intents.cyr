@@ -1,9 +1,9 @@
-# stiva — Agnoshi intent system (stub for future NL→intent parsing)
+# stiva — Agnoshi intent values.
 # Ported from rust-old/src/intents.rs.
 #
-# The agnoshi project does not exist yet. This module defines the intent
-# kind constants that stiva will support once NL intent parsing is
-# available. In Rust `Intent` and `AnsambluAction` are data-carrying
+# This module defines the intent kinds and their values. agnoshi does the natural-language parsing,
+# and it calls the `stiva` CLI, so nothing here needs to parse: `parse_intent` only ever fails, has
+# no caller, and is due to go (roadmap v3.3.3). In Rust `Intent` and `AnsambluAction` are data-carrying
 # `#[non_exhaustive]` enums exercised only via serde round-tripping; the
 # sole behaviour is `parse_intent`, which always errors. We port the
 # discriminants as module-prefixed enums (Cyrius hoists members to global
@@ -57,12 +57,12 @@ fn ansamblu_action_name(action) {
 #
 # Placeholder — actual NL parsing requires the agnoshi project, which does
 # not exist yet. Mirrors rust-old `parse_intent`, which always returns
-# `Err(StivaError::Runtime("agnoshi intent parsing …"))` — roadmap v3.1.0 item 6.
+# `Err(StivaError::Runtime("agnoshi intent parsing …"))` — roadmap v3.3.3.
 # Following the oci.cyr `parse_signal` sentinel idiom, we return the
 # negated error code `-(STIVA_ERR_RUNTIME)` (= -6) — never a valid intent
 # handle — so every call fails. The caller maps it back to STIVA_ERR_RUNTIME
 # and supplies the detail string via `stiva_err_print(STIVA_ERR_RUNTIME,
-# "agnoshi intent parsing not yet implemented")`. See roadmap v3.1.0 item 6.
+# "agnoshi intent parsing not yet implemented")`. See roadmap v3.3.3.
 # STIVA_ERR_RUNTIME is 6
 # (see error.cyr); inlined here to keep this a zero-include leaf module.
 #[must_use]
@@ -74,7 +74,7 @@ fn parse_intent(text) {
 # A tagged union: `kind` selects which fields are live; one flat struct holds
 # every field (unused = 0). The serde round-trip (externally-tagged
 # {"<Variant>": { fields }}) is real and Rust-tested (intent_serde), and is
-# independent of parse_intent (the NL parser above; roadmap v3.1.0 item 6).
+# independent of parse_intent (roadmap v3.3.3).
 struct Intent {
     kind;      # INTENT_KIND_* ordinal
     image;     # String (Run, Pull)
@@ -262,10 +262,3 @@ fn intent_from_jv(v) {
     }
     return 0;                                     # unknown variant tag
 }
-
-# ── DEFERRED (land with a real agnoshi NL parser) ───────────────
-# Only `parse_intent` (the natural-language → Intent parser) remains — it is
-# gated on the agnoshi project; see docs/development/roadmap.md v3.1.0 item 6:
-# it needs the agnoshi project, which does not exist yet, so the sentinel above
-# is the live behaviour. The field-carrying Intent value type and its serde
-# round-trip (the "variant payloads" item) are now ported above.

@@ -174,38 +174,15 @@ git = "https://github.com/MacCracken/kavach.git"
 tag = "3.14.3"
 modules = ["dist/kavach.cyr"]
 
-# ── samay + ai-hwaccel — declared, pinned, and DEFAULT-OFF ────────
-# These arrived silently as kavach 3.8.0's transitive closure (kavach declared
-# [deps.samay]; samay declares [deps.ai-hwaccel]), landing in lib/ undeclared
-# and UNLOCKED — 83 lock entries against 85 lib/*.cyr. kavach 3.8.2 makes them
-# optional on its side, so they no longer arrive uninvited; stiva now names them
-# explicitly, on its own terms.
-#
-# The `accel` feature is now DEFAULT-ON: roadmap §H (cron containers) and §I
-# (accelerator inventory + placement) have landed and call into both bundles.
-#
-# The two historical objections are both dead. The identifier-cap warning below
-# was written against cycc's 262144-entry buffer; 6.4.76 raised it to 524288 and
-# the worst unit with `accel` on measures 276,898 (52.8%) — a full
-# `cyrius test --features accel` run passes with no splitting. The size
-# objection (~279 KB reaching every consumer of dist/stiva.cyr) is real but not
-# material for a container runtime.
-#
-# ⚠ They are declared `optional`, but the feature cannot be switched off:
-# src/cron.cyr and src/fleet.cyr use both bundles with no gate, so a build with
-# `default = []` or `--no-default-features` fails to compile (measured at 3.1.0 and
-# 3.1.1). The roadmap's open cleanliness items have the fix.
-[features]
-default = ["accel"]
-accel = ["samay", "ai-hwaccel"]
-
+# ── samay + ai-hwaccel — required ─────────────
+# src/cron.cyr and src/fleet.cyr use both bundles directly. They were once declared optional behind
+# an `accel` feature, but nothing gated those modules, so switching it off only broke the build.
 # Cron/schedule machinery + resource-aware placement (roadmap §H).
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 # path = "../samay"   # see "Local dep development" above
 tag = "1.5.1"
 modules = ["dist/samay.cyr"]
-optional = true
 
 # Accelerator inventory + requirement matching (roadmap §I). Owns the bare
 # `backend_name`; kavach's OS-backend namer was renamed `os_backend_name` in
@@ -217,7 +194,6 @@ git = "https://github.com/MacCracken/ai-hwaccel.git"
 # path = "../ai-hwaccel"   # see "Local dep development" above
 tag = "2.5.6"
 modules = ["dist/ai-hwaccel.cyr"]
-optional = true
 
 # ── Local dep development ────────────────────────────────
 #

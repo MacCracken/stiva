@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.7.18** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.1.1
+- **Version**: SemVer, currently 3.1.2
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -18,11 +18,11 @@
 Stiva was ported from Rust to the **Cyrius** language (AGNOS ecosystem port pattern).
 All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-new
 `imagelayout.cyr` and `cron.cyr`) + `lib.cyr` (aggregation header) and `main.cyr`
-(entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
-`restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
+(entry + CLI). The CLI registers **36 verbs, 33 live**: `checkpoint` and `restore` print
+"not yet wired" (they need CRIU, roadmap v3.4.1), and `restart` cannot succeed (v3.2.1).
 
-**2197 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 363 ·
-mgmt 326 · store 304 · convert 116; run via `cyrius test tests/`), **92** CLI smoke
+**2649 tests** across the `.tcyr` files (stiva 667 · runpath 659 · registry 444 ·
+store 387 · mgmt 354 · convert 138; run via `cyrius test tests/`), **102** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
@@ -34,7 +34,7 @@ dispatch, `logs -f`, `events` over a persisted `{root}/events.jsonl` (v3.0.12–
 `exec` (v3.0.15) · OCI whiteouts, `stiva diff`, rootless networking, §H `cron`, §I
 accelerator inventory + placement (v3.0.16–v3.0.17). See
 `CHANGELOG.md` for what each release actually contained, and
-`docs/development/roadmap.md` for what is left (v3.1 → v3.4).
+`docs/development/roadmap.md` for what is left (v3.2 → v3.6).
 
 **Group A (OCI image-layout + transfer) detail**, since it is net-new rather than ported:
 the local store is a valid **OCI image layout** (`oci-layout` + `index.json` +
@@ -50,13 +50,12 @@ The old **v3.1 async milestone was dissolved**: the async substrate (`lib/async.
 ready and the runtime is single-threaded run-to-completion, so the container-orchestration
 surface was blocking work over the ported sync core, and it all landed on the v3.0.x line.
 
-⛔ **v3.1 is NOT blocked on anything upstream.** An adversarial audit on 2026-08-21 attacked
-all eight v3.1.0 items and found **zero** genuinely blocked — including CRIU, whose stated
+⛔ **Read any "blocked" label sceptically.** An adversarial audit on 2026-08-21 attacked all eight
+items then labelled blocked and found **zero** genuinely so — including CRIU, whose stated
 kavach prerequisite was mis-diagnosed (a PID namespace is one `clone()` with constants already
 in the tree), and `exec -it`, whose cyrius-coroutine prerequisite had been resolved eight
-toolchain releases below the current pin. Read `docs/development/roadmap.md`'s rewritten v3.1.0
-section before believing any "blocked" label, and see **Blocks and claims** below for why they
-were wrong. JSON/TOML/YAML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
+toolchain releases below the current pin. See **Blocks and claims** below for why they were
+wrong. JSON/TOML/YAML/base64 (`bayan`), HTTP/TLS (`sandhi`/`tls_native`),
 gzip/zstd/xz/lz4/bzip2 (`sankoch`), threads (`lib/thread.cyr`) and async (`lib/async.cyr`)
 all EXIST.
 
@@ -124,7 +123,7 @@ rust-old) is their oracle.
 | bote-core | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.8.15** |
 | cmdit | CLI parsing, verb introspection, shell completions — pin **1.5.0** |
 | samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.5.1** |
-| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.5.6** |
+| ai-hwaccel | Accelerator inventory + placement profiles — pin **2.5.6** |
 | sakshi · libro | Structured logging · docs tooling — pins **2.5.10** / **2.11.3** |
 | sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.15** |
 
@@ -216,8 +215,8 @@ daimon (container management), sutra (fleet deployment)
 | `intents` | Agnoshi intent stubs |
 | `error` | Error types |
 
-CLI binary: `stiva` — **36 registered verbs, 34 live**. Only `checkpoint` and `restore`
-print a "not yet wired" message; both need CRIU and are scheduled for v3.1 (see
+CLI binary: `stiva` — **36 registered verbs, 33 live**. `checkpoint` and `restore` print a
+"not yet wired" message because both need CRIU (roadmap v3.4.1), and `restart` cannot succeed (see
 `docs/cli.md`).
 
 **Verb ids are registration-ordered.** `cmdit_verb(h, ...)` hands back an id derived from
@@ -240,8 +239,10 @@ Stiva uses these kavach features — keep them wired:
 - **StrengthScore / score_backend** — security scoring in inspect/info
 - **ExternalizationGate** — output scanning for secrets/PII in exec/logs
 - **User namespaces** — rootless containers (UID/GID mapping)
-- **NO_NEW_PRIVS** — explicit `prctl(PR_SET_NO_NEW_PRIVS)` in pre_exec
-- **FD cleanup** — `close(3..1024)` in pre_exec (CVE-2024-21626 mitigation)
+- **NO_NEW_PRIVS** — on the process backend, `run -d` and `exec`. ⛔ Not on the OCI backend, the default
+  foreground path, which has no seccomp filter either: kavach's `oci_generate_spec` emits neither
+- **FD cleanup** — `_stor_cloexec_fds` marks every fd above stderr close-on-exec before a payload
+  starts (CVE-2024-21626 mitigation). kavach's own sweep stops at 1024
 
 ## Development Process
 
@@ -294,7 +295,7 @@ Four rules, binding on new work:
   No stanza means the item is *unstarted*, not blocked.
 - **A symbol's absence is not a capability's absence.** The unstated premise is always "…and stiva
   must go through this library's API." Check it. stiva bypasses kavach for `exec`
-  (`src/runtime.cyr:1359-1363`) and nein for `apply` (`src/network_manager.cyr:358-361`), both
+  (`exec_in_container`) and nein for `apply` (`_network_manager_run_nft`), both
   deliberately and both documented. A library boundary here is a choice, never a wall.
 - **Never type a number about a dependency** — struct sizes, field counts, version-gated
   behaviour. Read it out of `lib/` at the moment you write it, or leave it out. "`SandboxConfig`
@@ -321,7 +322,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2197 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2649 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -342,7 +343,7 @@ Root files (required):
   README.md, CHANGELOG.md, CLAUDE.md, CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md, LICENSE
 
 docs/ (required):
-  architecture/overview.md — module map, data flow, consumers
+  architecture.md — module map, data flow, consumers
   development/roadmap.md — completed, backlog, future, v1.0 criteria
 
 docs/ (when earned):
@@ -356,8 +357,8 @@ docs/ (when earned):
 
 ## Testing
 
-**2197 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 363 ·
-mgmt 326 · store 304 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
+**2649 Cyrius tests** across `tests/*.tcyr` (stiva 667 · runpath 659 · registry 444 ·
+store 387 · mgmt 354 · convert 138), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
 
@@ -367,12 +368,15 @@ across a library boundary, which neither suite tested. `env` shipped broken thro
 tests for exactly this reason. When a value crosses into kavach, assert on what the payload
 observes — see **Blocks and claims** above.
 
+⚠ **A test's `/tmp` paths are fixed**, so two `cyrius test` runs at once interfere. Do not run a suite
+while a mutation pass runs in a copy of the tree.
+
 ⚠ **`json_v_obj_set` appends; it never replaces.** Since bayan 1.11.1 one duplicate key refuses the
 whole document, and several callers read that 0 as an empty store (`container.cyr` "starting
 fresh", `cron.cyr` "treating the schedule as empty"). A writer whose keys come from data must
 iterate a hashmap or de-duplicate first, as `_il_kv_obj` does, and its test must parse what it wrote.
 
-`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**92** assertions
+`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**102** assertions
 against the built binary) — the `.tcyr` files cannot include `main.cyr`.
 
 ```bash

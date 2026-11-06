@@ -16,8 +16,8 @@
 #   load_key                                           (file read / env+hex)
 #   cryptsetup_available / veritysetup_available       (false, no feature)
 #
-# What is DEFERRED to the `encrypted` feature (sigil's LUKS, dm-verity and
-# AES-256-GCM calls) — see the block at the bottom:
+# What waits for the `encrypted` feature (sigil's LUKS, dm-verity and AES-256-GCM calls, roadmap
+# v3.4.3) — see the block at the bottom:
 #   stiva_luks_open / stiva_luks_close / stiva_luks_format
 #   stiva_verity_open / stiva_verity_close / stiva_verity_format / make_verity_config
 #   decrypt_layer / encrypt_layer / rand_nonce
@@ -161,10 +161,11 @@ fn load_key(source, out_len) {
     store64(out_len, 0);
     var src: KeySourceVal = source;
     if (src.kind == ENCRYPTED_KEYSRC_FILE) {
-        # std::fs::read(path) — read the whole key file.
-        var buf = alloc(4096);
-        var n = file_read_all(src.value, buf, 4096);
-        if (n < 0) { return 0; }
+        # std::fs::read(path) — read the whole key file. A key past the buffer is refused, not
+        # cut short: a silently shorter key is a different key.
+        var buf = alloc(4097);
+        var n = file_read_all(src.value, buf, 4097);
+        if (n <= 0 || n > 4096) { return 0; }
         store64(out_len, n);
         return buf;
     }
@@ -209,7 +210,7 @@ fn veritysetup_available() {
 # ── disabled-feature entry points ──
 # These mirror rust-old's `#[cfg(not(feature = "encrypted"))]` arms exactly:
 # each returns the disabled error and carries the Rust message string. The
-# `encrypted`-feature implementations (over sigil) are DEFERRED below.
+# `encrypted`-feature implementations (over sigil) are described below.
 
 # rust-old luks_open (no feature): Err(Storage("encrypted storage requires
 # the 'encrypted' feature")). Returns 0 (null OpenVolume); caller reports via
@@ -270,7 +271,7 @@ fn encrypt_layer(data, data_len, key_source, out_len) {
     return 0;
 }
 
-# ── DEFERRED (land with the `encrypted` feature — over sigil) ──
+# ── Not ported: the `encrypted` feature, over sigil (roadmap v3.4.3) ──
 # rust-old/src/encrypted.rs, under `#[cfg(feature = "encrypted")]`, also
 # implements the following against agnosys and aes_gcm/getrandom. The default
 # build never compiles these, and the Cyrius build has no `encrypted` feature

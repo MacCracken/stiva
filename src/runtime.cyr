@@ -5,7 +5,7 @@
 # The heavy paths — kavach sandbox build/exec/spawn, nsenter subprocess
 # execution, tar/gzip codecs, cgroup fs writes, the ExternalizationGate — are all
 # ported. Only CRIU remains; see the block at the bottom and
-# docs/development/roadmap.md v3.1.0 item 3.
+# docs/development/roadmap.md v3.4.1.
 #
 # What is ported here (self-contained + already-ported deps only):
 #   * The runtime spec value types: Namespace enum, SpecMount, RuntimeSpec,
@@ -60,6 +60,7 @@ struct SpecMount {
     options;
 }
 
+# One mount of a RuntimeSpec. `options` is a vec of cstrs.
 fn spec_mount_new(source, destination, mount_type, options) {
     var m = alloc(32);
     var mm: SpecMount = m;
@@ -106,6 +107,7 @@ struct RuntimeSpec {
     domainname;              # cstr or 0
 }
 
+# An empty RuntimeSpec, for the caller to fill in.
 fn runtime_spec_new() {
     var s = alloc(168);   # 21 fields * 8
     var ss: RuntimeSpec = s;
@@ -143,6 +145,7 @@ struct ContainerExecResult {
     timed_out;     # 1/0
 }
 
+# The outcome of running a command: exit code, captured output, duration and whether it timed out.
 fn container_exec_result_new(exit_code, stdout, stderr, duration_ms, timed_out) {
     var r = alloc(40);
     var rr: ContainerExecResult = r;
@@ -165,6 +168,7 @@ struct ProcessInfo {
     state;     # byte (char)
 }
 
+# One row of `top`.
 fn process_info_new(pid, ppid, comm, cmdline, state) {
     var p = alloc(40);
     var pp: ProcessInfo = p;
@@ -186,6 +190,7 @@ struct ContainerStats {
     pids_limit;           # 0 = unlimited
 }
 
+# One reading of a container's cgroup counters.
 fn container_stats_new(memory_bytes, memory_limit_bytes, cpu_usage_us, pids_current, pids_limit) {
     var c = alloc(40);
     var cc: ContainerStats = c;
@@ -668,6 +673,11 @@ fn apply_cgroup_limits(pid, spec) {
           strlen("could not resolve cgroup base, skipping limits"));
         return 0;
     }
+    if (_rt_cgroup_holds_only(base, pid) == 0) {
+        sakshi_warn("the container shares its cgroup, skipping limits",
+          strlen("the container shares its cgroup, skipping limits"));
+        return 0;
+    }
     var sp: RuntimeSpec = spec;
 
     if (sp.memory_limit_bytes > 0) {
@@ -765,10 +775,106 @@ fn _rt_write_cgroup_file(pid, filename, value) {
     return STIVA_ERR_OK;
 }
 
+# The parent of `pid`, or 0 if it has gone. The name in /proc/<pid>/stat is the payload's to choose
+# and may hold spaces and parentheses, so the fields are counted from the LAST `)`.
+#[must_use]
+fn _rt_proc_ppid(pid) {
+    var buf = alloc(1024);
+    var n = file_read_all(_rt_cat3("/proc/", _rt_int_to_cstr(pid), "/stat"), buf, 1023);
+    if (n <= 0) { return 0; }
+    var i = n - 1;
+    while (i >= 0) {
+        if (load8(buf + i) == 41) { break; }
+        i = i - 1;
+    }
+    if (i < 0 || i + 4 >= n) { return 0; }
+    # ") S <ppid> "
+    var at = i + 4;
+    var v = 0;
+    while (at < n) {
+        var c = load8(buf + at);
+        if (c < 48 || c > 57) { return v; }
+        v = v * 10 + c - 48;
+        at = at + 1;
+    }
+    return 0;
+}
+
+# 1 iff `pid` is `root_pid` or descends from it.
+#[must_use]
+fn _rt_pid_descends_from(pid, root_pid) {
+    var at = pid;
+    var hops = 0;
+    while (hops < 256) {
+        if (at == root_pid) { return 1; }
+        if (at <= 1) { return 0; }
+        at = _rt_proc_ppid(at);
+        hops = hops + 1;
+    }
+    return 0;
+}
+
+# 1 iff the cgroup directory `base` holds `pid`'s process tree and nothing else: no other process
+# and no child cgroup, whose processes cgroup.procs would not list. Unreadable reads as 0.
+fn _rt_cgroup_holds_only(base, pid) {
+    var cap = 1048576;
+    var buf = alloc(cap);
+    if (buf == 0) { return 0; }
+    var n = file_read_all(_rt_cat2(base, "/cgroup.procs"), buf, cap - 1);
+    if (n < 0) { return 0; }
+    var i = 0;
+    var v = 0;
+    var in_num = 0;
+    while (i <= n) {
+        var c = 10;
+        if (i < n) { c = load8(buf + i); }
+        if (c >= 48 && c <= 57) {
+            v = v * 10 + c - 48;
+            in_num = 1;
+        } elif (in_num == 1) {
+            if (_rt_pid_descends_from(v, pid) == 0) { return 0; }
+            v = 0;
+            in_num = 0;
+        }
+        i = i + 1;
+    }
+    var fd = file_open(base, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    var names = _stor_dir_names(fd);
+    var sb = alloc(STAT_BUFSZ);
+    var k = 0;
+    var alone = 1;
+    while (k < vec_len(names)) {
+        if (sys_fstatat(fd, vec_get(names, k), sb, AT_SYMLINK_NOFOLLOW) == 0) {
+            if ((_stor_st_mode(sb) & 61440) == 16384) { alone = 0; }
+        }
+        k = k + 1;
+    }
+    sys_close(fd);
+    return alone;
+}
+
+# 1 iff `pid`'s cgroup is the container's alone. stiva does not create per-container cgroups yet
+# (roadmap v3.2), so a payload normally shares one with the shell that started it.
+#
+# ⛔ What is written to a cgroup applies to everything in it. Freezing a shared one froze the
+# operator's session, stiva included, and `update` set a container's limits on all of it.
+#[must_use]
+fn _rt_cgroup_is_exclusive(pid) {
+    var base = resolve_cgroup_base(pid);
+    if (base == 0) { return 0; }
+    return _rt_cgroup_holds_only(base, pid);
+}
+
 # Pause a container by freezing its cgroup (rust-old: pause_container).
 fn pause_container(pid) {
     var lm = _rt_cat2("pausing container via cgroup freezer, pid=", _rt_int_to_cstr(pid));
     sakshi_info(lm, strlen(lm));
+    if (_rt_cgroup_is_exclusive(pid) == 0) {
+        stiva_err_print(STIVA_ERR_RUNTIME,
+          "cannot pause: the container shares its cgroup, and everything in it would freeze");
+        return STIVA_ERR_RUNTIME;
+    }
     return _rt_write_cgroup_file(pid, "cgroup.freeze", "1");
 }
 
@@ -792,7 +898,7 @@ fn unpause_container(pid) {
 # in MB (bytes/1048576, truncating) and CPU in tenths-of-a-core ((shares*10)/1024)
 # rather than the oracle's f64 fractional cores. SandboxConfig has no secrets /
 # externalization setter in the dist, so scan_policy + secret injection are
-# roadmap v3.1.0 item 1. sandbox_create/exec return 0 (no error code) so their
+# roadmap v3.2.2. sandbox_create/exec return 0 (no error code) so their
 # failure
 # messages carry no "<e>"; sandbox_transition returns a code → kavach_err_name.
 fn build_sandbox(spec) {
@@ -889,7 +995,7 @@ fn build_sandbox(spec) {
     # READER rather than trusting the setter.
     if (sp.workdir != 0) { config_workdir(cfg, sp.workdir); }
     # secret injection still needs a SandboxConfig setter kavach does not expose
-    # — roadmap v3.1.0 item 1. scan_policy is threaded via
+    # — roadmap v3.2.2. scan_policy is threaded via
     # `sandbox_exec_set_ext_policy`, NOT `config_externalization`, which kavach
     # stores and never reads.
 
@@ -962,8 +1068,7 @@ fn _rt_is_command_line(command) {
 #
 # The counterpart of exec_container: same build_sandbox, so the container gets
 # the identical seccomp/landlock/namespace/cgroup treatment — only the waiting
-# differs. Needs kavach >= 3.9.0 for `sandbox_spawn`; that symbol not existing
-# is what kept `run -d` on the v3.1 blocked list.
+# differs.
 #
 # The sandbox is NOT destroyed here. sandbox_destroy tears down the isolation
 # the child is still living inside, so it belongs with the reap — see
@@ -977,6 +1082,7 @@ fn spawn_container(spec, log_path) {
     var sb = build_sandbox(spec);
     if (sb == 0) { return 0; }   # error already printed by build_sandbox
 
+    _stor_cloexec_fds();
     var handle = 0;
     if (_rt_is_command_line(sp.command) == 1) {
         handle = sandbox_spawn(sb, command, log_path);
@@ -996,6 +1102,8 @@ fn spawn_container(spec, log_path) {
     return handle;
 }
 
+# Run `spec` to completion in its sandbox. Returns a ContainerExecResult*, or 0 with the detail
+# printed.
 fn exec_container(spec) {
     var sp: RuntimeSpec = spec;
     var command = _rt_join(sp.command, " ");
@@ -1005,6 +1113,7 @@ fn exec_container(spec) {
     var sb = build_sandbox(spec);
     if (sb == 0) { return 0; }   # error already printed by build_sandbox
 
+    _stor_cloexec_fds();
     var r = 0;
     if (_rt_is_command_line(sp.command) == 1) {
         r = sandbox_exec(sb, command);
@@ -1348,71 +1457,174 @@ fn _rt_path_join(base, rel) {
     return _rt_cat3(base, "/", rel);
 }
 
-# Copy one file src → dst by value (rust-old: std::fs::copy). Whole-file read via
-# storage's SEEK_END reader (no truncation). Returns 0 on success, -1 on failure.
-fn _rt_copy_file(src, dst) {
-    var len_cell = alloc(8);
-    var data = _stor_read_file(src, len_cell);
-    var n = load64(len_cell);
-    if (n < 0) { return 0 - 1; }
-    if (file_write_all(dst, data, n) < 0) { return 0 - 1; }
-    return 0;
-}
-
-# Recursively copy directory src → dst (rust-old: copy_dir_recursive). Creates
-# dst, then copies each entry (recursing into subdirs). Returns 0 / -1.
-fn copy_dir_recursive(src, dst) {
-    _stor_mkdir_p(dst);
-    var entries = dir_list(str_from(src));
-    var ne = vec_len(entries);
-    var ei = 0;
-    while (ei < ne) {
-        var name = str_cstr(vec_get(entries, ei));
-        var sp = _rt_path_join(src, name);
-        var dp = _rt_path_join(dst, name);
-        if (is_dir(str_from(sp)) == 1) {
-            if (copy_dir_recursive(sp, dp) != 0) { return 0 - 1; }
-        } else {
-            if (_rt_copy_file(sp, dp) != 0) { return 0 - 1; }
+# Copy everything left in open fd `from` to open fd `to`. Returns 0, or -1.
+fn _rt_copy_fd(from, to) {
+    var buf = alloc(65536);
+    while (1 == 1) {
+        var n = sys_read(from, buf, 65536);
+        if (n < 0) { return 0 - 1; }
+        if (n == 0) { return 0; }
+        var done = 0;
+        while (done < n) {
+            var w = sys_write(to, buf + done, n - done);
+            if (w <= 0) { return 0 - 1; }
+            done = done + w;
         }
-        ei = ei + 1;
     }
     return 0;
 }
 
+# The last component of `path`.
+#[must_use]
+fn _rt_basename(path) {
+    var n = strlen(path);
+    while (n > 1 && load8(path + n - 1) == 47) { n = n - 1; }
+    var i = n;
+    while (i > 0 && load8(path + i - 1) != 47) { i = i - 1; }
+    return _stor_slice(path, i, n);
+}
+
+# Copy host path `src` to `name` under `dfd`, an fd inside a rootfs. Directories recurse. The leaf
+# is opened O_NOFOLLOW|O_NONBLOCK and must be a regular file, so a symlink or FIFO the container
+# planted there is refused rather than followed or waited on. Returns 0, or -1.
+fn _rt_copy_in_at(src, dfd, name) {
+    if (is_dir(str_from(src)) == 1) {
+        sys_mkdirat(dfd, name, 493);
+        var sub = _stor_open_dir_at(dfd, name);
+        if (sub < 0) { return 0 - 1; }
+        var entries = dir_list(str_from(src));
+        var rc = 0;
+        var ei = 0;
+        while (ei < vec_len(entries) && rc == 0) {
+            var e = str_cstr(vec_get(entries, ei));
+            rc = _rt_copy_in_at(_rt_path_join(src, e), sub, e);
+            ei = ei + 1;
+        }
+        sys_close(sub);
+        return rc;
+    }
+    var from = file_open(src, O_RDONLY | O_CLOEXEC, 0);
+    if (from < 0) { return 0 - 1; }
+    var flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
+    var out = sys_openat(dfd, name, flags, 420);
+    var rc2 = 0 - 1;
+    if (out >= 0) {
+        var sb = alloc(STAT_BUFSZ);
+        if (sys_fstat(from, sb) == 0) { sys_fchmod(out, _stor_st_mode(sb) & 511); }
+        if (sys_fstat(out, sb) == 0 && (_stor_st_mode(sb) & 61440) == 32768) {
+            rc2 = _rt_copy_fd(from, out);
+        }
+        sys_close(out);
+    }
+    sys_close(from);
+    return rc2;
+}
+
+# Copy `name` under `dfd`, an fd inside a rootfs, to host path `dst`. Directories recurse.
+# Symlinks and special files inside a tree are left behind: nothing here can follow one out of the
+# rootfs, and a FIFO would hang. At the top level they are refused. Returns 0, or -1.
+fn _rt_copy_out_at(dfd, name, dst, top) {
+    var sb = alloc(STAT_BUFSZ);
+    if (sys_fstatat(dfd, name, sb, AT_SYMLINK_NOFOLLOW) != 0) { return 0 - 1; }
+    var kind = _stor_st_mode(sb) & 61440;
+    if (kind == 16384) {
+        _stor_mkdir_p(dst);
+        var sub = _stor_open_dir_at(dfd, name);
+        if (sub < 0) { return 0 - 1; }
+        var names = _stor_dir_names(sub);
+        var rc = 0;
+        var i = 0;
+        while (i < vec_len(names) && rc == 0) {
+            var e = vec_get(names, i);
+            rc = _rt_copy_out_at(sub, e, _rt_path_join(dst, e), 0);
+            i = i + 1;
+        }
+        sys_close(sub);
+        return rc;
+    }
+    if (kind != 32768) {
+        if (top == 1) { return 0 - 1; }
+        return 0;
+    }
+    var from = _stor_open_reg_at(dfd, name, sb);
+    if (from < 0) { return 0 - 1; }
+    var out = file_open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 420);
+    var rc2 = 0 - 1;
+    if (out >= 0) {
+        sys_fchmod(out, _stor_st_mode(sb) & 511);
+        rc2 = _rt_copy_fd(from, out);
+        sys_close(out);
+    }
+    sys_close(from);
+    return rc2;
+}
+
 # Copy a host path into a container's rootfs (rust-old: copy_into_container).
-# `container_dst` is rooted at the rootfs (leading '/' stripped). Creates the
-# target's parent dirs; dirs are copied recursively. Returns 0 / -1.
+# `container_dst` is rooted at the rootfs (leading '/' stripped), and its parent directories are
+# created. A destination ending in '/', or that is already a directory, takes a file under the
+# file's own name. No component may be a symlink: the rootfs is the container's, and the oracle's
+# by-name copy followed whatever it had planted onto the host. Returns 0 / -1.
 fn copy_into_container(rootfs, host_src, container_dst) {
     var lm = _rt_cat3("copying file into container: ", host_src,
       _rt_cat2(" -> ", container_dst));
     sakshi_info(lm, strlen(lm));
-    var rel = container_dst;
-    if (load8(rel) == 47) { rel = rel + 1; }      # strip leading '/'
-    var target = _rt_path_join(rootfs, rel);
-    _stor_mkdir_parents(target);
-    if (is_dir(str_from(host_src)) == 1) { return copy_dir_recursive(host_src, target); }
-    return _rt_copy_file(host_src, target);
+    var cell = alloc(8);
+    var dfd = _stor_walk_to_parent(rootfs, container_dst, 1, cell);
+    if (dfd < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE,
+          _rt_cat2("cannot reach a real directory in the container for: ", container_dst));
+        return 0 - 1;
+    }
+    var leaf = load64(cell);
+    var n = strlen(container_dst);
+    var into_dir = load8(container_dst + n - 1) == 47;
+    if (into_dir) { sys_mkdirat(dfd, leaf, 493); }
+    if (is_dir(str_from(host_src)) == 0) {
+        var sub = _stor_open_dir_at(dfd, leaf);
+        if (sub >= 0) {
+            sys_close(dfd);
+            dfd = sub;
+            leaf = _rt_basename(host_src);
+        }
+    }
+    var rc = _rt_copy_in_at(host_src, dfd, leaf);
+    sys_close(dfd);
+    if (rc != 0) {
+        stiva_err_print(STIVA_ERR_STORAGE,
+          _rt_cat2("cannot write in the container (a symlink or special file?): ", container_dst));
+    }
+    return rc;
 }
 
 # Copy a container-rootfs path out to the host (rust-old: copy_from_container).
-# Errors (-1) when the source path is absent in the container. Creates the host
-# destination's parent dirs; dirs are copied recursively. Returns 0 / -1.
+# Errors (-1) when the source path is absent in the container, or reaches through a symlink.
+# Creates the host destination's parent dirs; dirs are copied recursively. Returns 0 / -1.
 fn copy_from_container(rootfs, container_src, host_dst) {
     var lm = _rt_cat3("copying file from container: ", container_src,
       _rt_cat2(" -> ", host_dst));
     sakshi_info(lm, strlen(lm));
-    var rel = container_src;
-    if (load8(rel) == 47) { rel = rel + 1; }
-    var source = _rt_path_join(rootfs, rel);
-    if (file_exists(source) == 0) {
+    var cell = alloc(8);
+    var dfd = _stor_walk_to_parent(rootfs, container_src, 0, cell);
+    if (dfd < 0) {
+        stiva_err_print(STIVA_ERR_STORAGE,
+          _rt_cat2("source path does not exist in container: ", container_src));
+        return 0 - 1;
+    }
+    var sb = alloc(STAT_BUFSZ);
+    if (sys_fstatat(dfd, load64(cell), sb, AT_SYMLINK_NOFOLLOW) != 0) {
+        sys_close(dfd);
         stiva_err_print(STIVA_ERR_STORAGE,
           _rt_cat2("source path does not exist in container: ", container_src));
         return 0 - 1;
     }
     _stor_mkdir_parents(host_dst);
-    if (is_dir(str_from(source)) == 1) { return copy_dir_recursive(source, host_dst); }
-    return _rt_copy_file(source, host_dst);
+    var rc = _rt_copy_out_at(dfd, load64(cell), host_dst, 1);
+    sys_close(dfd);
+    if (rc != 0) {
+        stiva_err_print(STIVA_ERR_STORAGE,
+          _rt_cat2("cannot read from the container (a symlink or special file?): ", container_src));
+    }
+    return rc;
 }
 
 # ══ §D — exec into a running container ═══════════════════
@@ -1552,7 +1764,7 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
         # into the CONCATENATION of a previous exec's and this one's. The parent
         # unlinks first, so O_EXCL guarantees a fresh regular file and
         # O_NOFOLLOW refuses a planted symlink.
-        var efd = sys_open(err_path, 131265, 384);
+        var efd = sys_open(err_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
         if (efd >= 0) {
             sys_dup2(efd, 2);
             sys_close(efd);
@@ -1564,15 +1776,9 @@ fn _exec_capture2(args, env, workdir, out_buf, out_cap, err_path) {
         if (workdir != 0) {
             if (strlen(workdir) > 0) { syscall(SYS_CHDIR, workdir); }
         }
-        # CVE-2024-21626: close inherited host fds before exec, or the container
-        # can reach host resources through /proc/self/fd/N. The oracle bounds
-        # this by sysconf(_SC_OPEN_MAX); a fixed ceiling is the portable
-        # equivalent and covers every fd this process ever opens.
-        var fd = 3;
-        while (fd < 1024) {
-            sys_close(fd);
-            fd = fd + 1;
-        }
+        # CVE-2024-21626: no inherited host fd may survive the exec, or the
+        # container can reach host resources through /proc/self/fd/N.
+        _stor_cloexec_fds();
         # NO_NEW_PRIVS — a hardening divergence, not parity. The oracle does not
         # set it here (it does in the container-launch pre_exec), but an exec is
         # the same trust boundary.
@@ -1826,7 +2032,7 @@ fn exec_in_container(root, pid, command, env, workdir) {
     return container_exec_result_new(rt_last_exec_exit(), out_buf, errtext, dur_ms, 0);
 }
 
-# ── NOT PORTED: CRIU (roadmap v3.1.0 item 3) ──
+# ── NOT PORTED: CRIU (roadmap v3.4.1) ──
 # The only rust-old/src/runtime.rs surface still missing. Everything else that
 # used to live in this block — spawn_container/DaemonHandle, export_rootfs,
 # import_rootfs, exec_in_container — has landed.

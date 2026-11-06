@@ -5,425 +5,390 @@ rest. This file is only what is still to do.
 
 **Every item belongs to a release, and nothing is parked for being hard.** Where an item needs
 something from another repo, that prerequisite is written down as its own work item with a named
-symbol — not as a reason to wait.
+symbol, not as a reason to wait.
 
-**Every deferral marker in the source is listed here.** `cyrius lint` reports untracked deferrals
-per file; the count is expected to reach zero, either because the work landed or because the comment
-was stale and got deleted. If you add a `TODO` / `deferred` / `not yet` to the source, add it here
-in the same change.
+**Every deferral marker in the source is listed here.** If you add a `TODO` / `deferred` /
+`not yet` to the source, add it here in the same change.
+
+| Release | Theme |
+|---|---|
+| [Upstream](#upstream-work-that-stiva-needs) | Asks of kavach, sandhi, sakshi and sankoch |
+| [v3.2.0](#v320--containers-honour-their-image) | A container runs what its image says |
+| [v3.2.1](#v321--containers-you-can-manage) | Lifecycle: ps, stop, restart, wait, per-container cgroups |
+| [v3.2.2](#v322--configuring-a-container) | Mounts, user, secrets, the `run` flags |
+| [v3.3.0](#v330--registries-and-the-store) | Private registries, parallel pulls, store integrity |
+| [v3.3.1](#v331--networking) | A container gets a network |
+| [v3.3.2](#v332--orchestration) | ansamblu, health, fleet, daimon, multi-stage builds |
+| [v3.3.3](#v333--the-control-plane) | The MCP server, `parse_intent` |
+| [v3.4.0–v3.4.3](#v34--interactive-mobile-and-hardware) | `exec -it`, CRIU, devices, encrypted storage |
+| [v3.5.0–v3.5.2](#v35--other-platforms) | aarch64, AGNOS, Windows |
+| [v3.6.0](#v360--ecosystem) | CRI, metrics, deploy strategies, plugins |
 
 ---
 
-## Where stiva is — v3.1.1
+## Where stiva is — v3.1.2
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
 | | |
 |---|---|
-| CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
+| CLI | **33 of 36 verbs live**: `checkpoint` and `restore` are unwired (v3.4.1), and `restart` cannot succeed (v3.2.1) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
-| Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2197 across `tests/*.tcyr` · 92 CLI smoke assertions · 14 benchmarks |
-| Deps | pinned in [`cyrius.cyml`](../../cyrius.cyml) (`[package].cyrius` and the `[deps.*]` tags); [`state.md`](state.md) lists them and CI checks that list against the manifest. Not restated here. |
+| Container | run · run -d · exec · diff · ps · stop · kill · rename · logs · logs -f · events · wait · top · cp · inspect |
+| Deps and counts | [`state.md`](state.md) lists both, and CI checks the dep list against the manifest. Not restated here. |
 
-**Four facts that constrain everything below**, all verified by execution rather than by reading:
+**What constrains everything below:**
 
-- **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
-  it has not been re-verified at any later pin, including the cyrius 6.7.18 pin in force at
-  v3.1.1, so assume live.** A typed
-  `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
-  per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
-  `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
-  green in *every* unit shape including the 6-module `store.tcyr`, and an assertion that fails on a
-  silent wrong value rather than only on a segfault. Full write-up:
+- **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and has
+  not been re-verified at any later pin, so assume live.** A typed `var x: T = p; x.field` can
+  silently read garbage, per function and per compilation unit. The raw-offset accessors are
+  deliberate. Retiring them needs an assertion that fails on a silent wrong value rather than only
+  on a segfault. Write-up:
   [`docs/architecture/001-cycc-struct-id-miscompile.md`](../architecture/001-cycc-struct-id-miscompile.md).
-- **Only x86_64 is BUILT AND TESTED. aarch64 is untested, not broken** — its one known blocker
-  (`_stor_lchown`'s `syscall(94, …)`, which is `exit_group` on aarch64) was fixed in v3.0.18, and
-  the claim that it "cannot be fixed in stiva" was false. See v3.2.0.
-- **Containers have no secrets.** `secrets` still serializes as an empty array and nothing threads
-  one into `build_sandbox` — v3.1.0 item 1. ⚠ The old wording ("`build_sandbox` has no kavach
-  setter to thread one through") is no longer the blocker: kavach ships `SecretRef`,
-  `CredentialProxy`, `credential_proxy_env_vars` and `credential_inject_files`, and the env channel
-  they needed landed in kavach 3.12.0. This is stiva-side work now.
-- **⛔ FIVE `RuntimeSpec` fields were write-only — assembled correctly, then dropped at the kavach
-  boundary. Two are still live bugs.** This is the single most productive defect shape in this
-  codebase and it has now produced four shipped bugs.
-
-  | Field | State |
-  |---|---|
-  | `env` | **FIXED in v3.0.18** — kavach 3.12.0's `config_env`, called at `src/runtime.cyr:872` |
-  | `workdir` | **FIXED in v3.0.19** — needed kavach 3.12.2 first, because `config_workdir` was itself decorative (only the WASM backend read it) |
-  | `user` | ⛔ **LIVE** — same shape, never read. v3.1.0 item 10 |
-
-  ⚠ Two of five fixed. Both needed an upstream change *first*, because the kavach setter each
-  one wanted was decorative — a green call to a setter nothing reads is indistinguishable from
-  a fix. Grep for the READER on **both** sides of the boundary.
-  | `mounts` | Tracked as v3.1.0 item 9 — and it is what still starves AGNOS-native payloads of their environment |
-  | `namespaces` | Tracked as v3.1.0 item 3 (CRIU) |
-
-  ⚠ **When you add a field to a spec struct, grep for a READER before assuming it is wired.**
-  Assembling a value and delivering it are separate steps, and only the assembling half has ever
-  had tests here — `env` shipped broken through 2175 green tests because the test asserted the spec
-  *carried* the value, mirroring the Rust oracle's own unit test, and nothing asserted a container
-  could *read* it.
+- **Only x86_64 is built and tested in CI.** aarch64 builds and its suite is run by hand under
+  qemu; see v3.5.0.
+- **The default foreground path has no seccomp and no NO_NEW_PRIVS.** See the first
+  [upstream item](#kavach). Only the process backend and `run -d` have both, and `exec` has
+  NO_NEW_PRIVS alone. This is the largest security gap in stiva.
+- **Three `RuntimeSpec` fields are still write-only.** `mounts` and `user` are v3.2.2 and
+  `namespaces` is v3.4.1. `env` and `workdir` were the other two, and each needed a kavach change
+  first because the setter stiva wanted was decorative: a green call to a setter nothing reads is
+  indistinguishable from a fix. **When you add a field to a spec struct, grep for a reader on both
+  sides of the boundary.** `env` shipped broken through 2175 green tests because the test asserted
+  the spec carried the value, and nothing asserted a container could read it.
 
 ---
 
-## Moving the cyrius pin to 6.6.5
+## Upstream work that stiva needs
 
-Nothing breaks at this bump; one check starts giving the right answer. cyrius 6.6.5 is not tagged
-yet, and nothing below can land against the pin until it is. The pin is 6.6.2 today, and this
-section lists only what 6.6.5 itself changes.
+Each is a change to another repo, then a pin bump here. None is a reason to wait: the items that
+depend on them say what to do in the meantime.
 
-- [ ] `node_matches_constraints`' memory check (`src/fleet.cyr:257-262`) is silently wrong on
-      cyrius ≤ 6.6.4: `var cap: FleetNodeCapacity = n.capacity;` follows a closed loop body, and the
-      compiler guessed the aggregate's layout wrong, so **a 512 MB node passes a 1024 MB memory
-      constraint**. It is correct from 6.6.5 with no source change. Add a test for exactly that case
-      in the bump commit. See the cyrius CHANGELOG [6.6.5] entry "A struct literal inside a fn was a
-      GLOBAL slot, and whether an aggregate local was INLINE or a POINTER was GUESSED".
-- [ ] The RAW OFFSETS workaround and its comment (`src/fleet.cyr:271-285`) blame the retired
-      "struct-id 20/21" miscompile. The real cause was the same aggregate-layout guess, so after the
-      bump the typed `cap.accel_profiles` / `c.accel_req` / `c.accel_min_chips` form can come back.
-      Rewrite the comment either way.
-- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved SYS_UNLINKAT 35 → 263, so
-      an un-re-vendored peer's sys_unlink would run nanosleep.
+### kavach
 
----
+- **Seccomp and NO_NEW_PRIVS on the OCI backend.** `oci_generate_spec` emits neither, and a
+  foreground `stiva run` takes the OCI backend whenever runc is present. Emit
+  `process.noNewPrivileges` and a `linux.seccomp` profile. Until then SECURITY.md says so plainly.
+- **`SPAWN_MAX_FD`.** Its fd sweep stops at 1024. stiva marks every descriptor close-on-exec before
+  it reaches kavach (`_stor_cloexec_fds`), so this is defence in depth and not a live hole.
+- **Landlock is never applied** to a sandbox, on any path. Either apply it or remove it from what
+  kavach advertises.
 
-## Open cleanliness
+### sandhi
 
-*(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
-not here. What follows is only what is still open.)*
+- **`_sandhi_dl_drain_headers_a` has no deadline.** stiva bounds the socket with `_reg_set_bounds`,
+  so a silent server fails after one I/O timeout, but a server that trickles one header byte per
+  interval keeps it alive indefinitely.
 
-### Open cleanliness item — `accel` cannot be switched off
+### sakshi
 
-`cyrius.cyml` declares `samay` and `ai-hwaccel` optional, and `[features]` lets a consumer drop
-`accel`, but `src/cron.cyr` (`CRON_SKIP`) and `src/fleet.cyr` (`REQ_NONE`) use both bundles with no
-gate. A build with `default = []` or `cyrius test --no-default-features` fails to compile, at 3.1.0
-on cyrius 6.7.9 and at 3.1.1 on 6.7.18. Nothing in CI builds that way, so nothing shows it.
+- **An opt-out for TSC calibration.** It costs about 10 ms in every process that logs, so in every
+  `stiva` command. Measure again at the next pin, because it dominates the fast verbs.
 
-Either gate both modules on the feature, or drop `optional` and the `[features]` block and say the
-two deps are required.
+### sankoch
 
-### Open cleanliness item — `cyrius audit` exits 1 on two counts
-
-At 3.1.1 on cyrius 6.7.18, `fmt` is clean and tests are 2197/0, and `rc = 1` comes from two
-stages, either of which sets it alone: **147 lint warnings** (the next item) and **492
-undocumented public fns** across the audit's scope (`src tests benches`). Both counts are `rc = 1`
-at any value above zero (`_audit_sweep` in cyrius's `cbt/commands.cyr`). The audit's closing
-`=== 1 passed, 0 failed ===` is the benchmark file and says nothing about either.
-It is not a CI gate (`.github/workflows/ci.yml` runs deps/build/test, not `cyrius audit`), but it
-does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until both are
-zero. Compare the two counts instead of the exit code.
-
-### Open cleanliness item — 147 line-length warnings in `tests/`
-
-`src/` is fmt-clean and lint-clean at zero warnings. The **test** files are not:
-`registry.tcyr` 65 · `stiva.tcyr` 47 · `mgmt.tcyr` 13 · `runpath.tcyr` 11 · `store.tcyr` 9 ·
-`stiva.bcyr` 2 — all of them over 120 characters, almost entirely long assertion messages.
-
-It is recorded here rather than swept because the fix is 147 hand-verified line splits under a
-formatter rule that is easy to get wrong: **`cyrius fmt --check` requires a continuation line to
-sit at the *same* indent as the statement it continues, not one level deeper.** (That rule is
-also what made `src/build.cyr` and `tests/registry.tcyr` fail `fmt --check` for several releases
-— fixed in this line.) cyrlint counts characters at 6.6.20 where 6.6.10 counted bytes: a comment
-of 100 box-drawing characters warns under 6.6.10's and not under 6.6.20's, which is why this count
-fell from 163 with no test line changing to fix it.
+- **A public output cap on one-shot `gzip_decompress`.** It keeps a 16 MiB ceiling, and stiva lifts
+  it through the private `_deflate_dec_set_out_max`. A public setter retires that reach.
 
 ---
 
-## v3.1.0 — secrets, interactivity, and mobility
+## v3.2.0 — containers honour their image
 
-> The 3.1.0 and 3.1.1 releases are the moves to cyrius 6.7.9 and 6.7.18, and carry **none** of the items below.
-> They stay open and keep these numbers, because `src/` and the docs cite them as "v3.1.0 item N".
+A pulled image should run. Today `stiva run` needs an explicit command, and what the image's
+config says is parsed and dropped.
 
-> ⛔ **REWRITTEN 2026-08-21 after an adversarial re-audit. The previous version of this section
-> claimed eight items were blocked on upstream releases. ZERO of them were.** Seven were never
-> blocked; the eighth names a primitive that must be written, not waited for.
->
-> The cause was mechanical, not careless. Every claim below was originally written in one commit
-> (`44b9f8e`, 2026-07-26) against **cyrius 6.4.78 / kavach 3.9.3**. On 2026-08-21 every pin moved.
-> The roadmap edit that accompanied that bump was **one line** — the version inventory. The
-> conclusions *derived from* those versions were never re-checked, and four of them had already
-> gone stale. One ("`SandboxConfig` is 8 fields / 64 bytes") was **never true at any pin** — it was
-> 9 fields / 72 bytes the day it was typed, and stiva was already calling `config_rootfs`.
->
-> Every item now carries a `block` stanza (see **Recording a block** at the end of this file).
-> No stanza means **not blocked, merely unstarted** — which is what most of these were.
+- **Entrypoint, Cmd, Env, WorkingDir, User.** Read them from the image config and apply them as
+  defaults. `cc.config` carries none of them. `env` already reaches the payload through
+  `config_env`, so image env needs only the merge. ⛔ Test what the payload observes, not what the
+  spec carries.
+- **A default `PATH`.** With no image env the environment is empty, so `run -d img sleep 1` cannot
+  find `sleep`. Docker's default is the precedent.
+- **A derived image keeps its base.** `build_image` writes a config that drops the base's
+  environment, entrypoint, user and architecture (`_bld_` config assembly, see `build_image`), so
+  building on an image loses what it says.
+- **Short references resolve.** `stiva tag` prints `local/bb:v2`, which does not resolve as written,
+  and `run repo@sha256:…` fails after a pull by digest. One rule for what a user may type, used by
+  `run`, `rmi`, `tag`, `save`, `push` and `inspect`.
 
-The theme: a container you can hand a credential to, attach to, and move.
+## v3.2.1 — containers you can manage
 
-### 1. Secret injection and the externalization policy
+- **Foreground containers are visible.** While a foreground `stiva run` executes, its record says
+  `Created` with no pid, so `ps` omits it, and `stop` from another terminal reports success and
+  leaves the payload running.
+- **Streaming output.** Foreground output sits in a 1 MiB buffer until the payload exits. Stream it,
+  and report truncation in `exec`'s exit status instead of a silent cut.
+- **`restart` and `start` from a new process.** Both need the runtime spec, which lives only in the
+  process that created the container. Persist it.
+- **Exit codes across processes.** `wait` now follows a detached container's pid, but its exit code
+  is only known to whatever reaps it, so `wait` says none was recorded. Needs a small supervisor, or
+  a pipe held by the container's parent.
+- **Per-container cgroups.** stiva creates none, so a payload shares the cgroup of whatever started
+  it. `pause` and `update` refuse rather than freeze or limit the operator's session
+  (`_rt_cgroup_is_exclusive`), which today means they refuse nearly every container, and `stats`
+  reports the shared cgroup's counters.
+- **Unique names.** Two containers can hold one name, and every by-name verb takes the first.
+- **Cron runs detached.** `cron check` runs each job in the foreground, so a long job delays the
+  next, and nothing reaps or records them.
+- **Timestamps.** `inspect`'s `created_at` is uptime in milliseconds, not an epoch.
+- **Events are complete.** A foreground run emits `created` and `started` only, with `started` after
+  the payload exits, and a `run -d` container that exits by itself emits nothing. `logs -f` should
+  also stop on container state, not on quiet.
+- **Foreground logs are framed**, so `logs -n 2` shows the trailer rather than the last two lines.
+- **Kavach error detail** (was v3.1.0 item 7). All three accessors already exist:
+  `backend_result_is_diagnostic`, `spawn_exit_name` and `sandbox_exec_last_scan_result`, and stiva
+  calls none of them. Read the diagnostic channel stiva already receives, pre-flight
+  `backend_is_available` before `sandbox_create`, and map `spawn_exit_name` over `sandbox_spawn`'s
+  return-0 arms, which is the live `run -d` path.
+- **`--image-path`** is accepted and ignored. Wire it or remove it.
 
-**Not blocked. Never was.** Ordered work, all stiva-side:
+## v3.2.2 — configuring a container
 
-1. **Externalization** — the working lever, `sandbox_exec_set_ext_policy`, shipped in **kavach
-   3.9.3**, before this item was written. Persistence (`src/container.cyr:544-580`) and the
-   `stiva logs` consumer (`src/main.cyr:652-671`) are built and tested; what is missing is a
-   *producer* — nothing in stiva ever sets a non-zero `ContainerConfig.scan_policy`. Add a
-   `--scan-policy` family to `_cli_run`, then gate `container_manager_exec` through
-   `scan_output`.
-   ⛔ Call `sandbox_exec_set_ext_policy`, **NOT** `config_externalization`. The latter exists
-   (kavach 3.11.2) and is **decorative**: `SandboxConfig_externalization` has zero readers in
-   the bundle, and kavach's own doc says so — *"Carrying the policy is all this does; nothing
-   applies it for you."* Wiring it produces no behaviour change.
-   ⚠ Foreground `stiva run` output is **already** scanned today under kavach's default policy
-   (block=CRITICAL), which stiva never chose. Unverified by execution — see the probe below.
-2. **Secrets** — `SecretRef`, `CredentialProxy`, `credential_proxy_env_vars` and
-   `credential_inject_files` all exist in kavach. The env channel they needed landed in
-   **3.12.0** (`config_env`) and stiva now uses it for image env. What remains is a
-   `SandboxConfig.secrets` field, or routing the proxy's env vars through `config_env` —
-   **decide which before building.**
+### The `run` flags
 
-### 2. Interactive `exec -it`
+`-e`, `-v`, `-p`, `--user`, `--restart` and `--rm` are unknown flags today, and nothing on the CLI
+sets a limit, `timeout_ms`, `rootless`, `seccomp_profile` or `log_max_*`, though the config carries
+them all. Register verbs last, because ids are registration-ordered, and give each flag an
+end-to-end test against what the payload observes.
 
-**No upstream prerequisite remains.**
+### Wire `RuntimeSpec.mounts`
 
-- **Coroutines: RESOLVED, and the old entry was stale for four toolchain releases.** cyrius
-  triaged stiva's filed issue, **refuted its own premise**, and shipped `async_wait_rw` /
-  `async_relay_once` in 6.5.25 — eight releases below the current pin. They are sitting in this
-  repo's own `lib/async.cyr`.
-- **pty helper: must be written, in stiva.** `openpty` / `posix_openpt` / `TIOCSCTTY` /
-  `forkpty` exist nowhere — that part of the original entry is correct. But "most sensibly in
-  the cyrius stdlib" is a **placement preference stated as a constraint**: `SYS_IOCTL` is a
-  per-arch constant already in `lib/`, `sys_setsid` is in `lib/syscalls_linux_common.cyr`, and
-  `exec` already bypasses kavach wholesale (`src/runtime.cyr:1359-1363`). ~200 lines:
-  `/dev/ptmx` → `TIOCSPTLCK` → `TIOCGPTN` → `TIOCSCTTY`, raw mode via TCGETS/TCSETS, window
-  size via TIOCGWINSZ. Then `-i`/`-t` on `_cli_exec` and swap the child's fds.
-  ⛔ Build the relay on `async_wait_fd`/`async_wait_rw`, **not** `async_relay_once` — the
-  latter has zero consumers and zero tests anywhere in the cyrius corpus, and used exactly as
-  its own doc prescribes (two instances, reversed directions) it **deadlocks**: a blocking
-  `sys_read` on an idle-but-open fd stalls the single-threaded reactor. Both fds must be
-  `O_NONBLOCK`; the first call returns raw `-EAGAIN`; after child exit the master yields
-  `-EIO` forever rather than EOF, so retire the loop explicitly.
+`mounts` is write-only, the same shape as `env`. `standard_mounts()` builds `/proc` and `/dev`
+entries that never reach a mount.
 
-### 3. CRIU `checkpoint` / `restore`
+⚠ This is why **AGNOS-native payloads still see no environment**: cyrius's `getenv` reads
+`/proc/self/environ`, and `run -d` mounts no `/proc`. glibc and busybox payloads are fine. daimon
+and sutra are not. Tracked on the agnos roadmap, and the alternative fix is cyrius-side; see v3.5.1.
 
-**The prerequisite was mis-stated. There is a route today.**
+### Wire `RuntimeSpec.user`
 
-The old entry said kavach must "honour the namespace list" — but there is no namespace list to
-honour: neither `SandboxConfig` nor `SandboxPolicy` has one, and `config_require_namespaces` is
-a boolean, not a selector. That diagnosis was correct about `NS_PID` having no producer and
-**irrelevant**, because stiva does not have to go through kavach to get a namespace:
-`clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS|SIGCHLD)` is one syscall whose constants are
-already in the tree. Reproduced unprivileged, container init running as pid 1, by two
-independent reviewers.
+`RuntimeSpec.user` is assembled and never read, so a Stivafile's `user = "nobody"` is recorded and
+ignored. **Treat every container as running as root today.**
 
-⚠ **"Every stiva container runs in the HOST pid namespace" was false** — one measurement on the
-detached path generalised to a universal. The foreground path selects the OCI backend whenever
-runc is present (`src/runtime.cyr:836-837`) and kavach's spec emitter always includes a pid
-namespace. Only `run -d` lacks one.
+⛔ This is not a one-liner and it is not obviously kavach's: dropping privileges means
+`setgid`/`setgroups`/`setuid` in the child **after** the rootfs entry and **before** execve, in that
+order, with the uid resolved against the container's `/etc/passwd` rather than the host's. Establish
+where it belongs before writing it, and verify any kavach setter reaches a syscall before trusting
+it: `config_workdir` was decorative until kavach 3.12.2.
 
-Ordered work: (1) fork+clone in stiva's own spawn path, or wire `mounts`/`namespaces` (both
-still write-only); (2) assert the container's pid namespace differs from ours, the shape
-`_rt_userns_differs` already uses; (3) port `checkpoint`/`pre_dump`/`restore`/`restore_lazy`.
-`container_manager_restore` must set `start_ticks` from the new pid or
-`container_fixup_after_restart` demotes the restored container to STOPPED on the next load.
+### Secrets and the externalization policy
 
-⚠ Worth costing first: the runc path already has a pid namespace, and `runc checkpoint` /
-`runc restore` already wrap CRIU. Driving those may retire most of step 3.
+**Not blocked, and never was.** In order:
 
-### 4. §J — device and accelerator passthrough
+1. **Externalization.** The lever is `sandbox_exec_set_ext_policy`. Persistence and the `stiva logs`
+   consumer are built and tested, and what is missing is a producer: nothing sets a non-zero
+   `ContainerConfig.scan_policy`. Add a `--scan-policy` family to `_cli_run`, then gate
+   `container_manager_exec` through `scan_output`.
+   ⛔ Call `sandbox_exec_set_ext_policy`, **not** `config_externalization`, which is decorative:
+   `SandboxConfig_externalization` has no readers in the bundle.
+   ⚠ Foreground `stiva run` output is already scanned under kavach's default policy
+   (block=CRITICAL), which stiva never chose. Verify that by execution before relying on it.
+2. **Secrets.** `SecretRef`, `CredentialProxy`, `credential_proxy_env_vars` and
+   `credential_inject_files` all exist in kavach, and `config_env` is the env channel. What remains
+   is a `SandboxConfig.secrets` field or routing the proxy's env vars through `config_env`. **Decide
+   which before building.** `secrets` serializes as an empty array until then.
 
-**Not blocked on kavach or cyrius.** Both halves of the old diagnosis are true as *symbol*
-statements — `SandboxPolicy` has no device field, `cgroup_setup` writes no devices controller —
-and both are irrelevant:
+### Seccomp on `exec`
 
-- `stiva run -d` never reaches `oci_generate_spec`, which is the **only** place `/dev` is masked
-  with an empty tmpfs.
-- **cgroup v2 has no devices controller by design** — device access is gated by an attached eBPF
-  program, and an unattached cgroup is **ALLOW**. "No devices gate" is why a bind mount *works*,
-  not why it fails. (The claimed missing `SYS_BPF` is therefore not on the critical path either.)
-- Host-side `MS_BIND` is already in the tree at `src/storage.cyr:340`, and a chrooted child
-  inherits mounts established before it enters.
+`exec` enters the container by its own route and sets NO_NEW_PRIVS but no seccomp filter. Apply the
+container's profile.
 
-Ordered work: `--device` / `--gpus` on `_cli_run` (register verbs **last** — ids are
-registration-ordered), validation and persistence, then bind the node into the merged rootfs
-before spawn. ai-hwaccel supplies the matcher and `_find_pci_addr`; it emits no device path,
-major/minor, cgroup rule or driver mount, and should not be expected to.
+---
 
-### 5. Device allocation ledger
+## v3.3.0 — registries and the store
 
-**Blocked only by item 4's false block.** Design is stiva-side and unblocked.
+- **Private registries.** A `login` verb, credential use from the CLI (`pull` and `push` do not
+  read the credential store today), and plain HTTP or insecure TLS for a local registry.
+  `RegistryConfig.host` is what binds a credential to its host, and a config without one sends none.
+- **Tag listing follows `Link`.** `tags/list` stops at the first page.
+- **Parallel layer downloads** (was v3.1.0 item 8). Real OS threads and a thread-safe allocator
+  exist, and a 9-way digest-correct pull was measured at 15.0 s against 22.5 s. ⚠ The prerequisite
+  was a dependency defect: the first concurrent TLS handshake in a cold process failed
+  deterministically, from ~35 unguarded lazy-init flags in sigil. sigil 3.13.6 builds those tables
+  under `_sigil_once_*`. That is from reading the code, and **the cold 9-way pull has not been re-run
+  at this pin**. Re-run it first, and keep a main-thread TLS warm-up covering every handshake shape
+  the pull touches (including `auth.docker.io`) unless it goes 9/9 without one. Then a mutex on the
+  token cache and a fixed 4-worker pool with layer order taken from the descriptor list.
+  ⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn: that is the struct-id
+  20/21 shape.
+- **Blob integrity on read.** Digests are checked on download and by an explicit verify, not when a
+  blob is read back. `save` passed a flipped byte straight into an archive.
+- **`layers/` is never collected.** `gc` sweeps blobs. Unpacked layer directories stay until the
+  store is deleted.
+- **Archives over 2 GiB.** `export`, `save` and the tar writer hold the whole archive in one
+  allocation, and `alloc` returns 0 past `ALLOC_MAX`. Stream them. (Unpacking already fails cleanly.)
+- **xattrs and file capabilities** in layers. Dropped today, so a `cap_net_raw` binary loses it.
+- **zstd layers on write.** stiva reads them and writes gzip. A build-side choice with no reason to
+  make it yet.
 
-⛔ Do not key it on ai-hwaccel's `_find_pci_addr` device index — it is an **unsorted getdents
-ordinal**, not a stable identity, and a ledger keyed on an unstable id is worse than none.
-⛔ Do not copy `state.json`'s unlocked tmp+rename (`src/container.cyr:764-772`); use
-`file_lock` (`lib/io.cyr:612`), or the ledger reproduces the double-allocation race it exists
-to prevent. `src/network_pool.cyr` is stiva's only existing exclusive allocator and has no
-persistence at all — there is no working precedent to copy.
-⚠ samay's `node_capacity_reserve` decrements CPU, memory and disk but **not** `accel_profiles`,
-has zero file I/O, and releases only from `task_scheduler_cancel_task` — so a COMPLETED task
-never releases. Do not adopt it.
+## v3.3.1 — networking
 
-### 6. `parse_intent` — RETIRE, do not implement
+Most of this exists as a library with no caller. `network_manager_new` is never called, so no
+container gets a bridge, a veth or an address.
 
-**The premise was false and the dependency arrow points the other way.**
+- **Construct a `NetworkManager`** and attach containers to it.
+- **Move the veth into the netns.** `move_to_netns` and `configure_container_iface` have no caller.
+- **DNAT per container**, and a host-port conflict check.
+- **`-p`** (v3.2.2) reaches `connect_container`.
+- **Persist the IP pools**, which live only in memory.
+- **The DNS registry** has no caller either. When it gets one, `unregister` needs an owner check, so
+  a container that has gone cannot remove a name another has since taken.
+- **Verify the rootless helpers against real binaries.** pasta and slirp4netns are not installed in
+  CI, so stiva's tests see the argv pasta receives, not what it does with it.
 
-`src/intents.cyr:4` says "The agnoshi project does not exist yet." agnoshi has existed since
-**2026-04**, is at **1.8.9**, and ships a 44-tag NL parser. That sentence was inherited verbatim
-from the Rust oracle (`rust-old/src/intents.rs:3`), where it was **already false when the oracle
-froze**, and survived a whole-language port unread.
+## v3.3.2 — orchestration
 
-The real situation: agnoshi exposes no library surface (no `[lib]`, no `dist/`), has zero
-container intents (its 12 `Stiva*` intents existed only in its deleted Rust tree), and its own
-historical design **shells out to the `stiva` CLI** — agnoshi depends on stiva, not the reverse.
-`parse_intent` has no caller in `src/` at all.
+- **A verb that runs an ansamblu.** There is none. Parsing, DAG order and rolling-update plans exist,
+  and nothing drives them.
+- **`parse_ansamblu`** reads dotted service names and inline `env`.
+- **Health** is unreachable from the CLI. rust-old's `run_probe` and `start_probe_loop` are not
+  ported, and the question to settle first is what process runs the loop, since a CLI exits.
+- **Restart policies** are parsed and stored, and nothing applies them.
+- **Fleet.** Spread and bin-pack re-sort their candidates, which throws away the `preferred_nodes`
+  order that `_fleet_candidates` puts first.
+- **Daimon registration.** `register_container`, `deregister_container` and `report_status` are not
+  ported. sandhi is the HTTP client, so this is unstarted, not blocked.
+- **`run` steps and multi-stage builds.** `build_image` refuses both. A `run` step needs a sandbox
+  per step. bayan's section model is flat, so `[[stages]]` parse to an empty vec.
+- **`convert`** drops `CMD` (as the oracle did), and an `ADD`, `ARG` or `SHELL` silently. Report what
+  it drops, as compose conversion now does.
 
-**Recommendation: delete `parse_intent` and keep the `Intent` value type + serde**, which are
-complete and green. Confirm with agnoshi's maintainer first, then correct `src/intents.cyr:4`,
-`:58-59`, `:269` in the same change.
+## v3.3.3 — the control plane
 
-### 7. Kavach error detail
+- **An MCP server.** There is no `mcp` verb, and `mcp_handle_tool` has no caller, so the nine tool
+  definitions cannot be reached by a client. `stiva_run` needs its handler over the `stiva_run`
+  facade. `stiva_build` confines `context_dir` to the server's working directory.
+- **Retire `parse_intent`** (was v3.1.0 item 6). It only ever fails and has no caller. agnoshi has
+  existed since 2026-04, exposes no library surface, and shells out to the `stiva` CLI, so the
+  dependency arrow points the other way. Keep the `Intent` value type and its serde. Confirm with
+  agnoshi's maintainer first.
 
-**Not blocked.** All three accessors this item asks for shipped **before it was written**:
-`backend_result_is_diagnostic`, `spawn_exit_name`, and `sandbox_exec_last_scan_result`. stiva
-calls none of them.
+---
 
-Work: read the diagnostic channel stiva already receives; pre-flight `backend_is_available`
-before `sandbox_create` (its only return-0 path is BACKEND_UNAVAILABLE, and stiva already calls
-that probe at `src/runtime.cyr:836`); map `spawn_exit_name` over `sandbox_spawn`'s six return-0
-arms — the live `run -d` path the old entry omitted entirely.
+## v3.4 — interactive, mobile and hardware
 
-### 8. True concurrent layer downloads
+### v3.4.0 — interactive `exec -it`
 
-**Not blocked, and the stated prerequisite was false twice.** `buffer_unordered(4)` is
-concurrency, not parallelism, and real OS threads (`thread_create`/`thread_join`) existed at
-**cyrius 6.4.78 — the pin in force the day the claim was typed.** The allocator has been
-thread-safe since 6.0.64. A 9-way digest-correct parallel pull was measured (15.0 s vs 22.5 s).
+**No upstream prerequisite remains.** `async_wait_rw` and `async_relay_once` are in `lib/async.cyr`.
 
-⚠ **The prerequisite the old entry never mentioned was a dependency defect, and it has been fixed
-upstream. Re-measure before relying on that.** At the pin this was measured, the first concurrent
-TLS handshake in a cold process failed deterministically and poisoned the process, bisected to
-~35 unguarded lazy-init flags in sigil (`_p256_init`, `_onc_init`, `_sha_ni_init`). A single
-main-thread handshake before fan-out made the identical binary go 9/9.
+The pty helper must be written, in stiva. `openpty` / `posix_openpt` / `TIOCSCTTY` / `forkpty` exist
+nowhere, but `SYS_IOCTL` is a per-arch constant in `lib/`, `sys_setsid` is in
+`lib/syscalls_linux_common.cyr`, and `exec` already bypasses kavach. About 200 lines:
+`/dev/ptmx` → `TIOCSPTLCK` → `TIOCGPTN` → `TIOCSCTTY`, raw mode via TCGETS/TCSETS, window size via
+TIOCGWINSZ. Then `-i`/`-t` on `_cli_exec` and swap the child's fds.
 
-sigil 3.13.6 builds those tables under `_sigil_once_*` and states that a main-thread warm-up is now
-optional. That reached stiva at v3.0.23, because `lib/sigil.cyr` is the toolchain's fold: 137
-`_sigil_once_*` references in the 6.6.20 fold, 0 in the 6.6.10 one. `_sha_ni_init` keeps its old
-shape, assigning its pointer before filling the table, but its first run is inside
-`sha_ni_available`'s CAS-serialized probe. All of that is from reading the code. **The cold 9-way
-pull has not been re-run at this pin**, and stiva has no threads yet, so nothing in stiva has
-exercised it.
+⛔ Build the relay on `async_wait_fd`/`async_wait_rw`, **not** `async_relay_once`. The latter has no
+consumers or tests anywhere, and used as its own doc prescribes (two instances, reversed directions)
+it **deadlocks**: a blocking `sys_read` on an idle-but-open fd stalls the single-threaded reactor.
+Both fds must be `O_NONBLOCK`, the first call returns raw `-EAGAIN`, and after child exit the master
+yields `-EIO` forever rather than EOF, so retire the loop explicitly.
 
-Work: re-run the cold 9-way pull first. Keep a main-thread TLS warm-up covering **every handshake
-shape the pull touches** (including `auth.docker.io`, which `registry_resolve_manifest` does not
-pre-warm) unless that run goes 9/9 without one. Then a mutex on the token cache
-(`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl` scratch), and a
-fixed 4-worker pool with layer order taken from the descriptor list.
-⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn — that is the
-struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.7.18.
+### v3.4.1 — CRIU `checkpoint` / `restore`
 
-### 9. Wire `RuntimeSpec.mounts` — NEW, and it gates more than it looks
+**There is a route today.** stiva does not have to go through kavach to get a namespace:
+`clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS|SIGCHLD)` is one syscall whose constants are in the
+tree. Reproduced unprivileged, container init running as pid 1, by two independent reviewers.
 
-`mounts` is **write-only** (`src/runtime.cyr:539`), the third field found in the
-`RUNTIME_NS_PID` shape after `env` (fixed in 3.0.18) and `namespaces`. `standard_mounts()`
-builds `/proc` and `/dev` entries that never reach a mount.
+⚠ Only `run -d` lacks a pid namespace. The foreground path selects the OCI backend whenever runc is
+present, and kavach's spec emitter always includes one.
 
-⚠ This is why **AGNOS-native payloads still see no environment** after 3.0.18: cyrius's
-`getenv` reads `/proc/self/environ`, and `run -d` mounts no `/proc`. glibc and busybox payloads
-are fine. daimon and sutra are not. Tracked in the agnos roadmap; the alternative fix is
-cyrius-side.
+In order: (1) fork+clone in stiva's own spawn path, or wire `namespaces` (write-only); (2) assert the
+container's pid namespace differs from ours, the shape `_rt_userns_differs` uses; (3) port
+`checkpoint` / `pre_dump` / `restore` / `restore_lazy`. `container_manager_restore` must set
+`start_ticks` from the new pid, or `container_fixup_after_restart` demotes the restored container to
+STOPPED on the next load.
 
-### 10. Wire `RuntimeSpec.user` — `workdir` is DONE
+⚠ Worth costing first: `runc checkpoint` and `runc restore` already wrap CRIU, which may retire most
+of step 3.
 
-⚠ **`workdir` shipped in v3.0.19**, and the warning this item carried turned out to be correct:
-`config_workdir` *was* decorative — kavach's only reader was the WASM backend's `--dir` preopen —
-so wiring it stiva-side alone would have produced a green diff and no behaviour change. It needed
-kavach **3.12.2** (`_spawn_enter_workdir` after the chroot, plus `process.cwd` in the OCI spec)
-first. Keep that check in this item for `user`.
+### v3.4.2 — device and accelerator passthrough
 
-**`user` remains.** `RuntimeSpec.user` is assembled (`src/runtime.cyr:537`) and never read, so a
-Stivafile's `user = "nobody"` is recorded and ignored — **treat every container as running as
-root today.**
+**Not blocked on kavach or cyrius.** `SandboxPolicy` has no device field and `cgroup_setup` writes no
+devices controller, and neither matters:
 
-⛔ Unlike `workdir`, this is not a one-liner and it is not obviously kavach's: dropping
-privileges means `setgid`/`setgroups`/`setuid` in the child **after** the rootfs entry and
-**before** execve, in the right order, with the uid resolved against the container's
-`/etc/passwd` rather than the host's. Establish where that belongs before writing it — and
-verify any kavach setter reaches a syscall before trusting it.
+- `stiva run -d` never reaches `oci_generate_spec`, the only place `/dev` is masked.
+- **cgroup v2 has no devices controller by design.** Device access is gated by an attached eBPF
+  program, and an unattached cgroup is ALLOW.
+- Host-side `MS_BIND` is in the tree, and a chrooted child inherits mounts established before it
+  enters.
 
+Work: `--device` / `--gpus` on `_cli_run`, validation and persistence, then bind the node into the
+merged rootfs before spawn. ai-hwaccel supplies the matcher and `_find_pci_addr`. It emits no device
+path, major/minor, cgroup rule or driver mount, and should not be expected to.
 
-## v3.2.0 — non-x86: aarch64, then AGNOS
+**The allocation ledger** comes with it:
 
-### aarch64 — the known blocker is GONE; the target is untested, not broken
+- ⛔ Do not key it on `_find_pci_addr`'s device index, which is an unsorted getdents ordinal.
+- Use `file_lock`, as `_cm_persist` does now.
+- ⚠ samay's `node_capacity_reserve` decrements CPU, memory and disk but not `accel_profiles`, has no
+  file I/O, and releases only on cancel, so a completed task never releases. Do not adopt it.
 
-⛔ **This entry previously said the aarch64 blocker "cannot be fixed in stiva: the cyrius stdlib
-exposes neither a `sys_lchown` wrapper nor a `SYS_LCHOWN`/`SYS_FCHOWNAT` per-arch constant."
-That was FALSE, and false at the pin in force when it was written.** All four symbols were in
-stiva's own `lib/`: `sys_fchownat` (`syscalls_x86_64_linux.cyr:393`,
-`syscalls_aarch64_linux.cyr:611`), `SYS_FCHOWNAT` (`:116`, `:109`), `AT_FDCWD` and
-`AT_SYMLINK_NOFOLLOW` (`syscalls_linux_common.cyr:38`/`:41`, `:61`/`:68`) — and the stdlib's own
-header documents this exact use: *"with AT_FDCWD + AT_SYMLINK_NOFOLLOW it gives lchown
-semantics."* Fixed in **3.0.18** with a one-line replacement. Nobody re-checked between the
-claim being typed and it being disproved; see the `block` stanza rule below.
+### v3.4.3 — encrypted storage
 
-The `syscall(94, …)` → `__NR_exit_group` hazard was real: an aarch64 build terminated silently on
-the first tar entry of any unpack, `import` or `load` — verified under qemu (`stiva load` printed
-nothing, exit 16). It is gone.
+The `encrypted` feature. `src/encrypted.cyr`'s closing block maps each entry point onto sigil's
+`luks_*` and `dmverity_*`, which stiva already compiles, so it needs no new dep.
 
-Remaining work is ordinary and unblocked: build for aarch64, run the suite under qemu-aarch64,
-add an aarch64 CI job, and fix whatever that surfaces. **No upstream landing is required.**
+---
 
-⚠ Still worth doing upstream: the suggested cyrius lint on bare integer literals in `syscall()`.
-The same drift produced three sibling bugs here (`prctl` 157 → `setsid`, `chdir` 80 → `fstat`,
-and this one), and agnos tracks the identical class on its own roadmap as *"Raw `syscall(N,…)`
-with LINUX numbers on agnos paths"*. A lint catches the next one; a fixed call site does not.
+## v3.5 — other platforms
 
-### AGNOS kernel target
+### v3.5.0 — aarch64
+
+The target builds, and `cyrius test --aarch64 tests/` passes by hand under qemu-aarch64 (first run at
+3.1.2, where it found every symlink guard disabled by x86 open-flag literals). Add a CI job so it stays
+that way. The container paths themselves have not run on real aarch64 hardware. **No upstream landing
+is required.**
+
+⚠ Worth doing upstream: a cyrius lint on bare integer literals in `syscall()`. The same drift
+produced `prctl` 157 → `setsid`, `chdir` 80 → `fstat`, and `lchown` 94 → `exit_group`. stiva's own
+stat reads and open flags had the same shape until 3.1.2: bare offsets and bare `O_*` numbers are
+the same bug, and a lint could catch those too.
+
+### v3.5.1 — AGNOS kernel target
 
 Unblocked by the agnos 1.45.x ring-3 net/socket syscall surface (#45–#57, including server
-`sock_listen` #56 / `sock_accept` #57) — sockets were the major hurdle to container usage.
+`sock_listen` #56 / `sock_accept` #57).
 
-- Build + run stiva against the agnos syscall ABI (FS-write / exec-from-disk / sockets).
-- Map kavach isolation onto the agnos sandbox primitives — no Linux namespaces or seccomp there.
-- Container networking over the agnos socket surface: bridge / NAT / port-map without slirp/pasta.
-- Host the docker-service-sweep server-stage workloads (agora BBS, descent MUD, web server,
-  ark+nous server-side) in AGNOS containers.
-- Soak and weak-point sweep: connection floods, fuzzed input, resource exhaustion — including the
+- Build and run stiva against the agnos syscall ABI (FS-write / exec-from-disk / sockets).
+- Map kavach isolation onto the agnos sandbox primitives: no Linux namespaces or seccomp there.
+- Container networking over the agnos socket surface: bridge / NAT / port-map without slirp or pasta.
+- Host the docker-service-sweep server-stage workloads (agora BBS, descent MUD, web server, ark+nous
+  server-side) in AGNOS containers.
+- Soak and weak-point sweep: connection floods, fuzzed input, resource exhaustion, including the
   kernel's 8-connection TCP and 8-listener UDP caps.
 
-⚠ **An AGNOS-native payload cannot read its environment in a stiva container today**, and that
-lands on this line before any of the above matters. cyrius's `getenv` reads `/proc/self/environ`
-on the Linux target, `run -d` mounts no `/proc`, and the workloads named above are all
-cyrius-built. Filed on the agnos roadmap ("AGNOS-native binaries cannot read their environment
-inside a container"); the two candidate fixes are **not** equivalent — cyrius preferring the stack
-`envp` fixes every consumer, stiva wiring `mounts` (item 9) fixes only stiva. A design call is
-owed before either is built.
+⚠ **An AGNOS-native payload cannot read its environment in a stiva container today**, and that comes
+first. cyrius's `getenv` reads `/proc/self/environ` on the Linux target, `run -d` mounts no `/proc`,
+and the workloads above are all cyrius-built. Filed on the agnos roadmap. The two candidate fixes are
+**not** equivalent: cyrius preferring the stack `envp` fixes every consumer, and stiva wiring `mounts`
+fixes only stiva. A design call is owed before either is built.
 
-`epoll` is a portability trap on this line: its event struct is packed differently on x86_64 (data at
-+4, stride 12) and aarch64 (+8, stride 16), and the AGNOS wrappers take a **different arity** (3-arg
-vs Linux's 4-arg). `_exec_capture2` avoids it deliberately by sending stderr to a file rather than a
-second pipe; anything new reaching for epoll must handle all three.
+`epoll` is a portability trap here: its event struct is packed differently on x86_64 (data at +4,
+stride 12) and aarch64 (+8, stride 16), and the AGNOS wrappers take a different arity (3-arg vs
+Linux's 4-arg). `_exec_capture2` avoids it by sending stderr to a file rather than a second pipe.
+
+### v3.5.2 — Windows containers
+
+A kavach backend for Windows process isolation. Separate because it is the only item needing a
+non-Linux isolation model end to end, and because `lib/syscalls_windows.cyr` stubs `sys_fork` /
+`sys_execve` / `sys_waitpid` to `-1`, so the capture primitives every backend relies on do not exist
+there.
 
 ---
 
-## v3.3.0 — orchestration surface
+## v3.6.0 — ecosystem
 
-Carried from v2.1.0, and unblocked by the port: `ansamblu`, `fleet`, `health` and the `Stiva` facade
-all exist now.
-
-- **Kubernetes CRI shim** — a minimal CRI gRPC server wrapping stiva for k8s node integration.
-- **Metrics export** — a Prometheus-compatible `/metrics` endpoint.
-- **Ansamblu blue-green deploys** — deploy the new version alongside the old, swap traffic.
-- **Service mesh integration** — sidecar injection for ansamblu services.
-- **Fleet auto-scaling** — adjust node count from majra queue depth, over
-  `select_migration_target`. Its prerequisite — the three inherited `fleet.cyr` defects — was
-  cleared in v3.0.17.
-- **`stiva plugin` system** — loadable plugins for storage drivers, network drivers, auth providers.
-
-## v3.4.0 — Windows containers
-
-A kavach backend for Windows process isolation. Separate because it is the only item needing a
-non-Linux isolation model end to end, and because `lib/syscalls_windows.cyr` currently stubs
-`sys_fork` / `sys_execve` / `sys_waitpid` to `-1` — so the capture primitives every backend relies on
-do not exist there yet.
+- **Kubernetes CRI shim**: a minimal CRI gRPC server wrapping stiva for k8s node integration.
+- **Metrics export**: a Prometheus-compatible `/metrics` endpoint.
+- **Ansamblu blue-green deploys**: deploy the new version alongside the old, swap traffic.
+- **Service mesh integration**: sidecar injection for ansamblu services.
+- **Fleet auto-scaling**: adjust node count from majra queue depth, over `select_migration_target`.
+- **`stiva plugin` system**: loadable storage drivers, network drivers and auth providers.
 
 ---
 
 ## Known limitations
 
-Real, understood, and deliberately lived with. Each states its cost rather than a plan — but each is
+Real, understood, and deliberately lived with. Each states its cost rather than a plan, and each is
 here so it can be argued with, not so it can be forgotten.
 
 - **Exec output is truncated at the first NUL byte.** `ContainerExecResult` holds cstrs, so binary
@@ -432,41 +397,36 @@ here so it can be argued with, not so it can be forgotten.
 - **The event log's rotation is racy across processes.** `_cm_file_size` + `rotate_logs` run outside
   `file_append_locked`'s flock, so two processes crossing the threshold together can discard a
   retained generation. Closing it needs `file_append_locked` to expose its lock; a second lock here
-  would invert the acquisition order against the container-log path. The live append IS flocked, so
-  no event is ever lost or interleaved — only an older rotated file.
+  would invert the acquisition order against the container-log path. The live append is flocked, so
+  no event is ever lost or interleaved, only an older rotated file.
 - **`index.json` cannot express a digest-pinned reference.** It carries the reference in the
   `org.opencontainers.image.ref.name` annotation, which has no digest field, so after a store reload
   two digest-pinned pulls of one repository read as unpinned. Making the annotation digest-aware is
   an on-disk format change.
-- **The build cache's fingerprint is metadata-only** — path, mode, uid, gid, size, nanosecond mtime.
-  An edit preserving all of those will not invalidate it. Reading contents would cost as much as
-  rebuilding the layer the cache exists to skip. `rm -rf {root}/cache` forces a rebuild.
-- **`_stor_write_tar` assembles in memory** (`storage.cyr:1363`), so a rootfs larger than addressable
-  RAM cannot be exported. rust-old streamed via `tar::Builder`; a streaming writer lands if it ever
-  matters. A 16 GiB assembly ceiling and a null-alloc check make the failure an error rather than a
-  crash.
+- **The build cache's fingerprint is metadata-only**: path, mode, uid, gid, size, nanosecond mtime.
+  An edit preserving all of those will not invalidate it, and reading contents would cost as much
+  as rebuilding the layer the cache exists to skip. `rm -rf {root}/cache` forces a rebuild. A tree
+  deeper than 64 levels is never cached at all.
+- **`logs` and the audit reader show the newest 4 MiB and 1 MiB.** A longer history stays on disk.
+- **`diff` on a flattened rootfs reads every file of equal size** on both sides, so it costs about
+  two reads of the image.
 - **A policy carrying any resource limit fails on the OCI backend unprivileged.** runc refuses
-  `linux.resources` without the cgroup delegation an unprivileged user lacks. ⚠ The previous
-  wording — "`policy_strict` cannot run … the generated spec **always** emits `linux.resources`" —
-  overstated the mechanism: kavach builds `resources` as `""` and populates it only when the policy
-  carries a memory or pid limit (`lib/kavach.cyr:7980-7981`). `policy_strict` happens to set
-  `memory_limit_mb = 512` and `max_pids = 64` (`:3188-3190`), which is why it trips; a
-  limit-free policy emits no `resources` and runs fine. So the limitation is about **limits**, not
-  about `policy_strict`, and not about the emitter being unconditional.
-  A kavach-side fix (emit `resources` only when delegation is available, or degrade with a
-  warning); raise it there if a consumer needs limits on OCI unprivileged.
+  `linux.resources` without the cgroup delegation an unprivileged user lacks. kavach populates
+  `resources` only when the policy carries a memory or pid limit, and `policy_strict` sets both,
+  which is why it trips. The fix is on the kavach side: emit `resources` only when delegation is
+  available, or degrade with a warning.
 
 ---
 
 ## Recording a block
 
-Adopted 2026-08-21, after an audit found that **eight of eight "blocked on upstream" claims in
-the v3.1.0 section were wrong.** Not one was caught by review; every one was caught by running
-something. The rules below are mechanical on purpose — the failure was never carelessness, it
-was writing a conclusion once and never re-testing it.
+Adopted 2026-08-21, after an audit found that **eight of eight "blocked on upstream" claims in the
+v3.1.0 section were wrong.** Not one was caught by review; every one was caught by running
+something. The rules below are mechanical on purpose: the failure was never carelessness, it was
+writing a conclusion once and never re-testing it.
 
-**A claim of a block is not prose. It is a stanza, and without one the item is not blocked — it
-is unstarted, and must be filed that way.**
+**A claim of a block is not prose. It is a stanza, and without one the item is not blocked, it is
+unstarted, and must be filed that way.**
 
 ````
 ```block
@@ -483,137 +443,30 @@ routes:
 
 Seven rules, each mapping to a specific way this went wrong:
 
-1. **`probe:` is mandatory and executable.** It exits 0 when the block has lifted, non-zero
-   while it holds. Writing it forces you to state what "unblocked" looks like — the step none of
-   the eight took. A probe going green is a build failure: the tree tells you the block is gone.
-2. **`around-api` and `raw-syscall` may not be blank.** Both were the answer for five of the
-   eight. This tree bypasses kavach for `exec` and nein for `apply`, both deliberately and both
-   documented — a library boundary here is a choice, never a wall.
-3. **`verified:` records the dep version the probe last ran against.** CI compares it to the tag
-   in `cyrius.cyml` and fails on mismatch. Four claims went stale at one dep bump that edited
-   exactly one roadmap line.
+1. **`probe:` is mandatory and executable.** It exits 0 when the block has lifted, non-zero while it
+   holds. Writing it forces you to state what "unblocked" looks like, the step none of the eight
+   took. A probe going green is a build failure: the tree tells you the block is gone.
+2. **`around-api` and `raw-syscall` may not be blank.** Both were the answer for five of the eight.
+   This tree bypasses kavach for `exec` and nein for `apply`, both deliberately and both documented.
+   A library boundary here is a choice, never a wall.
+3. **`verified:` records the dep version the probe last ran against.** CI compares it to the tag in
+   `cyrius.cyml` and fails on mismatch. Four claims went stale at one dep bump that edited exactly
+   one roadmap line.
 4. **Never type a number about a dependency.** Struct sizes and field counts come from a script
    reading `lib/`, or they are omitted. "8 fields / 64 bytes" was wrong the day it was written.
-5. **Assert symbol absence in backticks, and expect to be checked.** CI greps `lib/` and the
-   pinned snapshot for every backticked identifier in a sentence containing *no* / *neither* /
-   *does not exist* / *exposes no*. A hit fails the build. This alone would have caught four,
-   including `SYS_FCHOWNAT`, which the roadmap named while it sat in this repo's own `lib/`.
-6. **"Verified by execution" must carry the command and its expected output.** One measurement
-   on the detached path became "**every** stiva container runs in the HOST pid namespace." It
-   was false for the runc path, and one re-run would have said so.
-7. **These phrases are build errors** outside a stanza with a live probe: `cannot be fixed`,
-   `under any wiring`, `no amount of`, `not on stiva effort`. At adoption there were three hits
-   in this tree and **two were provably false** — `roadmap.md`'s aarch64 entry and
-   `src/storage.cyr`'s `_stor_lchown`. Both are now fixed; the phrase is what survived longest.
-   ⚠ **Implementer's note, learned by running the check on the day it was written:** a bare grep
-   now matches five lines, and every one is a *quotation of the phrase being disavowed* — this
-   rule's own documentation, and the two corrected comments that record what they used to claim.
-   The gate must skip lines where the phrase is quoted or negated, or it fires hardest on exactly
-   the writing that fixed the problem. Match the *assertion*, not the string.
+5. **Assert symbol absence in backticks, and expect to be checked.** CI greps `lib/` and the pinned
+   snapshot for every backticked identifier in a sentence containing *no* / *neither* / *does not
+   exist* / *exposes no*. A hit fails the build. This alone would have caught four, including
+   `SYS_FCHOWNAT`, which the roadmap named while it sat in this repo's own `lib/`.
+6. **"Verified by execution" must carry the command and its expected output.** One measurement on
+   the detached path became "every stiva container runs in the HOST pid namespace." It was false for
+   the runc path, and one re-run would have said so.
+7. **These phrases are build errors** outside a stanza with a live probe: `cannot be fixed`, `under
+   any wiring`, `no amount of`, `not on stiva effort`. At adoption there were three hits in this tree
+   and two were provably false. The gate must skip lines where the phrase is quoted or negated, or it
+   fires hardest on exactly the writing that fixed the problem. Match the assertion, not the string.
 
-⚠ **Inherited oracle prose is not evidence.** `src/intents.cyr:4` still says "The agnoshi project
-does not exist yet" — copied verbatim from `rust-old/`, where it was **already false when the
-oracle froze**, and carried unread through a whole-language port. When porting a comment, port
-the behaviour and re-derive the claim.
-
----
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin:** `cyrius = "6.6.2"` (`cyrius.cyml`).
-
-No source change is needed. The reason this note is long anyway is that stiva has
-by far the largest struct surface in this slice of the ecosystem, and 6.6.6 turns
-several previously-silent struct miscompiles into hard compile errors — so the
-honest answer to "will this build stop?" needed measuring rather than assuming.
-
-### The struct audit: 635 sites, zero hits
-
-6.6.6 rejects copying between two **different** struct/vector types, in both the
-`var p: T = q;` and the bare `p = q` shape. stiva has **91 structs and 635
-struct-typed `var` declarations** across `src/`, `tests/` and `programs/`, so this
-was the real question for the pin. A scope-aware scan (reset at each `fn`, then
-matching every typed declaration and every bare assignment against the types in
-scope) found **zero** sites where both sides are struct-typed vars of different
-types.
-
-Every site is the same safe idiom — viewing a raw pointer as a struct:
-
-```cyrius
-var p = alloc(24);
-var s: AgentStatus = p;     # src/agent.cyr:60
-s.id = id;
-```
-
-The right-hand side is an untyped `alloc()` result or an untyped parameter, never
-a struct-typed var, so 6.6.6 has nothing to reject. Confirmed by compiling that
-exact shape against `cycc 6.6.6` — it builds and runs. The same holds for the
-`src/ansamblu.cyr` cluster (`var s: ServiceDef = service;`,
-`var sess: AnsambluSession = session;`, ~30 more), `src/image.cyr`,
-`src/registry.cyr` and `src/cron.cyr`: the right-hand side is always a plain
-parameter.
-
-Two related rules also come up empty:
-
-- **By-value >8 B struct params are now deep-copied** where they used to alias a
-  pointer. stiva has **no struct-typed by-value params** — the two `fn f(x: T)`
-  grep hits (`src/health.cyr:294`, `src/oci.cyr:106`) are Rust-origin signatures
-  quoted in comments. So the aliasing-to-copy behaviour change has no site, and
-  nothing that relied on the old aliasing can shift underneath stiva.
-- **An `async fn` with a vector param or a >8 B struct return is now an error.**
-  All 18 `async fn` hits in stiva are Rust-origin prose in `src/mcp.cyr`,
-  `src/agent.cyr`, `src/image.cyr` and `src/network_rootless.cyr` comments —
-  stiva defines no real `async fn`.
-
-### Windows: not exposed today, but this pin is a prerequisite for v3.4
-
-stiva has **zero `CYRIUS_TARGET_WIN` guards** in its own `src/`, and the README
-lists "**v3.4 — Windows containers**" as a *future* milestone, so the PE
-`O_APPEND`/`O_TRUNC` data-corruption bug is not biting stiva today. It would bite
-the moment that milestone starts, because stiva writes exactly the kind of file
-the bug destroys:
-
-- **`src/network_rootless.cyr:429`** — `sys_open(log_path, 1089, 384)`
-  (`O_WRONLY|O_CREAT|O_APPEND`, 0600), `dup2`'d onto fd 2 as the
-  slirp4netns/pasta child's stderr log. Structurally POSIX-only (it sits inside a
-  forked child and PE has no `fork`), but it is the canonical append-a-journal
-  shape and the one to re-check when a Windows path appears.
-- **97 `file_write_all` sites** — `lib/io.cyr:546` opens
-  `O_WRONLY|O_CREAT|O_TRUNC`, so on a pre-6.6.6 PE build every one of them would
-  have left the old tail behind when the new content was shorter. For a container
-  runtime that means state files, image manifests and layout JSON.
-- **152 `file_exists` / `file_read_all` sites** — both open read-only, and 6.6.6
-  stops PE requesting write access for a read, so they begin succeeding on
-  read-only files and volumes. Relevant for a read-only image store.
-
-One thing worth recording while it is in view, because the comment above it is
-already careful about this: **`src/runtime.cyr:1533` is not an append.** Flags
-`131265` = `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, exactly as the comment at
-`:1527-1532` says — it explicitly is *not* `1089`. No action; noted so a future
-reader grepping for "1089-shaped" flags does not mis-file it.
-
-### Everything else checked and clear
-
-- 0 `operator` fns, 0 `ret2`/`rethi`, 0 `: cstring` params, no SIMD intrinsics.
-- **40 globals, none redeclared**, so 6.6.6's "a later redeclaration now wins
-  everywhere from program start" flip and the new different-type-co-linked-global
-  error change nothing here.
-- **No `var` in a top-level block** anywhere in the tree, so the new block
-  scoping is a heads-up only.
-- No own `vec_*` definitions, so `assert.cyr`'s new transitive `vec.cyr` include
-  cannot collide.
-- No raw `SYS_STATFS`. No `lib/` symlinks, `cyrius.lock` present and writable, so
-  6.6.6's fail-hard `cyrius deps` / `publish` is a no-op.
-- `lib/regression.cyr` is not vendored, so the new exec deadline and
-  `PR_SET_PDEATHSIG` behaviour does not reach stiva.
-
-### Verify after bumping
-
-1. `cyrius build` — the point of the struct audit above is that this should
-   simply succeed. If it *does* stop on a "cannot copy … into a variable of a
-   different struct/vector type" error, that is a real latent miscompile the scan
-   missed, not a regression to work around: fix the copy.
-2. `cyrius test` plus the `tests/*.tcyr` suite — `mgmt.tcyr`, `runpath.tcyr` and
-   `stiva.tcyr` carry the densest struct use.
-3. Nothing Windows-specific to check until v3.4 opens, at which point the
-   `O_APPEND` / `O_TRUNC` notes above are the acceptance list.
+⚠ **Inherited oracle prose is not evidence.** A comment in `src/intents.cyr` said "The agnoshi project
+does not exist yet", copied verbatim from `rust-old/`, where it was already false when the oracle
+froze, and carried unread through a whole-language port. When porting a comment, port the behaviour
+and re-derive the claim.

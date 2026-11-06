@@ -222,7 +222,12 @@ fn _rg_mt() {
 
 # ══ Inc-0: index / platform JSON parsing ════════════════════════
 
-fn test_rg_platform_from_jv() {
+# The ref the token tests authenticate for.
+fn _rt_auth_ref() {
+    return image_ref_parse("reg.test/acme/app:v1");
+}
+
+fn _test_rg_platform_from_jv() {
     test_group("rg_platform_from_jv");
     var p: Platform = platform_from_jv(_rg_parse("{\"architecture\":\"amd64\",\"os\":\"linux\"}"));
     assert_neq(p, 0, "minimal platform parses");
@@ -244,12 +249,13 @@ fn test_rg_platform_from_jv() {
     return 0;
 }
 
-fn test_rg_platform_manifest_from_jv() {
+fn _test_rg_platform_manifest_from_jv() {
     test_group("rg_platform_manifest_from_jv");
     var eb = str_builder_new();
     str_builder_add_cstr(eb, "{");
     str_builder_add_cstr(eb, _rg_mt());
-    str_builder_add_cstr(eb, "\"digest\":\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"size\":528,");
+    str_builder_add_cstr(eb,
+      "\"digest\":\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"size\":528,");
     str_builder_add_cstr(eb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}");
     var e: PlatformManifest = platform_manifest_from_jv(_rg_parse(str_cstr(str_builder_build(eb))));
     assert_neq(e, 0, "entry parses");
@@ -258,11 +264,11 @@ fn test_rg_platform_manifest_from_jv() {
     assert_neq(e.platform, 0, "platform attached");
     # platform is optional
     var e2: PlatformManifest = platform_manifest_from_jv(_rg_parse(
-        "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\",\"size\":1}"));
+        "{\"mediaType\":\"m\",\"digest\":\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\",\"size\":1}"));   #skip-lint
     assert_neq(e2, 0, "entry without platform parses");
     assert_eq(e2.platform, 0, "platform absent -> 0");
     # the three required fields are tag-guarded
-    assert_eq(platform_manifest_from_jv(_rg_parse("{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}")), 0, "no mediaType -> 0");
+    assert_eq(platform_manifest_from_jv(_rg_parse("{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}")), 0, "no mediaType -> 0");   #skip-lint
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"size\":1}")), 0, "no digest -> 0");
     assert_eq(platform_manifest_from_jv(_rg_parse("{\"mediaType\":\"m\",\"digest\":\"d\"}")), 0, "no size -> 0");
     # a STRING size is rejected, not silently coerced to 0
@@ -271,18 +277,20 @@ fn test_rg_platform_manifest_from_jv() {
     return 0;
 }
 
-fn test_rg_oci_index_from_jv() {
+fn _test_rg_oci_index_from_jv() {
     test_group("rg_oci_index_from_jv");
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"schemaVersion\":2,");
     str_builder_add_cstr(sb, "\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[");
     str_builder_add_cstr(sb, "{");
     str_builder_add_cstr(sb, _rg_mt());
-    str_builder_add_cstr(sb, "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":100,");
+    str_builder_add_cstr(sb,
+      "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":100,");
     str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},");
     str_builder_add_cstr(sb, "{");
     str_builder_add_cstr(sb, _rg_mt());
-    str_builder_add_cstr(sb, "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":200,");
+    str_builder_add_cstr(sb,
+      "\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":200,");
     str_builder_add_cstr(sb, "\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}");
     var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
     assert_neq(idx, 0, "index parses");
@@ -294,16 +302,18 @@ fn test_rg_oci_index_from_jv() {
     var want = platform_new("amd64", "linux", 0, 0);
     var sel: PlatformManifest = select_platform(idx, want);
     assert_neq(sel, 0, "amd64 selected");
-    assert_eq(streq(sel.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "picked the amd64 entry");
+    assert_eq(streq(sel.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1,
+      "picked the amd64 entry");
     var want2 = platform_new("arm64", "linux", 0, 0);
     var sel2: PlatformManifest = select_platform(idx, want2);
-    assert_eq(streq(sel2.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "picked the arm64 entry");
+    assert_eq(streq(sel2.digest, "sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1,
+      "picked the arm64 entry");
     # a platform not in the index -> 0 (UnsupportedPlatform at the caller)
     assert_eq(select_platform(idx, platform_new("s390x", "linux", 0, 0)), 0, "absent platform -> 0");
     return 0;
 }
 
-fn test_rg_oci_index_hostile_entries() {
+fn _test_rg_oci_index_hostile_entries() {
     test_group("rg_oci_index_hostile_entries");
     # DIVERGENCE from the oracle's serde-strict decode: one malformed entry is
     # dropped, not fatal — a remote registry must not be able to fail an
@@ -311,7 +321,8 @@ fn test_rg_oci_index_hostile_entries() {
     var sb = str_builder_new();
     str_builder_add_cstr(sb, "{\"schemaVersion\":2,\"manifests\":[");
     str_builder_add_cstr(sb, "{\"junk\":true},");
-    str_builder_add_cstr(sb, "{\"mediaType\":\"m\",\"digest\":\"sha256:676f6fd000000000000000000000000000000000000000000000000000000000\",\"size\":10},");
+    str_builder_add_cstr(sb,
+      "{\"mediaType\":\"m\",\"digest\":\"sha256:676f6fd000000000000000000000000000000000000000000000000000000000\",\"size\":10},");   #skip-lint
     str_builder_add_cstr(sb, "\"not-an-object\"]}");
     var idx: OciIndex = oci_index_from_jv(_rg_parse(str_cstr(str_builder_build(sb))));
     assert_neq(idx, 0, "index still parses");
@@ -324,7 +335,7 @@ fn test_rg_oci_index_hostile_entries() {
     return 0;
 }
 
-fn test_rg_body_is_index() {
+fn _test_rg_body_is_index() {
     test_group("rg_body_is_index");
     # The structural sniff used when Content-Type is absent/unhelpful.
     assert_eq(_reg_body_is_index(_rg_parse("{\"manifests\":[]}")), 1, "manifests array -> index");
@@ -334,17 +345,17 @@ fn test_rg_body_is_index() {
     return 0;
 }
 
-fn test_rg_manifest_schema_version_guard() {
+fn _test_rg_manifest_schema_version_guard() {
     test_group("rg_manifest_schema_version_guard");
     # Regression: schemaVersion was read unguarded, and bayan's json_v_int
     # returns 0 for a non-INT tag — so a registry sending "2" as a STRING
     # silently produced schema_version 0.
     var good: OciManifest = oci_manifest_from_jv(_rg_parse(
-        "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
+        "{\"schemaVersion\":2,\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));   #skip-lint
     assert_neq(good, 0, "manifest parses");
     assert_eq(good.schema_version, 2, "int schemaVersion read");
     var bad: OciManifest = oci_manifest_from_jv(_rg_parse(
-        "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));
+        "{\"schemaVersion\":\"2\",\"config\":{\"mediaType\":\"c\",\"digest\":\"sha256:c000000000000000000000000000000000000000000000000000000000000000\",\"size\":1},\"layers\":[]}"));   #skip-lint
     assert_neq(bad, 0, "still parses (config is what matters)");
     # the guard leaves the constructor default rather than clobbering it to 0
     assert_eq(bad.schema_version, 2, "string schemaVersion does not clobber the default");
@@ -357,7 +368,7 @@ fn _rg_ref(registry, repo, tag) {
     return image_ref_new(registry, repo, tag, 0);
 }
 
-fn test_rg_api_base() {
+fn _test_rg_api_base() {
     test_group("rg_api_base");
     var c = registry_client_new();
     assert_neq(c, 0, "client built");
@@ -376,23 +387,27 @@ fn test_rg_api_base() {
     return 0;
 }
 
-fn test_rg_urls() {
+fn _test_rg_urls() {
     test_group("rg_urls");
     var c = registry_client_with_base_url("http://reg");
     var r = _rg_ref("ghcr.io", "acme/app", "v1");
     assert_eq(streq(_reg_manifest_url(c, r), "http://reg/v2/acme/app/manifests/v1"), 1, "manifest by tag");
-    assert_eq(streq(_reg_blob_url(c, r, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"), "http://reg/v2/acme/app/blobs/sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1, "blob");
+    assert_eq(streq(_reg_blob_url(c, r, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"),
+        "http://reg/v2/acme/app/blobs/sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1, "blob");   #skip-lint
     assert_eq(streq(_reg_uploads_url(c, r), "http://reg/v2/acme/app/blobs/uploads/"), 1, "uploads (trailing slash)");
     assert_eq(streq(_reg_tags_url(c, r), "http://reg/v2/acme/app/tags/list"), 1, "tags");
-    assert_eq(streq(_reg_referrers_url(c, r, "sha256:d000000000000000000000000000000000000000000000000000000000000000"), "http://reg/v2/acme/app/referrers/sha256:d000000000000000000000000000000000000000000000000000000000000000"), 1, "referrers");
+    assert_eq(streq(_reg_referrers_url(c, r,
+          "sha256:d000000000000000000000000000000000000000000000000000000000000000"), "http://reg/v2/acme/app/referrers/sha256:d000000000000000000000000000000000000000000000000000000000000000"), 1, "referrers");   #skip-lint
     # a digest pins over the tag on the manifest URL
-    var pinned = image_ref_new("ghcr.io", "acme/app", "v1", "sha256:70696e0000000000000000000000000000000000000000000000000000000000");
-    assert_eq(streq(_reg_manifest_url(c, pinned), "http://reg/v2/acme/app/manifests/sha256:70696e0000000000000000000000000000000000000000000000000000000000"), 1,
+    var pinned = image_ref_new("ghcr.io", "acme/app", "v1",
+      "sha256:70696e0000000000000000000000000000000000000000000000000000000000");
+    assert_eq(streq(_reg_manifest_url(c, pinned),
+        "http://reg/v2/acme/app/manifests/sha256:70696e0000000000000000000000000000000000000000000000000000000000"), 1,
       "digest wins over tag");
     return 0;
 }
 
-fn test_rg_scopes_and_accept() {
+fn _test_rg_scopes_and_accept() {
     test_group("rg_scopes_and_accept");
     var r = _rg_ref("ghcr.io", "acme/app", "v1");
     assert_eq(streq(_reg_pull_scope(r), "repository:acme/app:pull"), 1, "pull scope");
@@ -406,7 +421,7 @@ fn test_rg_scopes_and_accept() {
     return 0;
 }
 
-fn test_rg_location_and_digest_query() {
+fn _test_rg_location_and_digest_query() {
     test_group("rg_location_and_digest_query");
     # an absolute Location is used as-is; a path is joined to the base
     assert_eq(streq(_reg_resolve_location("https://reg", "https://cdn/upload/1"), "https://cdn/upload/1"), 1,
@@ -414,14 +429,16 @@ fn test_rg_location_and_digest_query() {
     assert_eq(streq(_reg_resolve_location("https://reg", "/v2/x/blobs/uploads/1"),
         "https://reg/v2/x/blobs/uploads/1"), 1, "relative location joined");
     # the query separator flips once the URL already carries one
-    assert_eq(streq(_reg_append_digest_query("https://reg/up/1", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
-        "https://reg/up/1?digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "first query param uses ?");
-    assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz", "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
-        "https://reg/up/1?_state=xyz&digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "subsequent uses &");
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1",
+          "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
+        "https://reg/up/1?digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "first query param uses ?");   #skip-lint
+    assert_eq(streq(_reg_append_digest_query("https://reg/up/1?_state=xyz",
+          "sha256:a000000000000000000000000000000000000000000000000000000000000000"),
+        "https://reg/up/1?_state=xyz&digest=sha256:a000000000000000000000000000000000000000000000000000000000000000"), 1, "subsequent uses &");   #skip-lint
     return 0;
 }
 
-fn test_rg_api_bases_mirrors() {
+fn _test_rg_api_bases_mirrors() {
     test_group("rg_api_bases_mirrors");
     # mirrors first, the canonical base always last (parity port; NOT wired —
     # api_bases is dead code in the oracle too).
@@ -440,7 +457,7 @@ fn test_rg_api_bases_mirrors() {
 
 # ══ Inc-2: token cache ══════════════════════════════
 
-fn test_rg_cache_key_scope_separation() {
+fn _test_rg_cache_key_scope_separation() {
     test_group("rg_cache_key_scope_separation");
     # THE regression this test exists for: the oracle joins registry+scope with
     # a NUL byte. Cyrius maps are cstr-keyed, so a NUL-joined key would compare
@@ -461,7 +478,7 @@ fn test_rg_cache_key_scope_separation() {
     return 0;
 }
 
-fn test_rg_token_cache_expiry() {
+fn _test_rg_token_cache_expiry() {
     test_group("rg_token_cache_expiry");
     var c = registry_client_new();
     var k = _reg_cache_key("ghcr.io", "repository:a/b:pull");
@@ -479,7 +496,7 @@ fn test_rg_token_cache_expiry() {
     return 0;
 }
 
-fn test_rg_token_url_and_basic_auth() {
+fn _test_rg_token_url_and_basic_auth() {
     test_group("rg_token_url_and_basic_auth");
     assert_eq(streq(_reg_token_url("https://auth.example.com/token", "registry.example.com",
           "repository:a/b:pull"),
@@ -494,7 +511,7 @@ fn test_rg_token_url_and_basic_auth() {
     return 0;
 }
 
-fn test_rg_token_from_body() {
+fn _test_rg_token_from_body() {
     test_group("rg_token_from_body");
     var a = "{\"token\":\"abc123\"}";
     assert_eq(streq(_reg_token_from_body(a, strlen(a)), "abc123"), 1, "token key");
@@ -513,7 +530,7 @@ fn test_rg_token_from_body() {
 
 # ══ Inc-3: the transport seam ════════════════════════════
 
-fn test_rg_transport_seam() {
+fn _test_rg_transport_seam() {
     test_group("rg_transport_seam");
     # A client with no transport keeps the live path (slot stays 0).
     var plain = registry_client_new();
@@ -536,7 +553,7 @@ fn test_rg_transport_seam() {
     return 0;
 }
 
-fn test_rg_headers_fail_closed_on_crlf() {
+fn _test_rg_headers_fail_closed_on_crlf() {
     test_group("rg_headers_fail_closed_on_crlf");
     # A registry-supplied token flows into Authorization, so a CR/LF-bearing
     # value is reachable by hostile input and must fail closed rather than
@@ -547,7 +564,7 @@ fn test_rg_headers_fail_closed_on_crlf() {
     return 0;
 }
 
-fn test_rg_http_opts_overrides_sandhi_defaults() {
+fn _test_rg_http_opts_overrides_sandhi_defaults() {
     test_group("rg_http_opts_overrides_sandhi_defaults");
     var o = _reg_http_opts();
     assert_neq(o, 0, "opts built");
@@ -561,7 +578,7 @@ fn test_rg_http_opts_overrides_sandhi_defaults() {
 # ══ Inc-4: the bearer state machine ══════════════════════
 # Each case mirrors a wiremock test in rust-old/src/registry.rs.
 
-fn test_rg_auth_flow() {
+fn _test_rg_auth_flow() {
     test_group("rg_auth_flow");   # oracle: mock_auth_flow, registry.rs:1719
     var ctx = _rg_ctx_new();
     var hdrs = sandhi_headers_new();
@@ -587,7 +604,7 @@ fn test_rg_auth_flow() {
     return 0;
 }
 
-fn test_rg_auth_flow_success() {
+fn _test_rg_auth_flow_success() {
     test_group("rg_auth_flow_success");
     var ctx = _rg_ctx_new();
     var hdrs = sandhi_headers_new();
@@ -612,7 +629,7 @@ fn test_rg_auth_flow_success() {
     return 0;
 }
 
-fn test_rg_auth_access_token_key() {
+fn _test_rg_auth_access_token_key() {
     test_group("rg_auth_access_token_key");   # oracle: registry.rs:1770
     var ctx = _rg_ctx_new();
     var hdrs = sandhi_headers_new();
@@ -620,27 +637,79 @@ fn test_rg_auth_access_token_key() {
     store64(ctx + RG_CTX_HDRS, hdrs);
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"access_token\":\"alt-key-token\"}");
     var c = _rg_client(ctx);
-    var tok = _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
+    var tok = _reg_acquire_token(c, _rt_auth_ref(), "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
     assert_neq(tok, 0, "access_token accepted as a fallback key");
     assert_eq(streq(tok, "alt-key-token"), 1, "correct token extracted");
     return 0;
 }
 
-fn test_rg_auth_basic_credentials_on_token_endpoint() {
+fn _test_rg_auth_basic_credentials_on_token_endpoint() {
     test_group("rg_auth_basic_credentials_on_token_endpoint");   # oracle: registry.rs:2282
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
-    var cfg = registry_config_new("user", "pass", 0);
+    var cfg = registry_config_set_host(registry_config_new("user", "pass", 0), "reg.test");
     var c = registry_client_with_config(cfg);
     registry_client_set_transport(c, _rg_transport(ctx));
-    _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
+    _reg_acquire_token(c, _rt_auth_ref(), "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
     # base64("user:pass") == dXNlcjpwYXNz
     assert_eq(_rg_contains(_rg_auth_at(ctx, 0), "Basic dXNlcjpwYXNz"), 1,
       "basic creds go to the TOKEN endpoint");
     return 0;
 }
 
-fn test_rg_cached_token_reused() {
+# Run a token exchange and report whether Basic credentials went out with it.
+fn _rt_sent_basic(cfg, ref) {
+    var ctx = _rg_ctx_new();
+    _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
+    var c = registry_client_with_config(cfg);
+    registry_client_set_transport(c, _rg_transport(ctx));
+    _reg_acquire_token(c, ref, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull");
+    var auth = _rg_auth_at(ctx, 0);
+    if (auth == 0) { return 0; }
+    return _rg_contains(auth, "Basic");
+}
+
+# The oracle's config has no host, so one password went to whichever registry the next image
+# named, and to any URL that registry's challenge named.
+fn _test_rg_credentials_are_bound_to_their_host() {
+    test_group("rg_credentials_are_bound_to_their_host");
+    var bound = registry_config_set_host(registry_config_new("user", "pass", 0), "reg.test");
+    assert_eq(_rt_sent_basic(bound, _rt_auth_ref()), 1, "sent for their own registry");
+    assert_eq(_rt_sent_basic(bound, image_ref_parse("evil.test/a/b:v1")), 0, "never for another");
+    var unbound = registry_config_new("user", "pass", 0);
+    assert_eq(_rt_sent_basic(unbound, _rt_auth_ref()), 0, "no host means no credentials");
+    var hub = registry_config_set_host(registry_config_new("user", "pass", 0), "docker.io");
+    assert_eq(_rt_sent_basic(hub, image_ref_parse("docker.io/library/a:v1")), 1, "docker.io alias");
+    return 0;
+}
+
+# The realm is a URL the registry chose, so it must not be a way to reach what this host can.
+fn _test_rg_realm_rules() {
+    test_group("rg_realm_rules");
+    assert_eq(_reg_host_is_literal("127.0.0.1"), 1, "dotted IPv4");
+    assert_eq(_reg_host_is_literal("2130706433"), 1, "decimal IPv4");
+    assert_eq(_reg_host_is_literal("0x7f.1"), 1, "hex IPv4");
+    assert_eq(_reg_host_is_literal("::1"), 1, "IPv6, as sandhi gives it");
+    assert_eq(_reg_host_is_literal("localhost"), 1, "localhost");
+    assert_eq(_reg_host_is_literal("x.localhost"), 1, "a localhost subdomain");
+    assert_eq(_reg_host_is_literal("auth.docker.io"), 0, "a public name");
+    assert_eq(_reg_host_is_literal("1password.com"), 0, "a leading digit is not an address");
+    assert_eq(_reg_host_is_literal("reg.test"), 0, "another name");
+    var c = registry_client_new();
+    var ref = _rt_auth_ref();
+    assert_eq(_reg_realm_allowed(c, ref, "https://auth.test/token"), 1, "another https host");
+    assert_eq(_reg_realm_allowed(c, ref, "http://auth.test/token"), 0, "no downgrade");
+    assert_eq(_reg_realm_allowed(c, ref, "https://169.254.169.254/x"), 0, "no cloud metadata");
+    assert_eq(_reg_realm_allowed(c, ref, "https://10.0.0.1/x"), 0, "no private address");
+    assert_eq(_reg_realm_allowed(c, ref, "https://[::1]/x"), 0, "no IPv6 loopback");
+    assert_eq(_reg_realm_allowed(c, ref, "https://localhost/x"), 0, "no localhost");
+    assert_eq(_reg_realm_allowed(c, ref, "not a url"), 0, "not a URL");
+    var local = image_ref_parse("127.0.0.1:5000/a/b:v1");
+    assert_eq(_reg_realm_allowed(c, local, "https://127.0.0.1:5001/t"), 1, "a local registry's own host");
+    return 0;
+}
+
+fn _test_rg_cached_token_reused() {
     test_group("rg_cached_token_reused");   # oracle: registry.rs:2048
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/manifests/", 200, "{\"ok\":1}");
@@ -658,7 +727,7 @@ fn test_rg_cached_token_reused() {
     return 0;
 }
 
-fn test_rg_cached_token_401_triggers_reauth() {
+fn _test_rg_cached_token_401_triggers_reauth() {
     test_group("rg_cached_token_401_triggers_reauth");   # oracle: registry.rs:2171
     var ctx = _rg_ctx_new();
     var hdrs = sandhi_headers_new();
@@ -679,7 +748,7 @@ fn test_rg_cached_token_401_triggers_reauth() {
     return 0;
 }
 
-fn test_rg_401_without_challenge_header() {
+fn _test_rg_401_without_challenge_header() {
     test_group("rg_401_without_challenge_header");   # oracle: registry.rs:1929
     var ctx = _rg_ctx_new();   # no WWW-Authenticate attached
     _rg_route(ctx, "GET", "/manifests/", 401, "");
@@ -694,38 +763,38 @@ fn test_rg_401_without_challenge_header() {
     return 0;
 }
 
-fn test_rg_challenge_without_realm() {
+fn _test_rg_challenge_without_realm() {
     test_group("rg_challenge_without_realm");   # oracle: registry.rs:2260
     var c = _rg_client(_rg_ctx_new());
-    assert_eq(_reg_acquire_token(c, "Bearer service=\"reg.test\"", "repository:x:pull"), 0,
+    assert_eq(_reg_acquire_token(c, _rt_auth_ref(), "Bearer service=\"reg.test\"", "repository:x:pull"), 0,
       "no realm -> no token");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
     return 0;
 }
 
-fn test_rg_token_endpoint_no_token_field() {
+fn _test_rg_token_endpoint_no_token_field() {
     test_group("rg_token_endpoint_no_token_field");   # oracle: registry.rs:1947
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"unexpected\":\"shape\"}");
     var c = _rg_client(ctx);
-    assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
+    assert_eq(_reg_acquire_token(c, _rt_auth_ref(), "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
       "no token/access_token field -> 0");
     assert_eq(registry_last_error(), STIVA_ERR_AUTH_FAILED, "AUTH_FAILED");
     return 0;
 }
 
-fn test_rg_token_endpoint_error_status() {
+fn _test_rg_token_endpoint_error_status() {
     test_group("rg_token_endpoint_error_status");   # oracle: registry.rs:1976
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "auth.test/token", 403, "denied");
     var c = _rg_client(ctx);
-    assert_eq(_reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
+    assert_eq(_reg_acquire_token(c, _rt_auth_ref(), "Bearer realm=\"https://auth.test/token\"", "repository:x:pull"), 0,
       "403 from the token endpoint -> 0");
     assert_eq(registry_last_status(), 403, "status recorded");
     return 0;
 }
 
-fn test_rg_server_error_is_registry_not_auth() {
+fn _test_rg_server_error_is_registry_not_auth() {
     test_group("rg_server_error_is_registry_not_auth");   # oracle: registry.rs:2129
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/manifests/", 500, "boom");
@@ -742,7 +811,7 @@ fn test_rg_server_error_is_registry_not_auth() {
     return 0;
 }
 
-fn test_rg_token_url_carries_caller_scope() {
+fn _test_rg_token_url_carries_caller_scope() {
     test_group("rg_token_url_carries_caller_scope");
     # The challenge's own scope is DISCARDED and the caller's sent instead
     # (registry.rs:512-516) — that is what makes a push scope survive a
@@ -750,7 +819,7 @@ fn test_rg_token_url_carries_caller_scope() {
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "auth.test/token", 200, "{\"token\":\"t\"}");
     var c = _rg_client(ctx);
-    _reg_acquire_token(c, "Bearer realm=\"https://auth.test/token\",scope=\"repository:other:pull\"",
+    _reg_acquire_token(c, _rt_auth_ref(), "Bearer realm=\"https://auth.test/token\",scope=\"repository:other:pull\"",
       "repository:library/alpine:push,pull");
     var sent = _rg_log_at(ctx, 0);
     assert_eq(_rg_contains(sent, "scope=repository:library/alpine:push,pull"), 1,
@@ -762,11 +831,11 @@ fn test_rg_token_url_carries_caller_scope() {
 # ══ Inc-5: manifest fetch + platform resolve ═════════════
 
 fn _rg_manifest_json() {
-    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\",\"size\":7},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:6ca79aaa00000000000000000000000000000000000000000000000000000000\",\"size\":11}]}";
+    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\",\"size\":7},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:6ca79aaa00000000000000000000000000000000000000000000000000000000\",\"size\":11}]}";   #skip-lint
 }
 
 fn _rg_index_json() {
-    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}";
+    return "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}},{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:a000000000000000000000000000000000000000000000000000000000000000\",\"size\":528,\"platform\":{\"architecture\":\"arm64\",\"os\":\"linux\"}}]}";   #skip-lint
 }
 
 fn _rg_ctx_with_ct(ct) {
@@ -777,7 +846,7 @@ fn _rg_ctx_with_ct(ct) {
     return ctx;
 }
 
-fn test_rg_fetch_manifest() {
+fn _test_rg_fetch_manifest() {
     test_group("rg_fetch_manifest");
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
     _rg_route(ctx, "GET", "/manifests/", 200, _rg_manifest_json());
@@ -790,11 +859,12 @@ fn test_rg_fetch_manifest() {
     assert_eq(mm.schema_version, 2, "schemaVersion 2");
     assert_eq(vec_len(mm.layers), 1, "one layer");
     var cd: Descriptor = mm.config;
-    assert_eq(streq(cd.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "config digest");
+    assert_eq(streq(cd.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1,
+      "config digest");
     return 0;
 }
 
-fn test_rg_fetch_manifest_index() {
+fn _test_rg_fetch_manifest_index() {
     test_group("rg_fetch_manifest_index");
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.index.v1+json");
     _rg_route(ctx, "GET", "/manifests/", 200, _rg_index_json());
@@ -808,7 +878,7 @@ fn test_rg_fetch_manifest_index() {
     return 0;
 }
 
-fn test_rg_fetch_manifest_index_without_content_type() {
+fn _test_rg_fetch_manifest_index_without_content_type() {
     test_group("rg_fetch_manifest_index_without_content_type");
     # DIVERGENCE from the oracle, deliberate: with no Content-Type the oracle
     # parses an index AS a manifest, yielding zero layers and a silently broken
@@ -823,7 +893,7 @@ fn test_rg_fetch_manifest_index_without_content_type() {
     return 0;
 }
 
-fn test_rg_fetch_manifest_digest_verified() {
+fn _test_rg_fetch_manifest_digest_verified() {
     test_group("rg_fetch_manifest_digest_verified");
     var body = _rg_manifest_json();
     var good = sha256_digest(body, strlen(body));
@@ -842,7 +912,8 @@ fn test_rg_fetch_manifest_digest_verified() {
     var ctx2 = _rg_ctx_new();
     var h2 = sandhi_headers_new();
     sandhi_headers_add(h2, "Content-Type", "application/vnd.oci.image.manifest.v1+json");
-    sandhi_headers_add(h2, "Docker-Content-Digest", "sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    sandhi_headers_add(h2, "Docker-Content-Digest",
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000");
     store64(ctx2 + RG_CTX_HDRS, h2);
     _rg_route(ctx2, "GET", "/manifests/", 200, body);
     var c2 = _rg_client(ctx2);
@@ -852,7 +923,7 @@ fn test_rg_fetch_manifest_digest_verified() {
     return 0;
 }
 
-fn test_rg_fetch_manifest_errors() {
+fn _test_rg_fetch_manifest_errors() {
     test_group("rg_fetch_manifest_errors");
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
     _rg_route(ctx, "GET", "/manifests/", 404, "not found");
@@ -870,16 +941,18 @@ fn test_rg_fetch_manifest_errors() {
     return 0;
 }
 
-fn test_rg_resolve_manifest_from_index() {
+fn _test_rg_resolve_manifest_from_index() {
     test_group("rg_resolve_manifest_from_index");
     # The index entry's digest must be the REAL hash of the child body, because
     # the pinned refetch now verifies it (a caller-pinned digest outranks
     # Docker-Content-Digest). Build the index around the served body.
     var child = _rg_manifest_json();
     var child_d = sha256_digest(child, strlen(child));
-    var idx = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"";
+    var idx = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"";   #skip-lint
     idx = _reg_cat2(idx, child_d);
-    idx = _reg_cat2(idx, "\",\"size\":528,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}]}");
+    idx = _reg_cat2(idx, "\",\"size\":528,\"platform\":{\"architecture\":\"");
+    idx = _reg_cat2(idx, host_arch());
+    idx = _reg_cat2(idx, "\",\"os\":\"linux\"}}]}");
 
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.index.v1+json");
     _rg_route(ctx, "GET", _reg_cat2("/manifests/", child_d), 200, child);
@@ -897,7 +970,7 @@ fn test_rg_resolve_manifest_from_index() {
     return 0;
 }
 
-fn test_rg_resolve_manifest_pinned_digest_enforced() {
+fn _test_rg_resolve_manifest_pinned_digest_enforced() {
     test_group("rg_resolve_manifest_pinned_digest_enforced");
     # Pinning by digest is the control you reach for against a compromised
     # registry or a mutated tag. Serving different bytes than the pinned digest
@@ -921,7 +994,7 @@ fn test_rg_resolve_manifest_pinned_digest_enforced() {
     return 0;
 }
 
-fn test_rg_resolve_manifest_direct() {
+fn _test_rg_resolve_manifest_direct() {
     test_group("rg_resolve_manifest_direct");
     # A registry that answers with a plain manifest resolves in one fetch.
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
@@ -942,7 +1015,7 @@ fn _rg_blob_store(name) {
     return image_store_new(root);
 }
 
-fn test_rg_blob_stream_to_store() {
+fn _test_rg_blob_stream_to_store() {
     test_group("rg_blob_stream_to_store");
     var payload = "hello-layer-payload";
     var digest = sha256_digest(payload, strlen(payload));
@@ -968,7 +1041,7 @@ fn test_rg_blob_stream_to_store() {
     return 0;
 }
 
-fn test_rg_blob_digest_mismatch_leaves_nothing() {
+fn _test_rg_blob_digest_mismatch_leaves_nothing() {
     test_group("rg_blob_digest_mismatch_leaves_nothing");
     # THE important one: a corrupt blob must never become visible at the
     # content-addressed path, because has_blob / GC roots / verify_integrity
@@ -990,7 +1063,7 @@ fn test_rg_blob_digest_mismatch_leaves_nothing() {
     return 0;
 }
 
-fn test_rg_blob_limit_enforced() {
+fn _test_rg_blob_limit_enforced() {
     test_group("rg_blob_limit_enforced");
     # The descriptor's size is attacker-controlled, so it is a ceiling only.
     # A registry streaming more than it declared is cut off.
@@ -1016,7 +1089,7 @@ fn test_rg_blob_limit_enforced() {
     return 0;
 }
 
-fn test_rg_blob_already_present_is_noop() {
+fn _test_rg_blob_already_present_is_noop() {
     test_group("rg_blob_already_present_is_noop");
     var payload = "already-here";
     var digest = sha256_digest(payload, strlen(payload));
@@ -1030,7 +1103,7 @@ fn test_rg_blob_already_present_is_noop() {
     return 0;
 }
 
-fn test_rg_blob_warm_cache_skips_probe() {
+fn _test_rg_blob_warm_cache_skips_probe() {
     test_group("rg_blob_warm_cache_skips_probe");
     # In a real pull the manifest fetch already primed this key, so a blob must
     # cost ONE request. An unconditional challenge probe would double the
@@ -1051,7 +1124,7 @@ fn test_rg_blob_warm_cache_skips_probe() {
     return 0;
 }
 
-fn test_rg_blob_stale_token_retries_once() {
+fn _test_rg_blob_stale_token_retries_once() {
     test_group("rg_blob_stale_token_retries_once");
     # A cached token the registry has since rejected: the stream 401s with no
     # usable challenge (sandhi never surfaces the download hop's headers), so
@@ -1084,7 +1157,7 @@ fn test_rg_blob_stale_token_retries_once() {
     return 0;
 }
 
-fn test_rg_blob_short_write_aborts() {
+fn _test_rg_blob_short_write_aborts() {
     test_group("rg_blob_short_write_aborts");
     # A failing fd must abort the transfer rather than silently producing a
     # truncated blob whose digest happens to be checked later.
@@ -1096,7 +1169,7 @@ fn test_rg_blob_short_write_aborts() {
     return 0;
 }
 
-fn test_rg_blob_error_status() {
+fn _test_rg_blob_error_status() {
     test_group("rg_blob_error_status");
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/blobs/", 404, "");
@@ -1124,7 +1197,7 @@ fn _rg_layer_body() {
 # canned registry will serve. Anything else and the pull would fail on the
 # digest check rather than on whatever the test is actually probing.
 fn _rg_build_manifest(cfg_digest, cfg_size, lay_digest, lay_size) {
-    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     s = _reg_cat2(s, cfg_digest);
     s = _reg_cat2(s, "\",\"size\":");
     s = _reg_cat2(s, _reg_uint_str(cfg_size));
@@ -1163,7 +1236,7 @@ fn _rg_pull_setup(name) {
     return out;
 }
 
-fn test_rg_pull_image() {
+fn _test_rg_pull_image() {
     test_group("rg_pull_image");
     var s = _rg_pull_setup("pull");
     var ctx = load64(s + 0);
@@ -1197,7 +1270,7 @@ fn test_rg_pull_image() {
     return 0;
 }
 
-fn test_rg_pull_dedups_present_blobs() {
+fn _test_rg_pull_dedups_present_blobs() {
     test_group("rg_pull_dedups_present_blobs");
     var s = _rg_pull_setup("pulldedup");
     var ctx = load64(s + 0);
@@ -1223,7 +1296,7 @@ fn test_rg_pull_dedups_present_blobs() {
 
 # Build a manifest with one layer that optionally carries `urls`.
 fn _rg_manifest_with_urls(cfg_d, cfg_size, lay_d, lay_size, with_urls) {
-    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     s = _reg_cat2(s, cfg_d);
     s = _reg_cat2(s, "\",\"size\":");
     s = _reg_cat2(s, _reg_uint_str(cfg_size));
@@ -1254,7 +1327,7 @@ fn _rg_foreign_ctx(with_urls) {
     return ctx;
 }
 
-fn test_rg_pull_refuses_foreign_layer() {
+fn _test_rg_pull_refuses_foreign_layer() {
     test_group("rg_pull_refuses_foreign_layer");
     # A descriptor carrying `urls` points at an arbitrary external host. The
     # oracle fetches it (image.rs:186-190) — an SSRF primitive driven entirely
@@ -1284,7 +1357,7 @@ fn test_rg_pull_refuses_foreign_layer() {
     return 0;
 }
 
-fn test_rg_pull_partial_failure_leaves_no_image() {
+fn _test_rg_pull_partial_failure_leaves_no_image() {
     test_group("rg_pull_partial_failure_leaves_no_image");
     # Config lands, layer 404s. A half-pulled image must never be listable.
     var s = _rg_pull_setup("partial");
@@ -1336,68 +1409,74 @@ fn _rg_push_ctx() {
     return ctx;
 }
 
-fn test_rg_push_blob_monolithic() {
+fn _test_rg_push_blob_monolithic() {
     test_group("rg_push_blob_monolithic");
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var data = "blob-payload";
 
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", data, strlen(data)), 1, "pushed");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        data, strlen(data)), 1, "pushed");
     # HEAD precheck, POST to open the session, PUT to upload.
     assert_eq(_rg_log_len(ctx), 3, "three requests");
     assert_eq(_rg_contains(_rg_log_at(ctx, 0), "HEAD "), 1, "1: existence precheck");
     assert_eq(_rg_contains(_rg_log_at(ctx, 1), "POST "), 1, "2: open upload session");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "PUT "), 1, "3: upload");
-    assert_eq(_rg_contains(_rg_log_at(ctx, 2), "digest=sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 1,
+    assert_eq(_rg_contains(_rg_log_at(ctx, 2),
+        "digest=sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 1,
       "the PUT carries ?digest=");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "/blobs/uploads/uuid-1"), 1,
       "the PUT targets the Location the registry handed back");
     return 0;
 }
 
-fn test_rg_push_blob_skips_existing() {
+fn _test_rg_push_blob_skips_existing() {
     test_group("rg_push_blob_skips_existing");
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "HEAD", "/blobs/", 200, "");   # already present
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "x", 1), 1, "reported success");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        "x", 1), 1, "reported success");
     assert_eq(_rg_log_len(ctx), 1, "only the precheck — no upload");
     return 0;
 }
 
-fn test_rg_push_blob_chunked() {
+fn _test_rg_push_blob_chunked() {
     test_group("rg_push_blob_chunked");
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var data = "0123456789";
 
-    assert_eq(registry_push_blob_chunked(c, ref, "sha256:bbb0000000000000000000000000000000000000000000000000000000000000", data, 10, 4), 1, "pushed");
+    assert_eq(registry_push_blob_chunked(c, ref,
+        "sha256:bbb0000000000000000000000000000000000000000000000000000000000000", data, 10, 4), 1, "pushed");
     # HEAD, POST, then ceil(10/4)=3 PATCHes, then the finalize PUT.
     assert_eq(_rg_log_len(ctx), 6, "HEAD + POST + 3 PATCH + PUT");
     assert_eq(_rg_contains(_rg_log_at(ctx, 2), "PATCH "), 1, "chunk 1 is a PATCH");
     assert_eq(_rg_contains(_rg_log_at(ctx, 4), "PATCH "), 1, "chunk 3 is a PATCH");
     assert_eq(_rg_contains(_rg_log_at(ctx, 5), "PUT "), 1, "finalize is a PUT");
-    assert_eq(_rg_contains(_rg_log_at(ctx, 5), "digest=sha256:bbb0000000000000000000000000000000000000000000000000000000000000"), 1,
+    assert_eq(_rg_contains(_rg_log_at(ctx, 5),
+        "digest=sha256:bbb0000000000000000000000000000000000000000000000000000000000000"), 1,
       "finalize carries ?digest=");
     return 0;
 }
 
-fn test_rg_push_chunk_size_guard() {
+fn _test_rg_push_chunk_size_guard() {
     test_group("rg_push_chunk_size_guard");
     # A zero chunk size would loop forever building 0-length PATCHes.
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
-    assert_eq(registry_push_blob_chunked(c, ref, "sha256:ccc0000000000000000000000000000000000000000000000000000000000000", "xyz", 3, 0), 0,
+    assert_eq(registry_push_blob_chunked(c, ref,
+        "sha256:ccc0000000000000000000000000000000000000000000000000000000000000", "xyz", 3, 0), 0,
       "zero chunk size refused");
     assert_eq(_rg_log_len(ctx), 0, "no request issued");
     return 0;
 }
 
-fn test_rg_push_manifest() {
+fn _test_rg_push_manifest() {
     test_group("rg_push_manifest");
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
@@ -1410,7 +1489,7 @@ fn test_rg_push_manifest() {
     return 0;
 }
 
-fn test_rg_push_manifest_rejects_empty() {
+fn _test_rg_push_manifest_rejects_empty() {
     test_group("rg_push_manifest_rejects_empty");
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
@@ -1420,7 +1499,7 @@ fn test_rg_push_manifest_rejects_empty() {
     return 0;
 }
 
-fn test_rg_push_uses_push_scope() {
+fn _test_rg_push_uses_push_scope() {
     test_group("rg_push_uses_push_scope");
     # The upload legs are keyed on repository:<repo>:push,pull. If the existence
     # precheck primed a PULL-scoped token instead (as the oracle does), the PUT
@@ -1431,7 +1510,8 @@ fn test_rg_push_uses_push_scope() {
     var pushkey = _reg_cache_key("reg.test", _reg_push_scope(ref));
     _reg_cache_token(c, pushkey, "tok-push");
 
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        "data", 4), 1, "pushed");
     assert_eq(streq(_rg_auth_at(ctx, 0), "Bearer tok-push"), 1,
       "the precheck uses the PUSH-scoped token");
     assert_eq(streq(_rg_auth_at(ctx, 2), "Bearer tok-push"), 1,
@@ -1441,7 +1521,7 @@ fn test_rg_push_uses_push_scope() {
     return 0;
 }
 
-fn test_rg_push_roundtrip_preserves_manifest_bytes() {
+fn _test_rg_push_roundtrip_preserves_manifest_bytes() {
     test_group("rg_push_roundtrip_preserves_manifest_bytes");
     # Pull an image, then push it. The manifest must go back up BYTE-FOR-BYTE,
     # so its digest survives the round trip — the whole point of storing the
@@ -1472,20 +1552,22 @@ fn test_rg_push_roundtrip_preserves_manifest_bytes() {
     return 0;
 }
 
-fn test_rg_push_quiet_precheck() {
+fn _test_rg_push_quiet_precheck() {
     test_group("rg_push_quiet_precheck");
     # The existence precheck 404s on every blob of a first push. That must not
     # be reported as an error — it is the answer, and the caller acts on it.
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
-    assert_eq(registry_blob_exists(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000"), 0, "absent");
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed anyway");
+    assert_eq(registry_blob_exists(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000"),
+      0, "absent");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        "data", 4), 1, "pushed anyway");
     assert_eq(registry_last_error(), STIVA_ERR_OK, "a successful push leaves no error set");
     return 0;
 }
 
-fn test_rg_push_reauths_on_401_from_put() {
+fn _test_rg_push_reauths_on_401_from_put() {
     test_group("rg_push_reauths_on_401_from_put");
     # A token can expire mid-upload (TTL is 270 s; a large layer outlasts that).
     # The 401 from the PUT carries its own challenge, so the token is minted
@@ -1506,16 +1588,21 @@ fn test_rg_push_reauths_on_401_from_put() {
     var key = _reg_cache_key("reg.test", _reg_push_scope(ref));
     _reg_cache_token(c, key, "tok-stale");
 
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "recovered and pushed");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        "data", 4), 1, "recovered and pushed");
     assert_eq(streq(_reg_get_cached_token(c, key), "tok-fresh"), 1, "cache refreshed");
     return 0;
 }
 
-fn test_rg_same_origin() {
+fn _test_rg_same_origin() {
     test_group("rg_same_origin");
     assert_eq(_reg_same_origin("https://reg.test/v2/x", "https://reg.test"), 1, "same origin");
-    assert_eq(_reg_same_origin("https://reg.test:443/v2/x", "https://reg.test"), 0,
-      "explicit port differs textually — treated as a different origin");
+    assert_eq(_reg_same_origin("https://reg.test:443/v2/x", "https://reg.test"), 1,
+      "443 is https's default port, so this is the same origin");
+    assert_eq(_reg_same_origin("https://reg.test:8443/v2/x", "https://reg.test"), 0,
+      "another port is another origin");
+    assert_eq(_reg_same_origin("https://reg.test#.evil.example/x", "https://reg.test"), 0,
+      "the gate reads a URL as sandhi connects to it");
     assert_eq(_reg_same_origin("https://evil.test/v2/x", "https://reg.test"), 0, "different host");
     assert_eq(_reg_same_origin("http://reg.test/v2/x", "https://reg.test"), 0,
       "scheme downgrade is a different origin");
@@ -1526,7 +1613,7 @@ fn test_rg_same_origin() {
     return 0;
 }
 
-fn test_rg_push_no_token_to_foreign_location() {
+fn _test_rg_push_no_token_to_foreign_location() {
     test_group("rg_push_no_token_to_foreign_location");
     # A hostile registry answers the upload POST with an absolute Location on a
     # host it controls. Withholding the token there is NOT enough — the body
@@ -1546,7 +1633,8 @@ fn test_rg_push_no_token_to_foreign_location() {
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     _reg_cache_token(c, _reg_cache_key("reg.test", _reg_push_scope(ref)), "tok-secret");
 
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa00000000000000000000000000000000000000000000000000000000000", "data", 4), 0,
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa00000000000000000000000000000000000000000000000000000000000",
+        "data", 4), 0,
       "push refused");
     assert_eq(registry_last_error(), STIVA_ERR_REGISTRY, "reported as a registry error");
     # HEAD + POST only. Nothing was sent to evil.test at all.
@@ -1562,7 +1650,7 @@ fn test_rg_push_no_token_to_foreign_location() {
     return 0;
 }
 
-fn test_rg_push_chunked_rejects_offorigin_relocation() {
+fn _test_rg_push_chunked_rejects_offorigin_relocation() {
     test_group("rg_push_chunked_rejects_offorigin_relocation");
     # Same attack, mid-session: the registry moves the upload off-origin on the
     # first PATCH response. It must be refused there too, not once per chunk.
@@ -1576,7 +1664,8 @@ fn test_rg_push_chunked_rejects_offorigin_relocation() {
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     # The POST's own Location is already off-origin, so it is refused at the
     # session-open step — the earliest possible point.
-    assert_eq(registry_push_blob_chunked(c, ref, "sha256:bbb00000000000000000000000000000000000000000000000000000000000", "0123456789", 10, 4), 0,
+    assert_eq(registry_push_blob_chunked(c, ref,
+        "sha256:bbb00000000000000000000000000000000000000000000000000000000000", "0123456789", 10, 4), 0,
       "refused");
     var i = 0;
     var touched = 0;
@@ -1588,7 +1677,7 @@ fn test_rg_push_chunked_rejects_offorigin_relocation() {
     return 0;
 }
 
-fn test_rg_push_token_still_sent_same_origin() {
+fn _test_rg_push_token_still_sent_same_origin() {
     test_group("rg_push_token_still_sent_same_origin");
     # The guard must not break the normal case: a relative Location resolves
     # against the API base, so it stays same-origin and keeps its token.
@@ -1596,14 +1685,15 @@ fn test_rg_push_token_still_sent_same_origin() {
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     _reg_cache_token(c, _reg_cache_key("reg.test", _reg_push_scope(ref)), "tok-ok");
-    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000", "data", 4), 1, "pushed");
+    assert_eq(registry_push_blob(c, ref, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000",
+        "data", 4), 1, "pushed");
     var last = _rg_log_len(ctx) - 1;
     assert_eq(streq(_rg_auth_at(ctx, last), "Bearer tok-ok"), 1,
       "same-origin upload keeps its Authorization");
     return 0;
 }
 
-fn test_rg_push_uploads_every_referenced_blob() {
+fn _test_rg_push_uploads_every_referenced_blob() {
     test_group("rg_push_uploads_every_referenced_blob");
     # A push that skipped the layer loop entirely would still end with a
     # manifest PUT and still look like a success — leaving a manifest in the
@@ -1645,15 +1735,18 @@ fn test_rg_push_uploads_every_referenced_blob() {
 
 # ══ Digest validation (registry-controlled path traversal) ══
 
-fn test_rg_digest_is_valid() {
+fn _test_rg_digest_is_valid() {
     test_group("rg_digest_is_valid");
-    assert_eq(digest_is_valid("sha256:0000000000000000000000000000000000000000000000000000000000000000"), 1, "canonical form");
+    assert_eq(digest_is_valid("sha256:0000000000000000000000000000000000000000000000000000000000000000"), 1,
+      "canonical form");
     assert_eq(digest_is_valid("sha256:../../../../etc/shadow"), 0, "path traversal");
     assert_eq(digest_is_valid("sha256:abc"), 0, "too short");
-    assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000000"), 0, "too long");
+    assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000000"), 0,
+      "too long");
     assert_eq(digest_is_valid("sha256:AAAA000000000000000000000000000000000000000000000000000000000000"), 0,
       "uppercase rejected — one blob must have exactly one path");
-    assert_eq(digest_is_valid("sha512:0000000000000000000000000000000000000000000000000000000000000000"), 0, "wrong algorithm");
+    assert_eq(digest_is_valid("sha512:0000000000000000000000000000000000000000000000000000000000000000"), 0,
+      "wrong algorithm");
     assert_eq(digest_is_valid("0000000000000000000000000000000000000000000000000000000000000000"), 0, "no prefix");
     assert_eq(digest_is_valid(0), 0, "null");
     assert_eq(digest_is_valid("sha256:00000000000000000000000000000000000000000000000000000000000000/g"), 0,
@@ -1661,7 +1754,7 @@ fn test_rg_digest_is_valid() {
     return 0;
 }
 
-fn test_rg_pull_rejects_traversal_digest() {
+fn _test_rg_pull_rejects_traversal_digest() {
     test_group("rg_pull_rejects_traversal_digest");
     # THE critical one. A registry serving `"digest": "sha256:../../../<path>"`
     # made _img_blob_path resolve outside the store: has_blob reported the
@@ -1670,11 +1763,12 @@ fn test_rg_pull_rejects_traversal_digest() {
     # The descriptor parser now refuses it, so the manifest never parses.
     var cfg = _rg_cfg_json();
     var cfg_d = sha256_digest(cfg, strlen(cfg));
-    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     man = _reg_cat2(man, cfg_d);
     man = _reg_cat2(man, "\",\"size\":");
     man = _reg_cat2(man, _reg_uint_str(strlen(cfg)));
-    man = _reg_cat2(man, "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:../../../../tmp/stiva-traversal-victim\",\"size\":5}]}");
+    man = _reg_cat2(man,
+      "},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:../../../../tmp/stiva-traversal-victim\",\"size\":5}]}");   #skip-lint
 
     var ctx = _rg_ctx_with_ct("application/vnd.oci.image.manifest.v1+json");
     _rg_route(ctx, "GET", "/manifests/", 200, man);
@@ -1689,11 +1783,12 @@ fn test_rg_pull_rejects_traversal_digest() {
     return 0;
 }
 
-fn test_rg_blob_path_fails_closed() {
+fn _test_rg_blob_path_fails_closed() {
     test_group("rg_blob_path_fails_closed");
     assert_eq(_img_blob_path("/tmp/store", "sha256:../../../etc/passwd"), 0,
       "_img_blob_path refuses a malformed digest");
-    assert_neq(_img_blob_path("/tmp/store", "sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
+    assert_neq(_img_blob_path("/tmp/store", "sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+      0,
       "and still builds a path for a valid one");
     var store = _rg_blob_store("failclosed");
     assert_eq(image_store_has_blob(store, "sha256:../../../etc/passwd"), 0,
@@ -1702,20 +1797,20 @@ fn test_rg_blob_path_fails_closed() {
     return 0;
 }
 
-fn test_rg_descriptor_rejects_bad_size() {
+fn _test_rg_descriptor_rejects_bad_size() {
     test_group("rg_descriptor_rejects_bad_size");
     # A negative size disabled the download ceiling entirely (`if (size > 0)`),
     # and i64max + 65536 wraps negative — both leave the transfer unbounded.
-    var neg = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":-1}";
+    var neg = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":-1}";   #skip-lint
     assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(neg, strlen(neg))), 0, "negative size rejected");
-    var huge = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":9223372036854775807}";
+    var huge = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":9223372036854775807}";   #skip-lint
     assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(huge, strlen(huge))), 0, "i64max size rejected");
-    var okd = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":1024}";
+    var okd = "{\"mediaType\":\"x\",\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"size\":1024}";   #skip-lint
     assert_neq(descriptor_from_jv(bayan_json_v_parse_buf(okd, strlen(okd))), 0, "a sane size parses");
     return 0;
 }
 
-fn test_rg_push_manifest_targets_the_tag() {
+fn _test_rg_push_manifest_targets_the_tag() {
     test_group("rg_push_manifest_targets_the_tag");
     # A digest-pinned target must still PUT at the tag, or the push creates a
     # repository nothing can pull by name.
@@ -1731,7 +1826,7 @@ fn test_rg_push_manifest_targets_the_tag() {
     return 0;
 }
 
-fn test_rg_manifest_fetch_still_prefers_digest() {
+fn _test_rg_manifest_fetch_still_prefers_digest() {
     test_group("rg_manifest_fetch_still_prefers_digest");
     # The push change must not alter the FETCH side, where a digest rightly
     # outranks the tag.
@@ -1743,7 +1838,7 @@ fn test_rg_manifest_fetch_still_prefers_digest() {
     return 0;
 }
 
-fn test_rg_push_missing_image() {
+fn _test_rg_push_missing_image() {
     test_group("rg_push_missing_image");
     var ctx = _rg_push_ctx();
     var c = _rg_client(ctx);
@@ -1756,7 +1851,7 @@ fn test_rg_push_missing_image() {
 
 # ══ Inc-9: discovery ═════════════════════════════════════
 
-fn test_rg_list_tags() {
+fn _test_rg_list_tags() {
     test_group("rg_list_tags");
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/tags/list", 200, "{\"name\":\"library/alpine\",\"tags\":[\"3.18\",\"3.19\",\"latest\"]}");
@@ -1771,7 +1866,7 @@ fn test_rg_list_tags() {
     return 0;
 }
 
-fn test_rg_discovery_uses_pull_scope() {
+fn _test_rg_discovery_uses_pull_scope() {
     test_group("rg_discovery_uses_pull_scope");
     # Discovery is read-only, so it must request `:pull` — asking for
     # `push,pull` on a repository you can only read gets the whole request
@@ -1805,7 +1900,7 @@ fn test_rg_discovery_uses_pull_scope() {
     return 0;
 }
 
-fn test_rg_discovery_status_boundaries() {
+fn _test_rg_discovery_status_boundaries() {
     test_group("rg_discovery_status_boundaries");
     # A 3xx that survived the redirect budget is NOT success. Widening the
     # check to `>= 400` would parse a redirect body as a tag list.
@@ -1833,7 +1928,7 @@ fn test_rg_discovery_status_boundaries() {
     return 0;
 }
 
-fn test_rg_list_tags_edge_cases() {
+fn _test_rg_list_tags_edge_cases() {
     test_group("rg_list_tags_edge_cases");
     # An absent or non-array "tags" field is an EMPTY list, not an error — the
     # oracle's unwrap_or_default (registry.rs:826). A registry that has the
@@ -1864,7 +1959,7 @@ fn test_rg_list_tags_edge_cases() {
     return 0;
 }
 
-fn test_rg_catalog() {
+fn _test_rg_catalog() {
     test_group("rg_catalog");
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/v2/_catalog", 200, "{\"repositories\":[\"alpine\",\"nginx\"]}");
@@ -1880,7 +1975,7 @@ fn test_rg_catalog() {
     return 0;
 }
 
-fn test_rg_catalog_unsupported() {
+fn _test_rg_catalog_unsupported() {
     test_group("rg_catalog_unsupported");
     # Most registries disable _catalog; Docker Hub never supported it. That is
     # an ordinary answer, and it must be distinguishable from "no repositories".
@@ -1893,12 +1988,12 @@ fn test_rg_catalog_unsupported() {
     return 0;
 }
 
-fn test_rg_referrers() {
+fn _test_rg_referrers() {
     test_group("rg_referrers");
     var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-      "{\"schemaVersion\":2,\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"schemaVersion\":2,\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");   #skip-lint
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var refs = registry_referrers(c, ref, d);
@@ -1910,7 +2005,7 @@ fn test_rg_referrers() {
     return 0;
 }
 
-fn test_rg_referrers_skips_malformed() {
+fn _test_rg_referrers_skips_malformed() {
     test_group("rg_referrers_skips_malformed");
     # Referrers is a DISCOVERY list, so one unreadable artifact must not hide
     # the readable ones — the opposite of a manifest's layers, where a bad
@@ -1918,7 +2013,7 @@ fn test_rg_referrers_skips_malformed() {
     var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"x\",\"digest\":\"sha256:bad\",\"size\":1},{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"size\":9}]}");
+      "{\"manifests\":[{\"mediaType\":\"x\",\"digest\":\"sha256:bad\",\"size\":1},{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:6666666666666666666666666666666666666666666666666666666666666666\",\"size\":9}]}");   #skip-lint
     var c = _rg_client(ctx);
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
     var refs = registry_referrers(c, ref, d);
@@ -1926,7 +2021,7 @@ fn test_rg_referrers_skips_malformed() {
     return 0;
 }
 
-fn test_rg_referrers_rejects_bad_digest() {
+fn _test_rg_referrers_rejects_bad_digest() {
     test_group("rg_referrers_rejects_bad_digest");
     var ctx = _rg_ctx_new();
     var c = _rg_client(ctx);
@@ -1936,7 +2031,7 @@ fn test_rg_referrers_rejects_bad_digest() {
     return 0;
 }
 
-fn test_rg_verify_signature() {
+fn _test_rg_verify_signature() {
     test_group("rg_verify_signature");
     var d = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
     var ref = image_ref_new("reg.test", "library/alpine", "latest", 0);
@@ -1944,28 +2039,28 @@ fn test_rg_verify_signature() {
     # Signed (cosign).
     var ctx = _rg_ctx_new();
     _rg_route(ctx, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
-    assert_eq(registry_verify_signature(_rg_client(ctx), ref, d), 1, "cosign signature found");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");   #skip-lint
+    assert_eq(registry_has_signature_artifact(_rg_client(ctx), ref, d), 1, "cosign signature found");
 
     # Signed (notation).
     var ctx2 = _rg_ctx_new();
     _rg_route(ctx2, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
-    assert_eq(registry_verify_signature(_rg_client(ctx2), ref, d), 1, "notation signature found");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.cncf.notary.signature\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");   #skip-lint
+    assert_eq(registry_has_signature_artifact(_rg_client(ctx2), ref, d), 1, "notation signature found");
 
     # Present but not a signature.
     var ctx3 = _rg_ctx_new();
     _rg_route(ctx3, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
-    assert_eq(registry_verify_signature(_rg_client(ctx3), ref, d), 0, "an SBOM is not a signature");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");   #skip-lint
+    assert_eq(registry_has_signature_artifact(_rg_client(ctx3), ref, d), 0, "an SBOM is not a signature");
 
     # The signature must be found even when it is NOT first — an SBOM listed
     # ahead of it is the common real-world shape, and a scan that stops after
     # one entry reports a signed image as unsigned.
     var ctx5 = _rg_ctx_new();
     _rg_route(ctx5, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"size\":10},{\"mediaType\":\"application/vnd.example.attestation\",\"digest\":\"sha256:8888888888888888888888888888888888888888888888888888888888888888\",\"size\":11},{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:9999999999999999999999999999999999999999999999999999999999999999\",\"size\":12}]}");
-    assert_eq(registry_verify_signature(_rg_client(ctx5), ref, d), 1,
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.example.sbom\",\"digest\":\"sha256:7777777777777777777777777777777777777777777777777777777777777777\",\"size\":10},{\"mediaType\":\"application/vnd.example.attestation\",\"digest\":\"sha256:8888888888888888888888888888888888888888888888888888888888888888\",\"size\":11},{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:9999999999999999999999999999999999999999999999999999999999999999\",\"size\":12}]}");   #skip-lint
+    assert_eq(registry_has_signature_artifact(_rg_client(ctx5), ref, d), 1,
       "signature found even when it is the LAST referrer");
 
     # THE distinction that matters: a failed query is -1, NOT 0. Collapsing it
@@ -1973,12 +2068,12 @@ fn test_rg_verify_signature() {
     # unsigned — the oracle returns Ok(false)/Err and callers routinely lose it.
     var ctx4 = _rg_ctx_new();
     _rg_route(ctx4, "GET", "/referrers/", 500, "");
-    assert_eq(registry_verify_signature(_rg_client(ctx4), ref, d), 0 - 1,
+    assert_eq(registry_has_signature_artifact(_rg_client(ctx4), ref, d), 0 - 1,
       "query failure is -1, distinct from unsigned");
     return 0;
 }
 
-fn test_rg_index_dedup_digest_aware() {
+fn _test_rg_index_dedup_digest_aware() {
     test_group("rg_index_dedup_digest_aware");
     # image_ref_full_ref drops the digest, and a digest-only reference parses
     # with tag "latest" — so two digest-pinned images of one repository render
@@ -2000,7 +2095,7 @@ fn test_rg_index_dedup_digest_aware() {
     _img_set_manifest_digest(imB, dB);
 
     # Both need a manifest blob present, since load_index rebuilds from it.
-    var manA = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var manA = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     var mA = _reg_cat2(_reg_cat2(manA, cfgA), "\",\"size\":7},\"layers\":[]}");
     var mB = _reg_cat2(_reg_cat2(manA, cfgB), "\",\"size\":7},\"layers\":[]}");
     # Store them under the digests the Images claim (store_blob verifies, so
@@ -2019,7 +2114,7 @@ fn test_rg_index_dedup_digest_aware() {
     return 0;
 }
 
-fn test_rg_index_dedup_tag_still_moves() {
+fn _test_rg_index_dedup_tag_still_moves() {
     test_group("rg_index_dedup_tag_still_moves");
     # A tag is a mutable pointer: an UNPINNED add under the same name must
     # still replace, or `pull alpine:latest` twice would pile up entries.
@@ -2028,7 +2123,7 @@ fn test_rg_index_dedup_tag_still_moves() {
     var d2 = "sha256:2222000000000000000000000000000000000000000000000000000000000000";
     var cfg1 = "sha256:c110000000000000000000000000000000000000000000000000000000000000";
     var cfg2 = "sha256:c220000000000000000000000000000000000000000000000000000000000000";
-    var head = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var head = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     var m1 = _reg_cat2(_reg_cat2(head, cfg1), "\",\"size\":7},\"layers\":[]}");
     var m2 = _reg_cat2(_reg_cat2(head, cfg2), "\",\"size\":7},\"layers\":[]}");
     file_write_all(_img_blob_path(image_store_root(store), d1), m1, strlen(m1));
@@ -2128,7 +2223,7 @@ fn _bld_t_config_jv(store, image) {
     return bayan_json_v_parse_buf(buf, load64(cc));
 }
 
-fn test_bld_copy_dir_end_to_end() {
+fn _test_bld_copy_dir_end_to_end() {
     test_group("build: copy a directory end to end");
     var root = "/tmp/stiva-bld-e2e";
     var ctx = "/tmp/stiva-bld-e2e-ctx";
@@ -2141,7 +2236,7 @@ fn test_bld_copy_dir_end_to_end() {
 
     _bld_t_file(_stor_cat2(ctx, "/app"), "start.sh", "#!/bin/sh\nexec true\n");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"myapp\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"myapp\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\n";   #skip-lint
     var spec = parse_build_spec(src);
     assert(spec != 0, "spec parsed");
 
@@ -2165,7 +2260,7 @@ fn test_bld_copy_dir_end_to_end() {
     return 0;
 }
 
-fn test_bld_diff_ids_are_uncompressed() {
+fn _test_bld_diff_ids_are_uncompressed() {
     test_group("build: diff_ids are UNCOMPRESSED digests (oracle uses compressed)");
     var root = "/tmp/stiva-bld-diffid";
     var ctx = "/tmp/stiva-bld-diffid-ctx";
@@ -2175,7 +2270,7 @@ fn test_bld_diff_ids_are_uncompressed() {
     _bld_t_base(store);
     _bld_t_file(_stor_cat2(ctx, "/app"), "f.txt", "hello\n");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"d\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"d\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";   #skip-lint
     var img = build_image(parse_build_spec(src), store, 0, ctx);
     assert(img != 0, "build ok");
     if (img == 0) { return 0; }
@@ -2209,7 +2304,7 @@ fn test_bld_diff_ids_are_uncompressed() {
     return 0;
 }
 
-fn test_bld_config_has_platform_and_fields() {
+fn _test_bld_config_has_platform_and_fields() {
     test_group("build: config carries architecture/os (oracle omits both)");
     var root = "/tmp/stiva-bld-cfg";
     var ctx = "/tmp/stiva-bld-cfg-ctx";
@@ -2219,7 +2314,7 @@ fn test_bld_config_has_platform_and_fields() {
     _bld_t_base(store);
     _bld_t_file(_stor_cat2(ctx, "/app"), "f", "x");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"c\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"A\"\nvalue = \"1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/w\"\n\n[[steps]]\ntype = \"label\"\nkey = \"k\"\nvalue = \"v\"\n\n[config]\nentrypoint = [\"/e\"]\nexpose = [80, 443]\nuser = \"nobody\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"c\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"A\"\nvalue = \"1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/w\"\n\n[[steps]]\ntype = \"label\"\nkey = \"k\"\nvalue = \"v\"\n\n[config]\nentrypoint = [\"/e\"]\nexpose = [80, 443]\nuser = \"nobody\"\n";   #skip-lint
     var img = build_image(parse_build_spec(src), store, 0, ctx);
     assert(img != 0, "build ok");
     if (img == 0) { return 0; }
@@ -2227,7 +2322,7 @@ fn test_bld_config_has_platform_and_fields() {
     var cv = _bld_t_config_jv(store, img);
     assert(cv != 0, "config blob parses");
     if (cv == 0) { return 0; }
-    assert_eq(streq(_il_jv_str_field(cv, "architecture"), "amd64"), 1, "architecture present");
+    assert_eq(streq(_il_jv_str_field(cv, "architecture"), host_arch()), 1, "architecture present");
     assert_eq(streq(_il_jv_str_field(cv, "os"), "linux"), 1, "os present");
 
     var co = bayan_json_v_obj_get_by_cstr(cv, "config");
@@ -2247,7 +2342,7 @@ fn test_bld_config_has_platform_and_fields() {
     return 0;
 }
 
-fn test_bld_spec_workdir_beats_step() {
+fn _test_bld_spec_workdir_beats_step() {
     test_group("build: [config].workdir wins over a workdir step");
     var root = "/tmp/stiva-bld-wd";
     var ctx = "/tmp/stiva-bld-wd-ctx";
@@ -2256,7 +2351,7 @@ fn test_bld_spec_workdir_beats_step() {
     var store = image_store_new(root);
     _bld_t_base(store);
     _bld_t_file(ctx, "f", "x");
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"w\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/from-step\"\n\n[config]\nworkdir = \"/from-config\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"w\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/from-step\"\n\n[config]\nworkdir = \"/from-config\"\n";   #skip-lint
     var img = build_image(parse_build_spec(src), store, 0, ctx);
     assert(img != 0, "build ok");
     if (img == 0) { return 0; }
@@ -2265,17 +2360,17 @@ fn test_bld_spec_workdir_beats_step() {
     return 0;
 }
 
-fn test_bld_refuses_run_and_from_stage() {
+fn _test_bld_refuses_run_and_from_stage() {
     test_group("build: run and from_stage are refused, not faked");
     var root = "/tmp/stiva-bld-refuse";
     _stor_remove_dir_all(root);
     var store = image_store_new(root);
     _bld_t_base(store);
 
-    var run_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hi\"]\n";
+    var run_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hi\"]\n";   #skip-lint
     assert_eq(build_image(parse_build_spec(run_src), store, 0, "/tmp"), 0, "run step refused");
 
-    var fs_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"from_stage\"\nstage = \"s\"\nsource = \"a\"\ndestination = \"/b\"\n";
+    var fs_src = "[image]\nbase = \"local/base:v1\"\nname = \"r\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"from_stage\"\nstage = \"s\"\nsource = \"a\"\ndestination = \"/b\"\n";   #skip-lint
     assert_eq(build_image(parse_build_spec(fs_src), store, 0, "/tmp"), 0, "from_stage refused");
 
     # Neither may leave a half-built image behind.
@@ -2290,7 +2385,7 @@ fn test_bld_refuses_run_and_from_stage() {
     return 0;
 }
 
-fn test_bld_source_traversal_refused() {
+fn _test_bld_source_traversal_refused() {
     test_group("build: a copy source may not escape the build context");
     assert_eq(_bld_source_is_safe("app"), 1, "plain relative");
     assert_eq(_bld_source_is_safe("app/sub/x"), 1, "nested relative");
@@ -2310,12 +2405,12 @@ fn test_bld_source_traversal_refused() {
     _stor_remove_dir_all(root);
     var store = image_store_new(root);
     _bld_t_base(store);
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"t\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"../../../etc/hostname\"\ndestination = \"/x\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"t\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"../../../etc/hostname\"\ndestination = \"/x\"\n";   #skip-lint
     assert_eq(build_image(parse_build_spec(src), store, 0, "/tmp/stiva-bld-trav-ctx"), 0, "traversal refused");
     return 0;
 }
 
-fn test_bld_symlink_traversal_refused() {
+fn _test_bld_symlink_traversal_refused() {
     test_group("build: a copy source may not traverse a symlink");
     var ctx = "/tmp/stiva-bld-symlink-ctx";
     var out = "/tmp/stiva-bld-symlink-out";
@@ -2346,7 +2441,7 @@ fn test_bld_symlink_traversal_refused() {
     return 0;
 }
 
-fn test_bld_dest_is_safe() {
+fn _test_bld_dest_is_safe() {
     test_group("build: a copy destination may not carry '..'");
     assert_eq(_bld_dest_is_safe("/app"), 1, "absolute is fine (the prefix is stripped)");
     assert_eq(_bld_dest_is_safe("app/sub"), 1, "relative is fine");
@@ -2360,7 +2455,7 @@ fn test_bld_dest_is_safe() {
     return 0;
 }
 
-fn test_bld_malformed_step_is_a_parse_error_not_a_crash() {
+fn _test_bld_malformed_step_is_a_parse_error_not_a_crash() {
     test_group("build: a step missing a required field fails the parse");
     # Each of these used to leave a 0 in a BuildStep field, which reached
     # str_from(0) in build_step_to_jv on the ordinary build path — a SIGSEGV
@@ -2382,7 +2477,7 @@ fn test_bld_malformed_step_is_a_parse_error_not_a_crash() {
     return 0;
 }
 
-fn test_bld_dest_prefix() {
+fn _test_bld_dest_prefix() {
     test_group("build: destination prefix normalisation");
     assert_eq(streq(_bld_dest_prefix("/app"), "app"), 1, "leading slash stripped");
     assert_eq(streq(_bld_dest_prefix("///app"), "app"), 1, "repeated leading slashes");
@@ -2393,7 +2488,7 @@ fn test_bld_dest_prefix() {
     return 0;
 }
 
-fn test_bld_cache_reuse() {
+fn _test_bld_cache_reuse() {
     test_group("build: the layer cache is reused and carries the diff_id");
     var root = "/tmp/stiva-bld-cache";
     var ctx = "/tmp/stiva-bld-cache-ctx";
@@ -2403,7 +2498,7 @@ fn test_bld_cache_reuse() {
     _bld_t_base(store);
     _bld_t_file(_stor_cat2(ctx, "/app"), "f", "cached\n");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"k\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"k\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";   #skip-lint
     var a = build_image(parse_build_spec(src), store, 0, ctx);
     assert(a != 0, "first build ok");
     if (a == 0) { return 0; }
@@ -2429,7 +2524,7 @@ fn test_bld_cache_reuse() {
     return 0;
 }
 
-fn test_bld_cache_invalidates_on_context_change() {
+fn _test_bld_cache_invalidates_on_context_change() {
     test_group("build: editing the context invalidates the cached layer");
     var root = "/tmp/stiva-bld-stale";
     var ctx = "/tmp/stiva-bld-stale-ctx";
@@ -2439,7 +2534,7 @@ fn test_bld_cache_invalidates_on_context_change() {
     _bld_t_base(store);
     _bld_t_file(_stor_cat2(ctx, "/app"), "f", "VERSION-ONE\n");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"s\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"s\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";   #skip-lint
     var a = build_image(parse_build_spec(src), store, 0, ctx);
     assert(a != 0, "first build ok");
     if (a == 0) { return 0; }
@@ -2498,7 +2593,7 @@ fn test_bld_cache_invalidates_on_context_change() {
     return 0;
 }
 
-fn test_bld_source_fingerprint_discriminates() {
+fn _test_bld_source_fingerprint_discriminates() {
     test_group("build: the copy-source fingerprint discriminates");
     var ctx = "/tmp/stiva-bld-fp-ctx";
     _stor_remove_dir_all(ctx);
@@ -2523,7 +2618,7 @@ fn test_bld_source_fingerprint_discriminates() {
     return 0;
 }
 
-fn test_bld_cache_ignores_garbage_entry() {
+fn _test_bld_cache_ignores_garbage_entry() {
     test_group("build: a garbage cache entry is a miss, not an escape");
     var root = "/tmp/stiva-bld-badcache";
     var ctx = "/tmp/stiva-bld-badcache-ctx";
@@ -2533,7 +2628,7 @@ fn test_bld_cache_ignores_garbage_entry() {
     var base = _bld_t_base(store);
     _bld_t_file(_stor_cat2(ctx, "/app"), "f", "g\n");
 
-    var src = "[image]\nbase = \"local/base:v1\"\nname = \"g\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";
+    var src = "[image]\nbase = \"local/base:v1\"\nname = \"g\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"app\"\ndestination = \"/app\"\n";   #skip-lint
     var good = build_image(parse_build_spec(src), store, 0, ctx);
     assert(good != 0, "baseline build ok");
     if (good == 0) { return 0; }
@@ -2552,7 +2647,7 @@ fn test_bld_cache_ignores_garbage_entry() {
     return 0;
 }
 
-fn test_bld_missing_base_without_client() {
+fn _test_bld_missing_base_without_client() {
     test_group("build: an absent base with no registry client fails cleanly");
     var root = "/tmp/stiva-bld-nobase";
     _stor_remove_dir_all(root);
@@ -2562,107 +2657,110 @@ fn test_bld_missing_base_without_client() {
     return 0;
 }
 
+# Runs every case in registry.tcyr, and returns the failure count as the exit status.
 fn main() {
     alloc_init();
-    test_rg_transport_seam();
-    test_rg_headers_fail_closed_on_crlf();
-    test_rg_http_opts_overrides_sandhi_defaults();
-    test_rg_auth_flow();
-    test_rg_auth_flow_success();
-    test_rg_auth_access_token_key();
-    test_rg_auth_basic_credentials_on_token_endpoint();
-    test_rg_cached_token_reused();
-    test_rg_cached_token_401_triggers_reauth();
-    test_rg_401_without_challenge_header();
-    test_rg_challenge_without_realm();
-    test_rg_token_endpoint_no_token_field();
-    test_rg_token_endpoint_error_status();
-    test_rg_server_error_is_registry_not_auth();
-    test_rg_token_url_carries_caller_scope();
-    test_rg_platform_from_jv();
-    test_rg_platform_manifest_from_jv();
-    test_rg_oci_index_from_jv();
-    test_rg_oci_index_hostile_entries();
-    test_rg_body_is_index();
-    test_rg_manifest_schema_version_guard();
-    test_rg_api_base();
-    test_rg_urls();
-    test_rg_scopes_and_accept();
-    test_rg_location_and_digest_query();
-    test_rg_api_bases_mirrors();
-    test_rg_cache_key_scope_separation();
-    test_rg_token_cache_expiry();
-    test_rg_token_url_and_basic_auth();
-    test_rg_token_from_body();
-    test_rg_fetch_manifest();
-    test_rg_fetch_manifest_index();
-    test_rg_fetch_manifest_index_without_content_type();
-    test_rg_fetch_manifest_digest_verified();
-    test_rg_fetch_manifest_errors();
-    test_rg_resolve_manifest_from_index();
-    test_rg_resolve_manifest_pinned_digest_enforced();
-    test_rg_resolve_manifest_direct();
-    test_rg_blob_stream_to_store();
-    test_rg_blob_digest_mismatch_leaves_nothing();
-    test_rg_blob_limit_enforced();
-    test_rg_blob_already_present_is_noop();
-    test_rg_blob_warm_cache_skips_probe();
-    test_rg_blob_stale_token_retries_once();
-    test_rg_blob_short_write_aborts();
-    test_rg_blob_error_status();
-    test_rg_pull_image();
-    test_rg_pull_dedups_present_blobs();
-    test_rg_pull_refuses_foreign_layer();
-    test_rg_pull_partial_failure_leaves_no_image();
-    test_rg_push_blob_monolithic();
-    test_rg_push_blob_skips_existing();
-    test_rg_push_blob_chunked();
-    test_rg_push_chunk_size_guard();
-    test_rg_push_manifest();
-    test_rg_push_manifest_rejects_empty();
-    test_rg_push_uses_push_scope();
-    test_rg_push_roundtrip_preserves_manifest_bytes();
-    test_rg_push_quiet_precheck();
-    test_rg_push_reauths_on_401_from_put();
-    test_rg_same_origin();
-    test_rg_push_no_token_to_foreign_location();
-    test_rg_push_chunked_rejects_offorigin_relocation();
-    test_rg_push_token_still_sent_same_origin();
-    test_rg_push_uploads_every_referenced_blob();
-    test_rg_digest_is_valid();
-    test_rg_pull_rejects_traversal_digest();
-    test_rg_blob_path_fails_closed();
-    test_rg_descriptor_rejects_bad_size();
-    test_rg_push_manifest_targets_the_tag();
-    test_rg_manifest_fetch_still_prefers_digest();
-    test_rg_push_missing_image();
-    test_rg_list_tags();
-    test_rg_list_tags_edge_cases();
-    test_rg_discovery_uses_pull_scope();
-    test_rg_discovery_status_boundaries();
-    test_rg_catalog();
-    test_rg_catalog_unsupported();
-    test_rg_referrers();
-    test_rg_referrers_skips_malformed();
-    test_rg_referrers_rejects_bad_digest();
-    test_rg_verify_signature();
-    test_rg_index_dedup_digest_aware();
-    test_rg_index_dedup_tag_still_moves();
-    test_bld_copy_dir_end_to_end();
-    test_bld_diff_ids_are_uncompressed();
-    test_bld_config_has_platform_and_fields();
-    test_bld_spec_workdir_beats_step();
-    test_bld_refuses_run_and_from_stage();
-    test_bld_source_traversal_refused();
-    test_bld_symlink_traversal_refused();
-    test_bld_dest_is_safe();
-    test_bld_malformed_step_is_a_parse_error_not_a_crash();
-    test_bld_dest_prefix();
-    test_bld_cache_reuse();
-    test_bld_cache_invalidates_on_context_change();
-    test_bld_source_fingerprint_discriminates();
-    test_bld_cache_ignores_garbage_entry();
-    test_bld_missing_base_without_client();
+    _test_rg_transport_seam();
+    _test_rg_headers_fail_closed_on_crlf();
+    _test_rg_http_opts_overrides_sandhi_defaults();
+    _test_rg_auth_flow();
+    _test_rg_auth_flow_success();
+    _test_rg_auth_access_token_key();
+    _test_rg_auth_basic_credentials_on_token_endpoint();
+    _test_rg_credentials_are_bound_to_their_host();
+    _test_rg_realm_rules();
+    _test_rg_cached_token_reused();
+    _test_rg_cached_token_401_triggers_reauth();
+    _test_rg_401_without_challenge_header();
+    _test_rg_challenge_without_realm();
+    _test_rg_token_endpoint_no_token_field();
+    _test_rg_token_endpoint_error_status();
+    _test_rg_server_error_is_registry_not_auth();
+    _test_rg_token_url_carries_caller_scope();
+    _test_rg_platform_from_jv();
+    _test_rg_platform_manifest_from_jv();
+    _test_rg_oci_index_from_jv();
+    _test_rg_oci_index_hostile_entries();
+    _test_rg_body_is_index();
+    _test_rg_manifest_schema_version_guard();
+    _test_rg_api_base();
+    _test_rg_urls();
+    _test_rg_scopes_and_accept();
+    _test_rg_location_and_digest_query();
+    _test_rg_api_bases_mirrors();
+    _test_rg_cache_key_scope_separation();
+    _test_rg_token_cache_expiry();
+    _test_rg_token_url_and_basic_auth();
+    _test_rg_token_from_body();
+    _test_rg_fetch_manifest();
+    _test_rg_fetch_manifest_index();
+    _test_rg_fetch_manifest_index_without_content_type();
+    _test_rg_fetch_manifest_digest_verified();
+    _test_rg_fetch_manifest_errors();
+    _test_rg_resolve_manifest_from_index();
+    _test_rg_resolve_manifest_pinned_digest_enforced();
+    _test_rg_resolve_manifest_direct();
+    _test_rg_blob_stream_to_store();
+    _test_rg_blob_digest_mismatch_leaves_nothing();
+    _test_rg_blob_limit_enforced();
+    _test_rg_blob_already_present_is_noop();
+    _test_rg_blob_warm_cache_skips_probe();
+    _test_rg_blob_stale_token_retries_once();
+    _test_rg_blob_short_write_aborts();
+    _test_rg_blob_error_status();
+    _test_rg_pull_image();
+    _test_rg_pull_dedups_present_blobs();
+    _test_rg_pull_refuses_foreign_layer();
+    _test_rg_pull_partial_failure_leaves_no_image();
+    _test_rg_push_blob_monolithic();
+    _test_rg_push_blob_skips_existing();
+    _test_rg_push_blob_chunked();
+    _test_rg_push_chunk_size_guard();
+    _test_rg_push_manifest();
+    _test_rg_push_manifest_rejects_empty();
+    _test_rg_push_uses_push_scope();
+    _test_rg_push_roundtrip_preserves_manifest_bytes();
+    _test_rg_push_quiet_precheck();
+    _test_rg_push_reauths_on_401_from_put();
+    _test_rg_same_origin();
+    _test_rg_push_no_token_to_foreign_location();
+    _test_rg_push_chunked_rejects_offorigin_relocation();
+    _test_rg_push_token_still_sent_same_origin();
+    _test_rg_push_uploads_every_referenced_blob();
+    _test_rg_digest_is_valid();
+    _test_rg_pull_rejects_traversal_digest();
+    _test_rg_blob_path_fails_closed();
+    _test_rg_descriptor_rejects_bad_size();
+    _test_rg_push_manifest_targets_the_tag();
+    _test_rg_manifest_fetch_still_prefers_digest();
+    _test_rg_push_missing_image();
+    _test_rg_list_tags();
+    _test_rg_list_tags_edge_cases();
+    _test_rg_discovery_uses_pull_scope();
+    _test_rg_discovery_status_boundaries();
+    _test_rg_catalog();
+    _test_rg_catalog_unsupported();
+    _test_rg_referrers();
+    _test_rg_referrers_skips_malformed();
+    _test_rg_referrers_rejects_bad_digest();
+    _test_rg_verify_signature();
+    _test_rg_index_dedup_digest_aware();
+    _test_rg_index_dedup_tag_still_moves();
+    _test_bld_copy_dir_end_to_end();
+    _test_bld_diff_ids_are_uncompressed();
+    _test_bld_config_has_platform_and_fields();
+    _test_bld_spec_workdir_beats_step();
+    _test_bld_refuses_run_and_from_stage();
+    _test_bld_source_traversal_refused();
+    _test_bld_symlink_traversal_refused();
+    _test_bld_dest_is_safe();
+    _test_bld_malformed_step_is_a_parse_error_not_a_crash();
+    _test_bld_dest_prefix();
+    _test_bld_cache_reuse();
+    _test_bld_cache_invalidates_on_context_change();
+    _test_bld_source_fingerprint_discriminates();
+    _test_bld_cache_ignores_garbage_entry();
+    _test_bld_missing_base_without_client();
     return assert_summary();
 }
 

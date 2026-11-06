@@ -5,6 +5,179 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.1.2] — 2026-11-06 — P(-1) audit: security repairs, a real fuzzer, and a roadmap for what is left
+
+A hardening release: no new dep, no pin moved, no new verb. Seven reviews by attack surface found the
+defects below, and each was reproduced before it was fixed. The fixes have regression tests, apart
+from the two named under **Not done**, and 47 of those tests were proved able to fail by putting the
+bug back. The roadmap is rewritten around what the audit found missing.
+
+⛔ **The largest finding is not fixed here, because it needs kavach.** A foreground `stiva run` on the
+OCI backend, the default wherever runc is installed, has **no seccomp filter and no NO_NEW_PRIVS**.
+SECURITY.md claimed otherwise, and now has a table of what each path really gets.
+
+### Upgrading
+
+- **`pause` and `update` refuse a container that shares its cgroup.** stiva creates no per-container
+  cgroup, so that is nearly all of them. They used to act on the operator's whole session.
+- **`stiva run` takes its flags before the image.** Everything after it goes to the payload, so
+  `run IMG /bin/ls -d /tmp` no longer detaches.
+- **`wait` waits.** It used to answer 0 at once for a running container. A detached container's exit
+  code is not known to a second process, so it now says none was recorded and exits 1.
+- **A corrupt `cron.json` stops `cron` until it is repaired.** It used to read as empty, and the next
+  save erased the schedule. `state.json` is set aside as `state.json.corrupt.<pid>`.
+- **`state.json` and `cron.json` become 0600** at their next write.
+- **Layers re-extract once.** The unpack marker moved beside the layer (`layers/<hex>.unpacked`).
+- **The audit log's `user` is now `uid:<euid>`,** not `$USER`.
+- **MCP `stiva_build`'s `context_dir` must be relative**, with no `..`.
+- **`parse_build_spec` refuses** a bad name or tag, and an `expose` port outside 1–65535.
+  `parse_ansamblu` refuses `replicas` past 65535. `load_key` refuses a key file over 4096 bytes or empty.
+- **Library:** `RegistryConfig` carries a host (`registry_config_set_host`) and sends no credentials
+  without one. `registry_verify_signature` and `stiva_verify_signature` are now
+  `registry_has_signature_artifact` and `stiva_has_signature_artifact`, because they only ever looked
+  for an artifact and verified nothing. `copy_dir_recursive` is gone. `dns_registry_register` can
+  return `STIVA_ERR_NETWORK`. `_reg_acquire_token` takes the ref. `compose_dropped_keys` is new.
+- **The `accel` feature is gone.** `samay` and `ai-hwaccel` are required: nothing gated the modules
+  that use them, so switching it off only broke the build.
+
+### Security
+
+**Archives and layers.** A crafted `load` overwrote host files through a symlink under a read-only
+directory, and a directory entry could chmod through a link. A docker-archive member could be a
+symlink to a host file, whose bytes landed in a world-readable blob. Extraction now walks by file
+descriptor with `O_NOFOLLOW`, creates files `O_EXCL|O_NOFOLLOW`, verifies every header checksum,
+applies directory modes last (last entry wins, as `tar -x` does), keeps hard links inside the tree,
+and reads PAX long names. `load` extracts into a private per-process directory with links refused.
+
+**`cp`, `export` and `build`.** All three followed what a container or a build context planted.
+`cp` read and wrote host files through a link, in both directions, and hung on a FIFO. All three now
+walk by descriptor. `copy_from_container` and `copy_into_container` were rewritten, and a trailing
+`/` or an existing directory takes the source's name, which is what `cp f id:/app/` always needed.
+
+**`rm`.** The path came from what was typed, so `rm <name>` left the rootfs behind for ever and a
+container named `../../x` deleted outside the store. It uses the record's id now, and
+`container_name_is_valid` is enforced on create, rename and `cron add`. `rm` also refuses a paused
+container, which would have left a frozen process with no record.
+
+**Registry.** Credentials went to any host, a token realm could point anywhere, and a redirect carried
+them along. Credentials are now bound to their host, a realm must be on that origin, and a redirect
+ending in a 401 is refused. Connects and reads have deadlines, so a silent server fails in about a
+minute instead of never. A size-0 descriptor no longer means an unbounded download, and `.dl` scratch
+files are unique and `O_EXCL|O_NOFOLLOW`, so concurrent pulls cannot corrupt each other. The
+credentials file is written atomically at 0600.
+
+**Payloads.** A descriptor above 1024 reached the payload, and a directory fd defeats a chroot.
+`_stor_cloexec_fds` now marks every descriptor close-on-exec before kavach or a helper runs.
+
+**Rootless networking.** pasta's defaults forwarded every host port in, published every container
+port on the host, and mapped the gateway onto host loopback. stiva now passes `--config-net
+--no-map-gw -T none -U none`, and `-t none` / `-u none` for a protocol with no mapping, per passt(1).
+⚠ Tested against the argv pasta receives, since pasta is not installed where this was written.
+`rootless-net.pid` was signalled unchecked, and pasta daemonizes, so that pid was usually stale: it
+now records start ticks and is signalled only on a match. `select_backend`'s `-1` was never checked.
+
+**MCP.** `stiva_build`'s `context_dir` read any host directory into an image the client could fetch.
+`stiva_pull` was annotated read-only.
+
+**Network library.** The nftables ruleset went to a fixed `/tmp` name and is now a memfd. `delete_network`
+deleted a host bridge it never created. A newline in a DNS name wrote extra `/etc/hosts` lines. Loopback
+resolvers are dropped, since from a container they are the container. `/etc` is 0755, so a payload that
+is not root can read it. A port protocol is tcp or udp. None of this has a caller yet (roadmap v3.3.1).
+
+**State files.** `state.json` was world-readable with `env` inside. It is 0600 now, as is `cron.json`,
+and `layers/` and `containers/` are 0700.
+
+**The audit log** believed `$USER`, and a name that was not UTF-8 made the line invalid JSON, which the
+reader skips, hiding the entry from its own log. **The CLI** printed control bytes from image names and
+process titles straight to the terminal, and a `ref.name` annotation with control bytes or spaces now
+reads as no name.
+
+### Fixed
+
+- **`pause` froze the operator's session**, and `update` limited it, because a payload shares the
+  cgroup of whatever started it. Both now need the cgroup to hold the container's process tree alone.
+- **Gzip layers over 16 MiB failed to unpack, then segfaulted.** sankoch's one-shot decoder keeps its
+  own ceiling. `_stor_gunzip` lifts it, and output is clamped to what one allocation can hold.
+- **`state.json` lost updates.** Two commands were two processes, and the last save won, so a foreground
+  run wrote over everything that happened while it ran, and a removed container could come back. Saves
+  now merge under a lock, against what the process last saw. A file over 16 MiB wiped every record.
+- **`logs` and the audit reader read the oldest bytes** of a long file, so they froze in the past.
+- **`cron` fired twice.** On a clock step `last_fired` was overwritten with `now`, moving it backwards,
+  and two timers at one instant both fired. The watermarks are read back from samay, `reset_from`
+  persists, and each claim is made under a lock. A disabled job tracks the clock, so re-enabling it
+  owes nothing, and `cron add` on the same schedule keeps its place in time. `cron add` with no
+  `--schedule` segfaulted.
+- **`diff` missed a same-size edit** on a flattened rootfs. It compares bytes when metadata matches.
+- **`gc` could delete blobs** of images it failed to read. It refuses when the index is incomplete.
+- **`prune`** was cubic, and its help said dangling images while it removed every unused one.
+- **The build cache** ignored a file's owner, and a tree past 64 levels matched a stale layer. Owner is
+  in the key, and a tree that deep is never cached.
+- **`convert`** pasted Dockerfile values between quotes, so a `"` or `\` wrote TOML that did not parse,
+  or said something else. Values are escaped, `\`-newline continuations are joined as Docker does, and
+  the JSON form of `ENTRYPOINT` handles `\"`. Compose keys with no stiva equivalent are logged and
+  reported by `compose_dropped_keys`, because `read_only` and `cap_drop` are restrictions.
+- **aarch64 had no symlink guards.** Stat fields were read at x86 offsets, and open flags were x86
+  literals: `196608` means `O_DIRECT|O_LARGEFILE` on arm64, so `O_NOFOLLOW` silently did nothing and
+  every flatten failed. `current_platform` said amd64, and so did every image built there. All stat
+  reads and open flags are named now, `host_arch` is the one answer, and the whole suite was run under
+  qemu-aarch64 for the first time.
+- **IPv6.** `2001:db8::1` formatted as `2001:db8:::1`, the pool ran past its subnet, and a long prefix
+  wrapped round to a small one.
+- **`export` could fail silently**, exiting 1 with no message.
+- **A zombie counted as alive** for `stop` and `wait`.
+
+### Added
+
+- **A real fuzz harness.** `tests/stiva.fcyr` drives 18 parsers in forked batches, so a crash or a hang
+  is caught and leaves its input at `build/fuzz-crash-<target>.bin`. A planted crash and a planted hang
+  were both detected, and 1.08M inputs ran clean under `--poison`. CI runs it now.
+- **`cron_check_claim`**, `container_manager_wait_gone`, `image_store_remove_set` and `_img_read_tail`.
+
+### Changed
+
+- **`cyrius audit` exits 0.** 147 lint warnings and 492 undocumented functions are gone, 134 long lines
+  wrapped, and test functions are private to `cyrdoc`.
+- **The roadmap is rewritten.** Finished sections are gone, and every gap the audit found has a release,
+  v3.2.0 to v3.6.0, with upstream asks of kavach, sandhi, sakshi and sankoch listed first. "v3.1.0 item
+  N" citations in `src/` and the docs now name the new release.
+- **Every stale deferral comment is gone**, with the tokio and reqwest prose they carried. What is really
+  unported points at the roadmap.
+- **The docs say what is true.** SECURITY.md is rewritten around what each path gets. About 50 claims
+  were corrected, among them that image env reaches a payload, that every container has seccomp, that
+  Landlock is live, that there is a default bridge, and that the build cache is content-keyed. The count
+  of working verbs is 33, not 34: `restart` cannot succeed from the CLI (roadmap v3.2.1).
+
+### Performance
+
+Interleaved and pinned to one CPU against a 3.1.1 tree, four alternations of `cyrius bench` and medians
+of the end-to-end runs. The ten benchmarks not listed moved by less than 0.4%.
+
+| | 3.1.1 | 3.1.2 | |
+|---|---|---|---|
+| `prune`, 300 unused images | 9.94 s | 25 ms | −99.7% |
+| `events`, 8 MiB log | 263 ms | 40 ms | −85% |
+| `events --since`, 8 MiB log | 201 ms | 39 ms | −81% |
+| `event_ts_parse` | 2.310 µs | 295 ns | −87% |
+| `exec_capture2_trivial_child` | 1.611 ms | 1.327 ms | −18% |
+| First `run` of a 5000-file, 10 MiB layer | 373 ms | 373 ms | none |
+| `unpack_layer_gz_20_files_4kib` | 788 µs | 1.058 ms | **+34%** |
+| `compose_yaml_to_toml` | 24.1 µs | 25.5 µs | +6% |
+| `compose_400_reverse_sorted_keys` | 1.319 ms | 1.381 ms | +5% |
+
+⚠ The +34% is real for that benchmark and does not reach a real unpack. It extracts over the same
+directory 100 times, so it pays for the unlink-before-create on every file, and a first unpack, which
+is what `run` does, measures the same as before. The compose cost is the walk over each service's keys.
+`prune` was cubic in the number of images. `event_ts_parse` is an anchored scan that hands anything
+unusual to the real parser. The fd sweep walks what is open instead of 1021 numbers.
+
+### Not done
+
+The roadmap has each of these: seccomp on the foreground path, Landlock and the 1024 fd sweep (kavach),
+image config applied to containers, foreground containers visible to `ps` and `stop`, per-container
+cgroups, and a non-root `user`. `delete_network`'s `bridge_created` gate has no test, because it needs a
+stand-in for `delete_bridge`, and the build cache's owner field has none, because changing a file's
+owner needs root. pasta and slirp4netns have never run against this code.
+
 ## [3.1.1] — 2026-11-06 — cyrius 6.7.18, every dep at its newest tag, agnodrm retired
 
 Toolchain **6.7.9 → 6.7.18**, every dep to its newest tag, and `[deps.agnodrm]` removed. This is the

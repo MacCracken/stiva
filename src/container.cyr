@@ -7,12 +7,9 @@
 # the pure log-rotation and log-tail helpers, and the state-validation
 # (require_pid) and persisted-state-fixup logic.
 #
-# The async, stateful `ContainerManager` (tokio RwLock over a
-# HashMap<String, Container>, majra PubSub lifecycle events, NetworkManager
-# connect/disconnect, and all lifecycle methods that drive runtime's async
-# exec/spawn/kill/checkpoint) is DEFERRED — it needs an async runtime,
-# pub/sub, and shared-lock infra the ported base does not yet have. See the
-# DEFERRED block at the bottom (matches the storage/registry precedent).
+# The stateful `ContainerManager` holds the records, publishes lifecycle events over majra, and
+# drives runtime's exec/spawn/kill. It is synchronous: the oracle's tokio RwLock became a file lock
+# around state.json (see _cm_persist), because the processes sharing it are separate `stiva` runs.
 #
 # Enum members are namespaced `CONTAINER_STATE_*` so Cyrius's global
 # member-hoisting ("last def wins") cannot silently collide with a dep's
@@ -208,6 +205,8 @@ fn _cm_proc_start_ticks(pid) {
         i = i + 1;
     }
     if (close < 0) { return 0; }
+    # A zombie has exited, and no amount of polling will change that if its parent does not reap.
+    if (load8(buf + close + 2) == 90) { return 0; }
     # After ')' comes " S" (field 3). starttime is field 22, so it is the 20th
     # whitespace-separated token following the ')'.
     var field = 2;
@@ -268,6 +267,8 @@ fn _cm_stop_by_pid(pid, start_ticks, grace_ms) {
     return 0;
 }
 
+# Settle a record just loaded from disk: Running or Paused becomes Stopped unless its process is
+# still alive and still ours. Returns 1 if it changed the record.
 fn container_fixup_after_restart(c) {
     var cc: Container = c;
     if (cc.state == CONTAINER_STATE_RUNNING || cc.state == CONTAINER_STATE_PAUSED) {
@@ -403,13 +404,13 @@ fn container_tail_start(total, want) {
 
 # Read a container log file and return the last `n` lines (rust-old: log_tail;
 # content.lines() + saturating_sub). n <= 0 → the whole file. Returns a cstr
-# pointer (into the read buffer), or 0 if the log file is absent. 4 MiB cap.
+# pointer (into the read buffer), or 0 if the log file is absent. Past 4 MiB it
+# reads the newest 4 MiB: it used to read the oldest, so `logs` froze in the past.
 fn container_log_tail(log_path, n) {
-    var cap = 4194304;
-    var buf = alloc(cap);
-    var len = file_read_all(log_path, buf, cap - 1);
-    if (len < 0) { return 0; }
-    store8(buf + len, 0);
+    var cell = alloc(8);
+    var buf = _img_read_tail(log_path, 4194304, cell);
+    if (buf == 0) { return 0; }
+    var len = load64(cell);
     if (n <= 0) { return buf; }
 
     # total line count (lines() ignores a single trailing newline).
@@ -483,7 +484,7 @@ fn _container_cat2(a, b) {
 #
 # Divergences (documented): `secrets` (Vec<kavach::SecretRef>) and `scan_policy`
 # are runtime handles with no persisted meaning here — serialized as [] / null
-# and dropped on load (re-injected at start in v3.1). `created_at`/`started_at`
+# and dropped on load (roadmap v3.2.2). `created_at`/`started_at`
 # are epoch-millis ints (the port's convention), not chrono RFC3339 strings.
 
 # cstr → JSON string value, or JSON null when 0 (Option<String>=None).
@@ -596,7 +597,7 @@ fn _container_config_to_jv(config) {
     json_v_obj_set(o, str_from("detach"), json_v_bool_new(c.detach));
     json_v_obj_set(o, str_from("stop_grace_ms"), json_v_int_new(c.stop_grace_ms));
     json_v_obj_set(o, str_from("rootless"), json_v_bool_new(c.rootless));
-    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.1.0 item 1
+    json_v_obj_set(o, str_from("secrets"), json_v_arr_new());     # roadmap v3.2.2
     json_v_obj_set(o, str_from("scan_policy"), _ct_scan_policy_to_jv(c.scan_policy));
     json_v_obj_set(o, str_from("timeout_ms"), json_v_int_new(c.timeout_ms));
     json_v_obj_set(o, str_from("backend"), _ct_str_or_null(c.backend));
@@ -706,7 +707,7 @@ fn _container_config_from_jv(v) {
     c.detach = _ct_jv_bool(v, "detach");
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
-    c.secrets = 0;                                       # roadmap v3.1.0 item 1
+    c.secrets = 0;                                       # roadmap v3.2.2
     c.scan_policy = _ct_scan_policy_from_jv(bayan_json_v_obj_get_by_cstr(v, "scan_policy"));
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
@@ -762,42 +763,72 @@ fn container_state_save(root, containers) {
     }
     var s = json_v_build_pretty(arr, 2);
     var path = _container_cat2(root, "/state.json");
-    var tmp = _container_cat2(path, ".tmp");
-    if (file_write_all(tmp, str_data(s), str_len(s)) < 0) {
+    # 0600: a container's `env` is in here, which is where secrets usually travel.
+    if (_img_write_atomic(path, str_data(s), str_len(s), 384) == 0) {
         sakshi_warn("failed to write container state", strlen("failed to write container state"));
-        return 0;
-    }
-    if (sys_rename(tmp, path) < 0) {
-        sakshi_warn("failed to rename container state file", strlen("failed to rename container state file"));
         return 0;
     }
     return 1;
 }
 
-# Load container records from `{root}/state.json` (rust-old: load_persisted_state).
-# Applies the Running/Paused → Stopped, pid → -1 restart fixup. A missing/
-# unparseable file yields a fresh empty vec.
+# Take the lock every state.json read-modify-write holds, or -1 when it cannot be had (then the
+# caller proceeds unlocked, as one process alone is safe). Every stiva command is its own process,
+# so without this two parallel `run -d` each rewrite the file from their own copy, and all but one
+# record and its container are lost.
+fn container_state_lock(root) {
+    sys_mkdir(root, 493);
+    var fd = file_open(_container_cat2(root, "/.state.lock"), O_RDWR | O_CREAT | O_CLOEXEC, 384);
+    if (fd < 0) { return 0 - 1; }
+    file_lock(fd);
+    return fd;
+}
+
+# Release container_state_lock's lock.
+fn container_state_unlock(fd) {
+    if (fd >= 0) {
+        file_unlock(fd);
+        file_close(fd);
+    }
+    return 0;
+}
+
+# Load container records from `{root}/state.json` (rust-old: load_persisted_state), applying the
+# Running/Paused → Stopped, pid → -1 restart fixup.
 fn container_state_load(root) {
+    var out = container_state_read(root);
+    var i = 0;
+    while (i < vec_len(out)) {
+        container_fixup_after_restart(vec_get(out, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Read the records in `{root}/state.json` as they are on disk. A missing file is an empty vec. An
+# unparseable one is moved aside to `state.json.corrupt.<pid>` first, so what starts fresh next
+# has not destroyed anything, and the vec is empty. The whole file is read: a fixed buffer here
+# once cut a large state off mid-document, which then failed to parse and lost every record.
+fn container_state_read(root) {
     var out = vec_new();
     var path = _container_cat2(root, "/state.json");
     if (file_exists(path) == 0) { return out; }
-    var cap = 16777216;
-    var buf = alloc(cap);
-    var n = file_read_all(path, buf, cap);
-    if (n <= 0) { return out; }
+    var cell = alloc(8);
+    var buf = _img_read_file(path, cell);
+    if (buf == 0) { return out; }
+    var n = load64(cell);
+    if (n == 0) { return out; }
     var rv = bayan_json_v_parse_buf(buf, n);
-    if (rv == 0) {
-        sakshi_warn("failed to parse container state, starting fresh",
-          strlen("failed to parse container state, starting fresh"));
+    if (rv == 0 || json_v_is_arr(rv) == 0) {
+        sakshi_warn("failed to parse container state, setting it aside and starting fresh",
+          strlen("failed to parse container state, setting it aside and starting fresh"));
+        sys_rename(path, _img_scratch_path(path, ".corrupt"));
         return out;
     }
-    if (json_v_is_arr(rv) == 0) { return out; }
     var cnt = json_v_arr_len(rv);
     var i = 0;
     while (i < cnt) {
         var c = container_from_jv(json_v_arr_get(rv, i));
         if (c != 0) {
-            container_fixup_after_restart(c);
             vec_push(out, c);
         }
         i = i + 1;
@@ -1006,9 +1037,11 @@ struct ContainerInternals {
     spec;         # RuntimeSpec*  | 0
     exec_result;  # ContainerExecResult* | 0 (one-shot result, cached for wait)
     log_path;     # cstr — {root}/containers/{id}/container.log
-    spawned;      # DaemonHandle* | 0 — ALWAYS 0 here (detached spawn is v3.1)
+    spawned;      # DaemonHandle* | 0 — set by this process's own `run -d`
 }
 
+# What the manager holds for a container but does not persist: its overlay, spec, one-shot result,
+# log path and spawned handle.
 fn container_internals_new(overlay, spec, exec_result, log_path, spawned) {
     var ci = alloc(40);
     var c: ContainerInternals = ci;
@@ -1033,6 +1066,7 @@ struct ContainerManager {
     image_store;      # ImageStore* (borrowed; the facade also holds it — not freed here)
     publisher;        # PubSub* (owned; pubsub_new)
     network_manager;  # NetworkManager* | 0
+    saved;              # map id -> the record's JSON as this process last saw it
 }
 
 # Open a manager rooted at `root` over `image_store` (rust-old: new). Loads any
@@ -1040,11 +1074,20 @@ struct ContainerManager {
 # stands up an empty internals table + a fresh lifecycle-event bus. Returns a
 # ContainerManager*, or 0 on alloc failure.
 fn container_manager_new(root, image_store) {
-    var m = alloc(48);
+    var m = alloc(56);
     if (m == 0) { return 0; }
     var mm: ContainerManager = m;
     mm.root = root;
-    mm.containers = container_state_load(root);
+    var lock = container_state_lock(root);
+    var raw = container_state_read(root);
+    container_state_unlock(lock);
+    mm.saved = _cm_snapshot(raw);
+    var ri = 0;
+    while (ri < vec_len(raw)) {
+        container_fixup_after_restart(vec_get(raw, ri));
+        ri = ri + 1;
+    }
+    mm.containers = raw;
     mm.internals = map_new();
     mm.image_store = image_store;
     mm.publisher = pubsub_new();
@@ -1056,7 +1099,67 @@ fn container_manager_new(root, image_store) {
 # Returns 1/0 (best-effort, matching container_state_save).
 fn _cm_persist(mgr) {
     var mm: ContainerManager = mgr;
-    return container_state_save(mm.root, mm.containers);
+    var lock = container_state_lock(mm.root);
+    mm.containers = _cm_merge(mm.containers, container_state_read(mm.root), mm.saved);
+    var ok = container_state_save(mm.root, mm.containers);
+    mm.saved = _cm_snapshot(mm.containers);
+    container_state_unlock(lock);
+    return ok;
+}
+
+# Each record of `containers` as its JSON text, by id: what this process last read or wrote.
+#[must_use]
+fn _cm_snapshot(containers) {
+    var m = map_new();
+    var i = 0;
+    while (i < vec_len(containers)) {
+        var r = vec_get(containers, i);
+        var c: Container = r;
+        map_set(m, c.id, str_cstr(json_v_build(container_to_jv(r))));
+        i = i + 1;
+    }
+    return m;
+}
+
+# The records to write: this process's changes applied to what is on disk now. `saved` says what
+# this process last saw, which is how the cases are told apart. A record it did not change takes
+# the disk's copy, which another process may have updated. One it changed or created is its own.
+# One it removed stays removed. One on disk it never saw is another process's new record.
+#[must_use]
+fn _cm_merge(ours, disk, saved) {
+    var on_disk = map_new();
+    var i = 0;
+    while (i < vec_len(disk)) {
+        var d: Container = vec_get(disk, i);
+        map_set(on_disk, d.id, vec_get(disk, i));
+        i = i + 1;
+    }
+    var out = vec_new();
+    var mine = map_new();
+    i = 0;
+    while (i < vec_len(ours)) {
+        var r = vec_get(ours, i);
+        var c: Container = r;
+        map_set(mine, c.id, 1);
+        var was = map_get(saved, c.id);
+        var changed = 1;
+        if (was != 0) {
+            if (streq(was, str_cstr(json_v_build(container_to_jv(r)))) == 1) { changed = 0; }
+        }
+        if (changed == 1) {
+            vec_push(out, r);
+        } elif (map_has(on_disk, c.id) == 1) {
+            vec_push(out, map_get(on_disk, c.id));
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < vec_len(disk)) {
+        var e: Container = vec_get(disk, i);
+        if (map_has(mine, e.id) == 0 && map_has(saved, e.id) == 0) { vec_push(out, vec_get(disk, i)); }
+        i = i + 1;
+    }
+    return out;
 }
 
 # List all containers (rust-old: list). Returns the live vec<Container*> — the
@@ -1273,8 +1376,74 @@ fn container_events_append(root, event_json) {
 # parsable timestamp (unparsable JSON, missing key, or an explicit null).
 # `line` must be NUL-terminated and must NOT include the trailing newline.
 #[must_use]
+fn _cm_event_ts_fast(line) {
+    if (load8(line) != 123 || load8(line + 1) != 34 || load8(line + 2) != 116
+      || load8(line + 3) != 115 || load8(line + 4) != 34 || load8(line + 5) != 58) { return 0 - 2; }
+    var i = 6;
+    var v = 0;
+    var nd = 0;
+    while (1) {
+        var c = load8(line + i);
+        if (c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        nd = nd + 1;
+        i = i + 1;
+    }
+    if (nd == 0 || nd > 18) { return 0 - 2; }
+    if (nd > 1 && load8(line + 6) == 48) { return 0 - 2; }
+    # Validate the REST of the object: (,"key":"str"|int)* }  NUL. Any other shape
+    # (a backslash, non-ASCII, a control byte, a torn tail) goes to the real parser.
+    while (1) {
+        var d = load8(line + i);
+        if (d == 125) { if (load8(line + i + 1) == 0) { return v; } return 0 - 2; }
+        if (d != 44) { return 0 - 2; }
+        i = i + 1;
+        if (load8(line + i) != 34) { return 0 - 2; }
+        i = i + 1;
+        var ks = i;
+        while (1) {
+            var k = load8(line + i);
+            if (k == 34) { break; }
+            if (k == 92 || k < 32 || k > 126) { return 0 - 2; }
+            i = i + 1;
+        }
+        if (i - ks == 2 && load8(line + ks) == 116 && load8(line + ks + 1) == 115) { return 0 - 2; }
+        i = i + 1;
+        if (load8(line + i) != 58) { return 0 - 2; }
+        i = i + 1;
+        var e = load8(line + i);
+        if (e == 34) {
+            i = i + 1;
+            while (1) {
+                var q = load8(line + i);
+                if (q == 34) { break; }
+                if (q == 92 || q < 32 || q > 126) { return 0 - 2; }
+                i = i + 1;
+            }
+            i = i + 1;
+        } else {
+            var vs = i;
+            if (load8(line + i) == 45) { i = i + 1; }
+            var vd = 0;
+            while (1) {
+                var w = load8(line + i);
+                if (w < 48 || w > 57) { break; }
+                vd = vd + 1;
+                i = i + 1;
+            }
+            if (vd == 0) { return 0 - 2; }
+            if (load8(line + i) == 46 || load8(line + i) == 101 || load8(line + i) == 69) { return 0 - 2; }
+            if (vs == i) { return 0 - 2; }
+        }
+    }
+    return 0 - 2;
+}
+
+# The `ts` field of an event line, or -1 if the line has none or does not parse.
 fn container_event_ts(line) {
     if (line == 0) { return 0 - 1; }
+    var fast = _cm_event_ts_fast(line);
+    if (fast != 0 - 2) { return fast; }
     var v = bayan_json_v_parse_buf(line, strlen(line));
     if (v == 0) { return 0 - 1; }
     return _ct_jv_int_or(v, "ts", 0 - 1);
@@ -1422,8 +1591,12 @@ fn container_manager_create(mgr, image, config) {
     var id = _cm_gen_id();
     var name = cfg.name;
     if (name == 0) { name = _cm_id12(id); }
+    if (container_name_is_valid(name) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, _container_cat2("invalid container name: ", name));
+        return 0;
+    }
 
-    sys_mkdir(_container_cat2(mm.root, "/containers"), 493);
+    _img_private_dir(_container_cat2(mm.root, "/containers"));
     var croot = _cm_container_dir(mm.root, id);
     sys_mkdir(croot, 493);
 
@@ -1503,7 +1676,7 @@ fn _cm_write_log(mgr, id, exec_result) {
 # Start a created container to completion (rust-old: start one-shot branch,
 # container.rs:416-540). Flips CREATED→RUNNING, runs the command blocking via
 # exec_container, records the exit code + STOPPED, writes the log, and
-# persists. Detached (daemon) start is v3.1. Returns STIVA_ERR_OK, or a
+# persists. A detached config spawns instead. Returns STIVA_ERR_OK, or a
 # STIVA_ERR_* sentinel (detail printed).
 #
 # The ContainerExecResult is in the cycc 20/21 class, so its fields are read by
@@ -1520,7 +1693,7 @@ fn container_manager_start(mgr, id) {
     var ci = map_get(mm.internals, id);
     if (ci == 0) {
         # No runtime spec (a fresh process): one-shot start can only run a
-        # container created in this same process. Daemon re-attach is v3.1.
+        # container created in this same process. `start` from a new process is roadmap v3.2.1.
         stiva_err_print(STIVA_ERR_RUNTIME, "start: no runtime spec (created in another process?)");
         return STIVA_ERR_RUNTIME;
     }
@@ -1625,8 +1798,8 @@ fn _cm_disconnect_network(mgr, id) {
     # works cross-process, where `internals` is empty.
     _cm_stop_rootless_net(mm.root, id);
     if (mm.network_manager == 0) { return 0; }
-    # A real NetworkManager would detach the container here; the one-shot path
-    # never constructs one, so this only runs on the (v3.1) daemon path.
+    # A real NetworkManager would detach the container here. Nothing constructs one yet
+    # (roadmap v3.3.1).
     return 0;
 }
 
@@ -1657,15 +1830,26 @@ fn _cm_start_rootless_net(mgr, cc_in, croot) {
           strlen("rootless network unavailable; the container has no external connectivity"));
         return 0;
     }
-    var pf = _container_cat2(croot, "/rootless-net.pid");
+    _cm_rootless_record(_container_cat2(croot, "/rootless-net.pid"), rootless_handle_pid(h));
+    return 0;
+}
+
+# Record a helper as `<pid> <start ticks>`. A pid alone cannot be signalled safely later.
+fn _cm_rootless_record(path, pid) {
     var sb = str_builder_new();
-    str_builder_add_int(sb, rootless_handle_pid(h));
+    str_builder_add_int(sb, pid);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_int(sb, _cm_proc_start_ticks(pid));
     var pstr = str_builder_build(sb);
-    file_write_all(pf, str_data(pstr), str_len(pstr));
+    file_write_all(path, str_data(pstr), str_len(pstr));
     return 0;
 }
 
 # Stop a container's rootless helper, if one was recorded.
+#
+# ⛔ The record can be older than the pid it names. pasta forks into the background and exits by
+# itself with the container, so its recorded pid is usually long gone and may belong to something
+# else by now: a record without matching start ticks is never signalled.
 fn _cm_stop_rootless_net(root, id) {
     var pf = _cm_rootless_pidfile(root, id);
     if (file_exists(pf) == 0) { return 0; }
@@ -1674,8 +1858,11 @@ fn _cm_stop_rootless_net(root, id) {
     sys_unlink(pf);
     if (n <= 0) { return 0; }
     store8(buf + n, 0);
-    var pid = str_to_int(str_from(buf));
-    if (pid > 0) { sys_kill(pid, 15); }
+    var sp = strchr(buf, 32);
+    if (sp < 0) { return 0; }                   # written before the ticks were
+    var pid = str_to_int(str_new(buf, sp));
+    var ticks = str_to_int(str_from(buf + sp + 1));
+    if (container_pid_is_ours(pid, ticks) == 1) { sys_kill(pid, 15); }
     return 0;
 }
 
@@ -1683,8 +1870,7 @@ fn _cm_stop_rootless_net(root, id) {
 
 # Stop a container (rust-old: stop, container.rs:625). One-shot containers have
 # already completed, so this flips to Stopped, clears pid, disconnects the
-# network, emits `stopped`, and persists. (The daemon SIGTERM/grace/SIGKILL
-# branch needs DaemonHandle → v3.1.)
+# network, emits `stopped`, and persists. A detached one gets SIGTERM, its grace, then SIGKILL.
 fn container_manager_stop(mgr, id) {
     var mm: ContainerManager = mgr;
     var c = container_state_find(mm.containers, id);
@@ -1816,7 +2002,7 @@ fn container_manager_stats(mgr, id) {
 }
 
 # Remove a stopped container (rust-old: remove, container.rs:832). Refuses a
-# Running container, tears down its overlay, removes its directory + internals,
+# Running or Paused container, tears down its overlay, removes its directory + internals,
 # drops the record, emits `removed`, and persists. Returns STIVA_ERR_OK or a
 # sentinel (detail printed).
 fn container_manager_remove(mgr, id) {
@@ -1827,19 +2013,23 @@ fn container_manager_remove(mgr, id) {
         return STIVA_ERR_CONTAINER_NOT_FOUND;
     }
     var cc: Container = c;
-    if (cc.state == CONTAINER_STATE_RUNNING) {
+    # A paused container has a live process too: removing its record would orphan it, frozen.
+    if (cc.state == CONTAINER_STATE_RUNNING || cc.state == CONTAINER_STATE_PAUSED) {
         stiva_err_print(STIVA_ERR_INVALID_STATE,
           _container_cat2("cannot remove running container — stop it first: ", id));
         return STIVA_ERR_INVALID_STATE;
     }
     # Tear down the overlay if we still hold its internals.
-    var ci = map_get(mm.internals, id);
+    # ⛔ `id` is whatever the caller typed, which may be a name. Everything from here uses the
+    # record's own id: a path built from the argument left the real directory behind, and let a
+    # container named `../../x` delete outside the store.
+    var ci = map_get(mm.internals, cc.id);
     if (ci != 0) {
         var cint: ContainerInternals = ci;
         if (cint.overlay != 0) { teardown_overlay(cint.overlay); }
     }
     # Remove the container directory tree.
-    _stor_remove_dir_all(_cm_container_dir(mm.root, id));
+    _stor_remove_dir_all(_cm_container_dir(mm.root, cc.id));
 
     # Drop the record (filter the vec by id, since removal is by id-or-name).
     var kept = vec_new();
@@ -1851,9 +2041,29 @@ fn container_manager_remove(mgr, id) {
         i = i + 1;
     }
     mm.containers = kept;
-    container_manager_publish_event(mgr, _cm_event_json("removed", id, "state", "removed"));
+    container_manager_publish_event(mgr, _cm_event_json("removed", cc.id, "state", "removed"));
     _cm_persist(mgr);
     return STIVA_ERR_OK;
+}
+
+# 1 iff `name` is a valid container name, by Docker's rule: an ASCII letter or digit, then letters,
+# digits, `_`, `.` or `-`, at most 128 bytes. A name reaches logs and terminals, and stiva once
+# built paths from it, so it stays a plain word.
+#[must_use]
+fn container_name_is_valid(name) {
+    var n = strlen(name);
+    if (n == 0 || n > 128) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(name + i) & 255;
+        var alnum = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+        if (alnum == 0) {
+            if (i == 0) { return 0; }
+            if (c != 95 && c != 46 && c != 45) { return 0; }
+        }
+        i = i + 1;
+    }
+    return 1;
 }
 
 # Rename a container (rust-old: rename, container.rs:924). No lifecycle event.
@@ -1863,6 +2073,10 @@ fn container_manager_rename(mgr, id, new_name) {
     if (c == 0) {
         stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
         return STIVA_ERR_CONTAINER_NOT_FOUND;
+    }
+    if (container_name_is_valid(new_name) == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, _container_cat2("invalid container name: ", new_name));
+        return STIVA_ERR_INVALID_STATE;
     }
     var cc: Container = c;
     cc.name = new_name;
@@ -1956,11 +2170,11 @@ fn cm_diff_path(e) { return load64(e + 8); }
 # Paths are container-absolute ("/etc/passwd"). Directories are recorded too, so
 # a directory that appears or disappears is reported.
 #
-# The fingerprint deliberately excludes mtime: unpacking a layer sets it from the
-# tar, and a container that merely READ a file would otherwise show as changed.
-# Size + mode + type is what "changed" means for a filesystem diff.
+# The fingerprint excludes mtime, which flattening does not carry over, so a same-size edit
+# fingerprints the same as the original: the flattened branch of container_manager_diff compares
+# those files' bytes (_cm_diff_bytes_differ).
 fn _cm_diff_scan(dir, prefix, out) {
-    var fd = sys_open(dir, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    var fd = sys_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
     if (fd < 0) { return 0; }
     var buf = alloc(4096);
     var sb = alloc(144);
@@ -1978,18 +2192,17 @@ fn _cm_diff_scan(dir, prefix, out) {
                     if (load8(nm + 1) == 46) { if (load8(nm + 2) == 0) { skip = 1; } }
                 }
                 # prepare_layers' own bookkeeping, never image content.
-                if (skip == 0) { if (streq(nm, ".unpacked") == 1) { skip = 1; } }
                 if (skip == 0) {
                     var named = _stor_dup(nm);
                     var child = _container_cat2(_container_cat2(dir, "/"), named);
                     var path = _container_cat2(_container_cat2(prefix, "/"), named);
                     if (sys_lstat(child, sb) == 0) {
-                        var st = load64(sb + 24);
+                        var st = _stor_st_mode(sb);
                         var typ = st & 61440;
                         var fb = str_builder_new();
                         str_builder_add_int(fb, typ);
                         str_builder_add_cstr(fb, ":");
-                        str_builder_add_int(fb, load64(sb + 48));      # size
+                        str_builder_add_int(fb, _stor_st_size(sb));      # size
                         str_builder_add_cstr(fb, ":");
                         str_builder_add_int(fb, st & 4095);            # mode
                         map_set(out, path, str_cstr(str_builder_build(fb)));
@@ -2050,7 +2263,7 @@ fn _cm_diff_is_wh_path(path) {
 
 # Remove from `view` everything this layer's whiteouts delete.
 fn _cm_diff_apply_wh(dir, prefix, view) {
-    var fd = sys_open(dir, 196608, 0);
+    var fd = sys_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
     if (fd < 0) { return 0; }
     var buf = alloc(4096);
     var sb = alloc(144);
@@ -2080,7 +2293,7 @@ fn _cm_diff_apply_wh(dir, prefix, view) {
                     } else {
                         var child = _container_cat2(_container_cat2(dir, "/"), named);
                         if (sys_lstat(child, sb) == 0) {
-                            if ((load64(sb + 24) & 61440) == 16384) {
+                            if ((_stor_st_mode(sb) & 61440) == 16384) {
                                 vec_push(subs, named);
                             }
                         }
@@ -2172,7 +2385,8 @@ fn container_manager_diff(mgr, id) {
 
     # FLATTENED: no upper exists, so the rootfs must be compared against what the
     # image's layers merge to.
-    var lower = _cm_diff_lower_view(_cm_diff_layer_dirs(mm, cc));
+    var layer_dirs = _cm_diff_layer_dirs(mm, cc);
+    var lower = _cm_diff_lower_view(layer_dirs);
     var upper2 = map_new();
     _cm_diff_scan(_container_cat2(croot, "/rootfs"), "", upper2);
 
@@ -2185,6 +2399,11 @@ fn container_manager_diff(mgr, id) {
             var was = map_get(lower, key);
             if (was == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_ADD, key)); }
             elif (streq(was, now) == 0) { vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, key)); }
+            elif (_cm_diff_meta_type(now) == 32768) {   # S_IFREG
+                if (_cm_diff_bytes_differ(croot, key, layer_dirs) == 1) {
+                    vec_push(out, _cm_diff_entry(_CM_DIFF_CHG, key));
+                }
+            }
         }
         a = a + 1;
     }
@@ -2200,6 +2419,53 @@ fn container_manager_diff(mgr, id) {
         d = d + 1;
     }
     return out;
+}
+
+# 1 unless two open files hold the same bytes up to end of file.
+fn _cm_diff_fds_differ(a, b) {
+    var cap = 65536;
+    var ba = alloc(cap);
+    var bb = alloc(cap);
+    while (1 == 1) {
+        var na = sys_read(a, ba, cap);
+        if (na < 0) { return 1; }
+        var nb = 0;
+        while (nb < na) {
+            var got = sys_read(b, bb + nb, na - nb);
+            if (got <= 0) { return 1; }
+            nb = nb + got;
+        }
+        if (na == 0) {
+            if (sys_read(b, bb, 1) != 0) { return 1; }
+            return 0;
+        }
+        if (memeq(ba, bb, na) == 0) { return 1; }
+    }
+    return 1;
+}
+
+# 1 unless the rootfs copy of `key` holds what the topmost layer that has it holds. O_NOFOLLOW and
+# O_NONBLOCK: a running payload can swap what is at that path. A file that cannot be read reads as
+# changed, which is the answer that sends someone to look.
+fn _cm_diff_bytes_differ(croot, key, layer_dirs) {
+    var i = vec_len(layer_dirs) - 1;
+    var from = 0 - 1;
+    while (i >= 0 && from < 0) {
+        var p = _container_cat2(vec_get(layer_dirs, i), key);
+        from = file_open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
+        i = i - 1;
+    }
+    if (from < 0) { return 1; }
+    var path = _container_cat2(_container_cat2(croot, "/rootfs"), key);
+    var to = file_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
+    if (to < 0) {
+        sys_close(from);
+        return 1;
+    }
+    var rc = _cm_diff_fds_differ(from, to);
+    sys_close(from);
+    sys_close(to);
+    return rc;
 }
 
 # The S_IFMT field of a `_cm_diff_scan` fingerprint ("<type>:<size>:<mode>").
@@ -2230,6 +2496,8 @@ fn _cm_diff_layer_dirs(mm_in, cc_in) {
     return dirs;
 }
 
+# The rootfs path of container `id`: the merged overlay if this process holds one, or the path it
+# would have. Returns 0 for an unknown container.
 fn container_manager_get_rootfs(mgr, id) {
     var mm: ContainerManager = mgr;
     # Resolve id-or-name → the real id (the dir + internals key use the id).
@@ -2300,6 +2568,18 @@ fn container_manager_wait(mgr, id) {
     return cint.exec_result;
 }
 
+# Block until a detached container's process has gone, across processes. `internals` is in-memory
+# only, so a second `stiva` has no child to wait on: this polls the same starttime-checked probe
+# as `_cm_stop_by_pid`, which cannot be fooled by a recycled pid. Returns at once when nothing runs.
+fn container_manager_wait_gone(mgr, id) {
+    var c = container_manager_get(mgr, id);
+    if (c == 0) { return 0; }
+    var cc: Container = c;
+    if (cc.state != CONTAINER_STATE_RUNNING && cc.state != CONTAINER_STATE_PAUSED) { return 0; }
+    while (container_pid_is_ours(cc.pid, cc.start_ticks) == 1) { sleep_ms(100); }
+    return 0;
+}
+
 # Non-blocking exit-code check (rust-old: try_wait, :589). For one-shot
 # containers this reads the persisted exit_status off the record, so it works
 # across processes (what `stiva wait` needs). Returns the exit code, or -1.
@@ -2310,14 +2590,3 @@ fn container_manager_try_wait(mgr, id) {
     var cc: Container = c;
     return cc.exit_status;
 }
-
-# ── DEFERRED to v3.1 (external- or coroutine-blocked) ────────────
-# The remaining ContainerManager surface is gated on landings outside stiva:
-#   start(daemon branch)/wait/try_wait(daemon)  — runtime::spawn_container +
-#       DaemonHandle (kavach sandbox_spawn); the one-shot branches ship in §C.
-#   exec(&self, id, command)                    — runtime::exec_in_container
-#       (kavach sandbox_exec, non-interactive); interactive exec -it needs
-#       cyrius stackless coroutines.
-#   checkpoint/restore/prepare_migration/apply_migration — CRIU
-#       checkpoint_container/restore_container.
-# Tracked in docs/development/roadmap.md (v3.1).

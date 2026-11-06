@@ -97,6 +97,7 @@ struct VolumeMount {
     read_only;
 }
 
+# A parsed volume spec: host source, container target, and whether it is read-only.
 fn volume_mount_new(source, target, read_only) {
     var v = alloc(24);
     var vv: VolumeMount = v;
@@ -145,6 +146,7 @@ struct OverlayPaths {
     container_root;
 }
 
+# The four directories of one container's overlay.
 fn overlay_paths_new(merged, upper, work, container_root) {
     var p = alloc(32);
     var pp: OverlayPaths = p;
@@ -267,8 +269,16 @@ fn _stor_remove_dir_all(path) {
     # stiva itself built. That is a property of the CALLERS, not of this function,
     # and the whiteout code below deletes paths named by an untrusted image — so
     # the guarantee belongs here.
-    var fd = sys_open(path, 196608, 0);
+    #
+    # A directory an image shipped read-only must still go: an owner may always chmod, and
+    # an unlink needs write on the parent, so grant ourselves that before walking it.
+    var fd = sys_open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    if (fd < 0 && _stor_lkind(path) == 16384) {
+        sys_chmod(path, 448);                   # 0700: mode 0 cannot even be opened
+        fd = sys_open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    }
     if (fd >= 0) {
+        sys_fchmod(fd, 448);
         var buf = alloc(4096);
         var rgo = 1;
         while (rgo == 1) {
@@ -351,39 +361,9 @@ fn mount_volumes(volume_specs, merged_rootfs) {
 # here we use the Cyrius stdlib `sankoch` gzip_decompress / zstd_decompress and
 # a hand-rolled USTAR reader.
 
-# Read an entire file into a fresh heap buffer. Returns the buffer pointer;
-# writes its length to the 8-byte cell at `out_len`. Returns 0 on open
-# failure (out_len set to a negative errno). Sizes the buffer via lseek to
-# SEEK_END so the whole blob is captured (file_read_all is maxlen-bounded).
+# Read an entire file into a fresh heap buffer: see _img_read_file.
 #[must_use]
-fn _stor_read_file(path, out_len) {
-    var fd = file_open(path, 0, 0);        # O_RDONLY
-    if (fd < 0) {
-        store64(out_len, fd);
-        return 0;
-    }
-    var size = xlseek(fd, 0, 2);           # SEEK_END → byte length
-    xlseek(fd, 0, 0);                       # SEEK_SET → rewind
-    if (size < 0) {
-        file_close(fd);
-        store64(out_len, 0 - 1);
-        return 0;
-    }
-    var buf = alloc(size + 1);
-    var total = 0;
-    var rgo = 1;
-    while (rgo == 1) {
-        var n = sys_read(fd, buf + total, size - total);
-        if (n <= 0) { rgo = 0; }
-        else {
-            total = total + n;
-            if (total >= size) { rgo = 0; }
-        }
-    }
-    file_close(fd);
-    store64(out_len, total);
-    return buf;
-}
+fn _stor_read_file(path, out_len) { return _img_read_file(path, out_len); }
 
 # Parse a NUL/space-terminated octal field of `len` bytes at `p` into an
 # i64. USTAR numeric fields (size, mode) are ASCII octal, right-space- or
@@ -495,13 +475,175 @@ fn _stor_target_escapes(target) {
     return 0;
 }
 
-# True (1) iff `path` exists and is a symlink (lstat S_IFLNK). Used to avoid
-# writing a file THROUGH an existing symlink during extraction.
+# ── stat fields ──
+# Each reads its field at the per-arch offset. ⛔ Never spell one `load64(sb + 24)`: that is
+# x86_64's st_mode, but aarch64 keeps st_uid there, so a symlink check written that way reads
+# a uid, answers "not a link" for every path, and turns the extraction guards below off.
+#[must_use]
+fn _stor_st_mode(sb) { return load32(sb + STAT_MODE) & 65535; }
+#[must_use]
+fn _stor_st_uid(sb) { return load32(sb + STAT_UID) & 4294967295; }
+#[must_use]
+fn _stor_st_gid(sb) { return load32(sb + STAT_GID) & 4294967295; }
+#[must_use]
+fn _stor_st_size(sb) { return load64(sb + STAT_SIZE); }
+#[must_use]
+fn _stor_st_mtime(sb) { return load64(sb + STAT_MTIME); }
+#[must_use]
+fn _stor_st_mtime_ns(sb) { return load64(sb + STAT_MTIME_NSEC); }
+
+var _stor_sb = 0;       # one lstat buffer: an extraction lstats per entry, and alloc never frees
+
+# The S_IFMT bits of `path` without following a final symlink, or -1 when it is absent.
+#[must_use]
+fn _stor_lkind(path) {
+    if (_stor_sb == 0) { _stor_sb = alloc(STAT_BUFSZ); }
+    if (sys_lstat(path, _stor_sb) != 0) { return 0 - 1; }
+    return _stor_st_mode(_stor_sb) & 61440;
+}
+
+# ── walking a tree that may be hostile ──
+# A container's rootfs is the container's: a path checked by name can be a symlink by the time it
+# is opened, and that symlink resolves on the HOST. So anything that touches one goes down from a
+# directory fd, one component at a time, with O_NOFOLLOW at each step.
+
+# Open directory `name` under `dfd`, refusing a symlink.
+fn _stor_open_dir_at(dfd, name) {
+    return sys_openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0);
+}
+
+# Open regular file `name` under `dfd` for reading, and fill `sb` from the fd, so what is reported
+# is what was opened. Never follows a symlink, and O_NONBLOCK keeps a planted FIFO from hanging
+# the open. Returns the fd, or negative.
+fn _stor_open_reg_at(dfd, name, sb) {
+    var fd = sys_openat(dfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0);
+    if (fd < 0) { return fd; }
+    if (sys_fstat(fd, sb) != 0 || (_stor_st_mode(sb) & 61440) != 32768) {
+        sys_close(fd);
+        return 0 - 1;
+    }
+    return fd;
+}
+
+# The target of symlink `name` under `dfd`, as a fresh cstr, or 0.
+fn _stor_readlink_at(dfd, name) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/proc/self/fd/");
+    str_builder_add_int(sb, dfd);
+    str_builder_add_cstr(sb, "/");
+    str_builder_add_cstr(sb, name);
+    var tgt = alloc(4097);
+    var n = sys_readlink(str_cstr(str_builder_build(sb)), tgt, 4096);
+    if (n < 0) { return 0; }
+    store8(tgt + n, 0);
+    return tgt;
+}
+
+# Up to `size` bytes of open file `fd`, as a fresh buffer, with the count through `out_len`.
+# Returns 0 past ALLOC_MAX or on a read error.
+fn _stor_read_fd(fd, size, out_len) {
+    var buf = alloc(size + 1);
+    if (buf == 0) { return 0; }
+    var total = 0;
+    while (total < size) {
+        var n = sys_read(fd, buf + total, size - total);
+        if (n < 0) { return 0; }
+        if (n == 0) { break; }
+        total = total + n;
+    }
+    store8(buf + total, 0);
+    store64(out_len, total);
+    return buf;
+}
+
+# The names in the open directory `dfd`, as fresh cstrs, without `.` and `..`.
+fn _stor_dir_names(dfd) {
+    var out = vec_new();
+    var buf = alloc(4096);
+    while (1 == 1) {
+        var n = sys_getdents64(dfd, buf, 4096);
+        if (n <= 0) { break; }
+        var pos = 0;
+        while (pos < n) {
+            var name = buf + pos + 19;
+            var dot = load8(name) == 46 && load8(name + 1) == 0;
+            var dotdot = load8(name) == 46 && load8(name + 1) == 46 && load8(name + 2) == 0;
+            if (dot == 0 && dotdot == 0) { vec_push(out, _stor_dup(name)); }
+            pos = pos + load16(buf + pos + 16);
+        }
+    }
+    return out;
+}
+
+# Walk `rel` down from `root` without following a symlink, creating missing directories when
+# `mkdirs` is 1. Returns an fd for the last directory, with the final component through `out_leaf`
+# ("." when `rel` names `root` itself), or -1 for a `..`, a symlink, or a missing component. The
+# caller closes the fd. `root` itself is trusted, so it may be reached through a link.
+fn _stor_walk_to_parent(root, rel, mkdirs, out_leaf) {
+    var dfd = file_open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (dfd < 0) { return 0 - 1; }
+    var n = strlen(rel);
+    var leaf = 0;
+    var i = 0;
+    while (i < n) {
+        while (i < n && load8(rel + i) == 47) { i = i + 1; }
+        var start = i;
+        while (i < n && load8(rel + i) != 47) { i = i + 1; }
+        if (i > start) {
+            var comp = _stor_slice(rel, start, i);
+            if (streq(comp, "..") == 1) {
+                sys_close(dfd);
+                return 0 - 1;
+            }
+            if (streq(comp, ".") == 0) {
+                if (leaf != 0) {
+                    var next = _stor_open_dir_at(dfd, leaf);
+                    if (next < 0 && mkdirs == 1) {
+                        sys_mkdirat(dfd, leaf, 493);
+                        next = _stor_open_dir_at(dfd, leaf);
+                    }
+                    sys_close(dfd);
+                    if (next < 0) { return 0 - 1; }
+                    dfd = next;
+                }
+                leaf = comp;
+            }
+        }
+    }
+    if (leaf == 0) { leaf = "."; }
+    store64(out_leaf, leaf);
+    return dfd;
+}
+
+# Mark every open fd above stderr close-on-exec. Called before anything execs a container, because
+# a descriptor stiva holds or inherited is a way out: a directory fd defeats a chroot through
+# fchdir. kavach's spawn closes only up to 1024, so it must be done here, for its forks as well as
+# ours. This walks what is open, not a range, since the limit can be far above that.
+fn _stor_cloexec_fds() {
+    var dfd = file_open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (dfd < 0) {
+        var fd = 3;
+        while (fd < 1024) {
+            sys_fcntl(fd, 2, 1);                # F_SETFD, FD_CLOEXEC
+            fd = fd + 1;
+        }
+        return 0;
+    }
+    var names = _stor_dir_names(dfd);
+    var i = 0;
+    while (i < vec_len(names)) {
+        var f = atoi(vec_get(names, i));
+        if (f >= 3 && f != dfd) { sys_fcntl(f, 2, 1); }
+        i = i + 1;
+    }
+    sys_close(dfd);
+    return 0;
+}
+
+# True (1) iff `path` exists and is a symlink (lstat S_IFLNK).
 #[must_use]
 fn _stor_is_symlink(path) {
-    var sb = alloc(144);
-    if (sys_lstat(path, sb) != 0) { return 0; }
-    if ((load64(sb + 24) & 61440) == 40960) { return 1; }   # S_IFMT == S_IFLNK
+    if (_stor_lkind(path) == 40960) { return 1; }
     return 0;
 }
 
@@ -513,7 +655,6 @@ fn _stor_is_symlink(path) {
 # crate gives, without an openat wrapper).
 #[must_use]
 fn _stor_has_symlink_ancestor(dest, name) {
-    var sb = alloc(144);
     # Build "dest/name" ONCE (mutable), then lstat each ancestor by temporarily
     # NUL-terminating at its trailing '/' and restoring it — O(len) total rather
     # than the O(len^2) of rebuilding the prefix per component.
@@ -523,137 +664,305 @@ fn _stor_has_symlink_ancestor(dest, name) {
     while (i < flen) {
         if (load8(full + i) == 47) {             # ancestor boundary
             store8(full + i, 0);                 # terminate the prefix at the '/'
-            var is_link = 0;
-            if (sys_lstat(full, sb) == 0) {
-                if ((load64(sb + 24) & 61440) == 40960) { is_link = 1; }   # S_IFLNK
-            }
+            var kind = _stor_lkind(full);
             store8(full + i, 47);                # restore
-            if (is_link == 1) { return 1; }
+            if (kind == 40960) { return 1; }
         }
         i = i + 1;
     }
     return 0;
 }
 
-# Extract a decompressed USTAR archive `tar` of `tar_len` bytes into `dest`.
-# Minimal reader: 512-byte headers — name@0 (100b), mode@100, uid@108, gid@116,
-# size@124 (12b octal), typeflag@156 ('0'/'\0' = file, '5' = dir, '2' = symlink),
-# linkname@157. File data follows in ceil(size/512) 512-byte blocks. Two all-zero
-# blocks (or running out of bytes) ends the archive.
-#
-# Perms: chown is applied BEFORE chmod (chown clears setuid/setgid), best-effort
-# (needs root). Path-traversal names (absolute / "..") and ".."-escaping symlink
-# targets are rejected — an untrusted archive must not escape `dest`.
-# Returns 0 on success, -1 on a malformed header (short/torn block).
-fn _stor_extract_tar(tar, tar_len, dest) {
+# `name` without its trailing slashes, as a fresh cstr. lstat follows a final symlink when
+# the path ends in '/', so a directory entry named `x/` must be looked at as `x`.
+#[must_use]
+fn _stor_strip_slashes(name) {
+    var n = strlen(name);
+    while (n > 1 && load8(name + n - 1) == 47) { n = n - 1; }
+    return _stor_slice(name, 0, n);
+}
+
+# True (1) iff `name` is only `.` components and slashes: the extraction root itself. Its
+# entry is skipped, because its mode must not reach `dest`: an archive's `./` at 0555 would
+# otherwise make the caller's own directory unwritable, and its cleanup fail.
+#[must_use]
+fn _stor_name_is_root(name) {
+    var i = 0;
+    var len = strlen(name);
+    while (i < len) {
+        var c = load8(name + i);
+        if (c == 46) {
+            if (i + 1 < len && load8(name + i + 1) != 47) { return 0; }
+        } elif (c != 47) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# True (1) iff the 8-byte checksum at @148 matches the header. A bad one means the stream is
+# not a tar at this offset, and its size and mode fields mean nothing. Both the unsigned sum
+# and the signed sum of historic writers are accepted, as GNU tar does.
+#[must_use]
+fn _stor_hdr_checksum_ok(hdr) {
+    var stored = _stor_parse_octal(hdr + 148, 8);
+    var usum = 0;
+    var ssum = 0;
+    var i = 0;
+    while (i < 512) {
+        var c = load8(hdr + i) & 255;
+        if (i >= 148 && i < 156) { c = 32; }
+        usum = usum + c;
+        if (c >= 128) { ssum = ssum + c - 256; } else { ssum = ssum + c; }
+        i = i + 1;
+    }
+    if (stored == usum || stored == ssum) { return 1; }
+    return 0;
+}
+
+# The last value of `key` in the `size` bytes of a PAX extended header, as a cstr, or 0.
+# A record is "<len> <key>=<value>\n", and <len> counts the whole record. Go's archive/tar,
+# so Docker and BuildKit, writes a path over 100 bytes this way and leaves a TRUNCATED name in
+# the ustar header that follows, so a reader that skips this record puts the file elsewhere.
+#[must_use]
+fn _stor_pax_value(data, size, key) {
+    var klen = strlen(key);
+    var found = 0;
     var pos = 0;
-    var pending_name = 0;    # GNU 'L' long-name for the next real entry (0 = none)
-    var pending_link = 0;    # GNU 'K' long-link target for the next symlink entry
-    var rgo = 1;
-    while (rgo == 1) {
-        # Need a full 512-byte header block.
-        if (pos + 512 > tar_len) { rgo = 0; }
-        else {
-            var hdr = tar + pos;
-            # All-zero name byte @0 marks the end-of-archive block(s).
-            if (load8(hdr) == 0) {
-                rgo = 0;
-            } else {
-                # USTAR name field is exactly 100 bytes and is NOT NUL-terminated
-                # when the name fills all 100 — bound the copy to avoid over-read.
-                var nlen = 0;
-                while (nlen < 100 && load8(hdr + nlen) != 0) { nlen = nlen + 1; }
-                var name = _stor_slice(hdr, 0, nlen);
-                # USTAR prefix@345(155): if present, full name = prefix + '/' + name.
-                if (load8(hdr + 345) != 0) {
-                    var plen = 0;
-                    while (plen < 155 && load8(hdr + 345 + plen) != 0) { plen = plen + 1; }
-                    name = _stor_cat2(_stor_cat2(_stor_slice(hdr, 345, 345 + plen), "/"), name);
-                }
-                var mode = _stor_parse_octal(hdr + 100, 8);   # perm bits @100
-                var uid = _stor_parse_octal(hdr + 108, 8);    # uid @108
-                var gid = _stor_parse_octal(hdr + 116, 8);    # gid @116
-                var size = _stor_parse_octal(hdr + 124, 12);
-                var typeflag = load8(hdr + 156);
-                pos = pos + 512;                        # advance past header
-
-                # Validate the size against the remaining bytes BEFORE any use — a
-                # negative (crafted base-256 / >2^63 octal) or oversized value would
-                # otherwise slip past the signed torn-region check into a huge
-                # `sys_write` (heap over-read) and drive `pos` backward (OOB header
-                # reads). `pos <= tar_len` holds here (header block was in-range).
-                if (size < 0 || size > tar_len - pos) {
-                    return 0 - 1;
-                }
-                # Bound GNU long-name / long-link length: a crafted multi-MB name
-                # (gzip-amplified) would otherwise drive the per-component ancestor
-                # scan + lstat into a CPU DoS. Real paths are < PATH_MAX (4096);
-                # 8 KiB is a generous ceiling.
-                if (typeflag == 76 || typeflag == 75) {
-                    if (size > 8192) { return 0 - 1; }
-                }
-
-                if (typeflag == 76) {                   # 'L' GNU long name
-                    # The data (name + NUL, size bytes) is the name of the NEXT entry.
-                    var lnn = size;
-                    if (lnn > 0) { lnn = lnn - 1; }     # drop the trailing NUL
-                    pending_name = _stor_slice(tar + pos, 0, lnn);
-                } else {
-                    if (typeflag == 75) {               # 'K' GNU long link target
-                        var lkn = size;
-                        if (lkn > 0) { lkn = lkn - 1; }
-                        pending_link = _stor_slice(tar + pos, 0, lkn);
-                    } else {
-                        # Real entry — a pending 'L'/'K' overrides the header fields.
-                        # Reject path-traversal names / a symlinked ancestor (either
-                        # would escape `dest`); skipped entries still step over data.
-                        var ename = name;
-                        if (pending_name != 0) { ename = pending_name; }
-                        if (_stor_name_is_safe(ename) == 1 && _stor_has_symlink_ancestor(dest, ename) == 0) {
-                            var full = _stor_join(dest, ename);
-                            if (typeflag == 53) {                   # '5' → directory
-                                _stor_mkdir_p(full);
-                                _stor_lchown(full, uid, gid);       # chown BEFORE chmod:
-                                if (mode != 0) { sys_chmod(full, mode); }   # chown clears setuid/setgid
-                            } else {
-                                if (typeflag == 50) {               # '2' → symlink
-                                    var target = pending_link;
-                                    if (target == 0) {
-                                        var lnlen = 0;
-                                        while (lnlen < 100 && load8(hdr + 157 + lnlen) != 0) { lnlen = lnlen + 1; }
-                                        target = _stor_slice(hdr + 157, 0, lnlen);
-                                    }
-                                    if (_stor_target_escapes(target) == 0) {
-                                        _stor_mkdir_parents(full);
-                                        if (_stor_is_symlink(full) == 1) { sys_unlink(full); }
-                                        sys_symlink(target, full);
-                                        _stor_lchown(full, uid, gid);   # perms follow target → no chmod
-                                    }
-                                } else {
-                                    if (typeflag == 48 || typeflag == 0) {   # '0' or '\0' → file
-                                        _stor_mkdir_parents(full);
-                                        # Never write THROUGH an existing symlink at the target.
-                                        if (_stor_is_symlink(full) == 1) { sys_unlink(full); }
-                                        file_write_all(full, tar + pos, size);
-                                        _stor_lchown(full, uid, gid);   # chown BEFORE chmod
-                                        if (mode != 0) { sys_chmod(full, mode); }
-                                    }
-                                    # else: char/block/fifo/hardlink — skipped.
-                                }
-                            }
-                        }
-                        pending_name = 0;
-                        pending_link = 0;
-                    }
-                }
-
-                # Step over the file data: ceil(size/512) blocks.
-                var blocks = (size + 511) / 512;
-                pos = pos + (blocks * 512);
+    while (pos < size) {
+        var i = pos;
+        var rlen = 0;
+        while (i < size && i - pos < 10) {
+            var c = load8(data + i) & 255;
+            if (c < 48 || c > 57) { break; }
+            rlen = rlen * 10 + (c - 48);
+            i = i + 1;
+        }
+        if (i >= size || rlen <= 0 || pos + rlen > size) { return found; }
+        if (load8(data + i) != 32) { return found; }
+        i = i + 1;
+        var end = pos + rlen - 1;               # the record's closing newline
+        if (i + klen < end) {
+            if (memeq(data + i, key, klen) == 1 && load8(data + i + klen) == 61) {
+                found = _stor_slice(data, i + klen + 1, end);
             }
         }
+        pos = pos + rlen;
+    }
+    return found;
+}
+
+# Remove the non-directory at `full`, if any. Returns 0 when nothing is left there, or -1
+# when a directory is in the way or the unlink failed. ⛔ The result must be checked: an
+# ignored failure leaves a symlink for the next write to follow, which is how a read-only
+# parent directory once let an archive overwrite a host file.
+fn _stor_clear_leaf(full) {
+    var kind = _stor_lkind(full);
+    if (kind < 0) { return 0; }
+    if (kind == 16384) { return 0 - 1; }
+    if (sys_unlink(full) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# Extract a regular file. The name is free (`_stor_clear_leaf`) and O_EXCL|O_NOFOLLOW make
+# that certain, so this cannot write through anything. Mode and owner go on the fd, not the
+# path. Chown comes first, because chown clears setuid and setgid. Returns 0, or -1.
+fn _stor_extract_file(full, data, size, uid, gid, mode) {
+    if (_stor_clear_leaf(full) != 0) { return 0 - 1; }
+    var fd = file_open(full, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+    if (fd < 0) { return 0 - 1; }
+    var done = 0;
+    while (done < size) {
+        var n = sys_write(fd, data + done, size - done);
+        if (n <= 0) {
+            file_close(fd);
+            return 0 - 1;
+        }
+        done = done + n;
+    }
+    sys_fchown(fd, uid, gid);                   # best-effort: needs root
+    if (mode != 0) { sys_fchmod(fd, mode & 4095); }
+    file_close(fd);
+    return 0;
+}
+
+# Extract a directory, replacing any non-directory at its name. Its mode is deferred (see
+# `_stor_apply_dir_modes`) and recorded in `modes` as alternating path, mode. Returns 0, or -1.
+fn _stor_extract_dir(full, uid, gid, mode, modes) {
+    if (_stor_lkind(full) != 16384) {
+        if (_stor_clear_leaf(full) != 0) { return 0 - 1; }
+        _stor_mkdir_p(full);
+        if (_stor_lkind(full) != 16384) { return 0 - 1; }
+    }
+    _stor_lchown(full, uid, gid);               # best-effort: needs root
+    if (mode != 0) {
+        vec_push(modes, full);
+        vec_push(modes, mode & 4095);
     }
     return 0;
+}
+
+# Extract a hard link to `target`, an earlier entry of the same archive. Its name is checked
+# as an entry name, and it must be a regular file: linking a symlink or a directory could only
+# be a way to reach outside `dest`. A missing target is skipped, not fatal. Returns 0, or -1.
+fn _stor_extract_hardlink(dest, full, target) {
+    if (_stor_name_is_safe(target) == 0) { return 0; }
+    if (_stor_has_symlink_ancestor(dest, target) == 1) { return 0; }
+    var tfull = _stor_join(dest, target);
+    if (_stor_lkind(tfull) != 32768) { return 0; }
+    if (streq(tfull, full) == 1) { return 0; }
+    if (_stor_clear_leaf(full) != 0) { return 0 - 1; }
+    if (sys_linkat(AT_FDCWD, tfull, AT_FDCWD, full, 0) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# Extract one entry whose name `ename` already passed the path checks. Types stiva does not
+# materialise (device, FIFO) are skipped. `no_links` skips symlinks and hard links as well:
+# an image layout never needs one, and a member that is a link is how an archive's
+# manifest.json reaches a host file. Returns 0, or -1 when the entry cannot be honoured.
+fn _stor_extract_entry(dest, ename, typeflag, data, size, link, uid, gid, mode, modes, no_links) {
+    var full = _stor_join(dest, ename);
+    if (typeflag == 53) {                       # '5' directory
+        return _stor_extract_dir(full, uid, gid, mode, modes);
+    }
+    if (typeflag == 48 || typeflag == 0 || typeflag == 55) {    # '0', NUL, '7' regular
+        _stor_mkdir_parents(full);
+        return _stor_extract_file(full, data, size, uid, gid, mode);
+    }
+    if (no_links == 1) { return 0; }
+    if (typeflag == 50) {                       # '2' symlink
+        if (_stor_target_escapes(link) == 1) { return 0; }
+        _stor_mkdir_parents(full);
+        if (_stor_clear_leaf(full) != 0) { return 0 - 1; }
+        if (sys_symlink(link, full) != 0) { return 0 - 1; }
+        _stor_lchown(full, uid, gid);           # perms follow the target, so no chmod
+        return 0;
+    }
+    if (typeflag == 49) {                       # '1' hard link
+        _stor_mkdir_parents(full);
+        return _stor_extract_hardlink(dest, full, link);
+    }
+    return 0;
+}
+
+# Apply the modes `_stor_extract_dir` deferred, children first, and only a directory's last
+# entry where an archive names it twice. Deferring is what `tar -x` does, for two reasons. A
+# directory that is read-only in the image still has to take the entries that follow it. And it
+# leaves no moment when an archive can make a parent read-only so that an unlink fails.
+# O_NOFOLLOW keeps a chmod from reaching through a symlink.
+fn _stor_apply_dir_modes(modes) {
+    var done = map_new();
+    var i = vec_len(modes) - 2;
+    while (i >= 0) {
+        var path = vec_get(modes, i);
+        if (map_has(done, path) == 0) {
+            map_set(done, path, 1);
+            var fd = file_open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+            if (fd >= 0) {
+                sys_fchmod(fd, vec_get(modes, i + 1));
+                file_close(fd);
+            }
+        }
+        i = i - 2;
+    }
+    return 0;
+}
+
+# Extract a decompressed tar archive `tar` of `tar_len` bytes into `dest`, which the caller
+# owns and which must be empty. Reads ustar headers: name@0 (100b), mode@100, uid@108, gid@116,
+# size@124 (12b octal), checksum@148, typeflag@156, linkname@157, prefix@345 (155b), plus GNU
+# 'L' / 'K' long names and PAX 'x' path / linkpath records. File data follows in ceil(size/512)
+# 512-byte blocks. An all-zero block, or running out of bytes, ends the archive.
+#
+# An entry that would escape `dest` is skipped: an absolute or ".." name, a symlinked ancestor,
+# a ".."-escaping symlink target. One that cannot be honoured fails the whole extraction, since
+# a layer with a file silently missing is a corrupt rootfs.
+#
+# `no_links` = 1 for an archive whose members stiva reads back itself (see _stor_extract_entry).
+# Returns 0 on success, -1 on a malformed header or a refused entry.
+fn _stor_extract_tar_x(tar, tar_len, dest, no_links) {
+    var modes = vec_new();
+    var pos = 0;
+    var pending_name = 0;    # a GNU 'L' or PAX path for the next real entry (0 = none)
+    var pending_link = 0;    # a GNU 'K' or PAX linkpath for the next real entry
+    while (pos + 512 <= tar_len) {
+        var hdr = tar + pos;
+        if (load8(hdr) == 0) { break; }         # an empty name: the end-of-archive blocks
+        if (_stor_hdr_checksum_ok(hdr) == 0) { return 0 - 1; }
+
+        # The name field is exactly 100 bytes and is NOT NUL-terminated when the name fills
+        # it, so bound the copy to avoid an over-read.
+        var nlen = 0;
+        while (nlen < 100 && load8(hdr + nlen) != 0) { nlen = nlen + 1; }
+        var name = _stor_slice(hdr, 0, nlen);
+        if (load8(hdr + 345) != 0) {            # ustar prefix: prefix + '/' + name
+            var plen = 0;
+            while (plen < 155 && load8(hdr + 345 + plen) != 0) { plen = plen + 1; }
+            name = _stor_cat2(_stor_cat2(_stor_slice(hdr, 345, 345 + plen), "/"), name);
+        }
+        var mode = _stor_parse_octal(hdr + 100, 8);
+        var uid = _stor_parse_octal(hdr + 108, 8);
+        var gid = _stor_parse_octal(hdr + 116, 8);
+        var size = _stor_parse_octal(hdr + 124, 12);
+        var typeflag = load8(hdr + 156);
+        pos = pos + 512;
+
+        # Validate the size against the remaining bytes BEFORE any use: a negative (crafted
+        # base-256 or >2^63 octal) or oversized value would otherwise slip past into a huge
+        # write (a heap over-read) and drive `pos` backward (out-of-bounds header reads).
+        if (size < 0 || size > tar_len - pos) { return 0 - 1; }
+
+        if (typeflag == 76 || typeflag == 75) { # GNU 'L' name / 'K' link: data is NUL-ended
+            # Bounded: a crafted multi-MB name (gzip-amplified) would drive the per-component
+            # ancestor scan into a CPU DoS. Real paths are under PATH_MAX; 8 KiB is generous.
+            if (size > 8192) { return 0 - 1; }
+            var lnn = size;
+            if (lnn > 0) { lnn = lnn - 1; }
+            if (typeflag == 76) { pending_name = _stor_slice(tar + pos, 0, lnn); }
+            else { pending_link = _stor_slice(tar + pos, 0, lnn); }
+        } elif (typeflag == 120) {              # PAX 'x': records for the next real entry
+            if (size <= 1048576) {
+                var ppath = _stor_pax_value(tar + pos, size, "path");
+                var plink = _stor_pax_value(tar + pos, size, "linkpath");
+                if (ppath != 0) {
+                    if (strlen(ppath) > 8192) { return 0 - 1; }
+                    pending_name = ppath;
+                }
+                if (plink != 0) {
+                    if (strlen(plink) > 8192) { return 0 - 1; }
+                    pending_link = plink;
+                }
+            }
+        } elif (typeflag != 103) {              # 'g' global PAX records name no entry
+            var ename = name;
+            if (pending_name != 0) { ename = pending_name; }
+            var link = pending_link;
+            if (link == 0) {
+                var lnlen = 0;
+                while (lnlen < 100 && load8(hdr + 157 + lnlen) != 0) { lnlen = lnlen + 1; }
+                link = _stor_slice(hdr + 157, 0, lnlen);
+            }
+            ename = _stor_strip_slashes(ename);
+            if (_stor_name_is_safe(ename) == 1 && _stor_name_is_root(ename) == 0) {
+                if (_stor_has_symlink_ancestor(dest, ename) == 0) {
+                    var rc = _stor_extract_entry(dest, ename, typeflag, tar + pos, size, link,
+                      uid, gid, mode, modes, no_links);
+                    if (rc != 0) { return 0 - 1; }
+                }
+            }
+            pending_name = 0;
+            pending_link = 0;
+        }
+
+        pos = pos + ((size + 511) / 512) * 512;
+    }
+    return _stor_apply_dir_modes(modes);
+}
+
+# Extract a layer: symlinks and hard links are part of an image's rootfs.
+fn _stor_extract_tar(tar, tar_len, dest) {
+    return _stor_extract_tar_x(tar, tar_len, dest, 0);
 }
 
 # ── gzip compression (streaming — the batch encoder is unusable) ──────────
@@ -761,7 +1070,23 @@ fn _stor_decomp_limit(blob_len) {
     var lim = blob_len * _STOR_MAX_RATIO;
     if (lim < _STOR_MIN_OUT) { lim = _STOR_MIN_OUT; }
     if (lim > _STOR_MAX_OUT) { lim = _STOR_MAX_OUT; }
-    return lim;}
+    if (lim > ALLOC_MAX) { lim = ALLOC_MAX; }   # alloc answers 0 past this
+    return lim;
+}
+
+# gzip_decompress into `out`, up to `cap` bytes. ⛔ Not the one-shot `gzip_decompress`: that keeps
+# sankoch's 16 MiB DECOMPRESS_MAX_OUTPUT whatever buffer it is given, so every gzip layer over
+# 16 MiB failed to unpack. Only a private setter lifts it for gzip (zlib has a public form).
+# Returns the decoded length, or a negative sankoch ERR_*.
+fn _stor_gunzip(blob, blob_len, out, cap) {
+    var ctx = gzip_dec_init(out, cap);
+    if (ctx == 0) { return 0 - 2; }
+    _deflate_dec_set_out_max(load64(ctx), cap);
+    var wrote = gzip_dec_write(ctx, blob, blob_len);
+    var n = gzip_dec_finish(ctx);
+    if (wrote < 0) { return wrote; }
+    return n;
+}
 
 # Decompress a gzip'd tar `file` and extract it into `dest` (rust-old:
 # unpack_tar_gz — flate2 GzDecoder + tar::Archive). `blob` is the raw
@@ -785,7 +1110,8 @@ fn _stor_unpack_gz_bytes(blob, blob_len, dest) {
     var rgo = 1;
     while (rgo == 1) {
         out = alloc(cap);
-        dlen = gzip_decompress(blob, blob_len, out, cap);
+        if (out == 0) { return 0 - 2; }     # past ALLOC_MAX: the ceiling can exceed it
+        dlen = _stor_gunzip(blob, blob_len, out, cap);
         if (dlen == (0 - 2)) {              # ERR_BUFFER_TOO_SMALL → grow + retry
             if (cap >= limit) { return 0 - 2; }     # ceiling → decompression bomb
             cap = cap * 2;
@@ -818,6 +1144,7 @@ fn _stor_unpack_zstd_bytes(blob, blob_len, dest) {
     if (cap > 0) {
         if (cap > limit) { return 0 - 1; }      # declared size over the ceiling
         var out1 = alloc(cap);
+        if (out1 == 0) { return 0 - 1; }        # past ALLOC_MAX
         var dlen1 = zstd_decompress(blob, blob_len, out1, cap);
         if (dlen1 < 0) { return dlen1; }
         return _stor_extract_tar(out1, dlen1, dest);
@@ -830,6 +1157,7 @@ fn _stor_unpack_zstd_bytes(blob, blob_len, dest) {
     var tries = 0;
     while (tries < 12) {
         var out = alloc(gcap);
+        if (out == 0) { return 0 - 1; }         # past ALLOC_MAX
         var dlen = zstd_decompress(blob, blob_len, out, gcap);
         if (dlen >= 0) { return _stor_extract_tar(out, dlen, dest); }
         if (gcap >= limit) { return 0 - 1; }    # ceiling → bomb (or a corrupt frame)
@@ -899,7 +1227,10 @@ fn prepare_layers(store, layers) {
         var digest = load64(layer);
         var hex = digest_hex(digest);              # strip "sha256:" prefix
         var layer_dir = _stor_join(layers_base, hex);
-        var marker = _stor_join(layer_dir, ".unpacked");
+        # The marker sits BESIDE the layer, never in it. A layer's tree is the image's, so a
+        # marker inside could be a planted symlink (the write below would follow it) or a
+        # planted file that certifies a half-finished unpack.
+        var marker = _stor_cat2(layer_dir, ".unpacked");
 
         # Dedup: already-unpacked layers are skipped.
         if (file_exists(layer_dir) == 1) {
@@ -911,6 +1242,8 @@ fn prepare_layers(store, layers) {
             }
         }
 
+        # No marker: a partial unpack, or a layer from before the marker moved. Start clean.
+        _stor_remove_dir_all(layer_dir);
         _stor_mkdir_p(layer_dir);
 
         # Blob must exist at blobs/sha256/<hex>.
@@ -974,7 +1307,7 @@ fn _stor_copy_file_streamed(src, dst, buf, buflen) {
     # belt-and-braces half of the symlink fix: even if a stale link somehow
     # survives _stor_replace_existing, the write fails with ELOOP instead of
     # landing on the link's target somewhere outside the rootfs.
-    var wfd = file_open(dst, 131649, 384);
+    var wfd = file_open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 384);
     if (wfd < 0) {
         file_close(rfd);
         return 0 - 1;
@@ -1021,7 +1354,7 @@ fn _stor_copy_file_streamed(src, dst, buf, buflen) {
 # (that is the merge), anything else must be removed and verified gone.
 fn _stor_replace_existing_dirsafe(path, sb) {
     if (sys_lstat(path, sb) != 0) { return 0; }             # nothing there
-    if ((load64(sb + 24) & 61440) == 16384) { return 0; }   # already a dir — merge
+    if ((_stor_st_mode(sb) & 61440) == 16384) { return 0; }   # already a dir — merge
     sys_unlink(path);
     if (sys_lstat(path, sb) == 0) { return 0 - 1; }         # still there — refuse
     return 0;
@@ -1029,7 +1362,7 @@ fn _stor_replace_existing_dirsafe(path, sb) {
 
 fn _stor_replace_existing(path, sb) {
     if (sys_lstat(path, sb) != 0) { return 0; }             # nothing there
-    if ((load64(sb + 24) & 61440) == 16384) {               # S_IFDIR
+    if ((_stor_st_mode(sb) & 61440) == 16384) {               # S_IFDIR
         _stor_remove_dir_all(path);
     } else {
         sys_unlink(path);
@@ -1093,7 +1426,7 @@ fn _stor_is_opaque(name) {
 
 # Delete every entry in `dir` (used for an opaque directory). Returns 0.
 fn _stor_clear_dir(dir, sb) {
-    var fd = sys_open(dir, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    var fd = sys_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
     if (fd < 0) { return 0; }
     var names = vec_new();
     var buf = alloc(4096);
@@ -1131,7 +1464,7 @@ fn _stor_clear_dir(dir, sb) {
 # Returns 0 always — a marker naming something that is not there is normal (the
 # lower layers simply never created it).
 fn _stor_apply_whiteouts(src, dst, sb) {
-    var fd = sys_open(src, 196608, 0);          # O_DIRECTORY|O_NOFOLLOW
+    var fd = sys_open(src, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
     if (fd < 0) { return 0; }
     var targets = vec_new();
     var opaque = 0;
@@ -1191,7 +1524,7 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
     # This layer's deletions take effect before any of its content lands.
     var wsb = alloc(144);
     _stor_apply_whiteouts(src, dst, wsb);
-    var fd = sys_open(src, 65536, 0);      # O_DIRECTORY (dir-only open)
+    var fd = sys_open(src, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) { return 0 - 1; }
     var buf = alloc(4096);
     var sb = alloc(144);                    # struct stat
@@ -1213,9 +1546,6 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                 if (skip == 0) {
                     # Copy the name out of the dirent buffer before recursing.
                     var named = _stor_dup(nm);
-                    # `.unpacked` is prepare_layers' own bookkeeping marker, not
-                    # image content — it must not land in the container rootfs.
-                    if (streq(named, ".unpacked") == 1) { skip = 1; }
                     # Whiteout markers are this layer's DELETION instructions,
                     # already applied by _stor_apply_whiteouts above. They are
                     # metadata, never content: copying them through is what put
@@ -1226,10 +1556,10 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                         var s_child = _stor_join(src, named);
                         var d_child = _stor_join(dst, named);
                         if (sys_lstat(s_child, sb) == 0) {
-                            var st = load64(sb + 24);
+                            var st = _stor_st_mode(sb) | (_stor_st_uid(sb) << 32);
                             var perms = st & 4095;                        # & 0o7777
                             var uid = (st >> 32) & 4294967295;            # st_uid
-                            var gid = load64(sb + 32) & 4294967295;       # st_gid
+                            var gid = _stor_st_gid(sb);       # st_gid
                             var typ = st & 61440;                         # S_IFMT
                             if (typ == 16384) {                           # S_IFDIR
                                 # Merge into an existing dir; displace anything
@@ -1246,7 +1576,7 @@ fn _stor_flatten_tree(src, dst, cpbuf, cplen) {
                                     # the recursion below write through it, out
                                     # of the rootfs and onto the host.
                                     if (sys_lstat(d_child, sb) != 0) { rc = 0 - 1; skip = 1; }
-                                    elif ((load64(sb + 24) & 61440) != 16384) { rc = 0 - 1; skip = 1; }
+                                    elif ((_stor_st_mode(sb) & 61440) != 16384) { rc = 0 - 1; skip = 1; }
                                 }
                                 if (skip == 0) {
                                     _stor_lchown(d_child, uid, gid);
@@ -1555,74 +1885,70 @@ fn _tar_entry_new(relpath, typeflag, mode, uid, gid, size, payload) {
     return e;
 }
 
-# Recursively collect tar entries under `abs_dir`, naming each from `rel_prefix`
-# ("" at the root). Uses a raw getdents64 walk + lstat so real mode/uid/gid,
-# directory entries, and symlinks (stored as links, NOT dereferenced) are all
-# captured. Linux struct stat: st_mode@24(u32) st_uid@28 st_gid@32 st_size@48;
-# Linux dirent64: d_reclen@16 d_name@19. Returns 0 (a subtree that fails to open
-# is skipped — best-effort, matching the reader).
-fn _stor_tar_collect(abs_dir, rel_prefix, out) {
-    var fd = sys_open(abs_dir, 65536, 0);   # O_DIRECTORY
-    if (fd < 0) { return 0; }
-    var buf = alloc(4096);
-    var sb = alloc(144);                     # struct stat
-    var rgo = 1;
-    while (rgo == 1) {
-        var n = sys_getdents64(fd, buf, 4096);
-        if (n <= 0) { rgo = 0; }
-        else {
-            var pos = 0;
-            while (pos < n) {
-                var reclen = load16(buf + pos + 16);
-                var name = buf + pos + 19;
-                var skip = 0;
-                if (load8(name) == 46) {
-                    if (load8(name + 1) == 0) { skip = 1; }
-                    if (load8(name + 1) == 46) { if (load8(name + 2) == 0) { skip = 1; } }
-                }
-                if (skip == 0) {
-                    var named = _stor_dup(name);
-                    var abs_child = _stor_join(abs_dir, named);
-                    var rel_child = named;
-                    if (strlen(rel_prefix) > 0) {
-                        rel_child = _stor_cat2(_stor_cat2(rel_prefix, "/"), named);
-                    }
-                    if (sys_lstat(abs_child, sb) == 0) {
-                        var mode = load64(sb + 24) & 65535;               # st_mode (16-bit)
-                        var perms = mode & 4095;                          # & 0o7777
-                        var uid = (load64(sb + 24) >> 32) & 4294967295;   # st_uid
-                        var gid = load64(sb + 32) & 4294967295;           # st_gid
-                        var typ = mode & 61440;                           # S_IFMT
-                        if (typ == 16384) {                               # S_IFDIR
-                            vec_push(out, _tar_entry_new(_stor_cat2(rel_child, "/"), 53, perms, uid, gid, 0, 0));
-                            _stor_tar_collect(abs_child, rel_child, out);
-                        } else {
-                            if (typ == 40960) {                           # S_IFLNK
-                                var tgt = alloc(1024);
-                                var tn = sys_readlink(abs_child, tgt, 1023);
-                                if (tn < 0) { tn = 0; }
-                                store8(tgt + tn, 0);
-                                vec_push(out, _tar_entry_new(rel_child, 50, perms, uid, gid, 0, tgt));
-                            } else {
-                                if (typ == 32768) {                       # S_IFREG
-                                    var len_cell = alloc(8);
-                                    var data = _stor_read_file(abs_child, len_cell);
-                                    if (data != 0) {
-                                        var fsz = load64(len_cell);
-                                        vec_push(out, _tar_entry_new(rel_child, 48, perms, uid, gid, fsz, data));
-                                    }
-                                }
-                                # else: fifo/socket/device — skipped (as the reader does).
-                            }
-                        }
-                    }
-                }
-                pos = pos + reclen;
-            }
-        }
+# Add the tar entry for `name`, a child of the open directory `dfd`, then its subtree. The stat
+# is by name, but every read is through an fd opened from `dfd` with O_NOFOLLOW, so a tree that is
+# changing underneath us (a running container's rootfs, a build context) cannot substitute a
+# symlink between the look and the read. Returns 0, or -1 for a file that cannot be read: an
+# archive silently missing a file is worse than no archive.
+fn _stor_tar_collect_at(dfd, name, rel_child, out) {
+    var sb = alloc(STAT_BUFSZ);
+    if (sys_fstatat(dfd, name, sb, AT_SYMLINK_NOFOLLOW) != 0) { return 0; }  # gone since listed
+    var mode = _stor_st_mode(sb);
+    var perms = mode & 4095;
+    var uid = _stor_st_uid(sb);
+    var gid = _stor_st_gid(sb);
+    var typ = mode & 61440;
+    if (typ == 16384) {                         # S_IFDIR
+        vec_push(out, _tar_entry_new(_stor_cat2(rel_child, "/"), 53, perms, uid, gid, 0, 0));
+        var dir = _stor_open_dir_at(dfd, name);
+        if (dir < 0) { return 0 - 1; }
+        var rc = _stor_tar_collect_fd(dir, rel_child, out);
+        sys_close(dir);
+        return rc;
     }
-    sys_close(fd);
+    if (typ == 40960) {                         # S_IFLNK
+        var tgt = _stor_readlink_at(dfd, name);
+        if (tgt == 0) { return 0 - 1; }
+        vec_push(out, _tar_entry_new(rel_child, 50, perms, uid, gid, 0, tgt));
+        return 0;
+    }
+    if (typ == 32768) {                         # S_IFREG
+        var fd = _stor_open_reg_at(dfd, name, sb);
+        if (fd < 0) { return 0 - 1; }
+        var cell = alloc(8);
+        var data = _stor_read_fd(fd, _stor_st_size(sb), cell);
+        sys_close(fd);
+        if (data == 0) { return 0 - 1; }
+        vec_push(out, _tar_entry_new(rel_child, 48, perms, uid, gid, load64(cell), data));
+    }
+    return 0;                                   # FIFO, socket, device: skipped, as the reader does
+}
+
+# Collect tar entries for everything in the open directory `dfd`, named from `rel_prefix` ("" at
+# the root). Directory entries, real mode/uid/gid and symlinks (stored as links, NOT dereferenced)
+# are all captured. Returns 0, or -1 (see _stor_tar_collect_at).
+fn _stor_tar_collect_fd(dfd, rel_prefix, out) {
+    var names = _stor_dir_names(dfd);
+    var i = 0;
+    while (i < vec_len(names)) {
+        var named = vec_get(names, i);
+        var rel_child = named;
+        if (strlen(rel_prefix) > 0) {
+            rel_child = _stor_cat2(_stor_cat2(rel_prefix, "/"), named);
+        }
+        if (_stor_tar_collect_at(dfd, named, rel_child, out) != 0) { return 0 - 1; }
+        i = i + 1;
+    }
     return 0;
+}
+
+# As _stor_tar_collect_fd, from a path. Returns 0, or -1.
+fn _stor_tar_collect(abs_dir, rel_prefix, out) {
+    var fd = file_open(abs_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0 - 1; }
+    var rc = _stor_tar_collect_fd(fd, rel_prefix, out);
+    sys_close(fd);
+    return rc;
 }
 
 # Write a GNU long-name ('L'=76) / long-link ('K'=75) pseudo-entry at `buf`: a
@@ -1741,7 +2067,10 @@ fn _stor_write_tar(entries, out_path) {
 # See the IN-MEMORY CAVEAT above: the whole archive is held in one heap buffer.
 fn create_tar(src_dir, out_path) {
     var entries = vec_new();
-    _stor_tar_collect(src_dir, "", entries);
+    if (_stor_tar_collect(src_dir, "", entries) != 0) {
+        stiva_err_print(STIVA_ERR_STORAGE, _stor_cat2("cannot read everything under: ", src_dir));
+        return 0;
+    }
     return _stor_write_tar(entries, out_path);
 }
 
@@ -1753,15 +2082,3 @@ fn export_rootfs(rootfs, output) {
     sakshi_info("exporting rootfs to tar", strlen("exporting rootfs to tar"));
     return create_tar(rootfs, output);
 }
-
-# ── DEFERRED ─────────────────────────
-# Every rust-old/src/storage.rs entry point is ported. `unpack_tar_zstd`
-# (rust-old: zstd::stream::Decoder + tar::Archive) landed as
-# `_stor_unpack_zstd_bytes` once sankoch 2.5.0 shipped zstd decode; the
-# unpack_tar_gz / unpack_layer / prepare_layers / create_tar / export_rootfs
-# surface was already implemented above.
-#
-# Remaining (a deliberate choice, NOT a codec gap): stiva still WRITES gzip
-# layers. `zstd_compress` is available in sankoch, so emitting
-# `application/vnd.oci.image.layer.v1.tar+zstd` is a build-side decision to
-# make when there is a reason to, not a blocked item.

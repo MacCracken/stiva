@@ -3,11 +3,8 @@
 #
 # rust-old/src/lib.rs is the crate root: it re-exports the domain modules
 # (that aggregation lives in src/lib.cyr) AND defines `StivaConfig` (ported
-# below) + the top-level `Stiva` runtime facade. `Stiva` and its ~40
-# orchestration methods drive not-yet-ported async surfaces
-# (ContainerManager, RegistryClient, AuditLog::new, ImageStore async pull/
-# push) — captured in the DEFERRED block at the bottom, matching the
-# container/registry precedent.
+# below) + the top-level `Stiva` runtime facade over the container manager, the
+# registry client, the image store and the audit log.
 
 # ── StivaConfig (rust-old: struct StivaConfig) ────────────────
 # Configuration for the stiva runtime. Fields:
@@ -62,8 +59,7 @@ fn stiva_config_default() {
 # audited, matching the oracle). Single-node, synchronous:
 # the oracle's Arc/async collapses to plain pointers.
 #
-# pull/push/discovery are LIVE as of §B Inc-10 (v3.0.10); `build` is still
-# stubbed. Facade `run` still resolves the image from the LOCAL store rather
+# Facade `run` resolves the image from the LOCAL store rather
 # than pulling it — a documented divergence from the oracle's `run` =
 # pull-then-create-then-start, kept deliberately so `run` never reaches the
 # network implicitly. Pull first, then run.
@@ -294,9 +290,13 @@ fn stiva_exec(s, id, command, env, workdir) {
 # oracle): restart/pause/unpause/rename/update, and the read ops
 # stats/wait/logs/log_tail/get_rootfs.
 fn stiva_restart(s, id) { var ss: Stiva = s; return container_manager_restart(ss.containers, id); }
+# Freeze a container.
 fn stiva_pause(s, id) { var ss: Stiva = s; return container_manager_pause(ss.containers, id); }
+# Thaw a container.
 fn stiva_unpause(s, id) { var ss: Stiva = s; return container_manager_unpause(ss.containers, id); }
+# Rename a container.
 fn stiva_rename(s, id, new_name) { var ss: Stiva = s; return container_manager_rename(ss.containers, id, new_name); }
+# Change a running container's limits.
 fn stiva_update(s, id, mem, cpu, pids) {
     var ss: Stiva = s;
     return container_manager_update(ss.containers, id, mem, cpu, pids);
@@ -448,9 +448,9 @@ fn stiva_catalog(s, registry) {
     return registry_catalog(ss.registry_client, registry);
 }
 
-# 1 signed · 0 unsigned · -1 the query failed. See registry_verify_signature
+# 1 signed · 0 unsigned · -1 the query failed. See registry_has_signature_artifact
 # for why "unsigned" and "could not ask" are kept distinct.
-fn stiva_verify_signature(s, reference) {
+fn stiva_has_signature_artifact(s, reference) {
     var ss: Stiva = s;
     if (reference == 0) { return 0 - 1; }
     # Resolve the image FIRST, then take the registry target from what the store
@@ -473,7 +473,7 @@ fn stiva_verify_signature(s, reference) {
         stiva_err_print(STIVA_ERR_IMAGE_NOT_FOUND, reference);
         return 0 - 1;
     }
-    return registry_verify_signature(ss.registry_client, _image_reference(found), md);
+    return registry_has_signature_artifact(ss.registry_client, _image_reference(found), md);
 }
 
 # Local images (rust-old: Stiva::images). Returns a vec of Image*.
@@ -585,14 +585,37 @@ fn _mcp_uri(prefix, id) {
     return _img_cat2(prefix, id);
 }
 
+# 1 iff `path` stays under the directory it is relative to, read by its components.
+#[must_use]
+fn _mcp_context_is_confined(path) {
+    if (load8(path) == 0 || load8(path) == 47) { return 0; }
+    var i = 0;
+    while (1 == 1) {
+        var start = i;
+        while (load8(path + i) != 0 && load8(path + i) != 47) { i = i + 1; }
+        if (i - start == 2) {
+            if (load8(path + start) == 46 && load8(path + start + 1) == 46) { return 0; }
+        }
+        if (load8(path + i) == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # stiva_build (oracle mcp.rs:handle_build). MOVED here from mcp.cyr, where it
 # could only ever parse the spec — a real build needs the store and the registry
 # client, and those live on the facade.
+#
+# ⛔ `context_dir` comes from the client, and whatever is under it goes into an image the client can
+# read back. So it stays inside the server's own working directory: no absolute path, no `..`.
 fn mcp_handle_build(s, params) {
     var spec = _mcp_param_str(params, "spec");
     if (spec == 0) { return mcp_result_err("missing required parameter: spec"); }
     var ctx = _mcp_param_str(params, "context_dir");
     if (ctx == 0) { ctx = "."; }
+    if (_mcp_context_is_confined(ctx) == 0) {
+        return mcp_result_err("context_dir must be relative, with no `..`");
+    }
     var im = stiva_build(s, spec, ctx);
     if (im == 0) { return mcp_result_err("build failed"); }
     return mcp_result_resource(_mcp_uri("stiva://images/", _img_id(im)),
@@ -841,7 +864,7 @@ fn mcp_handle_tool(s, name, params) {
     # branch → `spawn_container`) and returns without blocking, which is exactly
     # what an MCP handler needs. Nothing upstream is missing; this is unstarted
     # stiva-side work — write `mcp_handle_run` over the `stiva_run` facade the way
-    # `mcp_handle_exec` wraps `stiva_exec`. Roadmap v3.1.0.
+    # `mcp_handle_exec` wraps `stiva_exec`. Roadmap v3.3.3.
     if (streq(name, "stiva_run") == 1) {
         return mcp_result_err(
           "stiva_run is not wired: no mcp_handle_run yet (the detached-run path it needs has existed since v3.0.14)");

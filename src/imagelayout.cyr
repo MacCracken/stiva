@@ -298,7 +298,17 @@ fn _il_index_manifests(idx) {
 fn _il_desc_ref_name(desc) {
     var ann = bayan_json_v_obj_get_by_cstr(desc, "annotations");
     if (json_v_is_obj(ann) == 0) { return 0; }
-    return _il_jv_str_field(ann, _il_ref_name_key());
+    var name = _il_jv_str_field(ann, _il_ref_name_key());
+    if (name == 0) { return 0; }
+    # An archive names itself, so this is untrusted. A reference has no spaces or control bytes,
+    # and treating a name that does as no name keeps the image and loses only the lie.
+    var i = 0;
+    while (load8(name + i) != 0) {
+        var c = load8(name + i);
+        if (c <= 32 || c == 127) { return 0; }
+        i = i + 1;
+    }
+    return name;
 }
 
 # Reconstruct an ImageRef from a full_ref string "registry/repository:tag" — the
@@ -355,9 +365,8 @@ fn _il_manifest_descriptor_jv(store, image, manifest_size) {
         }
     }
     if (arch == 0 || os == 0) {
-        # Host platform (current_platform's hardcoded amd64/linux) via literals —
-        # avoids a Platform struct-field read that cycc miscompiles in this fn.
-        arch = normalize_arch("x86_64");
+        # The host platform, without a Platform struct-field read, which cycc miscompiles in this fn.
+        arch = host_arch();
         os = "linux";
     }
     var po = json_v_obj_new();
@@ -522,9 +531,15 @@ fn image_store_list(store) {
     return image_store_load_index(store);
 }
 
-# Sweep unreferenced blobs: for each hex in blobs/sha256, form "sha256:{hex}"
-# and unlink when it is not in `referenced`. Returns the count removed.
+# Sweep unreferenced blobs: for each hex in blobs/sha256, form "sha256:{hex}" and unlink when it
+# is not in `referenced`, a vec of digests. Returns the count removed.
 fn _il_sweep_blobs(root, referenced) {
+    var wanted = map_new();
+    var ri = 0;
+    while (ri < vec_len(referenced)) {
+        map_set(wanted, vec_get(referenced, ri), 1);
+        ri = ri + 1;
+    }
     var removed = 0;
     var blobs_dir = _img_cat2(root, "/blobs/sha256");
     var entries = dir_list(str_from(blobs_dir));
@@ -532,16 +547,8 @@ fn _il_sweep_blobs(root, referenced) {
     var ei = 0;
     while (ei < ne) {
         var hex = str_cstr(vec_get(entries, ei));
-        var digest = _img_cat2("sha256:", hex);
-        var found = 0;
-        var ri = 0;
-        while (ri < vec_len(referenced)) {
-            if (streq(vec_get(referenced, ri), digest) == 1) { found = 1; }
-            ri = ri + 1;
-        }
-        if (found == 0) {
-            var blob_path = _img_cat2(_img_cat2(blobs_dir, "/"), hex);
-            xunlink(blob_path);
+        if (map_has(wanted, _img_cat2("sha256:", hex)) == 0) {
+            xunlink(_img_cat2(_img_cat2(blobs_dir, "/"), hex));
             removed = removed + 1;
         }
         ei = ei + 1;
@@ -572,19 +579,42 @@ fn _il_referenced_digests(images) {
     return referenced;
 }
 
+# 1 iff `images`, a load of the index, accounts for every descriptor in it. An absent index is
+# complete; a present one that does not parse, or names an image that did not load, is not.
+#[must_use]
+fn _il_index_is_complete(store, images) {
+    if (file_exists(_il_index_path(image_store_root(store))) == 0) { return 1; }
+    var manifests = _il_index_manifests(_il_index_read_jv(store));
+    if (manifests == 0) { return 0; }
+    if (json_v_arr_len(manifests) == vec_len(images)) { return 1; }
+    return 0;
+}
+
 # Remove an image by id (config digest), drop now-unreferenced blobs, and
 # rewrite index.json. Returns 1 on success, -1 when no image has `id`, 0 on a
-# rewrite failure. Shared blobs (config/manifest/layers) survive.
+# rewrite failure or an index that cannot be fully read. Shared blobs
+# (config/manifest/layers) survive.
 fn image_store_remove(store, id) {
+    var ids = map_new();
+    map_set(ids, id, 1);
+    return image_store_remove_set(store, ids);
+}
+
+# As image_store_remove, for every image whose id is a key of the map `ids`, in one sweep and one
+# rewrite: one at a time, each removal reloads the index and sweeps every blob, which took `prune`
+# 5 minutes and 5.5 GiB of heap at 1,000 images. Returns 1, -1 when none matched, or 0.
+fn image_store_remove_set(store, ids) {
     var root = image_store_root(store);
     var images = image_store_load_index(store);
+    # A rewrite from a partial load would drop what did not load, for good.
+    if (_il_index_is_complete(store, images) == 0) { return 0; }
     var before = vec_len(images);
     var kept = vec_new();
     var i = 0;
     while (i < before) {
         var im = vec_get(images, i);
         var ii: Image = im;
-        if (streq(ii.id, id) == 0) { vec_push(kept, im); }
+        if (map_has(ids, ii.id) == 0) { vec_push(kept, im); }
         i = i + 1;
     }
     if (vec_len(kept) == before) { return 0 - 1; }
@@ -596,8 +626,13 @@ fn image_store_remove(store, id) {
 # Garbage-collect unreferenced blobs (rust-old: gc). Referenced set = every
 # indexed image's config id + manifest digest + layer digests. Returns the count
 # of blobs removed. index.json is unchanged (only orphan blobs are dropped).
+#
+# Returns -1 without touching anything when the index cannot be fully read. An image the index
+# names but the load could not resolve contributes no roots, so sweeping would delete blobs
+# that are still wanted, and an unparseable index would delete every blob.
 fn image_store_gc(store) {
     var images = image_store_load_index(store);
+    if (_il_index_is_complete(store, images) == 0) { return 0 - 1; }
     return _il_sweep_blobs(image_store_root(store), _il_referenced_digests(images));
 }
 
@@ -980,6 +1015,8 @@ fn _il_load_docker_archive(store, dir) {
     return loaded;
 }
 
+# Load every image in the oci-archive or docker-archive at `path` into the store. Returns how many
+# it added, or -1 with the detail printed.
 fn image_store_load_archive(store, path) {
     var len_cell = alloc(8);
     var tarbuf = _img_read_file(path, len_cell);
@@ -988,10 +1025,17 @@ fn image_store_load_archive(store, path) {
         return 0 - 1;
     }
 
-    var tmp = _img_cat2(image_store_root(store), "/.load-tmp");
+    # Per-process and private, so two loads cannot share a tree and a failed load's leftovers
+    # are never read by the next. No links: nothing in an image layout is one, and every read
+    # below opens a member by name, so a symlink there is a read of a host file.
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, image_store_root(store));
+    str_builder_add_cstr(sb, "/.load-tmp-");
+    str_builder_add_int(sb, sys_getpid());
+    var tmp = str_cstr(str_builder_build(sb));
     _stor_remove_dir_all(tmp);
-    sys_mkdir(tmp, 493);
-    if (_stor_extract_tar(tarbuf, load64(len_cell), tmp) != 0) {
+    sys_mkdir(tmp, 448);
+    if (_stor_extract_tar_x(tarbuf, load64(len_cell), tmp, 1) != 0) {
         stiva_err_print(STIVA_ERR_STORAGE, "malformed archive");
         _stor_remove_dir_all(tmp);
         return 0 - 1;
@@ -1042,8 +1086,7 @@ fn _il_pull_blob(client, store, ref, digest, size) {
 #    `Docker-Content-Digest` can never be re-checked from disk. For a store that
 #    claims to be an OCI image layout that is simply wrong.
 #  * **Layers download sequentially.** The oracle uses `buffer_unordered(4)`.
-#    The Cyrius runtime is single-threaded run-to-completion; parallel layer
-#    fetch is roadmap v3.1.
+#    Parallel layer fetch is roadmap v3.3.0.
 #  * **Foreign layers are refused, not fetched.** The oracle follows
 #    `descriptor.urls` to an arbitrary external host (image.rs:186-190). That
 #    URL comes from the manifest, i.e. from the registry — following it is an

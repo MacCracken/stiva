@@ -19,14 +19,14 @@ include "src/storage.cyr"
 include "src/imagelayout.cyr"
 
 # ── imagelayout.cyr (OCI image-layout — net-new; OCI image-spec is the oracle) ──
-fn test_oci_config_object_minimal() {
+fn _test_oci_config_object_minimal() {
     test_group("oci_config_object_minimal");
     var o = oci_config_object_jv(0, 0, 0, 0, 0, 0, 0);
     assert_eq(streq(str_cstr(json_v_build(o)), "{}"), 1, "empty config object is {}");
     return 0;
 }
 
-fn test_oci_config_object_fields() {
+fn _test_oci_config_object_fields() {
     test_group("oci_config_object_fields");
     var env = vec_new();
     vec_push(env, "PATH=/usr/bin");
@@ -56,7 +56,7 @@ fn test_oci_config_object_fields() {
 # bayan 1.11.1 refuses a document with a duplicate key, so a config that writes one is a
 # config stiva cannot read back. Asserted through the parser, because the bytes alone
 # looked fine: every assertion on the old writer's output would still have passed.
-fn test_oci_config_object_repeated_keys() {
+fn _test_oci_config_object_repeated_keys() {
     test_group("oci_config_object_repeated_keys");
     var ports = vec_new();
     vec_push(ports, "8080/tcp");
@@ -82,7 +82,7 @@ fn test_oci_config_object_repeated_keys() {
     return 0;
 }
 
-fn test_oci_config_build_shape() {
+fn _test_oci_config_build_shape() {
     test_group("oci_config_build_shape");
     var diffs = vec_new();
     vec_push(diffs, "sha256:aaa0000000000000000000000000000000000000000000000000000000000000");
@@ -92,10 +92,12 @@ fn test_oci_config_build_shape() {
     assert_eq(strstr(j, "\"architecture\":\"amd64\"") >= 0, 1, "architecture");
     assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "os");
     assert_eq(strstr(j, "\"config\":{}") >= 0, 1, "empty config sub-object");
-    assert_eq(strstr(j, "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\"]}") >= 0, 1, "rootfs diff_ids");
+    assert_eq(strstr(j,
+        "\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\",\"sha256:bbb0000000000000000000000000000000000000000000000000000000000000\"]}") >= 0, 1, "rootfs diff_ids");   #skip-lint
     assert_eq(strstr(j, "created") >= 0, 0, "no created when 0");
     assert_eq(strstr(j, "history") >= 0, 0, "no history when absent");
-    var j2 = str_cstr(json_v_build(oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0), diffs, 0)));
+    var j2 = str_cstr(json_v_build(oci_config_build("amd64", "linux", 0, oci_config_object_jv(0, 0, 0, 0, 0, 0, 0),
+          diffs, 0)));
     assert_eq(streq(j, j2), 1, "deterministic bytes");
     var v3 = oci_config_build("arm64", "linux", "2024-01-01T00:00:00Z", 0, diffs, 0);
     var j3 = str_cstr(json_v_build(v3));
@@ -104,13 +106,13 @@ fn test_oci_config_build_shape() {
     return 0;
 }
 
-fn test_il_oci_layout_version() {
+fn _test_il_oci_layout_version() {
     test_group("il_oci_layout_version");
     assert_eq(streq(oci_image_layout_version(), "1.0.0"), 1, "imageLayoutVersion 1.0.0");
     return 0;
 }
 
-fn test_il_parse_full_ref() {
+fn _test_il_parse_full_ref() {
     test_group("il_parse_full_ref");
     # "local/demo:v1" — the import reference form.
     var rr1: ImageRef = _il_parse_full_ref("local/demo:v1");
@@ -153,12 +155,12 @@ fn test_il_parse_full_ref() {
 
 # v3.0.4: index descriptors carry the image's real config platform (so a
 # foreign-arch image from a docker/oci archive keeps its arch), else host.
-fn test_platform_passthrough() {
+fn _test_platform_passthrough() {
     test_group("platform_passthrough");
     var root = "/tmp/stiva_plat";
     _stor_remove_dir_all(root);
     var store = image_store_new(root);
-    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:7800000000000000000000000000000000000000000000000000000000000000\"]}}";
+    var cfg = "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:7800000000000000000000000000000000000000000000000000000000000000\"]}}";   #skip-lint
     var cdig = sha256_digest(cfg, strlen(cfg));
     image_store_store_blob(store, cdig, cfg, strlen(cfg));
     var img = image_new(cdig, image_ref_new("local", "arm-app", "v1", 0), 10, vec_new(), 0);
@@ -166,18 +168,20 @@ fn test_platform_passthrough() {
     var j = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img, 100)));
     assert_eq(strstr(j, "\"architecture\":\"arm64\"") >= 0, 1, "config arm64 carried into descriptor");
     assert_eq(strstr(j, "\"os\":\"linux\"") >= 0, 1, "config os carried");
-    # a missing config blob falls back to the host platform (amd64).
-    var img2 = image_new("sha256:6e6f6ee78697374e6e7400000000000000000000000000000000000000000000", image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
+    # a missing config blob falls back to the host platform.
+    var img2 = image_new("sha256:6e6f6ee78697374e6e7400000000000000000000000000000000000000000000",
+      image_ref_new("local", "x", "v1", 0), 10, vec_new(), 0);
     _img_set_manifest_digest(img2, "sha256:6da6e69200000000000000000000000000000000000000000000000000000000");
     var d2 = str_cstr(json_v_build(_il_manifest_descriptor_jv(store, img2, 100)));
-    assert_eq(strstr(d2, "\"architecture\":\"amd64\"") >= 0, 1, "missing config → host platform fallback");
+    var host = _img_cat3("\"architecture\":\"", host_arch(), "\"");
+    assert_eq(strstr(d2, host) >= 0, 1, "missing config → host platform fallback");
     return 0;
 }
 
 # A4: oci-archive save → load round-trip across two stores. Blobs transfer
 # byte-identically (content-verified) and the image reconstructs with the same
 # id + reference.
-fn test_oci_archive_save_load() {
+fn _test_oci_archive_save_load() {
     test_group("oci_archive_save_load");
     var ra = "/tmp/stiva_arc_a";
     var rb = "/tmp/stiva_arc_b";
@@ -218,7 +222,7 @@ fn test_oci_archive_save_load() {
     return 0;
 }
 
-fn test_registry_credential() {
+fn _test_registry_credential() {
     test_group("registry_credential");
     var cred = registry_credential_new("alice", "s3cret");
     var cc: RegistryCredential = cred;
@@ -228,7 +232,7 @@ fn test_registry_credential() {
 }
 
 # CredentialStore set/get/remove (rust-old registry.rs: CredentialStore::set/get/remove).
-fn test_credential_store_set_get_remove() {
+fn _test_credential_store_set_get_remove() {
     test_group("credential_store_set_get_remove");
     var store = credential_store_new();
     assert_eq(credential_store_get(store, "docker.io"), 0, "empty -> none");
@@ -245,7 +249,7 @@ fn test_credential_store_set_get_remove() {
 }
 
 # CredentialStore::to_config — creds present vs default (rust-old: to_config).
-fn test_credential_store_to_config() {
+fn _test_credential_store_to_config() {
     test_group("credential_store_to_config");
     var store = credential_store_new();
     credential_store_set(store, "ghcr.io", "bob", "tok");
@@ -259,7 +263,7 @@ fn test_credential_store_to_config() {
 }
 
 # CredentialStore JSON round-trip (the serde path underneath save/load).
-fn test_credential_store_json_round_trip() {
+fn _test_credential_store_json_round_trip() {
     test_group("credential_store_json_round_trip");
     var store = credential_store_new();
     credential_store_set(store, "docker.io", "alice", "pw1");
@@ -277,7 +281,7 @@ fn test_credential_store_json_round_trip() {
 
 # CredentialStore save→load through a temp path (NOT the real ~/.stiva — uses the
 # internal path-parameterized helpers to avoid clobbering the user's file).
-fn test_credential_store_save_load() {
+fn _test_credential_store_save_load() {
     test_group("credential_store_save_load");
     var path = "/tmp/stiva_cred_test/credentials.json";
     xunlink(path);
@@ -297,7 +301,7 @@ fn test_credential_store_save_load() {
 }
 
 # default_path lands under ~/.stiva (rust-old: default_path via dirs_path).
-fn test_credential_store_default_path() {
+fn _test_credential_store_default_path() {
     test_group("credential_store_default_path");
     var p = credential_store_default_path();
     assert_eq(strstr(p, "/.stiva/credentials.json") >= 0, 1, "path under /.stiva");
@@ -307,7 +311,7 @@ fn test_credential_store_default_path() {
 # STRICT deserialization parity: serde rejects a malformed credentials file
 # (missing `registries`, or a cred missing a required field) — load returns an
 # error, not a lenient empty/partial store. A valid empty store is accepted.
-fn test_credential_store_load_malformed() {
+fn _test_credential_store_load_malformed() {
     test_group("credential_store_load_malformed");
     var dir = "/tmp/stiva_cred_bad";
     sys_mkdir(dir, 0x1ED);
@@ -328,9 +332,8 @@ fn test_credential_store_load_malformed() {
     return 0;
 }
 
-
 # ── storage.cyr (rust-old/src/storage.rs) ──
-fn test_parse_volume_rw() {
+fn _test_parse_volume_rw() {
     test_group("parse_volume_rw");
     var vol = parse_volume("/data:/mnt/data");
     assert(vol != 0, "parses");
@@ -341,7 +344,7 @@ fn test_parse_volume_rw() {
     return 0;
 }
 
-fn test_parse_volume_ro() {
+fn _test_parse_volume_ro() {
     test_group("parse_volume_ro");
     var vol = parse_volume("/config:/etc/config:ro");
     assert(vol != 0, "parses");
@@ -350,19 +353,19 @@ fn test_parse_volume_ro() {
     return 0;
 }
 
-fn test_parse_volume_invalid() {
+fn _test_parse_volume_invalid() {
     test_group("parse_volume_invalid");
     assert_eq(parse_volume("nocolon"), 0, "nocolon is null");
     return 0;
 }
 
-fn test_parse_volume_too_many_parts() {
+fn _test_parse_volume_too_many_parts() {
     test_group("parse_volume_too_many_parts");
     assert_eq(parse_volume("/a:/b:ro:extra"), 0, "4 parts is null");
     return 0;
 }
 
-fn test_parse_volume_rw_explicit() {
+fn _test_parse_volume_rw_explicit() {
     test_group("parse_volume_rw_explicit");
     var vol = parse_volume("/src:/dst:rw");
     assert(vol != 0, "parses");
@@ -371,7 +374,7 @@ fn test_parse_volume_rw_explicit() {
     return 0;
 }
 
-fn test_parse_named_volume() {
+fn _test_parse_named_volume() {
     test_group("parse_named_volume");
     var vol = parse_volume("pgdata:/var/lib/postgresql/data");
     assert(vol != 0, "parses");
@@ -382,14 +385,14 @@ fn test_parse_named_volume() {
     return 0;
 }
 
-fn test_parse_volume_empty_string() {
+fn _test_parse_volume_empty_string() {
     test_group("parse_volume_empty_string");
     assert_eq(parse_volume(""), 0, "empty string is null");
     return 0;
 }
 
 # Mirrors setup_overlay_no_layers: empty layer vec => 0 (Err(Overlay)).
-fn test_setup_overlay_no_layers() {
+fn _test_setup_overlay_no_layers() {
     test_group("setup_overlay_no_layers");
     var empty = vec_new();
     assert_eq(setup_overlay(empty, "/tmp/stiva-storage-test"), 0, "no layers is null");
@@ -397,7 +400,7 @@ fn test_setup_overlay_no_layers() {
 }
 
 # Mirrors overlay_paths_debug: fields round-trip through the struct.
-fn test_overlay_paths_fields() {
+fn _test_overlay_paths_fields() {
     test_group("overlay_paths_fields");
     var p = overlay_paths_new("/merged", "/upper", "/work", "/root");
     var pp: OverlayPaths = p;
@@ -409,7 +412,7 @@ fn test_overlay_paths_fields() {
 }
 
 # Mirrors mount_volumes_empty: empty specs vec => empty (non-null) result.
-fn test_mount_volumes_empty() {
+fn _test_mount_volumes_empty() {
     test_group("mount_volumes_empty");
     var specs = vec_new();
     var mounts = mount_volumes(specs, "/tmp/stiva-storage-test");
@@ -433,6 +436,76 @@ fn _t_write_octal(p, len, val) {
     return 0;
 }
 
+# Seal a hand-built tar header with the checksum every real writer stores.
+fn _t_seal(hdr) {
+    var i = 148;
+    while (i < 156) {
+        store8(hdr + i, 32);
+        i = i + 1;
+    }
+    var sum = 0;
+    i = 0;
+    while (i < 512) {
+        sum = sum + (load8(hdr + i) & 255);
+        i = i + 1;
+    }
+    _t_write_octal(hdr + 148, 6, sum);
+    store8(hdr + 154, 0);
+    store8(hdr + 155, 32);
+    return 0;
+}
+
+# Append an entry to the tar being built at `out` (fresh, zeroed memory). Returns the next
+# offset. Passing `pos + 1024` as the length gives the two end-of-archive blocks.
+fn _t_tar_add(out, pos, name, typeflag, mode, data, link) {
+    memcpy(out + pos, name, strlen(name));
+    _t_write_octal(out + pos + 100, 7, mode);
+    var dlen = 0;
+    if (data != 0) { dlen = strlen(data); }
+    _t_write_octal(out + pos + 124, 11, dlen);
+    store8(out + pos + 156, typeflag);
+    if (link != 0) { memcpy(out + pos + 157, link, strlen(link)); }
+    _t_seal(out + pos);
+    pos = pos + 512;
+    if (dlen > 0) {
+        memcpy(out + pos, data, dlen);
+        pos = pos + ((dlen + 511) / 512) * 512;
+    }
+    return pos;
+}
+
+# The permission bits of `path`, not following a final symlink, or -1.
+fn _t_mode(path) {
+    var sb = alloc(STAT_BUFSZ);
+    if (sys_lstat(path, sb) != 0) { return 0 - 1; }
+    return _stor_st_mode(sb) & 4095;
+}
+
+# A fresh directory at `path`.
+fn _t_fresh_dir(path) {
+    _stor_remove_dir_all(path);
+    sys_mkdir(path, 493);
+    return path;
+}
+
+# A canary at `path`: mode 0600, content "secret".
+fn _t_canary(path) {
+    xunlink(path);
+    file_write_all(path, "secret", 6);
+    sys_chmod(path, 384);
+    return path;
+}
+
+# 1 iff the canary at `path` still reads "secret" at mode 0600.
+fn _t_canary_intact(path) {
+    var buf = alloc(16);
+    var n = file_read_all(path, buf, 15);
+    if (n != 6) { return 0; }
+    if (memeq(buf, "secret", 6) != 1) { return 0; }
+    if (_t_mode(path) != 384) { return 0; }
+    return 1;
+}
+
 # Build a single-file USTAR archive (name + data) into `out`, returning the
 # total byte length. Layout: 512 header (name@0, size octal @124, typeflag
 # '0' @156) + ceil(size/512) data blocks + two 512-byte zero blocks (EOF).
@@ -448,6 +521,7 @@ fn _t_build_tar(out, name, data, dlen) {
     store8(out + 124 + 11, 0);
     # typeflag @156 = '0' (regular file)
     store8(out + 156, 48);
+    _t_seal(out);
 
     # data blocks
     memcpy(out + 512, data, dlen);
@@ -475,6 +549,7 @@ fn _t_build_multi_tar(out, nfiles, fsize) {
         _t_write_octal(out + pos + 124, 11, fsize);   # size @124
         store8(out + pos + 124 + 11, 0);
         store8(out + pos + 156, 48);                  # typeflag '0' @156
+        _t_seal(out + pos);
         pos = pos + 512;
 
         var j = 0;
@@ -521,7 +596,7 @@ fn _t_diff_at(a, b, n) {
 }
 
 # _stor_parse_octal decodes ASCII octal, ignoring non-octal padding.
-fn test_stor_parse_octal() {
+fn _test_stor_parse_octal() {
     test_group("stor_parse_octal");
     var buf = alloc(16);
     var i = 0;
@@ -533,7 +608,7 @@ fn test_stor_parse_octal() {
 }
 
 # End-to-end: gzip a hand-built USTAR archive, unpack_layer it, read back.
-fn test_unpack_layer_gz_roundtrip() {
+fn _test_unpack_layer_gz_roundtrip() {
     test_group("unpack_layer_gz_roundtrip");
     var dir = "/tmp/stiva-unpack-test";
     sys_mkdir(dir, 493);
@@ -576,7 +651,7 @@ fn test_unpack_layer_gz_roundtrip() {
 # slip through.
 
 # The codec in isolation: 2.5 MiB in, 2.5 MiB out, byte-exact.
-fn test_gzip_compress_multi_mb_roundtrip() {
+fn _test_gzip_compress_multi_mb_roundtrip() {
     test_group("gzip_compress_multi_mb_roundtrip");
     var n = 2621440;                       # 2.5 MiB — two 1 MiB block boundaries
     var src = alloc(n);
@@ -599,7 +674,7 @@ fn test_gzip_compress_multi_mb_roundtrip() {
 }
 
 # unpack_layer on a 2.5 MiB layer blob: succeeds, and every file is byte-exact.
-fn test_unpack_layer_multi_mb() {
+fn _test_unpack_layer_multi_mb() {
     test_group("unpack_layer_multi_mb");
     var dir = "/tmp/stiva-unpack-bigtar";
     _stor_remove_dir_all(dir);
@@ -642,7 +717,7 @@ fn test_unpack_layer_multi_mb() {
 # The user-visible path: `stiva import` a 2 MiB rootfs tar, then prepare its
 # layers (what `stiva run` does). image_import gzips the tar itself, so this
 # also pins the imagelayout.cyr compress call site.
-fn test_image_import_multi_mb() {
+fn _test_image_import_multi_mb() {
     test_group("image_import_multi_mb");
     var root = "/tmp/stiva-import-bigtar";
     _stor_remove_dir_all(root);
@@ -684,14 +759,14 @@ fn test_image_import_multi_mb() {
 }
 
 # unpack_layer on a nonexistent blob returns the -1 failure sentinel.
-fn test_unpack_layer_missing_blob() {
+fn _test_unpack_layer_missing_blob() {
     test_group("unpack_layer_missing_blob");
     assert_eq(unpack_layer("/nonexistent/stiva/blob", "/tmp"), 0 - 1, "missing blob = -1");
     return 0;
 }
 
 # unpack_layer on bytes that are neither gzip nor zstd fails (-1).
-fn test_unpack_layer_not_gzip() {
+fn _test_unpack_layer_not_gzip() {
     test_group("unpack_layer_not_gzip");
     var dir = "/tmp/stiva-unpack-badgz";
     sys_mkdir(dir, 493);
@@ -704,7 +779,7 @@ fn test_unpack_layer_not_gzip() {
 # End-to-end: zstd a hand-built USTAR archive, unpack_layer it, read back.
 # Mirrors the gzip round-trip — unpack_layer dispatches on the 4-byte zstd
 # magic (28 B5 2F FD). sankoch shipped zstd decode in 2.5.0.
-fn test_unpack_layer_zstd_roundtrip() {
+fn _test_unpack_layer_zstd_roundtrip() {
     test_group("unpack_layer_zstd_roundtrip");
     var dir = "/tmp/stiva-unpack-zstd";
     sys_mkdir(dir, 493);
@@ -738,7 +813,7 @@ fn test_unpack_layer_zstd_roundtrip() {
 
 # A blob with valid zstd magic but a truncated/corrupt body must fail (-1),
 # not hang in the grow-retry loop or extract garbage.
-fn test_unpack_layer_zstd_corrupt() {
+fn _test_unpack_layer_zstd_corrupt() {
     test_group("unpack_layer_zstd_corrupt");
     var dir = "/tmp/stiva-unpack-zstd-bad";
     sys_mkdir(dir, 493);
@@ -757,7 +832,7 @@ fn test_unpack_layer_zstd_corrupt() {
 # zstd's FCS is attacker-controlled, so this is allocation amplification.
 # Frame header: magic + FHD 0xE0 (fcs_flag=3 → 8-byte FCS, single_segment=1,
 # did_flag=0) + the 8-byte little-endian size.
-fn test_unpack_layer_zstd_fcs_bomb() {
+fn _test_unpack_layer_zstd_fcs_bomb() {
     test_group("unpack_layer_zstd_fcs_bomb");
     var dir = "/tmp/stiva-unpack-zstd-bomb";
     sys_mkdir(dir, 493);
@@ -798,7 +873,7 @@ fn test_unpack_layer_zstd_fcs_bomb() {
 # Covers each of its three regimes independently — the gzip path cannot reach
 # the ratio regime end-to-end (deflate's own maximum is 1032:1, so a real gzip
 # blob can only ever land ~3% over a 1000:1 bound), so it is pinned here.
-fn test_stor_decomp_limit() {
+fn _test_stor_decomp_limit() {
     test_group("stor_decomp_limit");
     # Floor: a tiny blob is not held to the ratio — it could not clear it, and
     # the guessed starting cap is 1 MiB regardless.
@@ -808,15 +883,15 @@ fn test_stor_decomp_limit() {
     # Ratio: 1000:1 against the compressed length.
     assert_eq(_stor_decomp_limit(1049), 1049000, "1049 B -> ratio bound");
     assert_eq(_stor_decomp_limit(1048576), 1048576000, "1 MiB -> 1000 MiB");
-    # Absolute: 8 GiB, whatever the ratio would allow.
-    assert_eq(_stor_decomp_limit(8589935), 8589934592, "ratio clamped to 8 GiB");
-    assert_eq(_stor_decomp_limit(1073741824), 8589934592, "1 GiB blob -> 8 GiB");
+    # Absolute: what alloc can hand out, whatever the ratio would allow.
+    assert_eq(_stor_decomp_limit(8589935), ALLOC_MAX, "ratio clamped to ALLOC_MAX");
+    assert_eq(_stor_decomp_limit(1073741824), ALLOC_MAX, "1 GiB blob -> ALLOC_MAX");
     return 0;
 }
 
 # DoS guard, gzip side: the grow-retry loop must stop at _stor_decomp_limit
 # instead of doubling its buffer until the process dies. Mirrors
-# test_unpack_layer_zstd_fcs_bomb — the same attack, reached one doubling at a
+# _test_unpack_layer_zstd_fcs_bomb — the same attack, reached one doubling at a
 # time rather than through a forged header, which is why the loop reacting to
 # real decoded output does not by itself make gzip safe.
 #
@@ -830,7 +905,7 @@ fn test_stor_decomp_limit() {
 # compressible payload passes ~1 MiB (1049000 zero bytes -> a blob zlib expands
 # to 1049195, CRC mismatch), so a larger fixture would fail on the encoder, not
 # on anything this test is about.
-fn test_unpack_layer_gz_bomb() {
+fn _test_unpack_layer_gz_bomb() {
     test_group("unpack_layer_gz_bomb");
     var dir = "/tmp/stiva-unpack-gz-bomb";
     _stor_remove_dir_all(dir);
@@ -893,7 +968,7 @@ fn test_unpack_layer_gz_bomb() {
 # A3: perms-preserving tar writer + reader round-trip — real mode, a
 # subdirectory, a nested file, and a symlink (stored as a link, not
 # dereferenced). uid/gid preservation needs root, so it is not asserted here.
-fn test_tar_perms_roundtrip() {
+fn _test_tar_perms_roundtrip() {
     test_group("tar_perms_roundtrip");
     var src = "/tmp/stiva_tarp_src";
     var dst = "/tmp/stiva_tarp_dst";
@@ -925,10 +1000,10 @@ fn test_tar_perms_roundtrip() {
     var g1 = _stor_cat2(dst, "/hello.txt");
     assert_eq(file_exists(g1), 1, "hello.txt extracted");
     assert_eq(sys_lstat(g1, sb), 0, "lstat hello.txt");
-    assert_eq(load64(sb + 24) & 4095, 420, "hello.txt mode 0644 preserved");
+    assert_eq(_stor_st_mode(sb) & 4095, 420, "hello.txt mode 0644 preserved");
     var g2 = _stor_cat2(dst, "/run.sh");
     assert_eq(sys_lstat(g2, sb), 0, "lstat run.sh");
-    assert_eq(load64(sb + 24) & 4095, 493, "run.sh mode 0755 preserved");
+    assert_eq(_stor_st_mode(sb) & 4095, 493, "run.sh mode 0755 preserved");
     assert_eq(file_exists(_stor_cat2(dst, "/sub")), 1, "subdirectory extracted");
     var g3 = _stor_cat2(dst, "/sub/nested.txt");
     assert_eq(file_exists(g3), 1, "nested file extracted");
@@ -938,7 +1013,7 @@ fn test_tar_perms_roundtrip() {
     assert_eq(streq(rbuf, "deep"), 1, "nested content round-trips");
     var gl = _stor_cat2(dst, "/link");
     assert_eq(sys_lstat(gl, sb), 0, "lstat link");
-    assert_eq((load64(sb + 24) & 61440) == 40960, 1, "link is a symlink (S_IFLNK)");
+    assert_eq((_stor_st_mode(sb) & 61440) == 40960, 1, "link is a symlink (S_IFLNK)");
     var tgt = alloc(64);
     var tn = sys_readlink(gl, tgt, 63);
     store8(tgt + tn, 0);
@@ -948,7 +1023,7 @@ fn test_tar_perms_roundtrip() {
 
 # A3 security: the tar reader must reject path-traversal names/targets so an
 # untrusted archive or image layer cannot escape the destination directory.
-fn test_tar_extract_rejects_traversal() {
+fn _test_tar_extract_rejects_traversal() {
     test_group("tar_extract_rejects_traversal");
     assert_eq(_stor_name_is_safe("etc/passwd"), 1, "relative name ok");
     assert_eq(_stor_name_is_safe("a/b/c.txt"), 1, "nested name ok");
@@ -975,7 +1050,7 @@ fn test_tar_extract_rejects_traversal() {
 
 # v3.0.3 tar hardening: USTAR long-name (name+prefix split), base-256 numeric
 # fields, and symlink-ancestor write-through protection.
-fn test_tar_hardening() {
+fn _test_tar_hardening() {
     test_group("tar_hardening");
 
     # B2 base-256: a value beyond 11 octal digits (8^11 ≈ 8.59e9) uses base-256.
@@ -1028,7 +1103,7 @@ fn test_tar_hardening() {
 # Security: a crafted base-256 size that decodes to a NEGATIVE i64 must be
 # rejected (it would otherwise slip past the signed torn-region check into a
 # giant sys_write / drive `pos` backward).
-fn test_tar_extract_rejects_bad_size() {
+fn _test_tar_extract_rejects_bad_size() {
     test_group("tar_extract_rejects_bad_size");
     var buf = alloc(1024);
     var i = 0;
@@ -1037,6 +1112,7 @@ fn test_tar_extract_rejects_bad_size() {
     store8(buf + 156, 48);       # typeflag '0' (regular file)
     store8(buf + 124, 128);      # size@124: base-256 marker (0x80)
     store8(buf + 128, 128);      # p[4]=0x80 → decodes with bit 63 set → negative i64
+    _t_seal(buf);
     assert_eq(_stor_parse_octal(buf + 124, 12) < 0, 1, "base-256 size decodes negative");
     var dest = "/tmp/stiva_badsz";
     _stor_remove_dir_all(dest);
@@ -1048,7 +1124,7 @@ fn test_tar_extract_rejects_bad_size() {
 
 # v3.0.4 GNU longname/longlink: a path > 255 B (beyond USTAR name+prefix) and a
 # symlink target > 100 B round-trip through 'L'/'K' pseudo-entries.
-fn test_tar_longname() {
+fn _test_tar_longname() {
     test_group("tar_longname");
     var seg = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";   # 60
     var d = "/tmp/stiva_lng_src";
@@ -1092,18 +1168,400 @@ fn test_tar_longname() {
     store8(big, 120);                  # name "x"
     store8(big + 156, 76);             # 'L' long name
     _tar_octal(big + 124, 9000, 11);   # size 9000 > 8192 cap (but <= tar_len - 512)
+    _t_seal(big);
     assert_eq(_stor_extract_tar(big, 16384, dd), 0 - 1, "oversized long-name rejected (DoS cap)");
+    return 0;
+}
+
+# ── 3.1.2 audit: each of these replays an archive that used to escape `dest`, and asserts on
+# what the attack damaged, not on a return code.
+
+# A parent made read-only mid-archive used to make the unlink of a planted symlink fail, and the
+# write then followed the link: an unprivileged `stiva load` rewrote a host file, before the
+# archive was even validated.
+fn _test_tar_no_write_through_symlink_under_readonly_dir() {
+    test_group("tar_no_write_through_symlink_under_readonly_dir");
+    var canary = _t_canary("/tmp/stiva_x1_canary");
+    var dest = _t_fresh_dir("/tmp/stiva_x1");
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "d", 53, 493, 0, 0);
+    n = _t_tar_add(t, n, "d/f", 50, 511, 0, canary);
+    n = _t_tar_add(t, n, "d", 53, 365, 0, 0);
+    n = _t_tar_add(t, n, "d/f", 48, 438, "PWNED", 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    assert_eq(_t_canary_intact(canary), 1, "the host file is untouched");
+    assert_eq(_stor_lkind("/tmp/stiva_x1/d/f"), 32768, "the entry is a regular file in dest");
+    assert_eq(_t_mode("/tmp/stiva_x1/d"), 365, "the directory ends up at the mode it asked for");
+    _stor_remove_dir_all(dest);
+    return 0;
+}
+
+# A directory entry named like an existing symlink used to chmod the link's target, which is
+# how a mis-aimed probe changed the mode of a real directory outside its scratch tree.
+fn _test_tar_dir_entry_never_chmods_through_a_symlink() {
+    test_group("tar_dir_entry_never_chmods_through_a_symlink");
+    var victim = _t_fresh_dir("/tmp/stiva_x2_victim");
+    sys_chmod(victim, 448);
+    var dest = _t_fresh_dir("/tmp/stiva_x2");
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "x", 50, 511, 0, victim);
+    n = _t_tar_add(t, n, "x", 53, 511, 0, 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    assert_eq(_t_mode(victim), 448, "the symlink's target keeps its mode");
+    assert_eq(_stor_lkind("/tmp/stiva_x2/x"), 16384, "the name is a real directory now");
+    var f = _t_canary("/tmp/stiva_x2_canary");
+    var dest2 = _t_fresh_dir("/tmp/stiva_x2b");
+    var t2 = alloc(8192);
+    var m = _t_tar_add(t2, 0, "y", 50, 511, 0, f);
+    m = _t_tar_add(t2, m, "y/", 53, 511, 0, 0);
+    assert_eq(_stor_extract_tar(t2, m + 1024, dest2), 0, "a trailing slash extracts too");
+    assert_eq(_t_canary_intact(f), 1, "a trailing slash does not reach the target either");
+    return 0;
+}
+
+# A `./` entry names the extraction root. Honouring its mode left the caller's own directory
+# read-only, and `.load-tmp` then survived for the next load to extract into.
+fn _test_tar_root_entry_leaves_dest_alone() {
+    test_group("tar_root_entry_leaves_dest_alone");
+    assert_eq(_stor_name_is_root("."), 1, ". is the root");
+    assert_eq(_stor_name_is_root("./"), 1, "./ is the root");
+    assert_eq(_stor_name_is_root(".//."), 1, ".//. is the root");
+    assert_eq(_stor_name_is_root("./a"), 0, "./a is not");
+    assert_eq(_stor_name_is_root(".a"), 0, ".a is not");
+    var dest = _t_fresh_dir("/tmp/stiva_x3");
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "./", 53, 365, 0, 0);
+    n = _t_tar_add(t, n, "./f", 48, 420, "ok", 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    assert_eq(_t_mode(dest), 493, "dest keeps its own mode");
+    assert_eq(file_exists("/tmp/stiva_x3/f"), 1, "the entry after it landed");
+    return 0;
+}
+
+# Directory modes are deferred, so a read-only directory still takes its own entries, which a
+# real image needs when stiva is not root. The tree must also still be removable.
+fn _test_tar_readonly_dir_takes_its_entries() {
+    test_group("tar_readonly_dir_takes_its_entries");
+    var dest = _t_fresh_dir("/tmp/stiva_x4");
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "ro", 53, 365, 0, 0);
+    n = _t_tar_add(t, n, "ro/sub", 53, 0, 0, 0);
+    n = _t_tar_add(t, n, "ro/f", 48, 420, "data", 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    assert_eq(file_exists("/tmp/stiva_x4/ro/f"), 1, "the file under it landed");
+    assert_eq(_t_mode("/tmp/stiva_x4/ro"), 365, "the directory is read-only afterwards");
+    _stor_remove_dir_all(dest);
+    assert_eq(file_exists(dest), 0, "a read-only tree can still be removed");
+    return 0;
+}
+
+# Hard links used to be skipped, so every file an image stored as one was missing from its rootfs.
+fn _test_tar_hard_links() {
+    test_group("tar_hard_links");
+    var canary = _t_canary("/tmp/stiva_x5_canary");
+    var dest = _t_fresh_dir("/tmp/stiva_x5");
+    var t = alloc(16384);
+    var n = _t_tar_add(t, 0, "a", 48, 420, "shared", 0);
+    n = _t_tar_add(t, n, "b", 49, 420, 0, "a");
+    n = _t_tar_add(t, n, "esc", 49, 420, 0, "../stiva_x5_canary");
+    n = _t_tar_add(t, n, "abs", 49, 420, 0, canary);
+    n = _t_tar_add(t, n, "s", 50, 511, 0, canary);
+    n = _t_tar_add(t, n, "via", 49, 420, 0, "s");
+    n = _t_tar_add(t, n, "s2", 50, 511, 0, "/tmp");
+    n = _t_tar_add(t, n, "thru", 49, 420, 0, "s2/stiva_x5_canary");
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    var buf = alloc(16);
+    var got = file_read_all("/tmp/stiva_x5/b", buf, 15);
+    assert_eq(got, 6, "the link reads the file's bytes");
+    assert_eq(file_exists("/tmp/stiva_x5/esc"), 0, "a link out of dest is skipped");
+    assert_eq(file_exists("/tmp/stiva_x5/abs"), 0, "an absolute link is skipped");
+    assert_eq(_stor_lkind("/tmp/stiva_x5/via"), 0 - 1, "a link to a symlink is skipped");
+    assert_eq(_stor_lkind("/tmp/stiva_x5/thru"), 0 - 1, "a link through a symlink is skipped");
+    assert_eq(_t_canary_intact(canary), 1, "the host file is untouched");
+    return 0;
+}
+
+# Append a PAX 'x' header naming `key`=`value`, and return the next offset.
+fn _t_tar_pax(out, pos, key, value) {
+    var body = strlen(key) + strlen(value) + 2;    # key=value\n
+    var total = body + 1;                          # the space
+    var digits = 1;
+    var v = total + digits;
+    while (v >= 10) {
+        digits = digits + 1;
+        v = v / 10;
+    }
+    total = total + digits;
+    var sb = str_builder_new();
+    str_builder_add_int(sb, total);
+    str_builder_add_cstr(sb, " ");
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, "=");
+    str_builder_add_cstr(sb, value);
+    str_builder_add_cstr(sb, "\n");
+    return _t_tar_add(out, pos, "PaxHeaders/x", 120, 420, str_cstr(str_builder_build(sb)), 0);
+}
+
+# Go's archive/tar, so Docker and BuildKit, leaves a truncated name in the ustar header and the
+# real path in a PAX record. Ignoring the record put the file at the truncated path.
+fn _test_tar_pax_long_name() {
+    test_group("tar_pax_long_name");
+    var seg = "pppppppppppppppppppppppppppppppppppppppppppppppppp";    # 50
+    var p = _stor_cat2(_stor_cat2(_stor_cat2(seg, "/"), seg), "/");
+    p = _stor_cat2(_stor_cat2(p, seg), "/real.txt");
+    var dest = _t_fresh_dir("/tmp/stiva_x6");
+    var t = alloc(16384);
+    var n = _t_tar_pax(t, 0, "path", p);
+    n = _t_tar_add(t, n, "truncated.txt", 48, 420, "ok", 0);
+    n = _t_tar_pax(t, n, "linkpath", "/a/long/link/target");
+    n = _t_tar_add(t, n, "lnk", 50, 511, 0, "short");
+    n = _t_tar_pax(t, n, "path", "../escape");
+    n = _t_tar_add(t, n, "safe.txt", 48, 420, "no", 0);
+    n = _t_tar_add(t, n, "after.txt", 48, 420, "yes", 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the archive extracts");
+    assert_eq(file_exists(_stor_join(dest, p)), 1, "the file is at its PAX path");
+    assert_eq(file_exists("/tmp/stiva_x6/truncated.txt"), 0, "not at the truncated name");
+    var rl = alloc(64);
+    var rn = sys_readlink("/tmp/stiva_x6/lnk", rl, 63);
+    if (rn < 0) { rn = 0; }
+    store8(rl + rn, 0);
+    assert_streq(rl, "/a/long/link/target", "linkpath reaches the symlink");
+    assert_eq(file_exists("/tmp/stiva_x6/safe.txt"), 0, "a PAX path gets the same name checks");
+    assert_eq(file_exists("/tmp/escape"), 0, "and cannot leave dest");
+    assert_eq(file_exists("/tmp/stiva_x6/after.txt"), 1, "a PAX record covers one entry only");
+    return 0;
+}
+
+fn _test_tar_bad_checksum_refused() {
+    test_group("tar_bad_checksum_refused");
+    var dest = _t_fresh_dir("/tmp/stiva_x7");
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "f", 48, 420, "data", 0);
+    store8(t + 1, 120);                        # corrupt the name after sealing
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0 - 1, "a bad checksum fails the extract");
+    assert_eq(file_exists("/tmp/stiva_x7/fx"), 0, "and nothing is written");
+    store8(t + 1, 0);
+    assert_eq(_stor_extract_tar(t, n + 1024, dest), 0, "the sealed header extracts");
+    # The signed sum of historic writers is accepted as well.
+    var t2 = alloc(8192);
+    var m = _t_tar_add(t2, 0, "g", 48, 420, "x", 0);
+    store8(t2 + 200, 200);                     # a high byte: the two sums now differ
+    _t_seal(t2);
+    assert_eq(_stor_extract_tar(t2, m + 1024, dest), 0, "the unsigned sum of a high byte");
+    var sum = _stor_parse_octal(t2 + 148, 8) - 256;
+    _t_write_octal(t2 + 148, 6, sum);
+    assert_eq(_stor_extract_tar(t2, m + 1024, dest), 0, "the signed sum of a high byte");
+    return 0;
+}
+
+# `Config` as a symlink to a host file used to copy that file into a world-readable blob.
+fn _test_archive_member_links_are_not_read() {
+    test_group("archive_member_links_are_not_read");
+    var canary = _t_canary("/tmp/stiva_x8_canary");
+    var root = _t_fresh_dir("/tmp/stiva_x8_root");
+    var store = image_store_new(root);
+    var mj = "[{\"Config\":\"c.json\",\"RepoTags\":[\"evil:1\"],\"Layers\":[\"l.tar\"]}]";
+    var t = alloc(16384);
+    var n = _t_tar_add(t, 0, "manifest.json", 48, 420, mj, 0);
+    n = _t_tar_add(t, n, "c.json", 50, 511, 0, canary);
+    n = _t_tar_add(t, n, "l.tar", 50, 511, 0, canary);
+    var path = "/tmp/stiva_x8.tar";
+    file_write_all(path, t, n + 1024);
+    image_store_load_archive(store, path);
+    var digest = sha256_digest("secret", 6);
+    assert_eq(image_store_has_blob(store, digest), 0, "the host file is not in the store");
+    assert_eq(_t_canary_intact(canary), 1, "and it is untouched");
+    assert_eq(vec_len(image_store_list(store)), 0, "and no image was loaded");
+    return 0;
+}
+
+# A layer shipping `.unpacked` as a symlink used to get its target truncated.
+fn _test_layer_marker_lives_beside_the_layer() {
+    test_group("layer_marker_lives_beside_the_layer");
+    var canary = _t_canary("/tmp/stiva_x9_canary");
+    var root = _t_fresh_dir("/tmp/stiva_x9_root");
+    var store = image_store_new(root);
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, ".unpacked", 50, 511, 0, canary);
+    n = _t_tar_add(t, n, "f", 48, 420, "data", 0);
+    var gz = alloc(16384);
+    var glen = _stor_gzip_compress(t, n + 1024, gz, 16384);
+    var digest = sha256_digest(gz, glen);
+    assert_eq(image_store_store_blob(store, digest, gz, glen) != 0, 1, "blob stored");
+    var layers = vec_new();
+    vec_push(layers, layer_new(digest, glen, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    var dirs = prepare_layers(store, layers);
+    assert(dirs != 0, "prepare ok");
+    if (dirs == 0) { return 0; }
+    assert_eq(_t_canary_intact(canary), 1, "the marker write did not follow the layer's symlink");
+    var d0 = vec_get(dirs, 0);
+    assert_eq(file_exists(_stor_cat2(d0, ".unpacked")), 1, "the marker is beside the layer");
+    # A half-finished unpack, with no marker, is redone rather than trusted.
+    xunlink(_stor_cat2(d0, ".unpacked"));
+    xunlink(_stor_cat2(d0, "/f"));
+    var dirs2 = prepare_layers(store, layers);
+    assert(dirs2 != 0, "prepare again ok");
+    assert_eq(file_exists(_stor_cat2(d0, "/f")), 1, "a layer with no marker is unpacked again");
+    return 0;
+}
+
+# Import a one-file image into a fresh store at `root`. Returns the store.
+fn _t_store_with_image(root) {
+    _t_fresh_dir(root);
+    var store = image_store_new(root);
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "f", 48, 420, "data", 0);
+    var path = _stor_cat2(root, "/in.tar");
+    file_write_all(path, t, n + 1024);
+    assert(image_import(store, path, "app", "v1") != 0, "imported");
+    return store;
+}
+
+# `gc` used to treat an index it could not read as "nothing is referenced", and delete every blob.
+fn _test_gc_refuses_an_index_it_cannot_read() {
+    test_group("gc_refuses_an_index_it_cannot_read");
+    var root = "/tmp/stiva_x10_root";
+    var store = _t_store_with_image(root);
+    var im: Image = vec_get(image_store_list(store), 0);
+    var id = im.id;
+    assert_eq(image_store_gc(store), 0, "a healthy store has nothing to collect");
+    var ipath = _stor_cat2(root, "/index.json");
+    var cell = alloc(8);
+    var good = _stor_read_file(ipath, cell);
+    var goodlen = load64(cell);
+    file_write_all(ipath, "{not json", 9);
+    assert_eq(image_store_gc(store), 0 - 1, "an unparseable index refuses");
+    assert_eq(image_store_has_blob(store, id), 1, "and the blobs survive");
+    assert_eq(image_store_remove(store, id), 0, "remove refuses it too");
+    file_write_all(ipath, good, goodlen);
+    # An index that names a manifest the store no longer has must not lose that image's blobs.
+    var md = _img_manifest_digest(im);
+    xunlink(_img_blob_path(root, md));
+    assert_eq(image_store_gc(store), 0 - 1, "a missing manifest refuses");
+    assert_eq(image_store_has_blob(store, id), 1, "and the config blob survives");
+    return 0;
+}
+
+# An archive names itself, so a control byte in the name would reach the operator's terminal.
+fn _test_ref_name_is_checked() {
+    test_group("ref_name_is_checked");
+    var good = "{\"annotations\":{\"org.opencontainers.image.ref.name\":\"docker.io/a:v1\"}}";
+    var evil = "{\"annotations\":{\"org.opencontainers.image.ref.name\":\"a\\u001b[2Jb\"}}";
+    var spaced = "{\"annotations\":{\"org.opencontainers.image.ref.name\":\"a b\"}}";
+    var g = _il_desc_ref_name(bayan_json_v_parse_buf(good, strlen(good)));
+    assert(g != 0, "a real one reads");
+    if (g != 0) { assert_eq(streq(g, "docker.io/a:v1"), 1, "as itself"); }
+    assert_eq(_il_desc_ref_name(bayan_json_v_parse_buf(evil, strlen(evil))), 0, "an escape does not");
+    assert_eq(_il_desc_ref_name(bayan_json_v_parse_buf(spaced, strlen(spaced))), 0, "nor a space");
+    return 0;
+}
+
+# `prune` removes a set in one pass. Each image's own blobs go, and the others' stay.
+fn _test_remove_set_keeps_the_rest() {
+    test_group("remove_set_keeps_the_rest");
+    var root = "/tmp/stiva_x14_root";
+    var store = _t_store_with_image(root);
+    var t = alloc(8192);
+    var n = _t_tar_add(t, 0, "g", 48, 420, "other", 0);
+    var path = _stor_cat2(root, "/in2.tar");
+    file_write_all(path, t, n + 1024);
+    assert(image_import(store, path, "other", "v1") != 0, "imported the second");
+    var images = image_store_list(store);
+    assert_eq(vec_len(images), 2, "two images");
+    var a: Image = vec_get(images, 0);
+    var b: Image = vec_get(images, 1);
+    var aid = a.id;
+    var bid = b.id;
+    var ids = map_new();
+    map_set(ids, aid, 1);
+    assert_eq(image_store_remove_set(store, ids), 1, "removed");
+    assert_eq(image_store_has_blob(store, aid), 0, "its blobs are gone");
+    assert_eq(image_store_has_blob(store, bid), 1, "the other's are not");
+    assert_eq(vec_len(image_store_list(store)), 1, "one image left");
+    var none = map_new();
+    map_set(none, "sha256:nope", 1);
+    assert_eq(image_store_remove_set(store, none), 0 - 1, "nothing matched");
+    return 0;
+}
+
+# The file holds passwords. It used to land at 0644 in a 0755 directory, through a planted link.
+fn _test_credentials_file_is_private() {
+    test_group("credentials_file_is_private");
+    var dir = "/tmp/stiva_x12/.stiva";
+    _stor_remove_dir_all("/tmp/stiva_x12");
+    sys_mkdir("/tmp/stiva_x12", 493);
+    var path = "/tmp/stiva_x12/.stiva/credentials.json";
+    var store = map_new();
+    credential_store_set(store, "reg.test", "user", "pw");
+    assert_eq(_credential_store_save_to(store, path), 0, "saved");
+    assert_eq(_t_mode(path), 384, "the file is 0600");
+    assert_eq(_t_mode(dir), 448, "the directory is 0700");
+    var canary = _t_canary("/tmp/stiva_x12_canary");
+    xunlink(path);
+    sys_symlink(canary, path);
+    assert_eq(_credential_store_save_to(store, path), 0, "saved over a planted link");
+    assert_eq(_t_canary_intact(canary), 1, "the link's target is untouched");
+    assert_eq(_stor_lkind(path), 32768, "the name is a regular file now");
+    assert_eq(_credential_store_save_to(store, 0), 0 - 1, "no path, no save");
+    return 0;
+}
+
+# sankoch's one-shot gzip_decompress stops at 16 MiB whatever buffer it gets, so every gzip layer
+# over that size failed to unpack. A real base image is over it.
+fn _test_big_layers_unpack() {
+    test_group("big_layers_unpack");
+    var fsize = 20971520;
+    var tar = alloc(fsize + 8192);
+    var tlen = _t_build_multi_tar(tar, 1, fsize);
+    # Incompressible, as a real layer mostly is: past 1000:1 the decompression-bomb limit is
+    # what answers, and that limit is not what this test is about.
+    var x = 88172645463325252;
+    var w = 512;
+    while (w + 8 <= fsize) {
+        x = x * 6364136223846793005 + 1442695040888963407;
+        store64(tar + w, x);
+        w = w + 8;
+    }
+    var gz = alloc(fsize + 65536);
+    var glen = _stor_gzip_compress(tar, tlen, gz, fsize + 65536);
+    assert(glen > 0, "compressed");
+    var d1 = _t_fresh_dir("/tmp/stiva_x13");
+    assert_eq(_stor_unpack_gz_bytes(gz, glen, d1), 0, "a 20 MiB gzip layer unpacks");
+    var c1 = alloc(8);
+    _stor_read_file("/tmp/stiva_x13/bin/f0", c1);
+    assert_eq(load64(c1), fsize, "every byte of it");
+    var zs = alloc(fsize + 65536);
+    var zlen = zstd_compress(tar, tlen, zs, fsize + 65536);
+    assert(zlen > 0, "compressed with zstd");
+    var d2 = _t_fresh_dir("/tmp/stiva_x13");
+    assert_eq(_stor_unpack_zstd_bytes(zs, zlen, d2), 0, "a 20 MiB zstd layer unpacks");
+    var c2 = alloc(8);
+    _stor_read_file("/tmp/stiva_x13/bin/f0", c2);
+    assert_eq(load64(c2), fsize, "every byte of it");
+    return 0;
+}
+
+# Layers keep the setuid bits an image carries, so nobody else may reach them.
+fn _test_layers_dir_is_private() {
+    test_group("layers_dir_is_private");
+    var root = _t_fresh_dir("/tmp/stiva_x11_root");
+    image_store_new(root);
+    assert_eq(_t_mode("/tmp/stiva_x11_root/layers"), 448, "a new store's layers are 0700");
+    sys_chmod("/tmp/stiva_x11_root/layers", 493);
+    image_store_new(root);
+    assert_eq(_t_mode("/tmp/stiva_x11_root/layers"), 448, "an existing 0755 is tightened");
+    assert_eq(_t_mode(root), 493, "the root the user chose is left alone");
     return 0;
 }
 
 # v3.0.3 docker-archive read: a `docker save` layout (manifest.json + config +
 # uncompressed layer tars) is converted into a valid OCI image on load.
-fn test_docker_archive_load() {
+fn _test_docker_archive_load() {
     test_group("docker_archive_load");
     var d = "/tmp/stiva_dka_src";
     _stor_remove_dir_all(d);
     sys_mkdir(d, 493);
-    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\"]}}";
+    var cfg = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"sha256:aaa0000000000000000000000000000000000000000000000000000000000000\"]}}";   #skip-lint
     file_write_all(_stor_cat2(d, "/config.json"), cfg, strlen(cfg));
     var lay = "fake-layer-bytes";
     file_write_all(_stor_cat2(d, "/layer.tar"), lay, strlen(lay));
@@ -1134,7 +1592,7 @@ fn test_docker_archive_load() {
 
 # Security: a docker manifest.json whose Config/Layers escape the extracted temp
 # dir (absolute or "..") must NOT read arbitrary host files — the image is skipped.
-fn test_docker_archive_rejects_traversal() {
+fn _test_docker_archive_rejects_traversal() {
     test_group("docker_archive_rejects_traversal");
     var d = "/tmp/stiva_dt_src";
     _stor_remove_dir_all(d);
@@ -1153,19 +1611,20 @@ fn test_docker_archive_rejects_traversal() {
 }
 
 # prepare_layers on a store with no matching blob returns 0 (LayerUnpack).
-fn test_prepare_layers_missing_blob() {
+fn _test_prepare_layers_missing_blob() {
     test_group("prepare_layers_missing_blob");
     var root = "/tmp/stiva-prep-missing";
     var store = image_store_new(root);
     assert(store != 0, "store created");
     var layers = vec_new();
-    vec_push(layers, layer_new("sha256:d000000000000000000000000000000000000000000000000000000000000000", 0, "application/vnd.oci.image.layer.v1.tar+gzip"));
+    vec_push(layers, layer_new("sha256:d000000000000000000000000000000000000000000000000000000000000000", 0,
+        "application/vnd.oci.image.layer.v1.tar+gzip"));
     assert_eq(prepare_layers(store, layers), 0, "missing blob => 0");
     return 0;
 }
 
 # prepare_layers unpacks a real gzip'd layer, then dedups on a second call.
-fn test_prepare_layers_dedup() {
+fn _test_prepare_layers_dedup() {
     test_group("prepare_layers_dedup");
     var root = "/tmp/stiva-prep-dedup";
     var store = image_store_new(root);
@@ -1192,8 +1651,8 @@ fn test_prepare_layers_dedup() {
     var d0 = vec_get(dirs, 0);
     var f0 = _stor_cat2(d0, "/file.txt");
     assert_eq(file_exists(f0), 1, "file.txt extracted");
-    var m0 = _stor_cat2(d0, "/.unpacked");
-    assert_eq(file_exists(m0), 1, ".unpacked marker written");
+    var m0 = _stor_cat2(d0, ".unpacked");
+    assert_eq(file_exists(m0), 1, ".unpacked marker written beside the layer");
 
     # Second prepare: dedup (marker present → skip), same dir returned.
     var layers2 = vec_new();
@@ -1211,7 +1670,7 @@ fn test_prepare_layers_dedup() {
 # collision, non-colliding entries from both survive, and mode / symlink-ness
 # are preserved — an image whose /bin/sh lost its exec bit in the copy would
 # still be an unrunnable container.
-fn test_flatten_layers_stacks_and_preserves_perms() {
+fn _test_flatten_layers_stacks_and_preserves_perms() {
     test_group("flatten_layers_stacks_and_preserves_perms");
     var l0 = "/tmp/stiva_flat_l0";
     var l1 = "/tmp/stiva_flat_l1";
@@ -1223,7 +1682,7 @@ fn test_flatten_layers_stacks_and_preserves_perms() {
     sys_mkdir(l1, 493);
 
     # lower: an executable, a plain file the upper layer overwrites, a nested
-    # file, a symlink, and prepare_layers' own .unpacked bookkeeping marker.
+    # file, and a symlink.
     var sh = _stor_cat2(l0, "/run.sh");
     file_write_all(sh, "lower", 5);
     sys_chmod(sh, 493);                        # 0o755
@@ -1232,12 +1691,10 @@ fn test_flatten_layers_stacks_and_preserves_perms() {
     sys_mkdir(_stor_cat2(l0, "/etc"), 493);
     file_write_all(_stor_cat2(l0, "/etc/nested.conf"), "deep", 4);
     sys_symlink("run.sh", _stor_cat2(l0, "/link"));
-    file_write_all(_stor_cat2(l0, "/.unpacked"), "", 0);
 
     # upper: overwrites shared.txt, adds its own file.
     file_write_all(_stor_cat2(l1, "/shared.txt"), "from-upper", 10);
     file_write_all(_stor_cat2(l1, "/only-upper.txt"), "new", 3);
-    file_write_all(_stor_cat2(l1, "/.unpacked"), "", 0);
 
     var layers = vec_new();
     vec_push(layers, l0);
@@ -1258,19 +1715,18 @@ fn test_flatten_layers_stacks_and_preserves_perms() {
     # Perms + symlink survive.
     var sb = alloc(144);
     assert_eq(sys_lstat(_stor_cat2(dst, "/run.sh"), sb), 0, "lstat run.sh");
-    assert_eq(load64(sb + 24) & 4095, 493, "exec bit preserved (0755)");
+    assert_eq(_stor_st_mode(sb) & 4095, 493, "exec bit preserved (0755)");
     assert_eq(sys_lstat(_stor_cat2(dst, "/link"), sb), 0, "lstat link");
-    assert_eq((load64(sb + 24) & 61440) == 40960, 1, "symlink copied as a link, not dereferenced");
+    assert_eq((_stor_st_mode(sb) & 61440) == 40960, 1, "symlink copied as a link, not dereferenced");
 
     # The unpack marker is bookkeeping, not image content.
-    assert_eq(file_exists(_stor_cat2(dst, "/.unpacked")), 0, ".unpacked marker not copied");
     return 0;
 }
 
 # An image with no layers flattens to an empty rootfs and SUCCEEDS — "this image
 # has no filesystem" is a different fact from "the copy failed", and conflating
 # them would fail every create for a layerless image.
-fn test_flatten_layers_empty() {
+fn _test_flatten_layers_empty() {
     test_group("flatten_layers_empty");
     var dst = "/tmp/stiva_flat_empty";
     _stor_remove_dir_all(dst);
@@ -1287,7 +1743,7 @@ fn test_flatten_layers_empty() {
 # displacing unlink succeeds and the guard was never exercised. These cover the
 # case that actually escaped: a read-only parent makes the unlink fail, and the
 # surviving symlink was then chmod'd, descended into, and written through.
-fn test_flatten_layers_escape_readonly_parent_file() {
+fn _test_flatten_layers_escape_readonly_parent_file() {
     test_group("flatten_layers_escape_readonly_parent_file");
     var base = "/tmp/stiva_flat_ro";
     _stor_remove_dir_all(base);
@@ -1328,7 +1784,7 @@ fn test_flatten_layers_escape_readonly_parent_file() {
     return 0;
 }
 
-fn test_flatten_layers_readonly_dir_still_populates() {
+fn _test_flatten_layers_readonly_dir_still_populates() {
     test_group("flatten_layers_readonly_dir_still_populates");
     # A 0555 directory is ordinary image content (every /nix/store path). If its
     # mode is applied BEFORE its children are written, the whole create fails —
@@ -1355,7 +1811,7 @@ fn test_flatten_layers_readonly_dir_still_populates() {
     return 0;
 }
 
-fn test_flatten_layers_unreadable_file_is_skipped() {
+fn _test_flatten_layers_unreadable_file_is_skipped() {
     test_group("flatten_layers_unreadable_file_is_skipped");
     # A mode-0000 file is legal image content; under overlayfs it simply reads
     # as denied inside the container. Failing the create would make an
@@ -1379,7 +1835,7 @@ fn test_flatten_layers_unreadable_file_is_skipped() {
     return 0;
 }
 
-fn test_flatten_layers_long_symlink_target() {
+fn _test_flatten_layers_long_symlink_target() {
     test_group("flatten_layers_long_symlink_target");
     # A target over the old 1023-byte buffer was silently truncated into a link
     # to a DIFFERENT path, with a success return.
@@ -1411,7 +1867,7 @@ fn test_flatten_layers_long_symlink_target() {
     return 0;
 }
 
-fn test_flatten_layers_no_symlink_escape() {
+fn _test_flatten_layers_no_symlink_escape() {
     test_group("flatten_layers_no_symlink_escape");
     var l0 = "/tmp/stiva_flat_e0";
     var l1 = "/tmp/stiva_flat_e1";
@@ -1436,7 +1892,7 @@ fn test_flatten_layers_no_symlink_escape() {
 
     var sb = alloc(144);
     assert_eq(sys_lstat(_stor_cat2(dst, "/usr"), sb), 0, "lstat usr");
-    assert_eq((load64(sb + 24) & 61440) == 16384, 1, "usr is a real directory, not the lower symlink");
+    assert_eq((_stor_st_mode(sb) & 61440) == 16384, 1, "usr is a real directory, not the lower symlink");
     assert_eq(file_exists(_stor_cat2(dst, "/usr/pwned")), 1, "file landed inside the rootfs");
     assert_eq(file_exists(_stor_cat2(outside, "/pwned")), 0, "nothing written through the symlink");
     return 0;
@@ -1445,7 +1901,7 @@ fn test_flatten_layers_no_symlink_escape() {
 # End-to-end over the real unpack path: prepare_layers unpacks a gzip'd layer,
 # flatten_layers turns it into a rootfs. This is the sequence
 # container_manager_create runs when the overlay mount is unavailable.
-fn test_flatten_layers_from_prepared() {
+fn _test_flatten_layers_from_prepared() {
     test_group("flatten_layers_from_prepared");
     var root = "/tmp/stiva-flat-prep";
     _stor_remove_dir_all(root);
@@ -1480,7 +1936,7 @@ fn test_flatten_layers_from_prepared() {
 # verify_integrity on an untampered store reports no corruption (rust-old:
 # verify_integrity — no #[cfg(test)] in the oracle, so this exercises the
 # happy path the Rust doc promises).
-fn test_verify_integrity_clean() {
+fn _test_verify_integrity_clean() {
     test_group("verify_integrity_clean");
     var root = "/tmp/stiva-verify-clean";
     var store = image_store_new(root);
@@ -1495,7 +1951,7 @@ fn test_verify_integrity_clean() {
 
 # verify_integrity detects a blob whose on-disk contents no longer hash to its
 # content-addressed name, reporting its digest.
-fn test_verify_integrity_detects_corruption() {
+fn _test_verify_integrity_detects_corruption() {
     test_group("verify_integrity_detects_corruption");
     var root = "/tmp/stiva-verify-corrupt";
     var store = image_store_new(root);
@@ -1512,8 +1968,6 @@ fn test_verify_integrity_detects_corruption() {
     assert_eq(streq(vec_get(corrupted, 0), digest), 1, "reports the digest");
     return 0;
 }
-
-
 
 # ══ OCI whiteouts ════════════════════════════════════════
 # A layer deletes a path from the layers below it by shipping `.wh.<name>`, or
@@ -1532,7 +1986,7 @@ fn _wh_exists(dir, name) {
     return file_exists(_stor_cat2(_stor_cat2(dir, "/"), name));
 }
 
-fn test_whiteout_removes_a_lower_layer_file() {
+fn _test_whiteout_removes_a_lower_layer_file() {
     test_group("whiteout_removes_a_lower_layer_file");
     var l0 = "/tmp/stiva-wh-l0";
     var l1 = "/tmp/stiva-wh-l1";
@@ -1555,7 +2009,7 @@ fn test_whiteout_removes_a_lower_layer_file() {
     return 0;
 }
 
-fn test_whiteout_removes_a_lower_layer_directory() {
+fn _test_whiteout_removes_a_lower_layer_directory() {
     test_group("whiteout_removes_a_lower_layer_directory");
     var l0 = "/tmp/stiva-wh2-l0";
     var l1 = "/tmp/stiva-wh2-l1";
@@ -1571,7 +2025,7 @@ fn test_whiteout_removes_a_lower_layer_directory() {
     return 0;
 }
 
-fn test_whiteout_opaque_hides_inherited_contents() {
+fn _test_whiteout_opaque_hides_inherited_contents() {
     test_group("whiteout_opaque_hides_inherited_contents");
     var l0 = "/tmp/stiva-wh3-l0";
     var l1 = "/tmp/stiva-wh3-l1";
@@ -1594,7 +2048,7 @@ fn test_whiteout_opaque_hides_inherited_contents() {
     return 0;
 }
 
-fn test_whiteout_name_cannot_escape() {
+fn _test_whiteout_name_cannot_escape() {
     test_group("whiteout_name_cannot_escape");
     # The target name comes from an untrusted image. `.wh.` + "../../etc" would
     # otherwise hand _stor_replace_existing a path outside the rootfs.
@@ -1622,7 +2076,7 @@ fn test_whiteout_name_cannot_escape() {
     return 0;
 }
 
-fn test_whiteout_is_per_layer_not_global() {
+fn _test_whiteout_is_per_layer_not_global() {
     test_group("whiteout_is_per_layer_not_global");
     # A whiteout only hides layers BELOW it. A later layer re-adding the same
     # name must win.
@@ -1651,68 +2105,84 @@ fn test_whiteout_is_per_layer_not_global() {
     return 0;
 }
 
+# Runs every case in store.tcyr, and returns the failure count as the exit status.
 fn main() {
-    test_oci_config_object_minimal();
-    test_oci_config_object_fields();
-    test_oci_config_object_repeated_keys();
-    test_oci_config_build_shape();
-    test_il_oci_layout_version();
-    test_il_parse_full_ref();
-    test_platform_passthrough();
-    test_oci_archive_save_load();
-    test_registry_credential();
-    test_credential_store_set_get_remove();
-    test_credential_store_to_config();
-    test_credential_store_json_round_trip();
-    test_credential_store_save_load();
-    test_credential_store_default_path();
-    test_credential_store_load_malformed();
-    test_parse_volume_rw();
-    test_parse_volume_ro();
-    test_parse_volume_invalid();
-    test_parse_volume_too_many_parts();
-    test_parse_volume_rw_explicit();
-    test_parse_named_volume();
-    test_parse_volume_empty_string();
-    test_setup_overlay_no_layers();
-    test_overlay_paths_fields();
-    test_mount_volumes_empty();
-    test_stor_parse_octal();
-    test_unpack_layer_gz_roundtrip();
-    test_gzip_compress_multi_mb_roundtrip();
-    test_unpack_layer_multi_mb();
-    test_image_import_multi_mb();
-    test_unpack_layer_missing_blob();
-    test_unpack_layer_not_gzip();
-    test_unpack_layer_zstd_roundtrip();
-    test_unpack_layer_zstd_corrupt();
-    test_unpack_layer_zstd_fcs_bomb();
-    test_stor_decomp_limit();
-    test_unpack_layer_gz_bomb();
-    test_tar_perms_roundtrip();
-    test_tar_extract_rejects_traversal();
-    test_tar_hardening();
-    test_tar_extract_rejects_bad_size();
-    test_tar_longname();
-    test_docker_archive_load();
-    test_docker_archive_rejects_traversal();
-    test_prepare_layers_missing_blob();
-    test_prepare_layers_dedup();
-    test_flatten_layers_stacks_and_preserves_perms();
-    test_flatten_layers_empty();
-    test_flatten_layers_no_symlink_escape();
-    test_flatten_layers_escape_readonly_parent_file();
-    test_flatten_layers_readonly_dir_still_populates();
-    test_flatten_layers_unreadable_file_is_skipped();
-    test_flatten_layers_long_symlink_target();
-    test_flatten_layers_from_prepared();
-    test_verify_integrity_clean();
-    test_verify_integrity_detects_corruption();
-    test_whiteout_removes_a_lower_layer_file();
-    test_whiteout_removes_a_lower_layer_directory();
-    test_whiteout_opaque_hides_inherited_contents();
-    test_whiteout_name_cannot_escape();
-    test_whiteout_is_per_layer_not_global();
+    _test_oci_config_object_minimal();
+    _test_oci_config_object_fields();
+    _test_oci_config_object_repeated_keys();
+    _test_oci_config_build_shape();
+    _test_il_oci_layout_version();
+    _test_il_parse_full_ref();
+    _test_platform_passthrough();
+    _test_oci_archive_save_load();
+    _test_registry_credential();
+    _test_credential_store_set_get_remove();
+    _test_credential_store_to_config();
+    _test_credential_store_json_round_trip();
+    _test_credential_store_save_load();
+    _test_credential_store_default_path();
+    _test_credential_store_load_malformed();
+    _test_parse_volume_rw();
+    _test_parse_volume_ro();
+    _test_parse_volume_invalid();
+    _test_parse_volume_too_many_parts();
+    _test_parse_volume_rw_explicit();
+    _test_parse_named_volume();
+    _test_parse_volume_empty_string();
+    _test_setup_overlay_no_layers();
+    _test_overlay_paths_fields();
+    _test_mount_volumes_empty();
+    _test_stor_parse_octal();
+    _test_unpack_layer_gz_roundtrip();
+    _test_gzip_compress_multi_mb_roundtrip();
+    _test_unpack_layer_multi_mb();
+    _test_image_import_multi_mb();
+    _test_unpack_layer_missing_blob();
+    _test_unpack_layer_not_gzip();
+    _test_unpack_layer_zstd_roundtrip();
+    _test_unpack_layer_zstd_corrupt();
+    _test_unpack_layer_zstd_fcs_bomb();
+    _test_stor_decomp_limit();
+    _test_unpack_layer_gz_bomb();
+    _test_tar_perms_roundtrip();
+    _test_tar_extract_rejects_traversal();
+    _test_tar_hardening();
+    _test_tar_extract_rejects_bad_size();
+    _test_tar_longname();
+    _test_tar_no_write_through_symlink_under_readonly_dir();
+    _test_tar_dir_entry_never_chmods_through_a_symlink();
+    _test_tar_root_entry_leaves_dest_alone();
+    _test_tar_readonly_dir_takes_its_entries();
+    _test_tar_hard_links();
+    _test_tar_pax_long_name();
+    _test_tar_bad_checksum_refused();
+    _test_archive_member_links_are_not_read();
+    _test_layer_marker_lives_beside_the_layer();
+    _test_gc_refuses_an_index_it_cannot_read();
+    _test_layers_dir_is_private();
+    _test_credentials_file_is_private();
+    _test_remove_set_keeps_the_rest();
+    _test_ref_name_is_checked();
+    _test_big_layers_unpack();
+    _test_docker_archive_load();
+    _test_docker_archive_rejects_traversal();
+    _test_prepare_layers_missing_blob();
+    _test_prepare_layers_dedup();
+    _test_flatten_layers_stacks_and_preserves_perms();
+    _test_flatten_layers_empty();
+    _test_flatten_layers_no_symlink_escape();
+    _test_flatten_layers_escape_readonly_parent_file();
+    _test_flatten_layers_readonly_dir_still_populates();
+    _test_flatten_layers_unreadable_file_is_skipped();
+    _test_flatten_layers_long_symlink_target();
+    _test_flatten_layers_from_prepared();
+    _test_verify_integrity_clean();
+    _test_verify_integrity_detects_corruption();
+    _test_whiteout_removes_a_lower_layer_file();
+    _test_whiteout_removes_a_lower_layer_directory();
+    _test_whiteout_opaque_hides_inherited_contents();
+    _test_whiteout_name_cannot_escape();
+    _test_whiteout_is_per_layer_not_global();
     return assert_summary();
 }
 

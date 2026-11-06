@@ -12,12 +12,8 @@
 #   - available_backends   (which pasta / which slirp4netns)
 #   - select_backend       (preference resolution)
 #
-# The async process-spawning surface (RootlessNetworkHandle wrapping a
-# tokio::process::Child, start_rootless_network, stop_rootless_network,
-# start_slirp4netns, start_pasta, add_slirp_port_forwards) depends on the
-# async process runtime, UNIX-socket JSON RPC (serde_json) and filesystem
-# cleanup that are not in the ported base — they land in the DEFERRED
-# block at the bottom (same pattern as src/oci.cyr).
+# The oracle's tokio process handles became a plain fork+exec (start_rootless_network and the
+# helpers below it), and slirp4netns's port forwards go over its UNIX-socket JSON API.
 #
 # Error mapping (mirrors error.cyr): the Rust
 # `Err(StivaError::RootlessNetwork(...))` maps to the integer code
@@ -176,6 +172,8 @@ fn parse_port_mappings(specs) {
         if (slash >= 0) {
             port_part = _rl_slice(spec, 0, slash);
             protocol = _rl_slice(spec, slash + 1, strlen(spec));
+            # It goes on to pasta's argv and into slirp4netns's JSON, and neither takes anything else.
+            if (streq(protocol, "tcp") == 0 && streq(protocol, "udp") == 0) { return 0; }
         }
 
         # split_once(':') → (host, container), else single port for both.
@@ -424,13 +422,13 @@ fn _rl_spawn_detached(args, log_path) {
             sys_close(devnull);
         }
         if (log_path != 0) {
-            var lf = sys_open(log_path, 1089, 384);          # O_WRONLY|O_CREAT|O_APPEND, 0600
+            var lf = sys_open(log_path, O_WRONLY | O_CREAT | O_APPEND, 384);
             if (lf >= 0) { sys_dup2(lf, 2); sys_close(lf); }
         }
         # CVE-2024-21626: never hand inherited host fds to a child that outlives
         # this process.
         var fd = 3;
-        while (fd < 1024) { sys_close(fd); fd = fd + 1; }
+        _stor_cloexec_fds();
         sys_execve(vec_get(args, 0), argv, envp);
         sys_exit(127);
     }
@@ -490,17 +488,31 @@ fn _rl_start_slirp4netns(bin, pid, port_mappings, log_path) {
 #
 # pasta takes port mappings as ARGV flags, so it needs no API socket at all —
 # which is why it is preferred when mappings are present.
+#
+# ⚠ pasta's defaults suit a desktop, not a sandbox. Without these flags it forwards every port
+# the host binds into the container (`-T`/`-U auto`), publishes every port the container binds on
+# the host (`-t`/`-u auto`), and maps the gateway address onto the host's loopback, so a payload
+# could reach anything listening on 127.0.0.1. `--config-net` is what configures the interface when
+# pasta attaches to a PID that is already running. These are the flags Podman passes, per passt(1).
 fn _rl_start_pasta(bin, pid, port_mappings, log_path) {
     var args = vec_new();
     vec_push(args, bin);
     vec_push(args, "--ns-ifname");
     vec_push(args, "eth0");
+    vec_push(args, "--config-net");
+    vec_push(args, "--no-map-gw");
+    vec_push(args, "-T");
+    vec_push(args, "none");
+    vec_push(args, "-U");
+    vec_push(args, "none");
+    var tcp = 0;
+    var udp = 0;
     if (port_mappings != 0) {
         var i = 0;
         while (i < vec_len(port_mappings)) {
             var m = vec_get(port_mappings, i);
             var flag = "-t";
-            if (streq(PortMapping_protocol(m), "udp") == 1) { flag = "-u"; }
+            if (streq(PortMapping_protocol(m), "udp") == 1) { flag = "-u"; udp = 1; } else { tcp = 1; }
             vec_push(args, flag);
             var sb = str_builder_new();
             str_builder_add_int(sb, PortMapping_host_port(m));
@@ -509,6 +521,15 @@ fn _rl_start_pasta(bin, pid, port_mappings, log_path) {
             vec_push(args, str_cstr(str_builder_build(sb)));
             i = i + 1;
         }
+    }
+    # A protocol with a mapping is already explicit; one without would fall back to `auto`.
+    if (tcp == 0) {
+        vec_push(args, "-t");
+        vec_push(args, "none");
+    }
+    if (udp == 0) {
+        vec_push(args, "-u");
+        vec_push(args, "none");
     }
     vec_push(args, _rl_int_cstr(pid));
     var child = _rl_spawn_detached(args, log_path);
@@ -598,7 +619,7 @@ fn start_rootless_network(preference, pid, port_mappings, log_path) {
         }
     }
     var backend = select_backend(want);
-    if (backend == NETWORK_ROOTLESS_BACKEND_AUTO) {
+    if (backend < 0) {
         stiva_err_print(STIVA_ERR_ROOTLESS_NETWORK,
           "no rootless network backend available (install slirp4netns or pasta)");
         return 0;
@@ -641,32 +662,3 @@ fn stop_rootless_network(h) {
     if (sock != 0) { sys_unlink(sock); }
     return 0;
 }
-
-# ── NOT PORTED ──
-# rust-old/src/network/rootless.rs also defines the async, OS-process-
-# coupled surface — these wrap tokio::process::Child, UNIX-socket JSON
-# RPC (serde_json), std::env::temp_dir and filesystem cleanup, none of
-# which exist in the ported base yet:
-#
-#   struct RootlessNetworkHandle { child, backend, api_socket }
-#   impl RootlessNetworkHandle { fn backend(&self) -> &RootlessNetworkBackend }
-#
-#   async fn start_rootless_network(
-#       backend: &RootlessNetworkBackend,
-#       container_pid: u32,
-#       port_mappings: &[PortMapping],
-#   ) -> Result<RootlessNetworkHandle, StivaError>
-#
-#   async fn stop_rootless_network(
-#       handle: &mut RootlessNetworkHandle,
-#   ) -> Result<(), StivaError>
-#
-#   async fn start_slirp4netns(pid: u32, port_mappings: &[PortMapping])
-#       -> Result<RootlessNetworkHandle, StivaError>
-#   async fn add_slirp_port_forwards(sock_path: &Path,
-#       port_mappings: &[PortMapping]) -> Result<(), StivaError>
-#   async fn start_pasta(pid: u32, port_mappings: &[PortMapping])
-#       -> Result<RootlessNetworkHandle, StivaError>
-#
-# All fallible paths map to STIVA_ERR_ROOTLESS_NETWORK. Tracked in the
-# roadmap alongside the async/process-spawn runtime port.

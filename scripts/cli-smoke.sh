@@ -511,11 +511,47 @@ else
     # The container's exit code becomes stiva's, the way docker exec behaves.
     "$STIVA" exec execsmoke /bin/errw >/dev/null 2>&1
     assert_exit "the command's exit code is stiva's exit code" 3 "$?"
+    # What a write to a cgroup does, it does to everything in it, and this one holds this script.
+    out="$(run pause execsmoke 2>&1)"
+    assert_contains "pause refuses a cgroup it shares" "shares its cgroup" "$out"
     run stop execsmoke >/dev/null 2>&1
     # A stopped container must refuse, not hang or exec on the host.
     out="$(run exec execsmoke /bin/true 2>&1)"
     assert_contains "exec on a stopped container refuses" "not running" "$out"
+
+    # `wait` used to answer at once for a running container, and say 0.
+    run run -d --name waitsmoke local/demo:v1 /bin/sleeper >/dev/null 2>&1
+    ( sleep 1; "$STIVA" stop waitsmoke >/dev/null 2>&1 ) &
+    began=$SECONDS
+    "$STIVA" wait waitsmoke >/dev/null 2>&1
+    if [ $((SECONDS - began)) -ge 1 ]; then ok "wait waits for a detached container"
+    else bad "wait waits for a detached container" "returned in $((SECONDS - began)) s"; fi
+    wait
 fi
+
+# A second root, for records a command should never have written itself.
+ODD="$(mktemp -d)"
+trap 'rm -rf "$ROOT" "$WORK" "$ODD"' EXIT
+printf '[{"id":"odd1","name":"na\\u001b[2Jme","image_id":"","image_ref":"im\\u001b]0;x","state":"Stopped"}]' \
+    > "$ODD/state.json"
+out="$(STIVA_ROOT="$ODD" "$STIVA" ps -a 2>/dev/null)"
+assert_contains "ps replaces control bytes in a name" "na?[2Jme" "$out"
+assert_contains "and in an image reference" "im?]0;x" "$out"
+assert_absent "so nothing reaches the terminal" "$(printf '\033')" "$out"
+
+# One stray byte used to mean the next add or check wrote the whole schedule away.
+printf '{"jobs":[{"name":5}]}' > "$ODD/cron.json"
+STIVA_ROOT="$ODD" "$STIVA" cron ls >/dev/null 2>&1
+assert_exit "cron ls refuses a schedule it cannot read" 1 "$?"
+STIVA_ROOT="$ODD" "$STIVA" cron add --schedule '* * * * *' j img >/dev/null 2>&1
+assert_exit "cron add refuses to save over it" 1 "$?"
+STIVA_ROOT="$ODD" "$STIVA" cron check >/dev/null 2>&1
+assert_exit "cron check refuses to run from it" 1 "$?"
+assert_contains "and the file is as it was" '"name":5' "$(cat "$ODD/cron.json")"
+
+# A failure used to exit 1 and say nothing.
+out="$(STIVA_ROOT="$ODD" "$STIVA" export odd1 "$WORK/odd.tar" 2>&1 | grep -v '^\[[0-9]*\] \[')"
+assert_contains "export says why it failed" "cannot read" "$out"
 
 printf '\n────────────────────────────\n'
 printf '  %d passed, %d failed\n' "$PASS" "$FAIL"

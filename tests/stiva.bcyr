@@ -30,8 +30,10 @@ include "src/encrypted.cyr"
 include "src/runtime.cyr"
 include "src/container.cyr"
 
+# An empty body, so the timer's own cost can be read off the report.
 fn bench_noop(): i64 { return 0; }
 
+# Runs every benchmark in stiva.bcyr.
 fn main(): i64 {
     alloc_init();
     var b = bench_new("noop");
@@ -56,13 +58,15 @@ fn main(): i64 {
     bench_report(bc);
 
     # A2: OCI manifest assembly (config + one layer descriptor) + compact serialize.
-    var cfgd = descriptor_new(media_oci_config(), "sha256:e93fbbab999657e921e61a27fbacde563f2428130ec3532c1641def8cbac75f9", 163);
+    var cfgd = descriptor_new(media_oci_config(),
+      "sha256:e93fbbab999657e921e61a27fbacde563f2428130ec3532c1641def8cbac75f9", 163);
     var bm = bench_new("oci_manifest_to_jv+serialize");
     bench_batch_start(bm);
     var k = 0;
     while (k < 100000) {
         var ld = vec_new();
-        vec_push(ld, descriptor_new(media_oci_layer(), "sha256:3cb0b54b0805a060f557bfec1ea2b40ccd42d49581860e2dcd9cf7b2b1a8aa34", 153));
+        vec_push(ld, descriptor_new(media_oci_layer(),
+            "sha256:3cb0b54b0805a060f557bfec1ea2b40ccd42d49581860e2dcd9cf7b2b1a8aa34", 153));
         var man = oci_manifest_new(cfgd, ld);
         var mm: OciManifest = man;
         mm.media_type = media_oci_manifest();

@@ -73,9 +73,13 @@ fn content_part_resource(uri, mime_type, text) {
     return p;
 }
 
+# The kind of a content part.
 fn content_part_kind(p) { return load64(p); }
+# The text of a text part.
 fn content_part_text_of(p) { return load64(p + 8); }
+# The URI of a resource part.
 fn content_part_uri(p) { return load64(p + 16); }
+# The media type of a resource part.
 fn content_part_mime_type(p) { return load64(p + 24); }
 
 # ── McpResult ───────────────────────────
@@ -90,7 +94,9 @@ struct McpResult {
     content;
 }
 
+# 1 if the tool call succeeded.
 fn mcp_result_success(r) { return load64(r); }
+# The result's content parts, a vec.
 fn mcp_result_content(r) { return load64(r + 8); }
 
 # Create a success result with text content
@@ -142,7 +148,8 @@ fn mcp_result_err(message) {
 fn tool_list() {
     var tools = vec_new();
 
-    # stiva_pull — read-only
+    # stiva_pull — writes the store and talks to the network, so it is not read-only, but pulling
+    # the same reference twice changes nothing and removes nothing.
     var pull_props = vec_new();
     vec_push(pull_props, schema_prop_new("image",
         "{\"type\": \"string\", \"description\": \"Image reference (e.g., 'nginx:latest', 'ghcr.io/org/repo:tag')\"}"));
@@ -151,7 +158,12 @@ fn tool_list() {
     var pull = tool_def_new("stiva_pull",
       "Pull an OCI container image from a registry",
       schema_new("object", pull_props, pull_req));
-    tool_def_with_annotations(pull, ann_read_only());
+    var pull_ann = ann_new();
+    ann_set_read_only(pull_ann, HINT_FALSE);
+    ann_set_destructive(pull_ann, HINT_FALSE);
+    ann_set_idempotent(pull_ann, HINT_TRUE);
+    ann_set_open_world(pull_ann, HINT_TRUE);
+    tool_def_with_annotations(pull, pull_ann);
     vec_push(tools, pull);
 
     # stiva_run — destructive
@@ -322,32 +334,3 @@ fn mcp_handle_ansamblu(params) {
     }
     return mcp_result_err(_img_cat2("unknown ansamblu action: ", action));
 }
-
-# ── DEFERRED (land with the Stiva async runtime driver) ───────────
-# rust-old/src/mcp.rs also defines the live tool-dispatch + resource layer,
-# coupled to the async `Stiva` instance (rust-old/src/lib.rs), an async
-# runtime, and serde_json::Value construction the ported base lacks. The two
-# fully-synchronous handlers (handle_build / handle_ansamblu) are ported above;
-# the rest drive the async Stiva facade:
-#
-#   async fn handle_tool(stiva: &Arc<Stiva>, name, params) -> McpResult
-#     — dispatch by tool name to the handle_* fns; the two sync ones route to
-#       mcp_handle_build / mcp_handle_ansamblu, the rest stay async.
-#   async fn handle_pull(stiva, params) -> McpResult      (stiva.pull)
-#   async fn handle_run(stiva, params) -> McpResult       (stiva.run; builds
-#       container::ContainerConfig with name/command/ports/volumes, detach=true)
-#   async fn handle_ps(stiva) -> McpResult                (stiva.ps)
-#   async fn handle_stop(stiva, params) -> McpResult      (stiva.stop)
-#   async fn handle_exec(stiva, params) -> McpResult      (stiva.exec)
-#   async fn handle_push(stiva, params) -> McpResult      (stiva.push)
-#   async fn handle_inspect(stiva, params) -> McpResult   (stiva.inspect /
-#       stiva.inspect_image; type ∈ {"container","image"})
-#   async fn list_resources(stiva: &Arc<Stiva>) -> Vec<serde_json::Value>
-#       — container + image resources (stiva.ps + stiva.images)
-#   async fn read_resource(stiva: &Arc<Stiva>, uri) -> Result<Value, String>
-#       — strip_prefix "stiva://containers/" | "stiva://images/" then inspect.
-#
-# These reference the async Stiva runtime methods, serde_json Value
-# assembly, and the params Value accessor pattern (params.get(k).as_str());
-# they are ported alongside the Stiva runtime driver for parity. Tracked in
-# the roadmap.

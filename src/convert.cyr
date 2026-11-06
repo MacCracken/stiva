@@ -126,57 +126,63 @@ fn _cv_skip_line(s) {
 # Each appends one rendered TOML fragment to `sb`. Kept small so the
 # main function reads as a 1:1 mirror of the Rust match arms.
 
+# ⛔ Every value below goes through _cv_toml_str. The oracle pasted them between quotes, and
+# handled `"` in RUN alone, so `WORKDIR /a"` or a backslash in ENV wrote a Stivafile that did not
+# parse, or one that said something the Dockerfile did not.
+
+# Append the cstr `s` as a quoted, escaped TOML basic string.
+fn _cv_toml_str(sb, s) {
+    _cv_emit_toml_str(sb, str_from(s));
+    return 0;
+}
+
+# The cstr `s` as a quoted, escaped TOML basic string.
+#[must_use]
+fn _cv_toml_quoted(s) {
+    var sb = str_builder_new();
+    _cv_toml_str(sb, s);
+    return str_cstr(str_builder_build(sb));
+}
+
 # `[[steps]]\ntype = "run"\ncommand = ["/bin/sh", "-c", "<cmd>"]`
-# where `<cmd>` has every `"` replaced with `\"` (Rust rest.replace).
 fn _cv_emit_run(sb, rest) {
-    str_builder_add_cstr(sb, "[[steps]]\ntype = \"run\"\ncommand = [\"/bin/sh\", \"-c\", \"");
-    var len = strlen(rest);
-    var i = 0;
-    while (i < len) {
-        var c = load8(rest + i);
-        if (c == 34) { str_builder_add_cstr(sb, "\\\""); }
-        else { str_builder_putc(sb, c); }
-        i = i + 1;
-    }
-    str_builder_add_cstr(sb, "\"]");
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"run\"\ncommand = [\"/bin/sh\", \"-c\", ");
+    _cv_toml_str(sb, rest);
+    str_builder_add_cstr(sb, "]");
     return 0;
 }
 
 # `[[steps]]\ntype = "copy"\nsource = "<s>"\ndestination = "<d>"`
 fn _cv_emit_copy(sb, src, dst) {
-    str_builder_add_cstr(sb, "[[steps]]\ntype = \"copy\"\nsource = \"");
-    str_builder_add_cstr(sb, src);
-    str_builder_add_cstr(sb, "\"\ndestination = \"");
-    str_builder_add_cstr(sb, dst);
-    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"copy\"\nsource = ");
+    _cv_toml_str(sb, src);
+    str_builder_add_cstr(sb, "\ndestination = ");
+    _cv_toml_str(sb, dst);
     return 0;
 }
 
 # `[[steps]]\ntype = "env"\nkey = "<k>"\nvalue = "<v>"`
 fn _cv_emit_env(sb, k, v) {
-    str_builder_add_cstr(sb, "[[steps]]\ntype = \"env\"\nkey = \"");
-    str_builder_add_cstr(sb, k);
-    str_builder_add_cstr(sb, "\"\nvalue = \"");
-    str_builder_add_cstr(sb, v);
-    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"env\"\nkey = ");
+    _cv_toml_str(sb, k);
+    str_builder_add_cstr(sb, "\nvalue = ");
+    _cv_toml_str(sb, v);
     return 0;
 }
 
 # `[[steps]]\ntype = "workdir"\npath = "<p>"`
 fn _cv_emit_workdir(sb, p) {
-    str_builder_add_cstr(sb, "[[steps]]\ntype = \"workdir\"\npath = \"");
-    str_builder_add_cstr(sb, p);
-    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"workdir\"\npath = ");
+    _cv_toml_str(sb, p);
     return 0;
 }
 
 # `[[steps]]\ntype = "label"\nkey = "<k>"\nvalue = "<v>"`
 fn _cv_emit_label(sb, k, v) {
-    str_builder_add_cstr(sb, "[[steps]]\ntype = \"label\"\nkey = \"");
-    str_builder_add_cstr(sb, k);
-    str_builder_add_cstr(sb, "\"\nvalue = \"");
-    str_builder_add_cstr(sb, v);
-    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, "[[steps]]\ntype = \"label\"\nkey = ");
+    _cv_toml_str(sb, k);
+    str_builder_add_cstr(sb, "\nvalue = ");
+    _cv_toml_str(sb, v);
     return 0;
 }
 
@@ -228,6 +234,58 @@ fn _cv_parse_copy(sb, rest) {
     return 1;
 }
 
+# `dockerfile` with every `\`-newline removed, and with comment lines inside a continuation gone,
+# as Docker reads it. The oracle looked at one line at a time, so the rest of a multi-line RUN or
+# ENV vanished without a word.
+#[must_use]
+fn _cv_join_continuations(dockerfile) {
+    var sb = str_builder_new();
+    var n = strlen(dockerfile);
+    var i = 0;
+    while (i < n) {
+        var c = load8(dockerfile + i);
+        if (c == 92) {
+            var j = i + 1;
+            while (j < n) {
+                var w = load8(dockerfile + j);
+                if (w != 32 && w != 9 && w != 13) { break; }
+                j = j + 1;
+            }
+            if (j < n) {
+                if (load8(dockerfile + j) == 10) {
+                    i = _cv_skip_comment_lines(dockerfile, j + 1, n);
+                    continue;
+                }
+            }
+        }
+        str_builder_putc(sb, c);
+        i = i + 1;
+    }
+    return str_cstr(str_builder_build(sb));
+}
+
+# The offset of the first line at or after `start` that is not a comment.
+#[must_use]
+fn _cv_skip_comment_lines(s, start, n) {
+    var at = start;
+    while (at < n) {
+        var p = at;
+        while (p < n) {
+            var w = load8(s + p);
+            if (w != 32 && w != 9) { break; }
+            p = p + 1;
+        }
+        if (p >= n) { return at; }
+        if (load8(s + p) != 35) { return at; }
+        while (p < n) {
+            if (load8(s + p) == 10) { break; }
+            p = p + 1;
+        }
+        at = p + 1;
+    }
+    return at;
+}
+
 # ── main Dockerfile converter ─────────────────────
 # Convert a Dockerfile cstr to a Stivafile TOML cstr.
 #
@@ -238,6 +296,7 @@ fn _cv_parse_copy(sb, rest) {
 # 0 → StivaError::InvalidState "Dockerfile has no FROM instruction").
 #[must_use]
 fn dockerfile_to_toml(dockerfile) {
+    dockerfile = _cv_join_continuations(dockerfile);
     # Accumulators mirroring the Rust locals.
     var base = "";
     var user = "";
@@ -348,9 +407,9 @@ fn dockerfile_to_toml(dockerfile) {
     # Assemble the output document.
     var out = str_builder_new();
     str_builder_add_cstr(out, "[image]\n");
-    str_builder_add_cstr(out, "base = \"");
-    str_builder_add_cstr(out, base);
-    str_builder_add_cstr(out, "\"\n");
+    str_builder_add_cstr(out, "base = ");
+    _cv_toml_str(out, base);
+    str_builder_add_cstr(out, "\n");
     str_builder_add_cstr(out, "name = \"converted\"\n");
     str_builder_add_cstr(out, "tag = \"latest\"\n");
     str_builder_add_cstr(out, "\n");
@@ -387,15 +446,15 @@ fn dockerfile_to_toml(dockerfile) {
     }
 
     if (strlen(user) > 0) {
-        str_builder_add_cstr(out, "user = \"");
-        str_builder_add_cstr(out, user);
-        str_builder_add_cstr(out, "\"\n");
+        str_builder_add_cstr(out, "user = ");
+        _cv_toml_str(out, user);
+        str_builder_add_cstr(out, "\n");
     }
 
     if (strlen(workdir_config) > 0) {
-        str_builder_add_cstr(out, "workdir = \"");
-        str_builder_add_cstr(out, workdir_config);
-        str_builder_add_cstr(out, "\"\n");
+        str_builder_add_cstr(out, "workdir = ");
+        _cv_toml_str(out, workdir_config);
+        str_builder_add_cstr(out, "\n");
     }
 
     var built = str_builder_build(out);
@@ -470,9 +529,11 @@ fn _cv_parse_entrypoint(entrypoint, rest) {
                 var j = estart;
                 while (j < len) {
                     if (load8(rest + j) == 34) { break; }
+                    if (load8(rest + j) == 92) { j = j + 1; }   # `\"` does not end the element
                     j = j + 1;
                 }
                 if (j >= len) { break; }
+                # Still escaped as JSON, which a TOML basic string reads the same way.
                 var elem = _cv_slice(rest, estart, j);
                 var wrapped = _cv_wrap_quote(elem);
                 vec_push(entrypoint, wrapped);
@@ -486,7 +547,7 @@ fn _cv_parse_entrypoint(entrypoint, rest) {
     # Shell form → ["/bin/sh", "-c", "<rest>"].
     vec_push(entrypoint, "\"/bin/sh\"");
     vec_push(entrypoint, "\"-c\"");
-    vec_push(entrypoint, _cv_wrap_quote(rest));
+    vec_push(entrypoint, _cv_toml_quoted(rest));
     return 0;
 }
 
@@ -1142,12 +1203,59 @@ fn _cv_key_at(buf, len, off) {
     return str_new(buf + off, n);
 }
 
+# Keys of the last compose_yaml_to_toml's services that have no stiva equivalent, as
+# "<service>.<key>" cstrs. The conversion carries on without them, and logs each.
+var _cv_compose_dropped = 0;
+
+#[must_use]
+fn compose_dropped_keys() { return _cv_compose_dropped; }
+
+# 1 iff compose_yaml_to_toml writes this service key out.
+#[must_use]
+fn _cv_compose_key_is_carried(key) {
+    if (streq(key, "image") == 1) { return 1; }
+    if (streq(key, "command") == 1) { return 1; }
+    if (streq(key, "environment") == 1) { return 1; }
+    if (streq(key, "ports") == 1) { return 1; }
+    if (streq(key, "volumes") == 1) { return 1; }
+    if (streq(key, "depends_on") == 1) { return 1; }
+    if (streq(key, "restart") == 1) { return 1; }
+    return 0;
+}
+
+# ⛔ A dropped key is not always a lost convenience. `read_only`, `cap_drop`, `user`, `security_opt`
+# and `mem_limit` are restrictions: a service converted without them runs with more than it asked
+# for, so the operator has to hear about it.
+fn _cv_compose_note_dropped(service, svc) {
+    if (bayan_json_v_is_obj(svc) == 0) { return 0; }
+    var i = 0;
+    while (i < bayan_json_v_obj_len(svc)) {
+        var key = str_cstr(bayan_json_v_obj_key(svc, i));
+        if (_cv_compose_key_is_carried(key) == 0) {
+            var sb = str_builder_new();
+            str_builder_add_cstr(sb, service);
+            str_builder_add_cstr(sb, ".");
+            str_builder_add_cstr(sb, key);
+            var name = str_cstr(str_builder_build(sb));
+            vec_push(_cv_compose_dropped, name);
+            var msg = str_builder_new();
+            str_builder_add_cstr(msg, "compose: no stiva equivalent, dropped: ");
+            str_builder_add_cstr(msg, name);
+            var text = str_cstr(str_builder_build(msg));
+            sakshi_warn(text, strlen(text));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 #[must_use]
 fn compose_yaml_to_toml(yaml) {
     sakshi_info("converting docker-compose YAML to stiva TOML",
       strlen("converting docker-compose YAML to stiva TOML"));
 
     _cv_compose_err = 0;
+    _cv_compose_dropped = vec_new();
 
     # bayan_yaml_parse_buf, NOT bayan_yaml_parse — the latter takes a
     # 16-byte Str, and handing it a cstr compiles with only an arity
@@ -1220,6 +1328,7 @@ fn compose_yaml_to_toml(yaml) {
             if (deps != 0) { _cv_emit_compose_depends(out, deps); }
 
             _cv_emit_compose_str_field(out, svc, "restart", "restart");
+            _cv_compose_note_dropped(str_cstr(bayan_json_v_obj_key(services, sidx)), svc);
 
             str_builder_add_cstr(out, "\n");
             si = si + 1;

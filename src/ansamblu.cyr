@@ -21,14 +21,7 @@
 # frontier) are implemented locally here over the AnsambluFile's own
 # service→depends_on adjacency. Semantics match the Rust oracle.
 #
-# What is DEFERRED (see the block at the bottom):
-#   * parse_ansamblu — TOML → AnsambluFile. ACHIEVABLE via bayan's TOML object
-#     model (`toml_parse`/`toml_get`), exactly like build.cyr's now-ported
-#     parse_build_spec — it just isn't wired yet (NOT a Cyrius gap).
-#   * the serde JSON round-trip tests likewise use bayan's JSON codec — not
-#     yet ported. (compose-YAML is no longer a stdlib gap either: bayan 1.2.0
-#     ships a YAML parser, wired in src/convert.cyr at v3.0.6.)
-#
+
 # RestartPolicy is `pub use crate::health::RestartPolicy` in the oracle; it is
 # defined once in the sibling health.cyr (RESTART_POLICY_*), referenced here —
 # NOT redefined (Cyrius hoists enum members to globals, last-def-wins, so a
@@ -239,6 +232,23 @@ struct RollingUpdatePlan {
 }
 
 # ── replica_count (rust-old: replica_count) ─────────────────
+# A `replicas` value as a count, or -1. The oracle's type was u32, and atoi wraps silently, so past
+# that a file could ask for a negative count or an endless loop. No machine runs 65536 of a service.
+#[must_use]
+fn _ans_parse_replicas(s) {
+    var n = strlen(s);
+    if (n == 0 || n > 5) { return 0 - 1; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 48 || c > 57) { return 0 - 1; }
+        i = i + 1;
+    }
+    var v = atoi(s);
+    if (v > 65535) { return 0 - 1; }
+    return v;
+}
+
 # service.replicas.unwrap_or(1).max(1) — a None (-1) or a 0 both become 1.
 #[inline]
 #[must_use]
@@ -693,7 +703,10 @@ fn parse_ansamblu(toml_str) {
               _bld_str_vec(pairs, "depends_on"));
             var ss: ServiceDef = svc;
             var rep = bayan_toml_get_by_cstr(pairs, "replicas");
-            if (rep != 0) { ss.replicas = atoi(str_cstr(rep)); }
+            if (rep != 0) {
+                ss.replicas = _ans_parse_replicas(str_cstr(rep));
+                if (ss.replicas < 0) { return 0; }
+            }
             var rp = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "restart"));
             if (rp != 0) {
                 # Rust accepts only the UNIT variants as a bare string; the
@@ -773,12 +786,3 @@ fn parse_ansamblu(toml_str) {
 
     return ansamblu_file_new(services, networks, volumes);
 }
-
-# ── DEFERRED (JSON codec) ────────────────
-#   serde JSON round-trip tests: ansamblu_file_serde_round_trip,
-#   ansamblu_session_serde, network_def_serde, volume_def_serde,
-#   restart_policy_serde — need a JSON serializer for these records; they land
-#   with the JSON codec.
-#
-# RestartPolicy itself (`pub use crate::health::RestartPolicy`) is defined in
-# the sibling src/health.cyr and referenced here, not re-ported.

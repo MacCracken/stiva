@@ -1,15 +1,6 @@
 # stiva — OCI registry client: manifests, descriptors, platform selection.
 # Ported from rust-old/src/registry.rs.
 #
-# registry.rs is overwhelmingly a networked async HTTP client built on
-# reqwest + tokio (RwLock, Instant) + serde_json. None of that transport,
-# concurrency, or JSON-model machinery exists in the ported base, so every
-# RegistryClient method (fetch_manifest, resolve_manifest, fetch_blob,
-# blob_exists, push_blob, push_blob_chunked, push_manifest, list_tags,
-# catalog, referrers, authenticated_request, acquire_token, token cache) —
-# plus the serde load/save of CredentialStore — lands in the DEFERRED block
-# at the bottom (same pattern as src/oci.cyr / src/convert.cyr).
-#
 # What ports faithfully here is the SELF-CONTAINED leaf surface:
 #   * media-type constants (functions returning the wire strings)
 #   * the descriptor / manifest / index / platform data types
@@ -71,7 +62,7 @@ fn media_oci_config() {
 }
 
 # OCI layer media type for gzip-compressed tar archives (stiva builds gzip;
-# zstd is the v3.1 upstream residue — see media_oci_layer_zstd).
+# zstd layers are read but not written — see media_oci_layer_zstd).
 #[must_use]
 fn media_oci_layer() {
     return "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -171,10 +162,8 @@ fn descriptor_from_jv(v) {
     var szf = bayan_json_v_obj_get_by_cstr(v, "size");
     if (json_v_is_int(szf) == 0) { return 0; }
     var size = json_v_int(szf);
-    # A negative or absurd size would otherwise disable the download ceiling in
-    # registry_fetch_blob_to_store (`if (expected_size > 0)`), and
-    # `size + 65536` on i64max wraps negative — either way, unbounded. The
-    # descriptor is attacker-controlled, so bound it here.
+    # `size + 65536` is the download ceiling in registry_fetch_blob_to_store, and on
+    # i64max it wraps negative, so bound the attacker-controlled value here.
     if (size < 0) { return 0; }
     if (size > _REG_MAX_DESCRIPTOR_SIZE) { return 0; }
     var d = descriptor_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(dgf)), size);
@@ -517,15 +506,20 @@ fn normalize_arch(arch) {
     return arch;
 }
 
-# Detect current platform (rust-old: current_platform).
-# The Rust reads std::env::consts::{OS, ARCH}; those compile-time consts are
-# not available here. We return a Platform built from the host's uname, but
-# since no uname binding exists in the base yet the os/arch strings are the
-# build-target defaults ("linux" / normalized host arch). Callers that need
-# the exact runtime triple use the DEFERRED transport path.
+# Detect current platform (rust-old: current_platform, from std::env::consts). The
+# architecture is the build target's, as it was there: this binary runs on nothing else.
 #[must_use]
-fn current_platform() {
-    return platform_new(normalize_arch("x86_64"), "linux", 0, 0);
+fn current_platform() { return platform_new(host_arch(), "linux", 0, 0); }
+
+# This machine's architecture, by its OCI name.
+#[must_use]
+fn host_arch() {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return normalize_arch("aarch64");
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    return normalize_arch("x86_64");
+    #endif
 }
 
 # Select the best matching platform from an index (rust-old: select_platform).
@@ -752,11 +746,12 @@ struct RegistryConfig {
     username;   # Option<String> → cstr | 0
     password;   # Option<String> → cstr | 0
     mirrors;    # MirrorConfig → map handle (hostname → vec of URL cstr) | 0 = empty
+    host;       # the one registry the credentials belong to | 0, which sends them nowhere
 }
 
 #[must_use]
 fn registry_config_new(username, password, mirrors) {
-    var c = alloc(24);
+    var c = alloc(32);
     var cc: RegistryConfig = c;
     cc.username = username;
     cc.password = password;
@@ -765,6 +760,15 @@ fn registry_config_new(username, password, mirrors) {
 }
 
 # rust-old: RegistryConfig::default — all fields None/empty.
+# Bind `cfg`'s credentials to `host`, the only registry they will be sent for. The oracle has
+# no such field, so a password went to whichever registry the next image named, and to any URL
+# that registry's challenge named. Returns `cfg`.
+fn registry_config_set_host(cfg, host) {
+    var cc: RegistryConfig = cfg;
+    cc.host = host;
+    return cfg;
+}
+
 #[must_use]
 fn registry_config_default() {
     return registry_config_new(0, 0, 0);
@@ -801,18 +805,21 @@ fn _reg_parent_dir(path) {
     return _reg_slice(path, 0, slash);
 }
 
-# Stiva config dir (rust-old: dirs_path) — {HOME}/.stiva, or /tmp/.stiva if HOME unset.
+# Stiva config dir (rust-old: dirs_path) — {HOME}/.stiva, or 0 if HOME is unset. The oracle
+# fell back to /tmp/.stiva, where any local user could read the passwords or plant the file.
 #[must_use]
 fn _cred_dirs_path() {
     var home = getenv("HOME");
-    if (home == 0) { return "/tmp/.stiva"; }
+    if (home == 0) { return 0; }
     return _reg_cat2(home, "/.stiva");
 }
 
 # Default credential-store path (rust-old: CredentialStore::default_path).
 #[must_use]
 fn credential_store_default_path() {
-    return _reg_cat2(_cred_dirs_path(), "/credentials.json");
+    var dir = _cred_dirs_path();
+    if (dir == 0) { return 0; }
+    return _reg_cat2(dir, "/credentials.json");
 }
 
 # A fresh empty store (rust-old: CredentialStore::default).
@@ -902,11 +909,17 @@ fn credential_store_load() {
 
 # Save a store to `path` (internal; the public save uses default_path). Creates
 # the parent dir (create_dir_all). Returns 0 / -1.
+# The file holds passwords, so: a private directory, a 0600 temp that cannot be a planted link
+# (O_EXCL|O_NOFOLLOW), and a rename, so a failed write leaves the old file whole.
 fn _credential_store_save_to(store, path) {
+    if (path == 0) {
+        stiva_err_print(STIVA_ERR_REGISTRY, "HOME is unset; nowhere private to keep credentials");
+        return 0 - 1;
+    }
     var dir = _reg_parent_dir(path);
-    if (dir != 0) { sys_mkdir(dir, 493); }
+    if (dir != 0) { _img_private_dir(dir); }
     var s = json_v_build_pretty(credential_store_to_jv(store), 2);
-    if (file_write_all(path, str_data(s), str_len(s)) < 0) {
+    if (_img_write_atomic(path, str_data(s), str_len(s), 384) == 0) {
         stiva_err_print(STIVA_ERR_REGISTRY, "failed to write credentials");
         return 0 - 1;
     }
@@ -942,27 +955,8 @@ fn credential_store_to_config(store, registry) {
     var cred = credential_store_get(store, registry);
     if (cred == 0) { return registry_config_default(); }
     var cc: RegistryCredential = cred;
-    return registry_config_new(cc.username, cc.password, 0);
+    return registry_config_set_host(registry_config_new(cc.username, cc.password, 0), registry);
 }
-
-# ── DEFERRED (land with the async transport layer) ──────
-# rust-old/src/registry.rs also defines the HTTP client surface, all coupled to
-# reqwest / tokio (the sync CredentialStore/RegistryConfig/MirrorConfig above are
-# now ported):
-#
-#   struct AuthToken { token, expires_at: Option<tokio::time::Instant> }
-#   struct RegistryClient { reqwest::Client, config, tokens: Arc<RwLock<..>> }
-#     - new / with_config / with_base_url / default
-#     - api_base / api_bases                       (mirror resolution)
-#     - fetch_manifest / resolve_manifest / fetch_blob   (async GET)
-#     - blob_exists / push_blob / push_blob_chunked / push_manifest (async)
-#     - list_tags / catalog / referrers            (async discovery)
-#     - authenticated_get / authenticated_request / acquire_token  (bearer)
-#     - get_cached_token / cache_token             (RwLock token cache)
-#
-# These require an HTTP client, async runtime, a JSON object model, and a
-# credential-file (de)serializer — none present in the ported base. They
-# land with the transport layer for parity. Tracked in the roadmap.
 
 # ══ RegistryClient (roadmap §B) ═══════════════════════════
 # The blocking client over sandhi's HTTPS transport. `Arc<RwLock<HashMap>>`
@@ -1029,6 +1023,7 @@ fn registry_transport_new(send_fp, sink_fp, ctx) {
     return t;
 }
 
+# Replace the HTTP transport, which is how the tests stand in for a registry.
 fn registry_client_set_transport(client, transport) {
     store64(client + REG_CL_TRANSPORT, transport);
     return 0;
@@ -1090,6 +1085,20 @@ var _REG_HTTP_TOTAL_MS = 60000;
 var _REG_BLOB_TOTAL_MS = 3600000;
 var _REG_HTTP_MAX_HOPS = 10;             # oracle: Policy::limited(10)
 
+# ⛔ total_ms is checked between reads, so it only ever fires while bytes are arriving. A server
+# that accepts the connection and then says nothing hangs a pull forever unless each read, write
+# and connect has a bound of its own.
+var _REG_CONNECT_MS = 30000;
+var _REG_IO_MS = 60000;
+
+# The bounds every request carries.
+fn _reg_set_bounds(o) {
+    sandhi_http_options_connect_ms(o, _REG_CONNECT_MS);
+    sandhi_http_options_read_ms(o, _REG_IO_MS);
+    sandhi_http_options_write_ms(o, _REG_IO_MS);
+    return o;
+}
+
 #[must_use]
 fn _reg_http_opts() {
     var o = sandhi_http_options_new();
@@ -1098,7 +1107,7 @@ fn _reg_http_opts() {
     sandhi_http_options_max_hops(o, _REG_HTTP_MAX_HOPS);
     sandhi_http_options_max_response_bytes(o, _REG_MANIFEST_MAX_BYTES);
     sandhi_http_options_total_ms(o, _REG_HTTP_TOTAL_MS);
-    return o;
+    return _reg_set_bounds(o);
 }
 
 # Options for a blob-sized transfer: the long deadline, and no response-byte
@@ -1111,7 +1120,7 @@ fn _reg_blob_http_opts() {
     sandhi_http_options_follow_redirects(o, 1);
     sandhi_http_options_max_hops(o, _REG_HTTP_MAX_HOPS);
     sandhi_http_options_total_ms(o, _REG_BLOB_TOTAL_MS);
-    return o;
+    return _reg_set_bounds(o);
 }
 
 # ── transport dispatch ───────────────────────────
@@ -1123,11 +1132,25 @@ fn _reg_send(client, method, url, headers, body, body_len) {
         # A request carrying a body is a blob upload; give it the long deadline
         # for the same reason downloads get one (see _REG_BLOB_TOTAL_MS).
         var opts = _reg_http_opts();
-        if (body_len > 0) { opts = _reg_blob_http_opts(); }
+        if (body_len > 0) {
+            opts = _reg_blob_http_opts();
+            # A redirect here would carry the layer to a host _reg_start_upload never saw.
+            sandhi_http_options_follow_redirects(opts, 0);
+        }
         return sandhi_http_request_auto(method, url, headers, body, body_len, opts);
     }
     return fncall6(load64(t + REG_TP_SEND), load64(t + REG_TP_CTX),
       method, url, headers, body, body_len);
+}
+
+# As _reg_send, for a request that may elicit a challenge: it does not follow a redirect, so
+# the caller can tell a 401 from the registry from a 401 from wherever it redirected to.
+fn _reg_send_probe(client, method, url, headers) {
+    var t = load64(client + REG_CL_TRANSPORT);
+    if (t != 0) { return _reg_send(client, method, url, headers, 0, 0); }
+    var opts = _reg_http_opts();
+    sandhi_http_options_follow_redirects(opts, 0);
+    return sandhi_http_request_auto(method, url, headers, 0, 0, opts);
 }
 
 # One streaming download. Returns a sandhi download-result*, or 0.
@@ -1173,13 +1196,72 @@ fn _reg_bearer(token) {
 # (acquire_token). Four phases: try a cached token, probe unauthenticated,
 # acquire on the challenge, retry once. A second 401 is terminal.
 
+# True (1) iff `host`, as sandhi_url_host gives it, names this machine or an address literally:
+# an IPv6 address (sandhi strips the brackets, so a ':' is what shows), `localhost` and its
+# subdomains, or a host whose last label is numeric, which the WHATWG URL rules treat as an IPv4
+# address in any spelling (`127.0.0.1`, `2130706433`, `0x7f.1`). DNS names are not resolved, so a
+# public name pointing inward is out of reach of this check.
+#[must_use]
+fn _reg_host_is_literal(host) {
+    var n = strlen(host);
+    if (n == 0) { return 1; }
+    var k = 0;
+    while (k < n) {
+        if (load8(host + k) == 58) { return 1; }            # ':' IPv6
+        k = k + 1;
+    }
+    if (streq(host, "localhost") == 1) { return 1; }
+    if (n >= 10 && memeq(host + n - 10, ".localhost", 10) == 1) { return 1; }
+    var i = n;
+    while (i > 0 && load8(host + i - 1) != 46) { i = i - 1; }
+    if (n - i >= 2 && load8(host + i) == 48 && load8(host + i + 1) == 120) { return 1; }  # 0x..
+    var j = i;
+    while (j < n) {
+        var c = load8(host + j);
+        if (c < 48 || c > 57) { return 0; }
+        j = j + 1;
+    }
+    return n > i;
+}
+
+# True (1) iff a registry for `ref` may send stiva to `realm` for a token. The realm is a URL the
+# registry chose, so without this check it is a fetch of any address this host can reach, with
+# the response read back as a token, which is why image_store_pull refuses foreign layers. It may
+# not be weaker than the registry's own scheme, and may not be a literal or loopback address
+# unless the registry is on that same host.
+#[must_use]
+fn _reg_realm_allowed(client, ref, realm) {
+    var u = sandhi_url_parse(realm);
+    if (u == 0) { return 0; }
+    var base = sandhi_url_parse(_reg_api_base(client, ref));
+    if (base == 0) { return 0; }
+    if (sandhi_url_scheme(base) == SANDHI_URL_HTTPS && sandhi_url_scheme(u) != SANDHI_URL_HTTPS) {
+        return 0;
+    }
+    if (_reg_host_is_literal(sandhi_url_host(u)) == 0) { return 1; }
+    return streq(sandhi_url_host(u), sandhi_url_host(base));
+}
+
+# True (1) iff the client's credentials belong to `ref`'s registry.
+#[must_use]
+fn _reg_credentials_apply(cfg, ref) {
+    var cc: RegistryConfig = cfg;
+    if (cc.username == 0 || cc.password == 0 || cc.host == 0) { return 0; }
+    var reg = load64(ref + 0);                  # ImageRef.registry: see _reg_authenticated_request
+    if (streq(cc.host, reg) == 1) { return 1; }
+    return streq(cc.host, registry_host(reg));
+}
+
 # Exchange a WWW-Authenticate challenge for a bearer token
 # (rust-old: acquire_token, registry.rs:506-546). Returns the token cstr, or 0.
-fn _reg_acquire_token(client, www_auth, scope) {
+fn _reg_acquire_token(client, ref, www_auth, scope) {
     var params = parse_www_authenticate(www_auth);
     var realm = auth_params_get(params, "realm");
     if (realm == 0) {
         return _reg_fail(STIVA_ERR_AUTH_FAILED, "no realm in www-authenticate", 0);
+    }
+    if (_reg_realm_allowed(client, ref, realm) == 0) {
+        return _reg_fail(STIVA_ERR_AUTH_FAILED, "refusing the realm this registry named", 0);
     }
     # The challenge's own `scope` is DISCARDED and the caller's sent instead
     # (registry.rs:512-516). That is what makes a push scope survive a registry
@@ -1192,8 +1274,8 @@ fn _reg_acquire_token(client, www_auth, scope) {
     var cfg = load64(client + REG_CL_CONFIG);
     var basic = 0;
     if (cfg != 0) {
-        var cc: RegistryConfig = cfg;
-        if (cc.username != 0 && cc.password != 0) {
+        if (_reg_credentials_apply(cfg, ref) == 1) {
+            var cc: RegistryConfig = cfg;
             basic = _reg_basic_auth_header(cc.username, cc.password);
         }
     }
@@ -1267,19 +1349,33 @@ fn _reg_authenticated_request(client, ref, method, url, scope, accept) {
     # ── Phase 2: unauthenticated probe (elicits the challenge) ──
     var h2 = _reg_headers(accept, 0);
     if (h2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "cannot build request headers", 0); }
-    var r2 = _reg_send(client, method, url, h2, 0, 0);
+    var r2 = _reg_send_probe(client, method, url, h2);
     if (r2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
     if (sandhi_http_err_kind(r2) != SANDHI_OK) {
         return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
     }
-    if (sandhi_http_status(r2) != 401) { return _reg_resp_terminal(r2); }
+    var pst = sandhi_http_status(r2);
+    if (pst >= 300 && pst < 400) {
+        # A redirect is followed now, with no credentials. A challenge from wherever it led is
+        # that host's, not this registry's, so nothing is minted for it.
+        r2 = _reg_send(client, method, url, h2, 0, 0);
+        if (r2 == 0) { return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0); }
+        if (sandhi_http_err_kind(r2) != SANDHI_OK) {
+            return _reg_fail(STIVA_ERR_HTTP, "transport failure", 0);
+        }
+        if (sandhi_http_status(r2) == 401) {
+            return _reg_fail(STIVA_ERR_AUTH_FAILED, "refusing to authenticate after a redirect", 401);
+        }
+        return _reg_resp_terminal(r2);
+    }
+    if (pst != 401) { return _reg_resp_terminal(r2); }
 
     # ── Phase 3: challenge -> token ──
     var www = sandhi_headers_get(sandhi_http_headers(r2), "WWW-Authenticate");
     if (www == 0) {
         return _reg_fail(STIVA_ERR_AUTH_FAILED, "401 without www-authenticate header", 401);
     }
-    var fresh = _reg_acquire_token(client, www, scope);
+    var fresh = _reg_acquire_token(client, ref, www, scope);
     if (fresh == 0) { return 0; }   # already failed + printed
     _reg_cache_token(client, key, fresh);
 
@@ -1535,8 +1631,8 @@ fn _reg_blob_stream_once(client, ref, url, scope, sink) {
 }
 
 # Stream blob `digest` for `ref` into the store's content-addressed path,
-# verifying SHA-256 as it lands. `expected_size` (from the descriptor, 0 if
-# unknown) becomes the sink ceiling. Returns the blob path cstr, or 0.
+# verifying SHA-256 as it lands. `expected_size` is the descriptor's: it sets the sink
+# ceiling, and a non-zero one must match what arrived. Returns the blob path cstr, or 0.
 #
 # A blob already present is a no-op — the store is content-addressed, so a
 # matching digest is a matching blob.
@@ -1544,7 +1640,8 @@ fn _reg_blob_stream_once(client, ref, url, scope, sink) {
 # context, fresh sink. Returns a 2-word [sink, download_result] pair, or 0 if
 # the tempfile could not be opened.
 fn _reg_blob_attempt(client, ref, url, scope, tmp, limit) {
-    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 420);
+    xunlink(tmp);
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 420);
     if (fd < 0) { return 0; }
     var sha = alloc(144);
     sha256_init_into(sha);
@@ -1557,6 +1654,8 @@ fn _reg_blob_attempt(client, ref, url, scope, tmp, limit) {
     return out;
 }
 
+# Download blob `digest` of `ref` into the store, verifying its digest and size as it streams.
+# Returns the blob's path, or 0 with the detail printed.
 fn registry_fetch_blob_to_store(client, store, ref, digest, expected_size) {
     _reg_clear_err();
     if (image_store_has_blob(store, digest) == 1) {
@@ -1568,14 +1667,15 @@ fn registry_fetch_blob_to_store(client, store, ref, digest, expected_size) {
     if (path == 0) {
         return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "malformed blob digest", 0);
     }
-    # `.dl` rather than store_blob's `.tmp` so a concurrent import and a pull
-    # cannot collide on the same scratch name.
-    var tmp = _reg_cat2(path, ".dl");
+    # Per-process: the hash covers the stream, not the file, so two pulls sharing a scratch name
+    # truncate each other's bytes, pass the digest check anyway, and rename a holed file into
+    # place. has_blob then answers yes for it, so no later pull repairs it.
+    var tmp = _img_scratch_path(path, ".dl");
 
     var scope = _reg_pull_scope(ref);
     var url = _reg_blob_url(client, ref, digest);
-    var lim = 0;
-    if (expected_size > 0) { lim = expected_size + 65536; }
+    # Always a ceiling: `size: 0` is attacker-controlled, so it cannot mean "unbounded".
+    var lim = expected_size + 65536;
 
     # The streaming path CANNOT see a 401 challenge: sandhi's download driver
     # reports a non-2xx as status + err and never surfaces the hop's response
@@ -1650,6 +1750,10 @@ fn registry_fetch_blob_to_store(client, store, ref, digest, expected_size) {
         xunlink(tmp);
         return _reg_fail(STIVA_ERR_DIGEST_MISMATCH, "blob digest mismatch", 0);
     }
+    if (expected_size > 0 && sandhi_download_bytes(res) != expected_size) {
+        xunlink(tmp);
+        return _reg_fail(STIVA_ERR_REGISTRY, "blob size differs from its descriptor", 0);
+    }
     if (sys_rename(tmp, path) < 0) {
         xunlink(tmp);
         return _reg_fail(STIVA_ERR_IO, "cannot commit blob", 0);
@@ -1691,41 +1795,16 @@ fn _reg_uint_str(n) {
     return buf + i;
 }
 
-# Length of a URL's origin prefix — scheme://host[:port] — or 0 if it has none.
-fn _reg_origin_len(url) {
-    if (url == 0) { return 0; }
-    var n = strlen(url);
-    var i = 0;
-    var scheme_end = 0 - 1;
-    while (i + 2 < n) {
-        if (load8(url + i) == 58) {                      # ':'
-            if (load8(url + i + 1) == 47) {              # '/'
-                if (load8(url + i + 2) == 47) { scheme_end = i + 3; i = n; }
-            }
-        }
-        i = i + 1;
-    }
-    if (scheme_end < 0) { return 0; }
-    var j = scheme_end;
-    while (j < n) {
-        var c = load8(url + j);
-        # The authority ends at the first '/', '?' or '#'. Stopping only at '/'
-        # would fold a query string into the origin, so "https://reg.test?x=1"
-        # would compare unequal to its own base — and this parser is used as a
-        # security control (_reg_same_origin).
-        if (c == 47 || c == 63 || c == 35) { return j; }
-        j = j + 1;
-    }
-    return n;
-}
-
-# 1 when both URLs share scheme + host + port.
+# 1 when both URLs share scheme + host + port, as sandhi will read them. This is a security
+# control, so it must not have a URL grammar of its own: it once ended the authority at '#' and
+# sandhi does not, so `https://reg.test#.evil.example/x` passed here and connected elsewhere.
 fn _reg_same_origin(a, b) {
-    var la = _reg_origin_len(a);
-    var lb = _reg_origin_len(b);
-    if (la == 0 || lb == 0) { return 0; }
-    if (la != lb) { return 0; }
-    return memeq(a, b, la);
+    var ua = sandhi_url_parse(a);
+    var ub = sandhi_url_parse(b);
+    if (ua == 0 || ub == 0) { return 0; }
+    if (sandhi_url_scheme(ua) != sandhi_url_scheme(ub)) { return 0; }
+    if (sandhi_url_port(ua) != sandhi_url_port(ub)) { return 0; }
+    return streq(sandhi_url_host(ua), sandhi_url_host(ub));
 }
 
 # Headers for a body-carrying push leg: the cached push token, plus an optional
@@ -1864,7 +1943,7 @@ fn _reg_push_send(client, ref, method, url, scope, ctype, xname, xval, body, ble
     if (www == 0) {
         return _reg_fail(STIVA_ERR_AUTH_FAILED, "401 without www-authenticate header", 401);
     }
-    var fresh = _reg_acquire_token(client, www, scope);
+    var fresh = _reg_acquire_token(client, ref, www, scope);
     if (fresh == 0) { return 0; }   # already failed + reported
     _reg_cache_token(client, _reg_cache_key(load64(ref + 0), scope), fresh);
 
@@ -2170,7 +2249,7 @@ fn media_notary_signature() {
 #
 # This checks only that a signature artifact EXISTS. It does not verify the
 # signature cryptographically — neither does the oracle, despite the name.
-fn registry_verify_signature(client, ref, digest) {
+fn registry_has_signature_artifact(client, ref, digest) {
     var refs = registry_referrers(client, ref, digest);
     if (refs == 0) { return 0 - 1; }
     var n = vec_len(refs);
@@ -2191,10 +2270,12 @@ fn registry_verify_signature(client, ref, digest) {
 # 5 minutes, the code says 270 — the code wins).
 var _REG_TOKEN_TTL_NS = 270000000000;
 
+# A client with the default registry config.
 fn registry_client_new() {
     return registry_client_with_config(registry_config_default());
 }
 
+# A client using `config`, a RegistryConfig*.
 fn registry_client_with_config(config) {
     var c = alloc(32);
     if (c == 0) { return 0; }

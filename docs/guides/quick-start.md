@@ -33,31 +33,30 @@ and verifies every digest **before** the blob becomes visible in the store.
 Foreground (one-shot):
 
 ```bash
-stiva run alpine:3.19 echo "hello from stiva"
-stiva ps          # list containers
-stiva logs <id>   # view output
-stiva logs -f <id>   # follow until the container stops
+stiva run docker.io/library/alpine:3.19 /bin/echo "hello from stiva"
+stiva ps -a          # list containers, including finished ones
+stiva logs <id>      # view output
+stiva logs -f <id>   # follow, until the log has been quiet for 2 s
 ```
 
 Detached:
 
 ```bash
-stiva run -d alpine:3.19 sleep 3600   # prints the container id and returns
+stiva run -d docker.io/library/alpine:3.19 /bin/sleep 3600   # prints the container id and returns
 ```
 
-⛔ **`-w/--workdir` is accepted and silently ignored** — the value reaches
-`RuntimeSpec.workdir` and nothing reads it (roadmap v3.1.0 item 10).
+⚠ Three things worth knowing. References are matched exactly, so use the name `stiva images`
+prints. An image's `Entrypoint`, `Cmd` and `Env` are not used yet, so give a command, by its absolute
+path: a payload gets no `PATH` (roadmap v3.2.0).
 
 The complete set of flags `run` accepts is `--name`, `--backend`, `-w/--workdir` and
-`-d/--detach`.
+`-d/--detach`, and they come before the image.
 
-> **Not yet wired.** Environment variables (`-e`), port mapping (`-p`) and secret
-> injection (`-s`) are **not** accepted by `run` — passing them is a usage error, not a
-> silent no-op. Containers currently receive no secrets at all: `secrets` serializes as an
-> empty array and `build_sandbox` has no kavach setter to thread one through. That is
-> roadmap v3.1.0 item 1; port mapping arrives with §J live network attach, also v3.1.
-> To set environment variables today, use `stiva exec -e K=V` against a running container,
-> or bake them into the image with a `Stivafile` `env` step.
+> **Not yet wired.** Environment variables (`-e`), port mapping (`-p`), volumes (`-v`) and
+> secrets are **not** accepted by `run`, and passing them is a usage error, not a silent
+> no-op. All are roadmap v3.2.2. To set an environment variable today, use `stiva exec -e K=V`
+> against a running container. A `Stivafile` `env` step is recorded in the image, but nothing reads
+> it when a container starts.
 
 ## Working Inside a Container
 
@@ -71,25 +70,24 @@ stiva cp ./local.txt <id>:/app/    # copy in; reverse the operands to copy out
 
 `exec` keeps stdout and stderr separate and makes the command's exit code stiva's.
 
-> **`exec -it` is not offered.** There is no pty helper anywhere in the dependency tree, so
-> the interactive half has no substrate. It is roadmap v3.1.0 item 2, over cyrius stackless
-> coroutines.
+> **`exec -it` is not offered.** It needs a pty helper, which is roadmap v3.4.0.
 
 ## Inspecting and Managing
 
 ```bash
 stiva inspect <id>    # detailed JSON output (no security score — that is `stiva info`)
-stiva stats <id>      # CPU, memory, PID stats from cgroups v2
+stiva stats <id>      # CPU, memory, PID stats from its cgroup
 stiva events -f       # follow the lifecycle event stream
 stiva info            # host info, security score, accelerator inventory
 ```
 
 ## Basic Networking
 
-Stiva creates a default bridge network (`stiva0`, subnet `172.17.0.0/16`); containers
-receive an IP automatically. Rootless containers get slirp4netns or pasta instead.
+⛔ A container gets no bridge and no address yet: the network stack is a library with no caller
+(roadmap v3.3.1). What does work is slirp4netns or pasta for a rootless `run -d`, when either is
+installed.
 
-See the [networking guide](networking.md) for custom networks, IPv6, and DNS.
+See the [networking guide](networking.md).
 
 ## Building Images
 
@@ -125,13 +123,13 @@ stiva build -f Stivafile -c ./project
 ```
 
 `build` resolves the base locally first (then the registry), produces one gzip layer per
-`copy` step, and writes a full OCI config + manifest + `index.json` entry. The layer cache
-key covers the **content** of the source tree, not just its path — changing a file in the
-context invalidates the layer.
+`copy` step, and writes a full OCI config + manifest + `index.json` entry. The layer cache key
+covers each source file's **metadata** (path, mode, owner, size, modification time), so an edit
+that preserves all of those does not invalidate the layer. `rm -rf {root}/cache` forces a rebuild.
 
 > **`run` and `from_stage` steps are refused**, loudly, rather than silently skipped —
 > executing build steps needs a sandbox per step, and multi-stage needs stage-scoped
-> layer sets. Both are roadmap v3.3.
+> layer sets. Both are roadmap v3.3.2.
 
 ## Scheduled Containers
 
@@ -149,13 +147,13 @@ Stiva has no daemon, so `cron check` is what makes jobs fire. See
 ```bash
 stiva stop <id>       # graceful stop (SIGTERM then SIGKILL)
 stiva rm <id>         # remove a stopped container
-stiva rmi alpine:3.19 # remove an image
+stiva rmi docker.io/library/alpine:3.19 # remove an image
 stiva gc              # garbage-collect unreferenced blobs
 stiva prune           # remove all stopped containers and unused images
 ```
 
 ## Next Steps
 
-- [Networking guide](networking.md) -- custom networks, IPv6, DNS
-- [Security guide](security.md) -- rootless, seccomp, Landlock, output scanning
+- [Networking guide](networking.md) -- rootless networking, and the library underneath
+- [Security guide](security.md) -- what is enforced, rootless, output scanning
 - [CLI reference](../cli.md) -- full command list

@@ -167,8 +167,14 @@ fn network_manager_delete_network(m, name) {
         return STIVA_ERR_NETWORK;
     }
 
+    # Only a bridge this network created. An unprivileged create skips it, and a host interface
+    # that happens to have the same name is not ours to delete.
+    var doomed: ManagedNetwork = map_get(mgr.networks, name);
+    var created = doomed.bridge_created;
     map_delete(mgr.networks, name);
-    var _r = delete_bridge(name);      # best-effort (Rust: `let _ = ...`)
+    if (created == 1) {
+        var _r = delete_bridge(name);  # best-effort (Rust: `let _ = ...`)
+    }
     sakshi_info("network deleted", strlen("network deleted"));
     return STIVA_ERR_OK;
 }
@@ -356,24 +362,45 @@ fn network_manager_get_pool(m, network_name) {
 
 # ── nftables apply (rust-old: fn apply_nft_ruleset) ──────────────
 # Rust spawned `nft -f -`, piped the ruleset to its stdin, and waited —
-# synchronous, best-effort (all failures logged, never returned). Cyrius's
-# exec_vec has no stdin-piping surface, so we write the rendered ruleset to a
-# temp file and run `nft -f <file>` (semantically identical: nft reads the
-# ruleset from the given path instead of stdin). Every failure is swallowed,
-# matching the Rust warn-only contract. `ruleset` is a Str (firewall_render).
+# synchronous, best-effort (all failures logged, never returned). Every failure
+# is swallowed, matching the Rust warn-only contract. `ruleset` is a Str
+# (firewall_render).
 fn _network_manager_apply_nft_ruleset(ruleset) {
-    var path = "/tmp/stiva-nft-ruleset.nft";
-    var w = file_write_all(path, str_data(ruleset), str_len(ruleset));
-    if (w < 0) { return 0; }            # can't stage ruleset — non-fatal
-
-    var nft = _network_manager_nft_bin();
-    var args = vec_new();
-    vec_push(args, nft);
-    vec_push(args, "-f");
-    vec_push(args, path);
-    var _rc = exec_vec(args);           # best-effort; ignore exit code
+    var bin = _network_manager_nft_bin();
+    var _rc = _network_manager_run_nft(bin, str_data(ruleset), str_len(ruleset));
     sakshi_debug("applied nftables ruleset", strlen("applied nftables ruleset"));
     return 0;
+}
+
+# Run `bin -f` over `len` bytes of ruleset. exec_vec has no stdin-piping surface, so the bytes sit
+# in an anonymous memfd and nft opens it by path. There is no file to plant: this used to be a fixed
+# /tmp name, which let any local user aim the write through a symlink or swap the rules before nft
+# read them. Returns bin's exit code, or -1.
+fn _network_manager_run_nft(bin, data, len) {
+    var fd = sys_memfd_create("stiva-nft", 0);
+    if (fd < 0) {
+        sakshi_warn("cannot stage the nftables ruleset", strlen("cannot stage the nftables ruleset"));
+        return 0 - 1;
+    }
+    var off = 0;
+    while (off < len) {
+        var w = sys_write(fd, data + off, len - off);
+        if (w <= 0) {
+            sys_close(fd);
+            return 0 - 1;
+        }
+        off = off + w;
+    }
+    var path = str_builder_new();
+    str_builder_add_cstr(path, "/proc/self/fd/");
+    str_builder_add_int(path, fd);
+    var args = vec_new();
+    vec_push(args, bin);
+    vec_push(args, "-f");
+    vec_push(args, str_cstr(str_builder_build(path)));
+    var rc = exec_vec(args);
+    sys_close(fd);
+    return rc;
 }
 
 # Resolve the `nft` binary path (execve needs an absolute path; exec_vec does

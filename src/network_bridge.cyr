@@ -12,8 +12,7 @@
 # IPv4 addresses (`std::net::Ipv4Addr` in Rust) are represented here as a
 # packed 32-bit i64 in host order: (a << 24) | (b << 16) | (c << 8) | d,
 # i.e. a.b.c.d. `_ipv4_fmt` renders dotted-decimal for the `ip` argv. The
-# real `Ipv4Addr`-carrying network types land with src/network.cyr (see the
-# DEFERRED note); the packed-i64 convention is the port's local encoding.
+# packed-i64 convention is the port's local encoding, shared with src/network_dns.cyr.
 
 # ── command-runner helpers ──────────────────────
 # Absolute paths for the shelled-out tools (execve needs a resolved path;
@@ -329,15 +328,3 @@ fn configure_container_iface(pid, iface, container_ip, prefix_len, gateway) {
 
     return STIVA_ERR_OK;
 }
-
-# ── DEFERRED (land with src/network.cyr) ──────────────────
-# rust-old/src/network/bridge.rs is otherwise fully ported above. The
-# private Rust helpers `ip(&[&str])` and `sysctl(key, value)` are inlined
-# into the per-arity runners here (Cyrius has no varargs / closures), so
-# there is no standalone `ip`/`sysctl`/`nsenter` public symbol to port.
-#
-# The real `std::net::Ipv4Addr` type used by callers lives in
-# rust-old/src/network/mod.rs and lands with src/network.cyr; this module
-# encodes an address as a packed 32-bit host-order i64 (a.b.c.d) in the
-# meantime. When network.cyr lands, callers pass that same packed encoding
-# (or network.cyr adds an Ipv4 struct + a `_ipv4_pack` bridge helper).

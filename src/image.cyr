@@ -262,6 +262,7 @@ struct Layer {
     media_type;
 }
 
+# A Layer: its digest, compressed size and media type.
 fn layer_new(digest, size_bytes, media_type) {
     var l = alloc(24);
     var ll: Layer = l;
@@ -287,6 +288,7 @@ struct Image {
     manifest_digest;
 }
 
+# An Image. `layers` is a vec of Layer*, and `id` is the config digest.
 fn image_new(id, reference, size_bytes, layers, created_at) {
     var im = alloc(48);
     var ii: Image = im;
@@ -377,9 +379,95 @@ fn _img_blob_path(root, digest) {
 }
 
 # Open or create an image store (rust-old: ImageStore::new). Creates the
-# root and the blobs/sha256, manifests, and layers subdirectories
+# root and the blobs/sha256, manifests, and layers subdirectories. `layers` is private:
+# see _img_private_dir.
 # (create_dir_all analogues; EEXIST ignored — idempotent). Returns a
 # heap ImageStore*, or 0 if the root could not be created.
+# Create `path` 0700, and tighten it if it already exists with more. Only for a directory
+# stiva owns outright, never the root the user chose, which may be shared. What it protects is
+# the setuid bits an image legitimately carries: unpacked layers and container rootfs copies keep
+# them, so a tree other local users can reach hands them a setuid binary of the store's owner.
+# Docker keeps /var/lib/docker 0710 for the same reason.
+fn _img_private_dir(path) {
+    sys_mkdir(path, 448);
+    if (_stor_lkind(path) != 16384) { return 0; }
+    if (sys_lstat(path, _stor_sb) == 0) {
+        if ((_stor_st_mode(_stor_sb) & 63) != 0) { sys_chmod(path, 448); }
+    }
+    return 0;
+}
+
+# `path` plus `suffix` plus this process's id: a scratch name no other process shares.
+#[must_use]
+fn _img_scratch_path(path, suffix) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, path);
+    str_builder_add_cstr(sb, suffix);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, sys_getpid());
+    return str_cstr(str_builder_build(sb));
+}
+
+# The newest `cap - 1` bytes of the file at `path`, NUL-terminated, with their length in `out_len`.
+# When that leaves the start of the file behind, the partial first line goes too. For logs that
+# grow without bound, whose useful end is the last one. Returns 0 if it cannot be read.
+fn _img_read_tail(path, cap, out_len) {
+    var fd = file_open(path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) { return 0; }
+    var size = sys_lseek(fd, 0, 2);             # SEEK_END
+    var from = 0;
+    if (size >= cap) { from = size - (cap - 1); }
+    sys_lseek(fd, from, 0);                     # SEEK_SET
+    var buf = alloc(cap);
+    var len = 0;
+    if (buf == 0) { sys_close(fd); return 0; }
+    while (len < cap - 1) {
+        var n = sys_read(fd, buf + len, cap - 1 - len);
+        if (n <= 0) { break; }
+        len = len + n;
+    }
+    sys_close(fd);
+    store8(buf + len, 0);
+    if (from > 0) {
+        var i = 0;
+        while (i < len) {
+            if (load8(buf + i) == 10) {
+                store64(out_len, len - i - 1);
+                return buf + i + 1;
+            }
+            i = i + 1;
+        }
+    }
+    store64(out_len, len);
+    return buf;
+}
+
+# Write `len` bytes to `path` through a temp file and a rename, so a reader sees all of it or
+# none. O_EXCL|O_NOFOLLOW mean the temp cannot be a link another user planted. Returns 1, or 0.
+fn _img_write_atomic(path, data, len, mode) {
+    var tmp = _img_scratch_path(path, ".tmp");
+    xunlink(tmp);
+    var fd = file_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
+    if (fd < 0) { return 0; }
+    var done = 0;
+    while (done < len) {
+        var n = sys_write(fd, data + done, len - done);
+        if (n <= 0) {
+            file_close(fd);
+            xunlink(tmp);
+            return 0;
+        }
+        done = done + n;
+    }
+    file_close(fd);
+    if (sys_rename(tmp, path) < 0) {
+        xunlink(tmp);
+        return 0;
+    }
+    return 1;
+}
+
+# A store rooted at `root`, creating the directories it needs. Returns 0 if it cannot.
 fn image_store_new(root) {
     # 0o755 = 493. create_dir_all recurses in Rust; here we create each
     # level in order so nested paths succeed even from a fresh root.
@@ -391,7 +479,7 @@ fn image_store_new(root) {
     var manifests = _img_cat2(root, "/manifests");
     sys_mkdir(manifests, 493);
     var layers = _img_cat2(root, "/layers");
-    sys_mkdir(layers, 493);
+    _img_private_dir(layers);
 
     # Rust ImageStore::new propagates create_dir_all failures via `?`. sys_mkdir
     # returns -EEXIST for an already-present dir (idempotent, fine) and other
@@ -437,10 +525,7 @@ fn image_store_store_blob(store, digest, data, len) {
     var actual = sha256_digest(data, len);
     if (streq(actual, digest) == 0) { return 0; }
 
-    # Write atomically via temp file + rename.
-    var tmp = _img_cat2(path, ".tmp");
-    if (file_write_all(tmp, data, len) < 0) { return 0; }
-    if (sys_rename(tmp, path) < 0) { return 0; }
+    if (_img_write_atomic(path, data, len, 420) == 0) { return 0; }
     return path;
 }
 
@@ -539,7 +624,6 @@ fn _layer_digest(layer) {
 # maxlen truncation — an integrity check must hash the ENTIRE blob, and layer
 # blobs can exceed image_import's 64 MiB read cap). Writes the byte length to
 # `out_len`; returns the buffer, or 0 (out_len < 0) on open/seek failure.
-# Mirrors storage.cyr's _stor_read_file, kept local to image.cyr.
 fn _img_read_file(path, out_len) {
     var fd = file_open(path, 0, 0);            # O_RDONLY
     if (fd < 0) { store64(out_len, fd); return 0; }

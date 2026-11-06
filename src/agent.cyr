@@ -7,10 +7,8 @@
 #   - DEFAULT_REGISTRY_URL constant
 #   - struct AgentRegistration + struct AgentStatus
 #   - build_registration(container) — pure, mirrors the Rust builder
-# The three network functions (register/deregister/report_status) require an
-# async reqwest client + HTTP/TLS which the ported base lacks; they live in
-# the DEFERRED block at the bottom (legitimate HTTP/async deferral, matching
-# the registry-module precedent).
+# The three network functions (register/deregister/report_status) are not ported yet: see the note
+# at the bottom, and roadmap v3.3.2.
 
 # Default daimon registry URL (rust-old: DEFAULT_REGISTRY_URL).
 #[must_use]
@@ -132,25 +130,23 @@ fn _agent_first12(id) {
     return buf;
 }
 
-# ── DEFERRED (HTTP/async — no reqwest/TLS/async runtime in ported base) ──
-# rust-old/src/agent.rs also defines these network functions. Each builds a
-# URL under `{registry_url}` and issues a request against daimon's agent
-# registry using an async reqwest::Client, mapping transport failures to
-# StivaError::Network (STIVA_ERR_NETWORK). Port them once an HTTP client
-# lands (same status as registry.cyr's network paths):
+# ── Not ported: daimon registration (roadmap v3.3.2) ──
+# sandhi provides the HTTP client the registry module already uses, so this is unstarted work, not
+# blocked work. Each call builds a URL under `{registry_url}`, and a transport failure maps to
+# STIVA_ERR_NETWORK:
 #
-#   async fn register_container(client, container, registry_url)
+#   register_container(client, container, registry_url)
 #       POST {registry_url}/v1/agents/register  body = build_registration(...)
 #       non-2xx or transport error → Err(STIVA_ERR_NETWORK
 #         "daimon registration failed: {e}" /
 #         "daimon registration returned HTTP {status}")
 #
-#   async fn deregister_container(client, container_id, registry_url)
+#   deregister_container(client, container_id, registry_url)
 #       DELETE {registry_url}/v1/agents/{container_id}
 #       non-2xx → warn (does NOT error); transport error → Err(NETWORK
 #         "daimon deregistration failed: {e}")
 #
-#   async fn report_status(client, container_id, status, registry_url)
+#   report_status(client, container_id, status, registry_url)
 #       PUT {registry_url}/v1/agents/{container_id}/status
 #         body = AgentStatus { id: container_id, status, metadata: none }
 #       non-2xx → warn (does NOT error); transport error → Err(NETWORK

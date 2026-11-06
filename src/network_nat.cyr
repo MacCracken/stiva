@@ -61,10 +61,15 @@ fn network_nat_port_spec_new(host_addr, has_host_addr, host_port, container_port
     return p;
 }
 
+# The host address a port is bound to, when port_spec_has_host_addr says there is one.
 fn port_spec_host_addr(p) { var ps: PortSpec = p; return ps.host_addr; }
+# 1 if the spec named a host address.
 fn port_spec_has_host_addr(p) { var ps: PortSpec = p; return ps.has_host_addr; }
+# The port on the host.
 fn port_spec_host_port(p) { var ps: PortSpec = p; return ps.host_port; }
+# The port in the container.
 fn port_spec_container_port(p) { var ps: PortSpec = p; return ps.container_port; }
+# The protocol, a cstr.
 fn port_spec_protocol(p) { var ps: PortSpec = p; return ps.protocol; }
 
 # ── string helpers (self-contained; NUL-terminated cstrings) ─────────

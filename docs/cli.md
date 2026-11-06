@@ -1,12 +1,16 @@
 # CLI Reference
 
 Stiva provides a `stiva` binary. Every command below is **registered** (visible in
-`--help`); **34 of 36 execute end-to-end today**. The **Status** column marks each:
+`--help`); **33 of 36 work end-to-end today**. The **Status** column marks each:
 
 - **Live** — works end-to-end today.
-- **v3.1 (planned)** — registered but prints a clear "not yet wired" message. Only
-  `checkpoint` and `restore` are in this state; their module logic is ported and what
-  they need is CRIU integration (roadmap v3.1.0 item 3).
+- **Broken** — `restart`, which cannot succeed from the CLI (roadmap v3.2.1).
+- **v3.4 (planned)** — registered but prints a clear "not yet wired" message. Only `checkpoint` and
+  `restore` are in this state: they need CRIU, which is not ported (roadmap v3.4.1).
+
+⚠ References are matched exactly. An image pulled as `alpine:3.19` is stored as
+`docker.io/library/alpine:3.19`, and that is what `run`, `rmi`, `save` and `push` need (roadmap
+v3.2.0).
 
 ## Global Options
 
@@ -32,23 +36,23 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot) |
+| `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot). Flags come before the image, because everything after it goes to the payload. The image's own `Entrypoint` and `Cmd` are not used, so give a command (roadmap v3.2.0) |
 | `stiva ps [-a]` | **Live** | List **running** containers; `-a`/`--all` includes stopped ones |
 | `stiva stop <ID>` | **Live** | Stop a container (SIGTERM → SIGKILL) |
 | `stiva rm <ID>` | **Live** | Remove a stopped container |
-| `stiva pause <ID>` | **Live** | Pause via cgroups v2 freezer |
+| `stiva pause <ID>` | **Live** | Pause via cgroups v2 freezer. Refuses a container that shares its cgroup, because everything in it would freeze, and stiva creates no per-container cgroup yet (roadmap v3.2.1) |
 | `stiva unpause <ID>` | **Live** | Unpause a paused container |
 | `stiva inspect <ID>` | **Live** | Inspect a **container** (JSON output). Images are not inspectable — the lookup is container-only; use `stiva images` for the store index |
-| `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from cgroups v2 |
+| `stiva stats <ID>` | **Live** | Show CPU/memory/PID stats from the container's cgroup, which it shares with whatever started it (roadmap v3.2.1) |
 | `stiva logs <ID> [-n LINES] [-f] [--scan]` | **Live** | Show last N lines, or `-f` to follow, which returns once the log has been **quiet for 2 s** (`_CLI_FOLLOW_QUIET_MS`) — **not** when the container stops, so a `run -d` container that pauses output for longer ends the follow (polls the log file; the lifecycle bus is process-local). `--scan` runs the output through kavach's externalization gate first; it cannot be combined with `-f` |
 | `stiva export <ID> <OUTPUT.tar>` | **Live** | Export container rootfs as tar archive (two positionals; there is no `-o`) |
-| `stiva wait <ID>` | **Live** | Wait for container to exit, return exit code |
-| `stiva run -d <IMAGE> [CMD...]` | **Live** | Detached run over kavach 3.9.0 `sandbox_spawn`. Returns the container id immediately; state survives into other stiva processes, and `stop` signals the recorded pid when the in-memory handle is gone. **See the rootfs caveat below.** |
+| `stiva wait <ID>` | **Live** | Wait for a container to exit, print its exit code and exit with it. A detached container's code is known only to what reaped it, so `wait` says none was recorded and exits 1 (roadmap v3.2.1) |
+| `stiva run -d <IMAGE> [CMD...]` | **Live** | Detached run over kavach 3.9.0 `sandbox_spawn`. Returns the container id immediately; state survives into other stiva processes, and `stop` signals the recorded pid when the in-memory handle is gone. A payload gets no `PATH`, so give an absolute command. |
 | `stiva exec [-e K=V]... [-w DIR] <CONTAINER> <CMD> [ARGS...]` | **Live** | Run a command inside a running container via `nsenter`. stdout and stderr stay separate, and the command's exit code becomes stiva's. Non-interactive only — `-i`/`-t` are not offered |
 | `stiva top <ID>` | **Live** | List processes inside a running container (`/proc` walk over the descendants of the container PID) |
 | `stiva cp <SRC> <DST>` | **Live** | Copy files host↔container. Exactly one side is `<container>:<path>`; both or neither is refused rather than guessed |
 | `stiva kill <ID> [-s SIGNAL]` | **Live** | Send a signal (number, 1–64, default 15 = SIGTERM). Requires a running container |
-| `stiva restart <ID>` | **Live** | Restart a container (stop then start; needs the runtime spec from the creating process) |
+| `stiva restart <ID>` | ⛔ **Broken** | Cannot succeed: a running container is refused as "not stopped", and a stopped one has "no runtime spec", which exists only in the process that created it (roadmap v3.2.1) |
 | `stiva rename <ID> <NAME>` | **Live** | Rename a container |
 
 ### Operations
@@ -60,14 +64,14 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 | `stiva info` | **Live** | Show system information and security score |
 | `stiva convert <FILE> -f dockerfile [-o OUT]` | **Live** | Convert a Dockerfile to a `Stivafile` |
 | `stiva convert <FILE> -f compose ...` | **Live** | Convert docker-compose YAML to a compose TOML (documented YAML subset — see below) |
-| `stiva checkpoint <ID> [--leave-running]` | v3.1 (planned) | CRIU checkpoint a running container |
-| `stiva restore <ID> <DIR>` | v3.1 (planned) | Restore container from CRIU checkpoint |
+| `stiva checkpoint <ID> [--leave-running]` | v3.4 (planned) | CRIU checkpoint a running container |
+| `stiva restore <ID> <DIR>` | v3.4 (planned) | Restore container from CRIU checkpoint |
 | `stiva cron <SUBCOMMAND> ...` | **Live** | Schedule containers. See [`stiva cron`](#stiva-cron) |
 | `stiva events [--since SEC] [--until SEC] [-n N] [-f]` | **Live** | Replay container lifecycle events from `{root}/events.jsonl` (one JSON object per line, printed verbatim so `\| jq` works). Without `-f` it dumps and exits; `-f` follows until `-n`, `--until`, or an interrupt. See [Lifecycle events](#lifecycle-events) |
 | `stiva diff <ID>` | **Live** | Show filesystem changes in a container vs its image, one `<status> <path>` line per change (`A` added, `C` changed, `D` deleted). Handles both rootfs layouts — over an overlay the changed set is `{croot}/upper`, with overlayfs whiteouts (char 0:0) and opaque dirs read as deletions; a flattened rootfs (flagged by `{croot}/.rootfs-flattened`) is compared against the layer dirs. "no changes" goes to **stderr**, so `stiva diff <ID> \| wc -l` counts changes |
 | `stiva completions <SHELL>` | **Live** | Generate shell completions (bash, zsh, fish) on **stdout**, from cmdit's own verb table — so the script cannot drift from the CLI |
 | `stiva save <IMAGE> <OUTPUT.tar>` | **Live** | Save an image as an `oci-archive` tarball (skopeo/podman-compatible) |
-| `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` tarball into the store (`docker-archive` → v3.0.3) |
+| `stiva load <INPUT.tar>` | **Live** | Load images from an `oci-archive` or `docker-archive` tarball into the store |
 
 ## `stiva run` Flags
 
@@ -75,7 +79,7 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 |------|-------------|
 | `--name <NAME>` | Container name |
 | `--backend <NAME>` | Sandbox backend override (`process`, `oci`, `noop`, …) |
-| `-w, --workdir <DIR>` | ⛔ **Accepted and silently ignored.** Registered, stored on the spec, and never read — `build_sandbox` does not call `config_workdir` and the OCI spec hardcodes `"cwd":"/"`. Roadmap v3.1.0 item 10 |
+| `-w, --workdir <DIR>` | Working directory for the payload |
 | `-d, --detach` | Run detached over kavach `sandbox_spawn`; prints the container id and returns |
 
 **Arguments.** Two or more words after the image are the payload's argv, and each reaches it as one
@@ -85,10 +89,8 @@ way kavach's runtime guard reads the command and refuses `$(...)` and `| sh` any
 also refuses a newline, and a program path may not hold a space or a tab.
 
 > These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
-> (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired — passing them is a
-> usage error. Secret injection is roadmap v3.1.0 item 1 (containers currently get no
-> secrets at all: `secrets` serializes as an empty array and `build_sandbox` has no kavach
-> setter to thread one through); port mapping arrives with §J live network attach, also v3.1.
+> (`-p`), env (`-e`), volumes (`-v`) and secrets are **not** wired, and passing them is a
+> usage error. All are roadmap v3.2.2, and the port mapping needs v3.3.1 as well.
 
 ## `stiva exec` Flags
 
@@ -216,8 +218,9 @@ name = "myapp"
 tag = "v1.0"
 
 [[steps]]
-type = "run"
-command = ["apk", "add", "--no-cache", "curl"]
+type = "env"
+key = "APP_ENV"
+value = "prod"
 
 [[steps]]
 type = "copy"
@@ -264,11 +267,11 @@ user = "nobody"
 ## Examples
 
 ```bash
-# Run a container (foreground, one-shot)
-stiva run --name web nginx:latest
+# Run a container (foreground, one-shot). The image's entrypoint is not used, so give a command.
+stiva run --name web docker.io/library/nginx:latest /usr/sbin/nginx -v
 
 # Pick the sandbox backend explicitly and set a working directory
-stiva run --backend oci myapp:latest /bin/echo hi
+stiva run --backend oci local/myapp:latest /bin/echo hi
 
 # Check status
 stiva ps
@@ -335,8 +338,10 @@ var. `RUST_LOG` was a Rust-era leftover and is not read.
 
 ## Lifecycle events
 
-Every container state change publishes an event to the in-process majra hub **and** appends it to
-`{root}/events.jsonl`. `stiva events` reads that file.
+Each lifecycle change a stiva process makes publishes an event to the in-process majra hub **and**
+appends it to `{root}/events.jsonl`. `stiva events` reads that file. ⚠ The record is incomplete: a
+foreground run emits `created` and `started` only, with `started` after the payload exits, and a
+`run -d` container that exits by itself emits nothing (roadmap v3.2.1).
 
 The file is what makes the verb work at all. The hub is a `pubsub_new()` owned by one
 `ContainerManager` and is never persisted, and every CLI invocation is a separate process building
@@ -351,7 +356,7 @@ stiva events | jq -r '"\(.ts) \(.event) \(.container_id)"'
 
 ```json
 {"ts":1785021407505,"event":"created","container_id":"3f38…","image":"local/demo:v1"}
-{"ts":1785021407517,"event":"started","container_id":"3f38…","detach":"false"}
+{"ts":1785021407517,"event":"started","container_id":"3f38…","detach":"true"}
 {"ts":1785021407680,"event":"stopped","container_id":"3f38…","exit_code":0}
 {"ts":1785021407691,"event":"removed","container_id":"3f38…","state":"removed"}
 ```
@@ -395,7 +400,8 @@ skip it entirely; `stiva events` then reports that no events are recorded.
 |------|---------|
 | 0 | Success |
 | 1 | Error (message printed to stderr) |
-| N | Container exit code (for `stiva exec` and `stiva wait`) |
+| 2 | Usage error |
+| N | Container exit code, for `stiva run`, `stiva exec` and `stiva wait`. A payload that could not be started usually shows as 126 or 127 |
 
 ## Container filesystem
 
@@ -409,7 +415,5 @@ directly rather than through `/bin/sh`). Without one, the process backend enters
 `unshare(CLONE_NEWUSER|CLONE_NEWNS)` + `chroot`.
 
 **Decompression-bomb ceiling:** a layer blob is refused when its uncompressed size exceeds
-**min(1000× the compressed length, 8 GiB)** (`_STOR_MAX_RATIO` / `_STOR_MAX_OUT`,
-`src/storage.cyr:751-752`). Real base images are far below both bounds.
-*(A previous revision of this page claimed layers over "roughly 1 MB" fail to unpack and that
-this "rules out most real base images". That was false.)*
+**1000× the compressed length, or 2 GiB, the most one allocation can hold** (`_stor_decomp_limit`).
+Real base images are below both. An all-zero or periodic layer can hit the ratio first.

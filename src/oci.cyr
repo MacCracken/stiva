@@ -3,10 +3,8 @@
 #
 # This module carries the parts of oci.rs with no intra-crate coupling:
 # the OCI runtime-spec version, the OciStatus enum + its serde names, and
-# `parse_signal`. The container-coupled helpers from oci.rs
-# (`to_oci_status`, `build_state`, `parse_bundle`) depend on
-# container.rs's `Container` / `ContainerState` / `ContainerConfig` and
-# land with src/container.cyr — see the DEFERRED block at the bottom.
+# `parse_signal`. The container-coupled helpers from oci.rs (`to_oci_status`,
+# `build_state`, `parse_bundle`) live in src/container.cyr, beside the types they use.
 
 # OCI runtime spec version we conform to (rust-old: OCI_VERSION).
 #[must_use]

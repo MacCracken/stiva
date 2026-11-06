@@ -5,7 +5,7 @@
 
 ## Version
 
-**3.1.1** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.1.2** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
@@ -15,18 +15,18 @@
 ## Source
 
 - Rust oracle: 18622 lines at `rust-old/` (frozen).
-- Cyrius: **22,712 lines** across `src/*.cyr` — **27 domain modules** listed in
+- Cyrius: **24,180 lines** across `src/*.cyr` — **27 domain modules** listed in
   `cyrius.cyml [lib].modules`, plus `src/lib.cyr` (aggregation header) and `src/main.cyr`
   (entry + CLI). `cyrius distlib` folds the 27 into `dist/stiva.cyr`.
-- CLI: **36 registered verbs, 34 live**. `checkpoint` and `restore` print "not wired yet" —
-  they need CRIU (roadmap v3.1.0 item 3).
+- CLI: **36 registered verbs, 33 live**. `checkpoint` and `restore` print "not wired yet" —
+  they need CRIU (roadmap v3.4.1). `restart` cannot succeed yet (v3.2.1).
 
 ## Tests
 
-**2197** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 363 ·
-mgmt 326 · store 304 · convert 116 — plus **92** CLI smoke assertions
+**2649** assertions across 6 `tests/*.tcyr` files — stiva 667 · runpath 659 · registry 444 ·
+store 387 · mgmt 354 · convert 138 — plus **102** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
-and **14** benchmarks.
+**18** fuzz targets (`tests/stiva.fcyr`) and **14** benchmarks.
 
 ⚠ Counting note: `cyrius test tests/` prints a trailing `6 passed, 0 failed`, which is the
 **file** tally, not six extra assertions. Adding it to the per-file sum overstates the count
@@ -40,8 +40,8 @@ named). Git-pinned AGNOS bundles, in declaration order:
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
 | sigil | 3.13.15 | kavach | 3.14.3 |
-| sakshi | 2.5.10 | samay | 1.5.1 (optional) |
-| libro | 2.11.3 | ai-hwaccel | 2.5.6 (optional, on by default) |
+| sakshi | 2.5.10 | samay | 1.5.1 |
+| libro | 2.11.3 | ai-hwaccel | 2.5.6 |
 | majra | 2.13.0 | cmdit | 1.5.0 |
 | bote-core | 3.8.15 | nein | 1.9.1 |
 
@@ -58,14 +58,13 @@ daimon (container management), sutra (fleet deployment).
 
 ⚠ Both are **cyrius-built**, and a cyrius-built payload currently reads **no environment**
 inside a stiva container: `getenv` reads `/proc/self/environ` and nothing mounts `/proc` on the
-`run -d` path. Tracked on the agnos roadmap and as roadmap v3.1.0 item 9.
+`run -d` path. Tracked on the agnos roadmap and as roadmap v3.2.2.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). The single-node runtime is finished; v3.1.0 is secrets,
-interactivity and mobility.
+See [`roadmap.md`](roadmap.md). v3.2 is making one container correct: honouring the image's config,
+manageable lifecycle, and mounts, user and secrets. Its **Recording a block** convention says what it
+takes to call anything blocked in this tree.
 
-⚠ An adversarial audit at 3.0.18 found **zero of the eight** v3.1.0 items genuinely blocked on
-an upstream release — seven were never blocked. Read the rewritten v3.1.0 section, and the
-**Recording a block** convention at the end of `roadmap.md`, before believing any "blocked"
-label in this tree.
+⛔ The largest open security gap is upstream: the default foreground path, the OCI backend, has no
+seccomp filter and no NO_NEW_PRIVS. See SECURITY.md.

@@ -100,6 +100,7 @@ struct Network {
     driver;
 }
 
+# A Network: name, subnet, gateway and driver.
 fn network_new(name, subnet, gateway, driver) {
     var n: Network = alloc(32);
     n.name = name;
@@ -120,6 +121,7 @@ struct ContainerNetwork {
     container_veth;
 }
 
+# A container's attachment to a network: its addresses and both ends of its veth pair.
 fn container_network_new(ip, ipv6, network_name, host_veth, container_veth) {
     var cn: ContainerNetwork = alloc(40);
     cn.ip = ip;
@@ -226,9 +228,11 @@ fn dns_registry_new() {
     return reg;
 }
 
-# Register a name→IP mapping (rust-old: register). `name` and `ip` are cstrs.
+# Register a name→IP mapping (rust-old: register). `name` and `ip` are cstrs. A name that could
+# not go on a line of /etc/hosts is refused. Returns 0, or STIVA_ERR_NETWORK.
 fn dns_registry_register(r, name, ip) {
     var reg: DnsRegistry = r;
+    if (network_dns_name_is_valid(name) == 0) { return STIVA_ERR_NETWORK; }
     map_set(reg.entries, name, ip);
     return 0;
 }
@@ -274,8 +278,9 @@ fn dns_registry_to_hosts_entries(r) {
 # `rootfs` is a directory cstr; writes <rootfs>/etc/hosts with localhost
 # lines, the container's own {ip}\t{hostname}, then all registered service
 # names. Returns STIVA_ERR_OK on success, or STIVA_ERR_IO on write failure
-# (rust-old propagated std::io::Error via `?` → StivaError::Io).
+# (rust-old propagated std::io::Error via `?` → StivaError::Io), or on an invalid hostname.
 fn dns_registry_inject_into(reg, rootfs, container_ip, hostname) {
+    if (network_dns_name_is_valid(hostname) == 0) { return STIVA_ERR_IO; }
     # Build "<rootfs>/etc" as a cstr (rootfs is a NUL-terminated cstr; we
     # join with a literal '/' the way std::path::Path::join does — the extra
     # slash on a "…/" rootfs is harmless to the kernel). path_join from
@@ -285,7 +290,8 @@ fn dns_registry_inject_into(reg, rootfs, container_ip, hostname) {
     str_builder_putc(esb, 47);      # '/'
     str_builder_add_cstr(esb, "etc");
     var etc = str_cstr(str_builder_build(esb));
-    sys_mkdir(etc, 448);        # 0700; create_dir_all — rootfs already exists
+    # 0755, as _network_dns_ensure_etc: a payload that is not root has to read /etc/hosts.
+    sys_mkdir(etc, 493);
 
     # Fixed prelude:
     #   "127.0.0.1\tlocalhost\n"

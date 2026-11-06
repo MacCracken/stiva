@@ -39,9 +39,7 @@ include "src/stiva_core.cyr"
 # (dist/cmdit.cyr) — registered as verbs, not hand-rolled argv parsing.
 # `convert` has ported backing for BOTH formats (dockerfile_to_toml +
 # compose_yaml_to_toml); the container-lifecycle + registry verbs are the
-# v3.0.x runtime-completion work (blocking, over the ported sync core — the
-# substrate is ready), except detached `run -d`, the v3.1 externally-blocked
-# residue.
+# v3.0.x runtime-completion work (blocking, over the ported sync core).
 
 # Verb ids — cmdit_verb returns these in registration order.
 enum StivaVerb {
@@ -63,6 +61,22 @@ fn _cli_puts(s) { sys_write(1, s, strlen(s)); return 0; }
 # config, which is a far worse failure than the original mistake.
 fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 
+# Print a value that an image or a payload chose. A control byte in one would drive the operator's
+# terminal: a name in a loaded archive, or a process title in `top`, could rewrite what they see.
+fn _cli_puts_safe(s) {
+    var n = strlen(s);
+    var out = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 32 || c == 127) { c = 63; }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    sys_write(1, out, n);
+    return 0;
+}
+
 # NOTE: this literal does NOT track the VERSION file — cyrius.cyml reads
 # `version = "${file:VERSION}"`, but nothing interpolates it into the compiled
 # binary, so `stiva --version` is only correct if this string is bumped by hand.
@@ -71,7 +85,7 @@ fn _cli_eputs(s) { sys_write(2, s, strlen(s)); return 0; }
 # greps for, and re-run the script rather than editing this alone.
 #[must_use]
 fn _stiva_version_str() {
-    return "3.1.1 — OCI container runtime (Cyrius port)";
+    return "3.1.2 — OCI container runtime (Cyrius port)";
 }
 
 # Register all 36 subcommands (order = the verb ids above; APPEND ONLY — inserting a verb
@@ -80,7 +94,8 @@ fn _cli_register_verbs(h) {
     cmdit_verb(h, "pull", "Pull an image from a registry");
     cmdit_verb(h, "build", "Build an image from a Stivafile");
     cmdit_verb(h, "push", "Push a local image to a registry");
-    cmdit_verb(h, "run", "Run a container from an image");
+    # Everything after the image is the payload's command line, for the reason given on `exec`.
+    cmdit_verb_trailing_after(h, cmdit_verb(h, "run", "Run a container from an image"), 1);
     cmdit_verb(h, "ps", "List containers");
     cmdit_verb(h, "stop", "Stop a container");
     cmdit_verb(h, "rm", "Remove a container");
@@ -103,7 +118,7 @@ fn _cli_register_verbs(h) {
     cmdit_verb(h, "export", "Export a container's filesystem as a tar archive");
     cmdit_verb(h, "import", "Import a tar archive as an image");
     cmdit_verb(h, "cp", "Copy files between host and container");
-    cmdit_verb(h, "prune", "Remove stopped containers and dangling images");
+    cmdit_verb(h, "prune", "Remove stopped containers and every image no container uses");
     cmdit_verb(h, "wait", "Wait for a container to exit");
     cmdit_verb(h, "checkpoint", "Checkpoint a running container (CRIU)");
     cmdit_verb(h, "restore", "Restore a checkpointed container (CRIU)");
@@ -203,18 +218,12 @@ fn _cli_convert(h) {
     return CMDIT_EXIT_OK;
 }
 
-# Container-lifecycle / registry verbs that aren't wired yet. The substrate is
-# ready (single-threaded run-to-completion + a blocking sandhi HTTP client), so
-# these are synchronous/blocking work on the v3.0.x runtime-completion line
-# (registry pull/push, container manager, exec/CRIU) — NOT async and NOT v3.1.
-# The small genuinely-blocked residue (detached `run -d`, interactive
-# `exec -it`) is v3.1. See docs/development/roadmap.md.
+# The verbs that are registered but not wired yet: `checkpoint` and `restore`.
 fn _cli_not_wired(verb_name) {
     _cli_puts("stiva ");
     _cli_puts(verb_name);
     _cli_puts(": not wired yet. See docs/development/roadmap.md\n");
-    _cli_puts("  Needs CRIU — roadmap v3.1.0 item 3. The rest of the single-node runtime\n");
-    _cli_puts("  is complete as of v3.0.17; see docs/development/roadmap.md.\n");
+    _cli_puts("  Needs CRIU, which is roadmap v3.4.1.\n");
     return CMDIT_EXIT_RUN;
 }
 
@@ -330,7 +339,7 @@ fn _cli_images(root) {
     var i = 0;
     while (i < n) {
         var iim: Image = vec_get(images, i);
-        _cli_puts(image_ref_full_ref(iim.reference)); _cli_puts("\t");
+        _cli_puts_safe(image_ref_full_ref(iim.reference)); _cli_puts("\t");
         _cli_puts(iim.id); _cli_puts("\t");
         _cli_puts(_rt_int_to_cstr(iim.size_bytes)); _cli_puts("\n");
         i = i + 1;
@@ -408,10 +417,10 @@ fn _cli_ps(h, root) {
     while (i < n) {
         var cc: Container = vec_get(cs, i);
         if (all == 1 || cc.state == CONTAINER_STATE_RUNNING) {
-            _cli_puts(cc.id); _cli_puts("\t");
-            _cli_puts(cc.image_ref); _cli_puts("\t");
+            _cli_puts_safe(cc.id); _cli_puts("\t");
+            _cli_puts_safe(cc.image_ref); _cli_puts("\t");
             _cli_puts(container_state_name(cc.state)); _cli_puts("\t");
-            if (cc.name != 0) { _cli_puts(cc.name); } else { _cli_puts("-"); }
+            if (cc.name != 0) { _cli_puts_safe(cc.name); } else { _cli_puts("-"); }
             _cli_puts("\n");
         }
         i = i + 1;
@@ -430,7 +439,7 @@ fn _cli_stop(h, root) {
     var id = cmdit_positional(vh, 0);
     # Through the manager (rust-old: Stiva::stop). One-shot containers are
     # already Stopped, so this is idempotent rather than an error — the manager
-    # handles the daemon SIGTERM/grace path (v3.1) when a handle exists.
+    # handles the SIGTERM/grace path for a detached one.
     var mgr = container_manager_new(root, image_store_new(root));
     if (container_manager_stop(mgr, id) != STIVA_ERR_OK) { return CMDIT_EXIT_RUN; }
     _cli_puts(id); _cli_puts("\n");
@@ -543,14 +552,9 @@ var _CLI_FOLLOW_QUIET_MS = 2000;
 # `logs -f` — print the log, then keep printing as it grows, stopping once it
 # has been quiet for _CLI_FOLLOW_QUIET_MS.
 #
-# Termination is QUIESCENCE-based, not container-state-based, and that is not a
-# shortcut. `container_fixup_after_restart` (src/container.cyr:181) rewrites
-# RUNNING/PAUSED to STOPPED for every record loaded from disk — a stale pid from
-# a dead process is worse than none — so a fresh CLI process can never observe a
-# container as Running. A state-based loop therefore exits on its first pass
-# having followed nothing, which is exactly what the first version of this did.
-# Once `run -d` lands (v3.1) and there is a live pid to probe, state becomes the
-# better signal and should replace this.
+# Termination is QUIESCENCE-based, not container-state-based. That dates from when nothing could
+# outlive the process that started it. `run -d` does, and `wait` follows its pid, so state is now
+# the better signal and should replace this (roadmap v3.2.1).
 #
 # It polls the FILE rather than the lifecycle bus because the bus is a
 # per-ContainerManager in-process `pubsub_new()` (src/container.cyr:896), never
@@ -723,14 +727,16 @@ fn _cli_events_scan(buf, len, since_ms, until_ms, printed, count) {
                 # Terminate the line in place rather than copying it out: the
                 # buffer is ours, and a 70k-line log would otherwise be 70k
                 # allocations. The newline is restored immediately.
-                store8(buf + i, 0);
-                if (container_event_in_range(container_event_ts(buf + start),
-                    since_ms, until_ms) == 1) {
-                    _cli_puts(buf + start);
-                    _cli_puts("\n");
+                var keep = 1;
+                if (since_ms > 0 || until_ms > 0) {
+                    store8(buf + i, 0);
+                    keep = container_event_in_range(container_event_ts(buf + start), since_ms, until_ms);
+                    store8(buf + i, 10);
+                }
+                if (keep == 1) {
+                    sys_write(1, buf + start, i - start + 1);
                     total = total + 1;
                 }
-                store8(buf + i, 10);
             }
             start = i + 1;
         }
@@ -901,8 +907,9 @@ fn _cli_events(h, root) {
 }
 
 # `wait <container>` — print + exit with the container's exit code (rust-old:
-# Commands::Wait). Our foreground containers have already exited; return the
-# recorded exit_status.
+# Commands::Wait). A foreground container has already exited, so its recorded exit_status is the
+# answer. A detached one is waited for, and if nothing recorded how it ended (its parent is long
+# gone, so stiva cannot reap it) that is said rather than reported as success.
 fn _cli_wait(h, root) {
     var vh = cmdit_new("stiva wait");
     var vr = cmdit_parse_verb(vh, h);
@@ -918,8 +925,13 @@ fn _cli_wait(h, root) {
         stiva_err_print(STIVA_ERR_CONTAINER_NOT_FOUND, id);
         return CMDIT_EXIT_RUN;
     }
-    var ec = container_manager_try_wait(mgr, id);
-    if (ec == 0 - 1) { ec = 0; }
+    container_manager_wait_gone(mgr, id);
+    # A fresh manager: `stop` in another process may have recorded the code meanwhile.
+    var ec = container_manager_try_wait(container_manager_new(root, image_store_new(root)), id);
+    if (ec == 0 - 1) {
+        _cli_eputs("stiva wait: it has exited; no exit code was recorded\n");
+        return CMDIT_EXIT_RUN;
+    }
     _cli_puts(_rt_int_to_cstr(ec)); _cli_puts("\n");
     return ec;
 }
@@ -1153,7 +1165,7 @@ fn _cli_top(h, root) {
         var cmd = pi.cmdline;
         if (cmd == 0) { cmd = pi.comm; }
         if (cmd == 0) { cmd = ""; }
-        _cli_puts(cmd); _cli_puts("\n");
+        _cli_puts_safe(cmd); _cli_puts("\n");
         i = i + 1;
     }
     return CMDIT_EXIT_OK;
@@ -1353,6 +1365,10 @@ fn _cli_cron(h, root) {
 
     if (streq(sub, "ls") == 1) {
         var jobs = cron_store_load(root);
+        if (jobs == 0) {
+            _cron_store_unreadable(root);
+            return CMDIT_EXIT_RUN;
+        }
         _cli_puts("NAME\tSCHEDULE\tIMAGE\tENABLED\n");
         var i = 0;
         while (i < vec_len(jobs)) {
@@ -1403,12 +1419,8 @@ fn _cli_cron(h, root) {
     }
 
     if (streq(sub, "check") == 1) {
-        var jobs2 = cron_store_load(root);
-        var due = cron_due_at(jobs2, clock_epoch_ns());
-        # Persist the advanced anchors BEFORE running anything: if a container
-        # start crashes the process, the alternative is re-firing the same job on
-        # every subsequent tick forever.
-        var _sv = cron_store_save(root, jobs2);
+        var due = cron_check_claim(root, clock_epoch_ns());
+        if (due == 0) { return CMDIT_EXIT_RUN; }
         var s = _cli_stiva(root);
         if (s == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
         var fired = 0;
@@ -1652,6 +1664,10 @@ fn _cli_gc(h, root) {
     var store = image_store_new(root);
     if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
     var removed = image_store_gc(store);
+    if (removed < 0) {
+        stiva_err_print(STIVA_ERR_IO, "index.json cannot be fully read; refusing to collect");
+        return CMDIT_EXIT_RUN;
+    }
     _cli_puts("Removed "); _cli_puts(_rt_int_to_cstr(removed)); _cli_puts(" unreferenced blobs\n");
     return CMDIT_EXIT_OK;
 }
@@ -1667,7 +1683,8 @@ fn _cli_prune(h, root) {
     var store = image_store_new(root);
     if (store == 0) { stiva_err_print(STIVA_ERR_IO, root); return CMDIT_EXIT_RUN; }
 
-    # 1. drop Stopped containers.
+    # 1. drop Stopped containers. The lock spans the read and the write: see container_state_lock.
+    var lock = container_state_lock(root);
     var cs = container_state_load(root);
     var kept = vec_new();
     var removed_c = 0;
@@ -1700,33 +1717,36 @@ fn _cli_prune(h, root) {
         i = i + 1;
     }
     container_state_save(root, kept);
+    container_state_unlock(lock);
 
     # 2. drop images no remaining container references (by image_id).
     var images = image_store_load_index(store);
+    var in_use = map_new();
+    var k = 0;
+    while (k < vec_len(kept)) {
+        var kc: Container = vec_get(kept, k);
+        map_set(in_use, kc.image_id, 1);
+        k = k + 1;
+    }
+    var unused = map_new();
     var removed_i = 0;
-    var m = vec_len(images);
     var j = 0;
-    while (j < m) {
+    while (j < vec_len(images)) {
         var im: Image = vec_get(images, j);
-        var refd = 0;
-        var k = 0;
-        while (k < vec_len(kept)) {
-            var kc: Container = vec_get(kept, k);
-            if (streq(kc.image_id, im.id) == 1) { refd = 1; }
-            k = k + 1;
-        }
-        if (refd == 0) {
-            image_store_remove(store, im.id);
+        if (map_has(in_use, im.id) == 0) {
+            map_set(unused, im.id, 1);
             removed_i = removed_i + 1;
         }
         j = j + 1;
     }
+    if (removed_i > 0) { image_store_remove_set(store, unused); }
 
     _cli_puts("Removed "); _cli_puts(_rt_int_to_cstr(removed_c)); _cli_puts(" containers, ");
     _cli_puts(_rt_int_to_cstr(removed_i)); _cli_puts(" images\n");
     return CMDIT_EXIT_OK;
 }
 
+# Program entry: parse the global flags, then dispatch on the verb. Returns the exit code.
 fn main() {
     alloc_init();
     kavach_init();               # register sandbox backends (idempotent; needed by the run path)
@@ -1778,7 +1798,7 @@ fn main() {
     if (v == V_EXEC) { return _cli_exec(h, _cli_root(h, f_root)); }
     if (v == V_DIFF) { return _cli_diff(h, _cli_root(h, f_root)); }
     if (v == V_CRON) { return _cli_cron(h, _cli_root(h, f_root)); }
-    # Every other verb is the not-yet-wired surface (mostly v3.0.x, small v3.1 residue).
+    # Every other verb is the not-yet-wired surface.
     return _cli_not_wired(_cli_verb_name(v));
 }
 

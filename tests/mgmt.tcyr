@@ -45,7 +45,7 @@ fn _cm_mk_record(id, name, state, pid) {
       1700000000000, 0 - 1, container_config_default(), 0 - 1);
 }
 
-fn test_cm_new_empty_and_list() {
+fn _test_cm_new_empty_and_list() {
     test_group("cm_new_empty_and_list");
     var root = _cm_test_root();
     var store = image_store_new(root);
@@ -56,7 +56,7 @@ fn test_cm_new_empty_and_list() {
     return 0;
 }
 
-fn test_cm_persist_reload_roundtrip() {
+fn _test_cm_persist_reload_roundtrip() {
     test_group("cm_persist_reload_roundtrip");
     var root = _cm_test_root();
     var store = image_store_new(root);
@@ -79,7 +79,7 @@ fn test_cm_persist_reload_roundtrip() {
     return 0;
 }
 
-fn test_cm_get_by_id_or_name() {
+fn _test_cm_get_by_id_or_name() {
     test_group("cm_get_by_id_or_name");
     var root = _cm_test_root();
     var store = image_store_new(root);
@@ -93,7 +93,7 @@ fn test_cm_get_by_id_or_name() {
     return 0;
 }
 
-fn test_cm_require_pid() {
+fn _test_cm_require_pid() {
     test_group("cm_require_pid");
     var root = _cm_test_root();
     var store = image_store_new(root);
@@ -121,7 +121,7 @@ fn _cm_seed(root, id, name, state, pid) {
     return mgr;
 }
 
-fn test_cm_stop_and_try_wait() {
+fn _test_cm_stop_and_try_wait() {
     test_group("cm_stop_and_try_wait");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "c1", 0, CONTAINER_STATE_STOPPED, 0 - 1);
@@ -138,7 +138,7 @@ fn test_cm_stop_and_try_wait() {
     return 0;
 }
 
-fn test_cm_remove_guards() {
+fn _test_cm_remove_guards() {
     test_group("cm_remove_guards");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "run1", 0, CONTAINER_STATE_RUNNING, 4242);
@@ -155,7 +155,7 @@ fn test_cm_remove_guards() {
     return 0;
 }
 
-fn test_cm_pause_unpause_guards() {
+fn _test_cm_pause_unpause_guards() {
     test_group("cm_pause_unpause_guards");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "s1", 0, CONTAINER_STATE_STOPPED, 0 - 1);
@@ -168,7 +168,7 @@ fn test_cm_pause_unpause_guards() {
     return 0;
 }
 
-fn test_cm_rename() {
+fn _test_cm_rename() {
     test_group("cm_rename");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "id1", "old", CONTAINER_STATE_STOPPED, 0 - 1);
@@ -183,7 +183,7 @@ fn test_cm_rename() {
     return 0;
 }
 
-fn test_cm_restart_guard() {
+fn _test_cm_restart_guard() {
     test_group("cm_restart_guard");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "r1", 0, CONTAINER_STATE_RUNNING, 99);
@@ -192,7 +192,7 @@ fn test_cm_restart_guard() {
     return 0;
 }
 
-fn test_cm_logs_absent() {
+fn _test_cm_logs_absent() {
     test_group("cm_logs_absent");
     var root = _cm_test_root();
     var mgr = _cm_seed(root, "nolog", 0, CONTAINER_STATE_STOPPED, 0 - 1);
@@ -217,7 +217,7 @@ fn _stiva_test_config(root) {
     return stiva_config_new(root, root, net, 64, 0);
 }
 
-fn test_stiva_new_creates_dirs() {
+fn _test_stiva_new_creates_dirs() {
     test_group("stiva_new_creates_dirs");
     var root = _cm_test_root();
     var s = stiva_new(_stiva_test_config(root));
@@ -229,7 +229,7 @@ fn test_stiva_new_creates_dirs() {
     return 0;
 }
 
-fn test_stiva_run_ps_stop_rm() {
+fn _test_stiva_run_ps_stop_rm() {
     test_group("stiva_run_ps_stop_rm");
     kavach_init();
     var root = _cm_test_root();
@@ -263,7 +263,7 @@ fn test_stiva_run_ps_stop_rm() {
     return 0;
 }
 
-fn test_stiva_audit_emitted() {
+fn _test_stiva_audit_emitted() {
     test_group("stiva_audit_emitted");
     var root = _cm_test_root();
     var auditp = _rt_cat2(root, "/audit.log");
@@ -281,7 +281,7 @@ fn test_stiva_audit_emitted() {
     return 0;
 }
 
-fn test_ansamblu_action_serde() {
+fn _test_ansamblu_action_serde() {
     test_group("intents::ansamblu_action_serde");
     assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_UP), "Up") == 1, "ok");
     assert(streq(ansamblu_action_name(ANSAMBLU_ACTION_DOWN), "Down") == 1, "ok");
@@ -291,7 +291,7 @@ fn test_ansamblu_action_serde() {
     return 0;
 }
 
-fn test_ansamblu_replica_count() {
+fn _test_ansamblu_replica_count() {
     test_group("ansamblu_replica_count");
     # replicas = None (-1) → 1
     var s0 = service_def_new("x", 0, 0, 0, 0, 0);
@@ -307,7 +307,7 @@ fn test_ansamblu_replica_count() {
     return 0;
 }
 
-fn test_ansamblu_service_to_config() {
+fn _test_ansamblu_service_to_config() {
     test_group("ansamblu_service_to_config");
     # basic: single replica → name is the service name, env/ports carried
     var env = map_new();
@@ -332,7 +332,7 @@ fn test_ansamblu_service_to_config() {
     return 0;
 }
 
-fn test_ansamblu_compute_scale() {
+fn _test_ansamblu_compute_scale() {
     test_group("ansamblu_compute_scale");
     var services = map_new();
     var ids = vec_new();
@@ -361,7 +361,7 @@ fn test_ansamblu_compute_scale() {
     return 0;
 }
 
-fn test_ansamblu_startup_order() {
+fn _test_ansamblu_startup_order() {
     test_group("ansamblu_startup_order");
     # linear: frontend -> api -> db  (expect db before api before frontend)
     var services = map_new();
@@ -397,7 +397,7 @@ fn test_ansamblu_startup_order() {
     return 0;
 }
 
-fn test_ansamblu_startup_order_cycle() {
+fn _test_ansamblu_startup_order_cycle() {
     test_group("ansamblu_startup_order_cycle");
     # a -> b -> a is a cycle → resolve_startup_order returns 0
     var services = map_new();
@@ -414,7 +414,7 @@ fn test_ansamblu_startup_order_cycle() {
     return 0;
 }
 
-fn test_ansamblu_ready_services() {
+fn _test_ansamblu_ready_services() {
     test_group("ansamblu_ready_services");
     # db (no deps), api (depends_on db)
     var services = map_new();
@@ -453,7 +453,7 @@ fn test_ansamblu_ready_services() {
     return 0;
 }
 
-fn test_ansamblu_plan_rolling_update() {
+fn _test_ansamblu_plan_rolling_update() {
     test_group("ansamblu_plan_rolling_update");
     var services = map_new();
     var ids = vec_new();
@@ -481,7 +481,7 @@ fn test_ansamblu_plan_rolling_update() {
     return 0;
 }
 
-fn test_ansamblu_defaults() {
+fn _test_ansamblu_defaults() {
     test_group("ansamblu_defaults");
     # HealthCheck serde defaults
     var hc: HealthCheck = health_check_new(vec_new());
@@ -503,9 +503,9 @@ fn test_ansamblu_defaults() {
 }
 
 # ── parse_ansamblu (rust-old ansamblu.rs #[cfg(test)]) ────────────
-fn test_parse_ansamblu_toml() {
+fn _test_parse_ansamblu_toml() {
     test_group("parse_ansamblu_toml");
-    var toml = "[services.web]\nimage = \"nginx:latest\"\nports = [\"80:80\"]\n\n[services.api]\nimage = \"ghcr.io/maccracken/agnosticos:latest\"\nenv = { PORT = \"8090\" }\ndepends_on = [\"db\"]\n\n[services.db]\nimage = \"postgres:16\"\nvolumes = [\"pgdata:/var/lib/postgresql/data\"]\nenv = { POSTGRES_PASSWORD = \"secret\" }\n\n[volumes.pgdata]\n";
+    var toml = "[services.web]\nimage = \"nginx:latest\"\nports = [\"80:80\"]\n\n[services.api]\nimage = \"ghcr.io/maccracken/agnosticos:latest\"\nenv = { PORT = \"8090\" }\ndepends_on = [\"db\"]\n\n[services.db]\nimage = \"postgres:16\"\nvolumes = [\"pgdata:/var/lib/postgresql/data\"]\nenv = { POSTGRES_PASSWORD = \"secret\" }\n\n[volumes.pgdata]\n";   #skip-lint
     var spec = parse_ansamblu(toml);
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
@@ -518,19 +518,19 @@ fn test_parse_ansamblu_toml() {
     return 0;
 }
 
-fn test_parse_ansamblu_invalid_toml() {
+fn _test_parse_ansamblu_invalid_toml() {
     test_group("parse_ansamblu_invalid_toml");
     assert_eq(parse_ansamblu("not a [valid toml"), 0, "invalid -> 0");
     return 0;
 }
 
-fn test_parse_ansamblu_missing_services() {
+fn _test_parse_ansamblu_missing_services() {
     test_group("parse_ansamblu_missing_services");
     assert_eq(parse_ansamblu("[networks.default]"), 0, "no services -> 0");
     return 0;
 }
 
-fn test_parse_ansamblu_minimal() {
+fn _test_parse_ansamblu_minimal() {
     test_group("parse_ansamblu_minimal");
     var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\n");
     assert(spec != 0, "parses");
@@ -544,9 +544,9 @@ fn test_parse_ansamblu_minimal() {
     return 0;
 }
 
-fn test_parse_ansamblu_with_networks() {
+fn _test_parse_ansamblu_with_networks() {
     test_group("parse_ansamblu_with_networks");
-    var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\n\n[networks.frontend]\ndriver = \"bridge\"\nsubnet = \"10.0.0.0/24\"\n");
+    var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\n\n[networks.frontend]\ndriver = \"bridge\"\nsubnet = \"10.0.0.0/24\"\n");   #skip-lint
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
     assert_eq(map_size(af.networks), 1, "1 network");
@@ -556,7 +556,7 @@ fn test_parse_ansamblu_with_networks() {
     return 0;
 }
 
-fn test_parse_ansamblu_replicas() {
+fn _test_parse_ansamblu_replicas() {
     test_group("parse_ansamblu_replicas");
     var spec = parse_ansamblu("[services.worker]\nimage = \"worker:latest\"\nreplicas = 3\n");
     assert(spec != 0, "parses");
@@ -566,13 +566,13 @@ fn test_parse_ansamblu_replicas() {
     return 0;
 }
 
-fn test_parse_ansamblu_empty_string() {
+fn _test_parse_ansamblu_empty_string() {
     test_group("parse_ansamblu_empty_string");
     assert_eq(parse_ansamblu(""), 0, "empty -> 0");
     return 0;
 }
 
-fn test_parse_ansamblu_service_with_command() {
+fn _test_parse_ansamblu_service_with_command() {
     test_group("parse_ansamblu_service_with_command");
     var spec = parse_ansamblu("[services.app]\nimage = \"alpine\"\ncommand = [\"/bin/sh\", \"-c\", \"echo hello\"]\n");
     assert(spec != 0, "parses");
@@ -584,9 +584,9 @@ fn test_parse_ansamblu_service_with_command() {
     return 0;
 }
 
-fn test_parse_ansamblu_dependency_chain() {
+fn _test_parse_ansamblu_dependency_chain() {
     test_group("parse_ansamblu_dependency_chain");
-    var spec = parse_ansamblu("[services.frontend]\nimage = \"nginx\"\ndepends_on = [\"api\"]\n\n[services.api]\nimage = \"app:latest\"\ndepends_on = [\"db\", \"cache\"]\n\n[services.db]\nimage = \"postgres:16\"\n\n[services.cache]\nimage = \"redis:7\"\n");
+    var spec = parse_ansamblu("[services.frontend]\nimage = \"nginx\"\ndepends_on = [\"api\"]\n\n[services.api]\nimage = \"app:latest\"\ndepends_on = [\"db\", \"cache\"]\n\n[services.db]\nimage = \"postgres:16\"\n\n[services.cache]\nimage = \"redis:7\"\n");   #skip-lint
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
     assert_eq(map_size(af.services), 4, "4 services");
@@ -596,9 +596,9 @@ fn test_parse_ansamblu_dependency_chain() {
     return 0;
 }
 
-fn test_parse_ansamblu_all_fields() {
+fn _test_parse_ansamblu_all_fields() {
     test_group("parse_ansamblu_all_fields");
-    var spec = parse_ansamblu("[services.app]\nimage = \"myapp:latest\"\ncommand = [\"/start.sh\"]\nenv = { PORT = \"8080\", DEBUG = \"true\" }\nports = [\"8080:80\", \"443:443\"]\nvolumes = [\"/data:/app/data:ro\"]\ndepends_on = [\"db\"]\nreplicas = 2\n");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp:latest\"\ncommand = [\"/start.sh\"]\nenv = { PORT = \"8080\", DEBUG = \"true\" }\nports = [\"8080:80\", \"443:443\"]\nvolumes = [\"/data:/app/data:ro\"]\ndepends_on = [\"db\"]\nreplicas = 2\n");   #skip-lint
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
     var app: ServiceDef = map_get(af.services, "app");
@@ -610,7 +610,7 @@ fn test_parse_ansamblu_all_fields() {
     return 0;
 }
 
-fn test_parse_ansamblu_with_restart_policy() {
+fn _test_parse_ansamblu_with_restart_policy() {
     test_group("parse_ansamblu_with_restart_policy");
     var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\nrestart = \"always\"\n");
     assert(spec != 0, "parses");
@@ -620,9 +620,9 @@ fn test_parse_ansamblu_with_restart_policy() {
     return 0;
 }
 
-fn test_parse_ansamblu_with_health_check() {
+fn _test_parse_ansamblu_with_health_check() {
     test_group("parse_ansamblu_with_health_check");
-    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"curl\", \"-f\", \"http://localhost/health\"]\ninterval_secs = 10\ntimeout_secs = 3\nretries = 5\n");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"curl\", \"-f\", \"http://localhost/health\"]\ninterval_secs = 10\ntimeout_secs = 3\nretries = 5\n");   #skip-lint
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
     var app: ServiceDef = map_get(af.services, "app");
@@ -634,9 +634,9 @@ fn test_parse_ansamblu_with_health_check() {
     return 0;
 }
 
-fn test_parse_ansamblu_health_check_defaults() {
+fn _test_parse_ansamblu_health_check_defaults() {
     test_group("parse_ansamblu_health_check_defaults");
-    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n");
+    var spec = parse_ansamblu("[services.app]\nimage = \"myapp\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n");   #skip-lint
     assert(spec != 0, "parses");
     var af: AnsambluFile = spec;
     var app: ServiceDef = map_get(af.services, "app");
@@ -649,7 +649,7 @@ fn test_parse_ansamblu_health_check_defaults() {
 
 # Strict-parse parity: malformed input that serde's toml::from_str rejects must
 # error (return 0), not be silently accepted. (Adversarial parity-verify pass.)
-fn test_parse_ansamblu_strict_errors() {
+fn _test_parse_ansamblu_strict_errors() {
     test_group("parse_ansamblu_strict_errors");
     # unknown restart value → unknown enum variant → error.
     assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"sometimes\"\n"), 0, "unknown restart -> 0");
@@ -658,15 +658,17 @@ fn test_parse_ansamblu_strict_errors() {
     # non-string env value → HashMap<String,String> type error → error.
     assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\nenv = { PORT = 8090 }\n"), 0, "non-string env -> 0");
     # health_check missing the required command → error.
-    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\n\n[services.app.health_check]\ninterval_secs = 10\n"), 0, "hc missing command -> 0");
+    assert_eq(parse_ansamblu("[services.app]\nimage = \"x\"\n\n[services.app.health_check]\ninterval_secs = 10\n"), 0,
+      "hc missing command -> 0");
     # orphan health_check (no [services.app] main) → implicit missing image → error.
-    assert_eq(parse_ansamblu("[services.web]\nimage = \"nginx\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n"), 0, "orphan health_check -> 0");
+    assert_eq(parse_ansamblu("[services.web]\nimage = \"nginx\"\n\n[services.app.health_check]\ncommand = [\"true\"]\n"), 0, "orphan health_check -> 0");   #skip-lint
     # sanity: the valid forms still parse.
-    assert(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"always\"\nenv = { A = \"1\" }\n") != 0, "valid still parses");
+    assert(parse_ansamblu("[services.app]\nimage = \"x\"\nrestart = \"always\"\nenv = { A = \"1\" }\n") != 0,
+      "valid still parses");
     return 0;
 }
 
-fn test_agent_build_registration_from_container() {
+fn _test_agent_build_registration_from_container() {
     test_group("agent_build_registration_from_container");
     var ports = vec_new();
     vec_push(ports, "8080:80");
@@ -685,7 +687,7 @@ fn test_agent_build_registration_from_container() {
     return 0;
 }
 
-fn test_agent_build_registration_no_name() {
+fn _test_agent_build_registration_no_name() {
     test_group("agent_build_registration_no_name");
     var ports = vec_new();
     var cfg = _agent_test_config(ports);
@@ -700,7 +702,7 @@ fn test_agent_build_registration_no_name() {
     return 0;
 }
 
-fn test_agent_first12_truncates() {
+fn _test_agent_first12_truncates() {
     test_group("agent_first12_truncates");
     # Long id → exactly 12 chars.
     var got = _agent_first12("0123456789abcdefghij");
@@ -712,7 +714,7 @@ fn test_agent_first12_truncates() {
     return 0;
 }
 
-fn test_agent_registration_serde() {
+fn _test_agent_registration_serde() {
     test_group("agent_registration_serde");
     # rust-old round-trips through JSON; Cyrius base has no serde, so verify
     # the struct stores/returns its fields faithfully (parity on the payload).
@@ -730,7 +732,7 @@ fn test_agent_registration_serde() {
     return 0;
 }
 
-fn test_agent_status_serde() {
+fn _test_agent_status_serde() {
     test_group("agent_status_serde");
     var s = agent_status_new("c1", "running", 0);
     var st: AgentStatus = s;
@@ -740,14 +742,14 @@ fn test_agent_status_serde() {
     return 0;
 }
 
-fn test_agent_default_registry_url() {
+fn _test_agent_default_registry_url() {
     test_group("agent_default_registry_url");
     assert_eq(streq(agent_default_registry_url(), "http://localhost:8090"), 1,
       "default registry url");
     return 0;
 }
 
-fn test_fleet_strategy_names() {
+fn _test_fleet_strategy_names() {
     test_group("fleet_strategy_names");
     assert_eq(streq(fleet_strategy_name(FLEET_STRATEGY_SPREAD), "Spread"), 1, "spread");
     assert_eq(streq(fleet_strategy_name(FLEET_STRATEGY_BINPACK), "BinPack"), 1, "binpack");
@@ -756,7 +758,7 @@ fn test_fleet_strategy_names() {
     return 0;
 }
 
-fn test_fleet_node_status_names() {
+fn _test_fleet_node_status_names() {
     test_group("fleet_node_status_names");
     assert_eq(streq(fleet_node_status_name(FLEET_NODE_READY), "Ready"), 1, "ready");
     assert_eq(streq(fleet_node_status_name(FLEET_NODE_NOT_READY), "NotReady"), 1, "notready");
@@ -765,7 +767,7 @@ fn test_fleet_node_status_names() {
     return 0;
 }
 
-fn test_fleet_constraints_default() {
+fn _test_fleet_constraints_default() {
     test_group("fleet_constraints_default");
     var c = deployment_constraints_default();
     var cc: DeploymentConstraints = c;
@@ -776,7 +778,7 @@ fn test_fleet_constraints_default() {
     return 0;
 }
 
-fn test_fleet_free_slots() {
+fn _test_fleet_free_slots() {
     test_group("fleet_free_slots");
     var cap = fleet_node_capacity_new(4096, 4, 10, 3);
     var node = fleet_node_new("n1", "1.2.3.4", 0, cap, FLEET_NODE_READY, 0);
@@ -911,7 +913,7 @@ fn _mg_pull_ctx() {
     var lay = "mgmt-layer-bytes";
     var cfg_d = sha256_digest(cfg, strlen(cfg));
     var lay_d = sha256_digest(lay, strlen(lay));
-    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";
+    var man = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"";   #skip-lint
     man = _reg_cat2(man, cfg_d);
     man = _reg_cat2(man, "\",\"size\":");
     man = _reg_cat2(man, _reg_uint_str(strlen(cfg)));
@@ -929,7 +931,7 @@ fn _mg_pull_ctx() {
     return ctx;
 }
 
-fn test_mg_stiva_pull() {
+fn _test_mg_stiva_pull() {
     test_group("mg_stiva_pull");
     var ctx = _mg_pull_ctx();
     var s = _mg_stiva(ctx, "/tmp/stiva-mg-pull");
@@ -963,7 +965,7 @@ fn test_mg_stiva_pull() {
     return 0;
 }
 
-fn test_mg_stiva_pull_bad_reference() {
+fn _test_mg_stiva_pull_bad_reference() {
     test_group("mg_stiva_pull_bad_reference");
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-badref");
     assert_eq(stiva_pull(s, ""), 0, "empty reference refused");
@@ -971,7 +973,7 @@ fn test_mg_stiva_pull_bad_reference() {
     return 0;
 }
 
-fn test_mg_stiva_push() {
+fn _test_mg_stiva_push() {
     test_group("mg_stiva_push");
     var pctx = _mg_pull_ctx();
     var s = _mg_stiva(pctx, "/tmp/stiva-mg-push");
@@ -993,7 +995,7 @@ fn test_mg_stiva_push() {
     return 0;
 }
 
-fn test_mg_stiva_push_default_target_is_the_image_ref() {
+fn _test_mg_stiva_push_default_target_is_the_image_ref() {
     test_group("mg_stiva_push_default_target_is_the_image_ref");
     # Pushing BY ID with no target must resolve the image's own reference from
     # the store. Parsing the id as a reference instead gives
@@ -1030,14 +1032,14 @@ fn test_mg_stiva_push_default_target_is_the_image_ref() {
     return 0;
 }
 
-fn test_mg_stiva_push_missing() {
+fn _test_mg_stiva_push_missing() {
     test_group("mg_stiva_push_missing");
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-pushmiss");
     assert_eq(stiva_push(s, "reg.test/nope:latest", 0), 0, "unknown image -> 0");
     return 0;
 }
 
-fn test_mg_stiva_list_tags() {
+fn _test_mg_stiva_list_tags() {
     test_group("mg_stiva_list_tags");
     var ctx = _mg_ctx_new();
     _mg_route(ctx, "GET", "/tags/list", 200, "{\"tags\":[\"a\",\"b\"]}");
@@ -1053,7 +1055,7 @@ fn test_mg_stiva_list_tags() {
     return 0;
 }
 
-fn test_mg_stiva_catalog() {
+fn _test_mg_stiva_catalog() {
     test_group("mg_stiva_catalog");
     var ctx = _mg_ctx_new();
     _mg_route(ctx, "GET", "/v2/_catalog", 200, "{\"repositories\":[\"alpine\",\"nginx\",\"redis\"]}");
@@ -1065,8 +1067,8 @@ fn test_mg_stiva_catalog() {
     return 0;
 }
 
-fn test_mg_stiva_verify_signature_by_id() {
-    test_group("mg_stiva_verify_signature_by_id");
+fn _test_mg_stiva_has_signature_artifact_by_id() {
+    test_group("mg_stiva_has_signature_artifact_by_id");
     # Looking an image up BY ID must still query the image's own registry.
     # Parsing the id as a reference gives docker.io/library/sha256:<hex>, which
     # would leak this repository's manifest digest to Docker Hub and
@@ -1080,11 +1082,11 @@ fn test_mg_stiva_verify_signature_by_id() {
 
     var ctx = _mg_ctx_new();
     _mg_route(ctx, "GET", "/referrers/", 200,
-      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");
+      "{\"manifests\":[{\"mediaType\":\"application/vnd.dev.cosign.simplesigning.v1+json\",\"digest\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\",\"size\":42}]}");   #skip-lint
     registry_client_set_transport(stiva_registry_client(s),
       registry_transport_new(&_mg_send, &_mg_sink, ctx));
 
-    assert_eq(stiva_verify_signature(s, id), 1, "signed, looked up by id");
+    assert_eq(stiva_has_signature_artifact(s, id), 1, "signed, looked up by id");
     var url = _mg_log_at(ctx, 0);
     assert_eq(strstr(url, "reg.test") >= 0, 1, "queried the image's own registry");
     assert_eq(strstr(url, "docker.io") >= 0, 0, "NOT docker.io");
@@ -1094,11 +1096,11 @@ fn test_mg_stiva_verify_signature_by_id() {
     assert_eq(strstr(url, id) >= 0, 0, "not on the config digest");
 
     # An unknown image is -1, not a silent 0.
-    assert_eq(stiva_verify_signature(s, "reg.test/nope:latest"), 0 - 1, "unknown image -> -1");
+    assert_eq(stiva_has_signature_artifact(s, "reg.test/nope:latest"), 0 - 1, "unknown image -> -1");
     return 0;
 }
 
-fn test_mg_pull_index_dedup_by_digest() {
+fn _test_mg_pull_index_dedup_by_digest() {
     test_group("mg_pull_index_dedup_by_digest");
     # Two pulls of the SAME reference and same content collapse to one entry
     # (idempotent), which is the property the digest-aware dedup must preserve
@@ -1129,7 +1131,7 @@ fn _mg_mcp_text(r) {
     return t;
 }
 
-fn test_mg_mcp_dispatch_unknown_tool() {
+fn _test_mg_mcp_dispatch_unknown_tool() {
     test_group("mg_mcp_dispatch_unknown_tool");
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-unk");
     var r = mcp_handle_tool(s, "stiva_nope", _mg_mcp_params("{}"));
@@ -1140,7 +1142,7 @@ fn test_mg_mcp_dispatch_unknown_tool() {
     return 0;
 }
 
-fn test_mg_mcp_advertised_but_unavailable() {
+fn _test_mg_mcp_advertised_but_unavailable() {
     test_group("mg_mcp_advertised_but_unavailable");
     # stiva_run and stiva_exec stay in tool_list(), so a client WILL call them.
     # They must fail with a reason, not silently succeed and not vanish from the
@@ -1173,7 +1175,7 @@ fn test_mg_mcp_advertised_but_unavailable() {
     return 0;
 }
 
-fn test_mg_mcp_missing_params() {
+fn _test_mg_mcp_missing_params() {
     test_group("mg_mcp_missing_params");
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-params");
     var e = _mg_mcp_params("{}");
@@ -1186,6 +1188,48 @@ fn test_mg_mcp_missing_params() {
     return 0;
 }
 
+# Whatever is under `context_dir` goes into an image the client can read back.
+fn _test_mg_mcp_build_context_is_confined() {
+    test_group("mg_mcp_build_context_is_confined");
+    assert_eq(_mcp_context_is_confined("."), 1, "the working directory");
+    assert_eq(_mcp_context_is_confined("app/ctx"), 1, "a subdirectory");
+    assert_eq(_mcp_context_is_confined("a..b/..c"), 1, "dots inside a name");
+    assert_eq(_mcp_context_is_confined(""), 0, "empty");
+    assert_eq(_mcp_context_is_confined("/etc"), 0, "absolute");
+    assert_eq(_mcp_context_is_confined(".."), 0, "the parent");
+    assert_eq(_mcp_context_is_confined("../x"), 0, "through the parent");
+    assert_eq(_mcp_context_is_confined("a/../.."), 0, "back up");
+    assert_eq(_mcp_context_is_confined("a/.."), 0, "any `..` at all");
+    var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-confined");
+    var r = mcp_handle_tool(s, "stiva_build",
+      _mg_mcp_params("{\"spec\":\"x\",\"context_dir\":\"/etc\"}"));
+    assert_eq(mcp_result_success(r), 0, "the handler refuses");
+    assert(strstr(_mg_mcp_text(r), "context_dir") >= 0, "and says why");
+    return 0;
+}
+
+# A client decides what it may run unprompted from these. Pull writes the store and goes out.
+fn _test_mg_mcp_pull_is_not_read_only() {
+    test_group("mg_mcp_pull_is_not_read_only");
+    var tools = tool_list();
+    var i = 0;
+    var seen = 0;
+    while (i < vec_len(tools)) {
+        var t = vec_get(tools, i);
+        if (streq(tool_def_name(t), "stiva_pull") == 1) {
+            seen = 1;
+            var a = tool_def_annotations(t);
+            assert_eq(ann_read_only_hint(a), HINT_FALSE, "not read-only");
+            assert_eq(ann_destructive_hint(a), HINT_FALSE, "not destructive");
+            assert_eq(ann_idempotent_hint(a), HINT_TRUE, "idempotent");
+            assert_eq(ann_open_world_hint(a), HINT_TRUE, "reaches the network");
+        }
+        i = i + 1;
+    }
+    assert_eq(seen, 1, "found it");
+    return 0;
+}
+
 # mcp_handle_build (§F). Moved here from tests/stiva.tcyr: the handler used to
 # live in mcp.cyr and only PARSE the spec — its result literally said
 # status "parsed" — so it needed no facade. It now takes a `Stiva` and performs
@@ -1194,7 +1238,7 @@ fn test_mg_mcp_missing_params() {
 # Driven through `mcp_handle_tool` rather than by calling the handler directly,
 # so the dispatch entry (which had to change from `mcp_handle_build(params)` to
 # `mcp_handle_build(s, params)`) is covered too.
-fn test_mg_mcp_build() {
+fn _test_mg_mcp_build() {
     test_group("mg_mcp_build");
     var root = "/tmp/stiva-mg-mcp-build";
     var ctx = "/tmp/stiva-mg-mcp-build-ctx";
@@ -1212,18 +1256,21 @@ fn test_mg_mcp_build() {
 
     file_write_all(_stor_cat2(ctx, "/f.txt"), "payload\n", 8);
 
-    var spec = "[image]\\nbase = \\\"local/base:v1\\\"\\nname = \\\"mcpapp\\\"\\ntag = \\\"v1\\\"\\n\\n[[steps]]\\ntype = \\\"copy\\\"\\nsource = \\\"f.txt\\\"\\ndestination = \\\"/f.txt\\\"\\n";
+    var spec = "[image]\\nbase = \\\"local/base:v1\\\"\\nname = \\\"mcpapp\\\"\\ntag = \\\"v1\\\"\\n\\n[[steps]]\\ntype = \\\"copy\\\"\\nsource = \\\"f.txt\\\"\\ndestination = \\\"/f.txt\\\"\\n";   #skip-lint
     var pb = str_builder_new();
     str_builder_add_cstr(pb, "{\"spec\":\"");
     str_builder_add_cstr(pb, spec);
-    str_builder_add_cstr(pb, "\",\"context_dir\":\"");
-    str_builder_add_cstr(pb, ctx);
-    str_builder_add_cstr(pb, "\"}");
+    str_builder_add_cstr(pb, "\",\"context_dir\":\".\"}");
     var params = _mg_mcp_params(str_cstr(str_builder_build(pb)));
     assert(params != 0, "params parsed");
     if (params == 0) { return 0; }
 
+    # A client's context stays under the server's working directory, so the build runs from there.
+    var here = alloc(4097);
+    assert(sys_readlink("/proc/self/cwd", here, 4096) > 0, "noted where the test runs");
+    assert_eq(sys_chdir(ctx), 0, "into the context");
     var r = mcp_handle_tool(s, "stiva_build", params);
+    assert_eq(sys_chdir(here), 0, "and back");
     assert_eq(mcp_result_success(r), 1, "build succeeded through MCP dispatch");
     if (mcp_result_success(r) == 1) {
         # A real build reports the resulting IMAGE, not a parse summary — the
@@ -1240,7 +1287,7 @@ fn test_mg_mcp_build() {
     return 0;
 }
 
-fn test_mg_mcp_pull_and_inspect_image() {
+fn _test_mg_mcp_pull_and_inspect_image() {
     test_group("mg_mcp_pull_and_inspect_image");
     var ctx = _mg_pull_ctx();
     var s = _mg_stiva(ctx, "/tmp/stiva-mg-mcp-pull");
@@ -1268,7 +1315,7 @@ fn test_mg_mcp_pull_and_inspect_image() {
     return 0;
 }
 
-fn test_mg_mcp_ps_shape() {
+fn _test_mg_mcp_ps_shape() {
     test_group("mg_mcp_ps_shape");
     var s = _mg_stiva(_mg_ctx_new(), "/tmp/stiva-mg-mcp-ps");
     var r = mcp_handle_tool(s, "stiva_ps", _mg_mcp_params("{}"));
@@ -1279,7 +1326,7 @@ fn test_mg_mcp_ps_shape() {
     return 0;
 }
 
-fn test_mg_mcp_resources() {
+fn _test_mg_mcp_resources() {
     test_group("mg_mcp_resources");
     var ctx = _mg_pull_ctx();
     var s = _mg_stiva(ctx, "/tmp/stiva-mg-mcp-res");
@@ -1302,7 +1349,8 @@ fn test_mg_mcp_resources() {
     # An unknown scheme and a missing id are DIFFERENT failures; both return 0
     # but the caller can tell them apart from the error channel.
     assert_eq(mcp_read_resource(s, "stiva://volumes/x"), 0, "unknown scheme -> 0");
-    assert_eq(mcp_read_resource(s, "stiva://images/sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
+    assert_eq(mcp_read_resource(s,
+        "stiva://images/sha256:0000000000000000000000000000000000000000000000000000000000000000"), 0,
       "missing image -> 0");
     assert_eq(mcp_read_resource(s, 0), 0, "null uri -> 0");
     # A bare prefix with no id must not be treated as a lookup.
@@ -1341,7 +1389,7 @@ fn _ev_count_lines(s) {
     return n;
 }
 
-fn test_ev_path_is_per_root() {
+fn _test_ev_path_is_per_root() {
     test_group("ev_path_is_per_root");
     # Per-ROOT, not per-container: container_manager_remove deletes
     # {root}/containers/{id}, so a per-container log would destroy the `removed`
@@ -1353,7 +1401,7 @@ fn test_ev_path_is_per_root() {
     return 0;
 }
 
-fn test_ev_append_one_line_per_event() {
+fn _test_ev_append_one_line_per_event() {
     test_group("ev_append_one_line_per_event");
     var root = _ev_root();
     assert_eq(container_events_append_with(root, "{\"a\":1}", 8388608, 3), 1, "appended");
@@ -1364,7 +1412,7 @@ fn test_ev_append_one_line_per_event() {
     return 0;
 }
 
-fn test_ev_append_guards() {
+fn _test_ev_append_guards() {
     test_group("ev_append_guards");
     var root = _ev_root();
     assert_eq(container_events_append_with(0, "{\"a\":1}", 8388608, 3), 0, "null root -> 0");
@@ -1379,7 +1427,7 @@ fn test_ev_append_guards() {
     return 0;
 }
 
-fn test_ev_rotation() {
+fn _test_ev_rotation() {
     test_group("ev_rotation");
     var root = _ev_root();
     # 40-byte cap, 2 generations: every append after the first rotates.
@@ -1399,7 +1447,7 @@ fn test_ev_rotation() {
     return 0;
 }
 
-fn test_ev_rotation_disabled_by_zero() {
+fn _test_ev_rotation_disabled_by_zero() {
     test_group("ev_rotation_disabled_by_zero");
     var root = _ev_root();
     var i = 0;
@@ -1409,7 +1457,7 @@ fn test_ev_rotation_disabled_by_zero() {
     return 0;
 }
 
-fn test_ev_publish_persists_and_stamps_wall_clock() {
+fn _test_ev_publish_persists_and_stamps_wall_clock() {
     test_group("ev_publish_persists_and_stamps_wall_clock");
     var root = _ev_root();
     var mgr = container_manager_new(root, image_store_new(root));
@@ -1433,7 +1481,7 @@ fn test_ev_publish_persists_and_stamps_wall_clock() {
     return 0;
 }
 
-fn test_ev_survives_container_removal() {
+fn _test_ev_survives_container_removal() {
     test_group("ev_survives_container_removal");
     # The whole reason the log is per-root: `rm` deletes the container's own
     # directory, and the record of the removal has to outlive it.
@@ -1452,7 +1500,7 @@ fn test_ev_survives_container_removal() {
     return 0;
 }
 
-fn test_ev_ts_parse() {
+fn _test_ev_ts_parse() {
     test_group("ev_ts_parse");
     assert_eq(container_event_ts("{\"ts\":1785000000123,\"event\":\"x\"}"), 1785000000123, "reads ts");
     assert_eq(container_event_ts("{\"event\":\"x\"}"), 0 - 1, "missing ts -> -1");
@@ -1460,10 +1508,21 @@ fn test_ev_ts_parse() {
     assert_eq(container_event_ts("not json at all"), 0 - 1, "unparsable -> -1");
     assert_eq(container_event_ts("{\"ts\":1,\"event\":"), 0 - 1, "torn line -> -1");
     assert_eq(container_event_ts(0), 0 - 1, "null line -> -1");
+    # The anchored scan takes the common shape alone. Everything else goes to the real parser, so
+    # these have to agree with it.
+    assert_eq(container_event_ts("{\"ts\":7,\"event\":\"a\",\"exit_code\":-1}"), 7, "an int field");
+    assert_eq(container_event_ts("{\"ts\":7}"), 7, "ts alone");
+    assert_eq(container_event_ts("{\"ts\":7,\"event\":\"a\\\"b\"}"), 7, "an escape");
+    assert_eq(container_event_ts("{\"ts\":7,\"name\":\"caf\xc3\xa9\"}"), 7, "non-ASCII");
+    assert_eq(container_event_ts("{\"ts\":007}"), 0 - 1, "leading zeros are not JSON");
+    assert_eq(container_event_ts("{\"ts\":1.5}"), 1, "a float truncates, as the parser always did");
+    assert_eq(container_event_ts("{\"ts\":1,\"ts\":2}"), 0 - 1, "a repeated key");
+    assert_eq(container_event_ts("{\"ts\":1}x"), 0 - 1, "a tail");
+    assert_eq(container_event_ts("{\"event\":\"x\",\"ts\":9}"), 9, "ts not first");
     return 0;
 }
 
-fn test_ev_in_range() {
+fn _test_ev_in_range() {
     test_group("ev_in_range");
     assert_eq(container_event_in_range(500, 0, 0), 1, "unbounded window takes everything");
     assert_eq(container_event_in_range(500, 500, 0), 1, "--since is inclusive");
@@ -1490,7 +1549,7 @@ fn _fl_node(id, max_c, running, status) {
     return n;
 }
 
-fn test_fleet_rollback_does_not_stampede() {
+fn _test_fleet_rollback_does_not_stampede() {
     test_group("fleet_rollback_does_not_stampede");
     # A failed node with 3 running containers, and two healthy targets with 2
     # slots each. The oracle calls select_migration_target once per container
@@ -1519,7 +1578,7 @@ fn test_fleet_rollback_does_not_stampede() {
     return 0;
 }
 
-fn test_fleet_rollback_never_targets_the_failed_node() {
+fn _test_fleet_rollback_never_targets_the_failed_node() {
     test_group("fleet_rollback_never_targets_the_failed_node");
     var nodes = vec_new();
     vec_push(nodes, _fl_node("dead", 8, 1, FLEET_NODE_NOT_READY));
@@ -1532,7 +1591,7 @@ fn test_fleet_rollback_never_targets_the_failed_node() {
     return 0;
 }
 
-fn test_fleet_draining_and_cordoned_take_no_new_work() {
+fn _test_fleet_draining_and_cordoned_take_no_new_work() {
     test_group("fleet_draining_and_cordoned_take_no_new_work");
     # The oracle tests `== Ready` everywhere, so these two states are defined and
     # then behave identically to Ready — cordoning a node was a silent no-op.
@@ -1549,7 +1608,7 @@ fn test_fleet_draining_and_cordoned_take_no_new_work() {
     return 0;
 }
 
-fn test_fleet_preferred_nodes_are_honoured() {
+fn _test_fleet_preferred_nodes_are_honoured() {
     test_group("fleet_preferred_nodes_are_honoured");
     # The oracle declares preferred_nodes and never reads it.
     var nodes = vec_new();
@@ -1582,7 +1641,7 @@ fn _fleet_node_id(node) {
 
 # ══ §I accelerator placement ═════════════════════════════
 
-fn test_fleet_accel_requirement_gates_placement() {
+fn _test_fleet_accel_requirement_gates_placement() {
     test_group("fleet_accel_requirement_gates_placement");
     var nodes = vec_new();
     # A node with a real GPU profile, and one with none known.
@@ -1607,7 +1666,7 @@ fn test_fleet_accel_requirement_gates_placement() {
     return 0;
 }
 
-fn test_fleet_unknown_accel_inventory_is_not_satisfying() {
+fn _test_fleet_unknown_accel_inventory_is_not_satisfying() {
     test_group("fleet_unknown_accel_inventory_is_not_satisfying");
     # A node nobody has inventoried must NOT satisfy a GPU request: treating
     # unknown as satisfying would place the workload where it cannot run.
@@ -1620,7 +1679,7 @@ fn test_fleet_unknown_accel_inventory_is_not_satisfying() {
     return 0;
 }
 
-fn test_fleet_accel_default_is_req_none() {
+fn _test_fleet_accel_default_is_req_none() {
     test_group("fleet_accel_default_is_req_none");
     var c = deployment_constraints_default();
     assert_eq(load64(c + 32), REQ_NONE, "default constraints request no accelerator");
@@ -1632,86 +1691,89 @@ fn test_fleet_accel_default_is_req_none() {
     return 0;
 }
 
+# Runs every case in mgmt.tcyr, and returns the failure count as the exit status.
 fn main() {
     alloc_init();
-    test_cm_new_empty_and_list();
-    test_cm_persist_reload_roundtrip();
-    test_cm_get_by_id_or_name();
-    test_cm_require_pid();
-    test_cm_stop_and_try_wait();
-    test_cm_remove_guards();
-    test_cm_pause_unpause_guards();
-    test_cm_rename();
-    test_cm_restart_guard();
-    test_cm_logs_absent();
-    test_stiva_new_creates_dirs();
-    test_stiva_run_ps_stop_rm();
-    test_stiva_audit_emitted();
-    test_ansamblu_action_serde();
-    test_ansamblu_replica_count();
-    test_ansamblu_service_to_config();
-    test_ansamblu_compute_scale();
-    test_ansamblu_startup_order();
-    test_ansamblu_startup_order_cycle();
-    test_ansamblu_ready_services();
-    test_ansamblu_plan_rolling_update();
-    test_ansamblu_defaults();
-    test_parse_ansamblu_toml();
-    test_parse_ansamblu_invalid_toml();
-    test_parse_ansamblu_missing_services();
-    test_parse_ansamblu_minimal();
-    test_parse_ansamblu_with_networks();
-    test_parse_ansamblu_replicas();
-    test_parse_ansamblu_empty_string();
-    test_parse_ansamblu_service_with_command();
-    test_parse_ansamblu_dependency_chain();
-    test_parse_ansamblu_all_fields();
-    test_parse_ansamblu_with_restart_policy();
-    test_parse_ansamblu_with_health_check();
-    test_parse_ansamblu_health_check_defaults();
-    test_parse_ansamblu_strict_errors();
-    test_agent_build_registration_from_container();
-    test_agent_build_registration_no_name();
-    test_agent_first12_truncates();
-    test_agent_registration_serde();
-    test_agent_status_serde();
-    test_agent_default_registry_url();
-    test_fleet_strategy_names();
-    test_fleet_node_status_names();
-    test_fleet_constraints_default();
-    test_fleet_free_slots();
-    test_mg_stiva_pull();
-    test_mg_stiva_pull_bad_reference();
-    test_mg_stiva_push();
-    test_mg_stiva_push_default_target_is_the_image_ref();
-    test_mg_stiva_push_missing();
-    test_mg_stiva_list_tags();
-    test_mg_stiva_catalog();
-    test_mg_stiva_verify_signature_by_id();
-    test_mg_pull_index_dedup_by_digest();
-    test_mg_mcp_dispatch_unknown_tool();
-    test_mg_mcp_advertised_but_unavailable();
-    test_mg_mcp_missing_params();
-    test_mg_mcp_build();
-    test_mg_mcp_pull_and_inspect_image();
-    test_mg_mcp_ps_shape();
-    test_mg_mcp_resources();
-    test_ev_path_is_per_root();
-    test_ev_append_one_line_per_event();
-    test_ev_append_guards();
-    test_ev_rotation();
-    test_ev_rotation_disabled_by_zero();
-    test_ev_publish_persists_and_stamps_wall_clock();
-    test_ev_survives_container_removal();
-    test_ev_ts_parse();
-    test_ev_in_range();
-    test_fleet_rollback_does_not_stampede();
-    test_fleet_rollback_never_targets_the_failed_node();
-    test_fleet_draining_and_cordoned_take_no_new_work();
-    test_fleet_preferred_nodes_are_honoured();
-    test_fleet_accel_requirement_gates_placement();
-    test_fleet_unknown_accel_inventory_is_not_satisfying();
-    test_fleet_accel_default_is_req_none();
+    _test_cm_new_empty_and_list();
+    _test_cm_persist_reload_roundtrip();
+    _test_cm_get_by_id_or_name();
+    _test_cm_require_pid();
+    _test_cm_stop_and_try_wait();
+    _test_cm_remove_guards();
+    _test_cm_pause_unpause_guards();
+    _test_cm_rename();
+    _test_cm_restart_guard();
+    _test_cm_logs_absent();
+    _test_stiva_new_creates_dirs();
+    _test_stiva_run_ps_stop_rm();
+    _test_stiva_audit_emitted();
+    _test_ansamblu_action_serde();
+    _test_ansamblu_replica_count();
+    _test_ansamblu_service_to_config();
+    _test_ansamblu_compute_scale();
+    _test_ansamblu_startup_order();
+    _test_ansamblu_startup_order_cycle();
+    _test_ansamblu_ready_services();
+    _test_ansamblu_plan_rolling_update();
+    _test_ansamblu_defaults();
+    _test_parse_ansamblu_toml();
+    _test_parse_ansamblu_invalid_toml();
+    _test_parse_ansamblu_missing_services();
+    _test_parse_ansamblu_minimal();
+    _test_parse_ansamblu_with_networks();
+    _test_parse_ansamblu_replicas();
+    _test_parse_ansamblu_empty_string();
+    _test_parse_ansamblu_service_with_command();
+    _test_parse_ansamblu_dependency_chain();
+    _test_parse_ansamblu_all_fields();
+    _test_parse_ansamblu_with_restart_policy();
+    _test_parse_ansamblu_with_health_check();
+    _test_parse_ansamblu_health_check_defaults();
+    _test_parse_ansamblu_strict_errors();
+    _test_agent_build_registration_from_container();
+    _test_agent_build_registration_no_name();
+    _test_agent_first12_truncates();
+    _test_agent_registration_serde();
+    _test_agent_status_serde();
+    _test_agent_default_registry_url();
+    _test_fleet_strategy_names();
+    _test_fleet_node_status_names();
+    _test_fleet_constraints_default();
+    _test_fleet_free_slots();
+    _test_mg_stiva_pull();
+    _test_mg_stiva_pull_bad_reference();
+    _test_mg_stiva_push();
+    _test_mg_stiva_push_default_target_is_the_image_ref();
+    _test_mg_stiva_push_missing();
+    _test_mg_stiva_list_tags();
+    _test_mg_stiva_catalog();
+    _test_mg_stiva_has_signature_artifact_by_id();
+    _test_mg_pull_index_dedup_by_digest();
+    _test_mg_mcp_dispatch_unknown_tool();
+    _test_mg_mcp_advertised_but_unavailable();
+    _test_mg_mcp_missing_params();
+    _test_mg_mcp_build();
+    _test_mg_mcp_build_context_is_confined();
+    _test_mg_mcp_pull_is_not_read_only();
+    _test_mg_mcp_pull_and_inspect_image();
+    _test_mg_mcp_ps_shape();
+    _test_mg_mcp_resources();
+    _test_ev_path_is_per_root();
+    _test_ev_append_one_line_per_event();
+    _test_ev_append_guards();
+    _test_ev_rotation();
+    _test_ev_rotation_disabled_by_zero();
+    _test_ev_publish_persists_and_stamps_wall_clock();
+    _test_ev_survives_container_removal();
+    _test_ev_ts_parse();
+    _test_ev_in_range();
+    _test_fleet_rollback_does_not_stampede();
+    _test_fleet_rollback_never_targets_the_failed_node();
+    _test_fleet_draining_and_cordoned_take_no_new_work();
+    _test_fleet_preferred_nodes_are_honoured();
+    _test_fleet_accel_requirement_gates_placement();
+    _test_fleet_unknown_accel_inventory_is_not_satisfying();
+    _test_fleet_accel_default_is_req_none();
     return assert_summary();
 }
 

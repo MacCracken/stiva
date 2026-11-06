@@ -49,7 +49,7 @@ fn _cv_before(hay, first, second) {
 
 # ══ dockerfile_to_toml (rust-old/src/convert.rs:182-303) ══════════
 
-fn test_convert_dockerfile_basic() {
+fn _test_convert_dockerfile_basic() {
     test_group("convert_dockerfile_basic");
     var _sb = str_builder_new();
     _cv_yl(_sb, "");
@@ -78,13 +78,13 @@ fn test_convert_dockerfile_basic() {
     return 0;
 }
 
-fn test_convert_dockerfile_no_from() {
+fn _test_convert_dockerfile_no_from() {
     test_group("convert_dockerfile_no_from");
     assert_eq(dockerfile_to_toml("RUN echo hello"), 0, "no from -> null");
     return 0;
 }
 
-fn test_convert_dockerfile_comments_and_blanks() {
+fn _test_convert_dockerfile_comments_and_blanks() {
     test_group("convert_dockerfile_comments_and_blanks");
     var _sb = str_builder_new();
     _cv_yl(_sb, "# Comment");
@@ -100,7 +100,7 @@ fn test_convert_dockerfile_comments_and_blanks() {
     return 0;
 }
 
-fn test_convert_dockerfile_env_space_format() {
+fn _test_convert_dockerfile_env_space_format() {
     test_group("convert_dockerfile_env_space_format");
     var toml = dockerfile_to_toml("FROM alpine\nENV APP_HOME /opt/app");
     assert_eq(_cv_contains(toml, "key = \"APP_HOME\""), 1, "key");
@@ -108,14 +108,14 @@ fn test_convert_dockerfile_env_space_format() {
     return 0;
 }
 
-fn test_convert_dockerfile_expose_multiple() {
+fn _test_convert_dockerfile_expose_multiple() {
     test_group("convert_dockerfile_expose_multiple");
     var toml = dockerfile_to_toml("FROM alpine\nEXPOSE 80 443/tcp 8080");
     assert_eq(_cv_contains(toml, "expose = [80, 443, 8080]"), 1, "expose multi");
     return 0;
 }
 
-fn test_convert_dockerfile_label() {
+fn _test_convert_dockerfile_label() {
     test_group("convert_dockerfile_label");
     var toml = dockerfile_to_toml("FROM alpine\nLABEL maintainer=\"test@example.com\"");
     assert_eq(_cv_contains(toml, "type = \"label\""), 1, "label type");
@@ -127,7 +127,7 @@ fn test_convert_dockerfile_label() {
 
 # ── the four oracle cases (rust-old/src/convert.rs:312-375) ──
 
-fn test_compose_basic() {
+fn _test_compose_basic() {
     test_group("compose_basic");
     var _sb = str_builder_new();
     _cv_yl(_sb, "");
@@ -164,7 +164,7 @@ fn test_compose_basic() {
     return 0;
 }
 
-fn test_compose_depends_on() {
+fn _test_compose_depends_on() {
     test_group("compose_depends_on");
     var _sb = str_builder_new();
     _cv_yl(_sb, "");
@@ -187,7 +187,7 @@ fn test_compose_depends_on() {
     return 0;
 }
 
-fn test_compose_env_array() {
+fn _test_compose_env_array() {
     test_group("compose_env_array");
     var _sb = str_builder_new();
     _cv_yl(_sb, "");
@@ -206,7 +206,7 @@ fn test_compose_env_array() {
     return 0;
 }
 
-fn test_compose_invalid_yaml() {
+fn _test_compose_invalid_yaml() {
     test_group("compose_invalid_yaml");
     assert_eq(compose_yaml_to_toml("not: [valid: yaml"), 0, "invalid -> null");
     assert_eq(_cv_contains(compose_last_error(), "invalid YAML"), 1, "error prefix matches oracle");
@@ -215,7 +215,7 @@ fn test_compose_invalid_yaml() {
 
 # ── ordering parity (what serde_json's BTreeMap gave the oracle free) ──
 
-fn test_compose_service_key_sort_is_bytewise() {
+fn _test_compose_service_key_sort_is_bytewise() {
     test_group("compose_service_key_sort_is_bytewise");
     # Rust String Ord is unsigned byte-wise, so uppercase (0x4D) sorts
     # before lowercase (0x61, 0x7A) — NOT case-insensitively.
@@ -234,7 +234,7 @@ fn test_compose_service_key_sort_is_bytewise() {
     return 0;
 }
 
-fn test_compose_env_map_is_sorted() {
+fn _test_compose_env_map_is_sorted() {
     test_group("compose_env_map_is_sorted");
     var _sb = str_builder_new();
     _cv_yl(_sb, "services:");
@@ -249,7 +249,7 @@ fn test_compose_env_map_is_sorted() {
     return 0;
 }
 
-fn test_compose_depends_on_object_form() {
+fn _test_compose_depends_on_object_form() {
     test_group("compose_depends_on_object_form");
     # The long `condition:` syntax — the oracle takes obj.keys() off a
     # BTreeMap, so keys are sorted and the conditions are discarded.
@@ -268,7 +268,7 @@ fn test_compose_depends_on_object_form() {
     return 0;
 }
 
-fn test_compose_networks_and_volumes_sorted() {
+fn _test_compose_networks_and_volumes_sorted() {
     test_group("compose_networks_and_volumes_sorted");
     var _sb = str_builder_new();
     _cv_yl(_sb, "networks:");
@@ -293,7 +293,7 @@ fn test_compose_networks_and_volumes_sorted() {
     return 0;
 }
 
-fn test_compose_ipam_first_config_only() {
+fn _test_compose_ipam_first_config_only() {
     test_group("compose_ipam_first_config_only");
     # Rust `.first()` — index 0 only; a second config entry is ignored.
     var _sb = str_builder_new();
@@ -312,7 +312,7 @@ fn test_compose_ipam_first_config_only() {
 
 # ── per-field arms ──
 
-fn test_compose_command_string_and_array() {
+fn _test_compose_command_string_and_array() {
     test_group("compose_command_string_and_array");
     var s = compose_yaml_to_toml("services:\n  a:\n    command: \"nginx -g daemon\"\n");
     assert_eq(_cv_contains(s, "command = [\"nginx\", \"-g\", \"daemon\"]"), 1, "string splits on whitespace");
@@ -325,7 +325,7 @@ fn test_compose_command_string_and_array() {
     return 0;
 }
 
-fn test_compose_ports_drops_non_strings() {
+fn _test_compose_ports_drops_non_strings() {
     test_group("compose_ports_drops_non_strings");
     # Oracle: `.filter_map(as_str or as_i64 -> "")` then `.filter(!is_empty)`,
     # so a bare integer port is silently dropped.
@@ -334,7 +334,7 @@ fn test_compose_ports_drops_non_strings() {
     return 0;
 }
 
-fn test_compose_empty_arrays_suppressed() {
+fn _test_compose_empty_arrays_suppressed() {
     test_group("compose_empty_arrays_suppressed");
     var t = compose_yaml_to_toml("services:\n  a:\n    image: x\n    ports: []\n    volumes: []\n    depends_on: []\n");
     assert_eq(_cv_contains(t, "ports"), 0, "empty ports emits nothing");
@@ -344,7 +344,7 @@ fn test_compose_empty_arrays_suppressed() {
     return 0;
 }
 
-fn test_compose_env_non_string_values() {
+fn _test_compose_env_non_string_values() {
     test_group("compose_env_non_string_values");
     # Oracle: `match v.as_str() { Some(s) => s, None => v.to_string() }`.
     # bayan_json_v_build is the byte-exact analogue of Value::to_string().
@@ -366,7 +366,7 @@ fn test_compose_env_non_string_values() {
     return 0;
 }
 
-fn test_compose_env_list_needs_equals() {
+fn _test_compose_env_list_needs_equals() {
     test_group("compose_env_list_needs_equals");
     # `split_once('=')` — items without '=' are silently dropped (so bare
     # `- FOO` host-inheritance is lost), and the split is at the FIRST '='.
@@ -377,7 +377,7 @@ fn test_compose_env_list_needs_equals() {
     return 0;
 }
 
-fn test_compose_service_body_null_still_gets_header() {
+fn _test_compose_service_body_null_still_gets_header() {
     test_group("compose_service_body_null_still_gets_header");
     # The oracle writes the header before any body type check.
     var t = compose_yaml_to_toml("services:\n  bare:\n");
@@ -387,7 +387,7 @@ fn test_compose_service_body_null_still_gets_header() {
 
 # ── the Ok("") cases: valid input carrying nothing to convert ──
 
-fn test_compose_empty_ok_cases() {
+fn _test_compose_empty_ok_cases() {
     test_group("compose_empty_ok_cases");
     # Each is Ok("") in the oracle — a NON-null pointer to an empty string,
     # which is why 0 stays unambiguous as the error sentinel.
@@ -407,28 +407,28 @@ fn test_compose_empty_ok_cases() {
 # Each returns 0 with a verbatim bayan message. These pin the documented
 # subset — if bayan later grows support, these tests are the tripwire.
 
-fn test_compose_rejects_flow_mapping() {
+fn _test_compose_rejects_flow_mapping() {
     test_group("compose_rejects_flow_mapping");
     assert_eq(compose_yaml_to_toml("services:\n  a: {image: x}\n"), 0, "flow mapping -> null");
     assert_eq(_cv_contains(compose_last_error(), "flow mappings"), 1, "message names the construct");
     return 0;
 }
 
-fn test_compose_rejects_block_scalar() {
+fn _test_compose_rejects_block_scalar() {
     test_group("compose_rejects_block_scalar");
     assert_eq(compose_yaml_to_toml("services:\n  a:\n    command: |\n      echo hi\n"), 0, "block scalar -> null");
     assert_eq(_cv_contains(compose_last_error(), "block scalars"), 1, "message names the construct");
     return 0;
 }
 
-fn test_compose_rejects_anchor_alias() {
+fn _test_compose_rejects_anchor_alias() {
     test_group("compose_rejects_anchor_alias");
     assert_eq(compose_yaml_to_toml("base: &b\n  image: x\nservices:\n  a: *b\n"), 0, "anchor -> null");
     assert_eq(_cv_contains(compose_last_error(), "anchors"), 1, "message names the construct");
     return 0;
 }
 
-fn test_compose_rejects_merge_key() {
+fn _test_compose_rejects_merge_key() {
     test_group("compose_rejects_merge_key");
     # bayan has no '<<' handling at all: `<<: *base` dies on the alias
     # check, but a literal `<<: x` would silently become a key named "<<".
@@ -438,7 +438,7 @@ fn test_compose_rejects_merge_key() {
     return 0;
 }
 
-fn test_compose_rejects_multi_document() {
+fn _test_compose_rejects_multi_document() {
     test_group("compose_rejects_multi_document");
     var _sb = str_builder_new();
     _cv_yl(_sb, "---");
@@ -454,14 +454,14 @@ fn test_compose_rejects_multi_document() {
     return 0;
 }
 
-fn test_compose_rejects_tab_indent() {
+fn _test_compose_rejects_tab_indent() {
     test_group("compose_rejects_tab_indent");
     assert_eq(compose_yaml_to_toml("services:\n\ta:\n\t\timage: x\n"), 0, "tab indent -> null");
     assert_eq(_cv_contains(compose_last_error(), "tab"), 1, "message names the construct");
     return 0;
 }
 
-fn test_compose_error_carries_byte_offset() {
+fn _test_compose_error_carries_byte_offset() {
     test_group("compose_error_carries_byte_offset");
     # A deliberate improvement over the oracle, whose rustc-style caret
     # snippet is not reproducible here.
@@ -472,7 +472,7 @@ fn test_compose_error_carries_byte_offset() {
 
 # ── in-subset constructs that must keep working ──
 
-fn test_compose_accepts_flow_sequences_and_comments() {
+fn _test_compose_accepts_flow_sequences_and_comments() {
     test_group("compose_accepts_flow_sequences_and_comments");
     # Flow SEQUENCES are supported (only flow MAPPINGS are not), as are
     # quote-aware '#' comments and an unquoted `host:port` scalar (bayan
@@ -495,7 +495,7 @@ fn test_compose_accepts_flow_sequences_and_comments() {
 # Each of these was a confirmed defect in the first cut of the converter,
 # most of them found by diffing against a compiled build of the Rust oracle.
 
-fn test_compose_yaml11_bool_tokens_are_not_strings() {
+fn _test_compose_yaml11_bool_tokens_are_not_strings() {
     test_group("compose_yaml11_bool_tokens_are_not_strings");
     # serde-saphyr resolves the YAML 1.1 token family, so the oracle's
     # `.as_str()` sees None and emits NOTHING for `restart: no` — while a
@@ -514,7 +514,7 @@ fn test_compose_yaml11_bool_tokens_are_not_strings() {
     return 0;
 }
 
-fn test_compose_yaml11_tokens_dropped_from_arrays() {
+fn _test_compose_yaml11_tokens_dropped_from_arrays() {
     test_group("compose_yaml11_tokens_dropped_from_arrays");
     # The oracle's filter_map(as_str) DROPS a resolved bool element.
     var _sb = str_builder_new();
@@ -536,7 +536,7 @@ fn test_compose_yaml11_tokens_dropped_from_arrays() {
     return 0;
 }
 
-fn test_compose_yaml11_tokens_canonical_in_env() {
+fn _test_compose_yaml11_tokens_canonical_in_env() {
     test_group("compose_yaml11_tokens_canonical_in_env");
     # In the env map the oracle falls back to `v.to_string()`, which renders
     # the RESOLVED value — so `yes` becomes "true", not "yes".
@@ -556,7 +556,7 @@ fn test_compose_yaml11_tokens_canonical_in_env() {
     return 0;
 }
 
-fn test_compose_rejects_duplicate_keys() {
+fn _test_compose_rejects_duplicate_keys() {
     test_group("compose_rejects_duplicate_keys");
     # serde-saphyr rejects the document. bayan keeps both pairs, and since
     # the emitter ITERATES these maps both survived — producing two
@@ -572,7 +572,7 @@ fn test_compose_rejects_duplicate_keys() {
     return 0;
 }
 
-fn test_compose_rejects_duplicate_keys_nested() {
+fn _test_compose_rejects_duplicate_keys_nested() {
     test_group("compose_rejects_duplicate_keys_nested");
     # The check is recursive, so a duplicate inside a service body — which
     # the oracle also rejects at parse time — is caught too.
@@ -586,7 +586,7 @@ fn test_compose_rejects_duplicate_keys_nested() {
     return 0;
 }
 
-fn test_compose_merge_key_guard_is_recursive() {
+fn _test_compose_merge_key_guard_is_recursive() {
     test_group("compose_merge_key_guard_is_recursive");
     # The guard used to run only at the document root and on service bodies,
     # so the same construct errored in one place and became a literal `<<`
@@ -601,7 +601,7 @@ fn test_compose_merge_key_guard_is_recursive() {
     return 0;
 }
 
-fn test_compose_escapes_toml_output() {
+fn _test_compose_escapes_toml_output() {
     test_group("compose_escapes_toml_output");
     # DELIBERATE DIVERGENCE from the oracle, which emits every value through
     # a bare format! and so lets a hostile compose file close the string it
@@ -624,7 +624,7 @@ fn test_compose_escapes_toml_output() {
     return 0;
 }
 
-fn test_compose_quotes_non_bare_section_names() {
+fn _test_compose_quotes_non_bare_section_names() {
     test_group("compose_quotes_non_bare_section_names");
     # A TOML bare key is [A-Za-z0-9_-]+; anything else must be quoted, or a
     # service named `a.b` silently becomes a nested table.
@@ -640,7 +640,7 @@ fn test_compose_quotes_non_bare_section_names() {
     return 0;
 }
 
-fn test_compose_nested_env_object_keys_sorted() {
+fn _test_compose_nested_env_object_keys_sorted() {
     test_group("compose_nested_env_object_keys_sorted");
     # serde_json's Map is a BTreeMap at EVERY depth, so `v.to_string()`
     # sorts nested keys too. bayan_json_v_build walks insertion order, which
@@ -657,7 +657,7 @@ fn test_compose_nested_env_object_keys_sorted() {
     return 0;
 }
 
-fn test_compose_sort_is_order_insensitive() {
+fn _test_compose_sort_is_order_insensitive() {
     test_group("compose_sort_is_order_insensitive");
     # _cv_sorted_idx was an insertion sort — O(n^2) on reverse-sorted keys,
     # which is attacker-chosen input on this path (1 MiB of reversed keys
@@ -692,54 +692,125 @@ fn test_compose_sort_is_order_insensitive() {
     return 0;
 }
 
+# The oracle pasted values between quotes. Each of these wrote a file that did not parse.
+fn _test_convert_dockerfile_values_are_escaped() {
+    test_group("convert_dockerfile_values_are_escaped");
+    var t = dockerfile_to_toml(
+      "FROM alpine\"x\nUSER a\"b\nWORKDIR /p\\q\nENV K=v\\w\nLABEL l=\"m\"\"n\nRUN echo a\\nb \"c\"\nCOPY s\"1 d\"2\nENTRYPOINT run \"x\"\n");  #skip-lint
+    assert(t != 0, "converted");
+    if (t == 0) { return 0; }
+    assert_eq(_cv_contains(t, "base = \"alpine\\\"x\""), 1, "FROM");
+    assert_eq(_cv_contains(t, "user = \"a\\\"b\""), 1, "USER");
+    assert_eq(_cv_contains(t, "path = \"/p\\\\q\""), 1, "WORKDIR");
+    assert_eq(_cv_contains(t, "value = \"v\\\\w\""), 1, "ENV");
+    assert_eq(_cv_contains(t, "\"echo a\\\\nb \\\"c\\\"\""), 1, "RUN");
+    assert_eq(_cv_contains(t, "source = \"s\\\"1\""), 1, "COPY source");
+    assert_eq(_cv_contains(t, "destination = \"d\\\"2\""), 1, "COPY destination");
+    assert_eq(_cv_contains(t, "\"run \\\"x\\\"\""), 1, "ENTRYPOINT, shell form");
+    assert(bayan_toml_parse(str_from(t)) != 0, "and the whole file parses");
+    return 0;
+}
+
+# A `\"` inside the JSON form must not end the element.
+fn _test_convert_dockerfile_entrypoint_json_escapes() {
+    test_group("convert_dockerfile_entrypoint_json_escapes");
+    var t = dockerfile_to_toml("FROM a\nENTRYPOINT [\"sh\", \"say \\\"hi\\\"\"]\n");
+    assert(t != 0, "converted");
+    if (t == 0) { return 0; }
+    assert_eq(_cv_contains(t, "entrypoint = [\"sh\", \"say \\\"hi\\\"\"]"), 1, "two elements");
+    return 0;
+}
+
+# The rest of a multi-line instruction used to vanish without a word.
+fn _test_convert_dockerfile_continuations() {
+    test_group("convert_dockerfile_continuations");
+    var t = dockerfile_to_toml(
+      "FROM a\nRUN apt-get update && \\\n    # refresh\n    apt-get install -y x \\  \n    y\nENV A=1\n");
+    assert(t != 0, "converted");
+    if (t == 0) { return 0; }
+    assert_eq(_cv_contains(t, "apt-get update &&     apt-get install -y x     y"), 1, "joined");
+    assert_eq(_cv_contains(t, "refresh"), 0, "the comment inside is gone");
+    assert_eq(_cv_contains(t, "key = \"A\""), 1, "the next instruction still reads");
+    return 0;
+}
+
+# A restriction that does not survive conversion has to be said out loud.
+fn _test_convert_compose_says_what_it_dropped() {
+    test_group("convert_compose_says_what_it_dropped");
+    var t = compose_yaml_to_toml(
+      "services:\n  web:\n    image: nginx\n    read_only: true\n    cap_drop: [ALL]\n  db:\n    image: pg\n");
+    assert(t != 0, "converted");
+    var dropped = compose_dropped_keys();
+    assert_eq(vec_len(dropped), 2, "two keys");
+    var both = str_builder_new();
+    var i = 0;
+    while (i < vec_len(dropped)) {
+        str_builder_add_cstr(both, vec_get(dropped, i));
+        str_builder_add_cstr(both, " ");
+        i = i + 1;
+    }
+    var text = str_cstr(str_builder_build(both));
+    assert_eq(_cv_contains(text, "web.read_only"), 1, "read_only");
+    assert_eq(_cv_contains(text, "web.cap_drop"), 1, "cap_drop");
+    var carried = "services:\n  a:\n    image: x\n    ports: [\"1:1\"]\n";
+    assert(compose_yaml_to_toml(carried) != 0, "again");
+    assert_eq(vec_len(compose_dropped_keys()), 0, "a carried key is not reported");
+    return 0;
+}
+
+# Runs every case in convert.tcyr, and returns the failure count as the exit status.
 fn main() {
     alloc_init();
+    _test_convert_dockerfile_values_are_escaped();
+    _test_convert_dockerfile_entrypoint_json_escapes();
+    _test_convert_dockerfile_continuations();
+    _test_convert_compose_says_what_it_dropped();
     # dockerfile
-    test_convert_dockerfile_basic();
-    test_convert_dockerfile_no_from();
-    test_convert_dockerfile_comments_and_blanks();
-    test_convert_dockerfile_env_space_format();
-    test_convert_dockerfile_expose_multiple();
-    test_convert_dockerfile_label();
+    _test_convert_dockerfile_basic();
+    _test_convert_dockerfile_no_from();
+    _test_convert_dockerfile_comments_and_blanks();
+    _test_convert_dockerfile_env_space_format();
+    _test_convert_dockerfile_expose_multiple();
+    _test_convert_dockerfile_label();
     # compose — oracle parity
-    test_compose_basic();
-    test_compose_depends_on();
-    test_compose_env_array();
-    test_compose_invalid_yaml();
+    _test_compose_basic();
+    _test_compose_depends_on();
+    _test_compose_env_array();
+    _test_compose_invalid_yaml();
     # compose — ordering
-    test_compose_service_key_sort_is_bytewise();
-    test_compose_env_map_is_sorted();
-    test_compose_depends_on_object_form();
-    test_compose_networks_and_volumes_sorted();
-    test_compose_ipam_first_config_only();
+    _test_compose_service_key_sort_is_bytewise();
+    _test_compose_env_map_is_sorted();
+    _test_compose_depends_on_object_form();
+    _test_compose_networks_and_volumes_sorted();
+    _test_compose_ipam_first_config_only();
     # compose — per-field arms
-    test_compose_command_string_and_array();
-    test_compose_ports_drops_non_strings();
-    test_compose_empty_arrays_suppressed();
-    test_compose_env_non_string_values();
-    test_compose_env_list_needs_equals();
-    test_compose_service_body_null_still_gets_header();
-    test_compose_empty_ok_cases();
+    _test_compose_command_string_and_array();
+    _test_compose_ports_drops_non_strings();
+    _test_compose_empty_arrays_suppressed();
+    _test_compose_env_non_string_values();
+    _test_compose_env_list_needs_equals();
+    _test_compose_service_body_null_still_gets_header();
+    _test_compose_empty_ok_cases();
     # compose — the honest subset
-    test_compose_rejects_flow_mapping();
-    test_compose_rejects_block_scalar();
-    test_compose_rejects_anchor_alias();
-    test_compose_rejects_merge_key();
-    test_compose_rejects_multi_document();
-    test_compose_rejects_tab_indent();
-    test_compose_error_carries_byte_offset();
-    test_compose_accepts_flow_sequences_and_comments();
+    _test_compose_rejects_flow_mapping();
+    _test_compose_rejects_block_scalar();
+    _test_compose_rejects_anchor_alias();
+    _test_compose_rejects_merge_key();
+    _test_compose_rejects_multi_document();
+    _test_compose_rejects_tab_indent();
+    _test_compose_error_carries_byte_offset();
+    _test_compose_accepts_flow_sequences_and_comments();
     # regressions from the 2026-07-23 adversarial review
-    test_compose_yaml11_bool_tokens_are_not_strings();
-    test_compose_yaml11_tokens_dropped_from_arrays();
-    test_compose_yaml11_tokens_canonical_in_env();
-    test_compose_rejects_duplicate_keys();
-    test_compose_rejects_duplicate_keys_nested();
-    test_compose_merge_key_guard_is_recursive();
-    test_compose_escapes_toml_output();
-    test_compose_quotes_non_bare_section_names();
-    test_compose_nested_env_object_keys_sorted();
-    test_compose_sort_is_order_insensitive();
+    _test_compose_yaml11_bool_tokens_are_not_strings();
+    _test_compose_yaml11_tokens_dropped_from_arrays();
+    _test_compose_yaml11_tokens_canonical_in_env();
+    _test_compose_rejects_duplicate_keys();
+    _test_compose_rejects_duplicate_keys_nested();
+    _test_compose_merge_key_guard_is_recursive();
+    _test_compose_escapes_toml_output();
+    _test_compose_quotes_non_bare_section_names();
+    _test_compose_nested_env_object_keys_sorted();
+    _test_compose_sort_is_order_insensitive();
     return assert_summary();
 }
 

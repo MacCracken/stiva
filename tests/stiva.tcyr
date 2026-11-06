@@ -30,7 +30,7 @@ include "src/mcp.cyr"
 include "src/stiva_core.cyr"
 
 # ── error.cyr (rust-old/src/error.rs) ────────────────────────────
-fn test_error_names() {
+fn _test_error_names() {
     test_group("error_names");
     assert_eq(streq(stiva_err_name(STIVA_ERR_OK), "ok"), 1, "ok");
     assert_eq(streq(stiva_err_name(STIVA_ERR_IMAGE_NOT_FOUND), "image not found"), 1, "image not found");
@@ -49,13 +49,13 @@ fn test_error_names() {
 }
 
 # ── oci.cyr (rust-old/src/oci.rs) ────────────────────────────────
-fn test_oci_version() {
+fn _test_oci_version() {
     test_group("oci_version");
     assert_eq(streq(oci_version(), "1.2.0"), 1, "oci version 1.2.0");
     return 0;
 }
 
-fn test_oci_status_names() {
+fn _test_oci_status_names() {
     test_group("oci_status_names");
     assert_eq(streq(oci_status_name(OCI_STATUS_CREATING), "creating"), 1, "creating");
     assert_eq(streq(oci_status_name(OCI_STATUS_CREATED), "created"), 1, "created");
@@ -64,7 +64,7 @@ fn test_oci_status_names() {
     return 0;
 }
 
-fn test_parse_signal_numeric() {
+fn _test_parse_signal_numeric() {
     test_group("parse_signal_numeric");
     assert_eq(parse_signal("15"), 15, "15 -> 15");
     assert_eq(parse_signal("9"), 9, "9 -> 9");
@@ -72,7 +72,7 @@ fn test_parse_signal_numeric() {
     return 0;
 }
 
-fn test_parse_signal_names() {
+fn _test_parse_signal_names() {
     test_group("parse_signal_names");
     assert_eq(parse_signal("SIGTERM"), 15, "SIGTERM -> 15");
     assert_eq(parse_signal("SIGKILL"), 9, "SIGKILL -> 9");
@@ -84,7 +84,7 @@ fn test_parse_signal_names() {
     return 0;
 }
 
-fn test_parse_signal_invalid() {
+fn _test_parse_signal_invalid() {
     test_group("parse_signal_invalid");
     assert_eq(parse_signal("SIGFOO"), 0 - 1, "SIGFOO -> -1");
     assert_eq(parse_signal("0"), 0 - 1, "0 -> -1");
@@ -95,7 +95,7 @@ fn test_parse_signal_invalid() {
 # to_oci_status / OciState / build_state / parse_bundle live in container.cyr
 # (they couple to the container types + bayan) but mirror rust-old/src/oci.rs
 # #[cfg(test)], so they're grouped here with the rest of the oci surface.
-fn test_oci_status_all_variants() {
+fn _test_oci_status_all_variants() {
     test_group("oci_status_all_variants");
     assert_eq(to_oci_status(CONTAINER_STATE_CREATED), OCI_STATUS_CREATED, "Created");
     assert_eq(to_oci_status(CONTAINER_STATE_RUNNING), OCI_STATUS_RUNNING, "Running");
@@ -105,7 +105,7 @@ fn test_oci_status_all_variants() {
     return 0;
 }
 
-fn test_oci_state_serde() {
+fn _test_oci_state_serde() {
     test_group("oci_state_serde");
     var st = oci_state_new("1.2.0", "test-container", OCI_STATUS_RUNNING, 1234,
       "/run/containers/test", 0);
@@ -121,10 +121,11 @@ fn test_oci_state_serde() {
     return 0;
 }
 
-fn test_build_state_json() {
+fn _test_build_state_json() {
     test_group("build_state_json");
     var cfg = container_config_default();
-    var c: Container = container_new("abc123", "test", "sha256:dead000000000000000000000000000000000000000000000000000000000000", "",
+    var c: Container = container_new("abc123", "test",
+      "sha256:dead000000000000000000000000000000000000000000000000000000000000", "",
       CONTAINER_STATE_RUNNING, 42, 1000, 2000, cfg, 0 - 1);
     var s: OciState = build_state(c, "/run/bundle");
     assert_eq(streq(s.oci_version, "1.2.0"), 1, "oci_version 1.2.0");
@@ -134,11 +135,11 @@ fn test_build_state_json() {
     return 0;
 }
 
-fn test_parse_bundle_minimal() {
+fn _test_parse_bundle_minimal() {
     test_group("parse_bundle_minimal");
     var dir = "/tmp/stiva_oci_min";
     sys_mkdir(dir, 0x1ED);
-    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/sh\",\"-c\",\"echo hello\"],\"env\":[\"PATH=/usr/bin\",\"HOME=/root\"]},\"root\":{\"path\":\"rootfs\"}}";
+    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/sh\",\"-c\",\"echo hello\"],\"env\":[\"PATH=/usr/bin\",\"HOME=/root\"]},\"root\":{\"path\":\"rootfs\"}}";   #skip-lint
     file_write_all("/tmp/stiva_oci_min/config.json", cfg, strlen(cfg));
     var config = parse_bundle(dir);
     assert_eq(config != 0, 1, "parsed non-null");
@@ -153,11 +154,11 @@ fn test_parse_bundle_minimal() {
     return 0;
 }
 
-fn test_parse_bundle_with_resources() {
+fn _test_parse_bundle_with_resources() {
     test_group("parse_bundle_with_resources");
     var dir = "/tmp/stiva_oci_res";
     sys_mkdir(dir, 0x1ED);
-    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/true\"]},\"root\":{\"path\":\"rootfs\"},\"hostname\":\"test-host\",\"linux\":{\"resources\":{\"memory\":{\"limit\":268435456},\"pids\":{\"limit\":100}}}}";
+    var cfg = "{\"ociVersion\":\"1.2.0\",\"process\":{\"args\":[\"/bin/true\"]},\"root\":{\"path\":\"rootfs\"},\"hostname\":\"test-host\",\"linux\":{\"resources\":{\"memory\":{\"limit\":268435456},\"pids\":{\"limit\":100}}}}";   #skip-lint
     file_write_all("/tmp/stiva_oci_res/config.json", cfg, strlen(cfg));
     var c: ContainerConfig = parse_bundle(dir);
     assert_eq(c.memory_limit, 268435456, "memory_limit");
@@ -166,7 +167,7 @@ fn test_parse_bundle_with_resources() {
     return 0;
 }
 
-fn test_parse_bundle_missing_config() {
+fn _test_parse_bundle_missing_config() {
     test_group("parse_bundle_missing_config");
     var dir = "/tmp/stiva_oci_missing";
     sys_mkdir(dir, 0x1ED);
@@ -175,7 +176,7 @@ fn test_parse_bundle_missing_config() {
 }
 
 # ── intents.cyr (rust-old/src/intents.rs) ────────────────────────
-fn test_parse_intent_not_implemented() {
+fn _test_parse_intent_not_implemented() {
     test_group("intents::parse_intent_not_implemented");
     assert(parse_intent("run nginx") < 0, "ok");
     assert_eq(parse_intent("run nginx"), 0 - 6, "eq");
@@ -184,7 +185,7 @@ fn test_parse_intent_not_implemented() {
     return 0;
 }
 
-fn test_intent_serde() {
+fn _test_intent_serde() {
     test_group("intents::intent_serde");
     assert(streq(intent_kind_name(INTENT_KIND_RUN), "Run") == 1, "ok");
     assert(streq(intent_kind_name(INTENT_KIND_STOP), "Stop") == 1, "ok");
@@ -199,7 +200,7 @@ fn test_intent_serde() {
 
 # Intent payload JSON round-trip (rust-old intents.rs: intent_serde) — the
 # externally-tagged {"<Variant>": { fields }} form, every variant.
-fn test_intent_payload_serde() {
+fn _test_intent_payload_serde() {
     test_group("intents::intent_payload_serde");
     # Run { image, name: Some } — check the wire shape too.
     var rj = json_v_build(intent_to_jv(intent_run("nginx", "web")));
@@ -257,7 +258,7 @@ fn _t_intent_parse(j) {
     return intent_from_jv(bayan_json_v_parse_buf(j, strlen(j)));
 }
 
-fn test_intent_from_jv_strict() {
+fn _test_intent_from_jv_strict() {
     test_group("intents::intent_from_jv_strict");
     assert_eq(_t_intent_parse("{\"Run\":{\"name\":\"web\"}}"), 0, "Run missing image -> 0");
     assert_eq(_t_intent_parse("{\"Scale\":{\"service\":\"w\",\"replicas\":\"3\"}}"), 0, "Scale replicas string -> 0");
@@ -275,14 +276,14 @@ fn test_intent_from_jv_strict() {
 }
 
 # ── audit.cyr (rust-old/src/audit.rs) ────────────────────────────
-fn test_audit_operation_display() {
+fn _test_audit_operation_display() {
     test_group("audit_operation_display");
     assert_eq(streq(audit_op_name(AUDIT_OP_CREATE), "create"), 1, "eq");
     assert_eq(streq(audit_op_name(AUDIT_OP_CHECKPOINT), "checkpoint"), 1, "eq");
     return 0;
 }
 
-fn test_audit_entry_container_serde() {
+fn _test_audit_entry_container_serde() {
     test_group("audit_entry_container_serde");
     var entry = audit_entry_container(AUDIT_OP_CREATE, "abc123", AUDIT_RESULT_SUCCESS, 0);
     var json = audit_entry_to_json(entry);
@@ -296,7 +297,7 @@ fn test_audit_entry_container_serde() {
     return 0;
 }
 
-fn test_audit_entry_image_serde() {
+fn _test_audit_entry_image_serde() {
     test_group("audit_entry_image_serde");
     var entry = audit_entry_image(AUDIT_OP_PULL, "nginx:latest", AUDIT_RESULT_FAILED, "timeout");
     var json = audit_entry_to_json(entry);
@@ -308,7 +309,7 @@ fn test_audit_entry_image_serde() {
     return 0;
 }
 
-fn test_audit_entry_with_metadata() {
+fn _test_audit_entry_with_metadata() {
     test_group("audit_entry_with_metadata");
     var entry = audit_entry_container(AUDIT_OP_KILL, "abc123", AUDIT_RESULT_SUCCESS, 0);
     entry = audit_entry_with_metadata(entry, "{\"signal\":15}");
@@ -317,7 +318,7 @@ fn test_audit_entry_with_metadata() {
     return 0;
 }
 
-fn test_audit_result_serde() {
+fn _test_audit_result_serde() {
     test_group("audit_result_serde");
     var s = audit_entry_container(AUDIT_OP_START, "c1", AUDIT_RESULT_SUCCESS, 0);
     var sj = audit_entry_to_json(s);
@@ -331,7 +332,7 @@ fn test_audit_result_serde() {
     return 0;
 }
 
-fn test_audit_log_write_and_read() {
+fn _test_audit_log_write_and_read() {
     test_group("audit_log_write_and_read");
     var path = "/tmp/stiva_audit_test_wr.log";
     xunlink(path);
@@ -347,7 +348,7 @@ fn test_audit_log_write_and_read() {
     return 0;
 }
 
-fn test_audit_log_read_limit() {
+fn _test_audit_log_read_limit() {
     test_group("audit_log_read_limit");
     var path = "/tmp/stiva_audit_test_lim.log";
     xunlink(path);
@@ -363,7 +364,7 @@ fn test_audit_log_read_limit() {
     return 0;
 }
 
-fn test_audit_log_empty() {
+fn _test_audit_log_empty() {
     test_group("audit_log_empty");
     var path = "/tmp/stiva_audit_test_empty.log";
     xunlink(path);
@@ -380,9 +381,8 @@ fn test_audit_log_empty() {
 # in the repo (94.3% of cycc's cap), and a file including only error.cyr +
 # convert.cyr sits at ~86%. See that file's header.
 
-
 # ── network_mod.cyr (rust-old/src/network/mod.rs) ──
-fn test_network_mode_name() {
+fn _test_network_mode_name() {
     test_group("network_mode_name");
     assert_eq(streq(network_mode_name(NETWORK_MODE_BRIDGE), "Bridge"), 1, "Bridge");
     assert_eq(streq(network_mode_name(NETWORK_MODE_HOST), "Host"), 1, "Host");
@@ -392,7 +392,7 @@ fn test_network_mode_name() {
     return 0;
 }
 
-fn test_network_mode_container() {
+fn _test_network_mode_container() {
     test_group("network_mode_container");
     var a: NetworkModeVal = network_mode_new(NETWORK_MODE_CONTAINER, "abc123");
     var b: NetworkModeVal = network_mode_new(NETWORK_MODE_CONTAINER, "abc123");
@@ -407,7 +407,7 @@ fn test_network_mode_container() {
     return 0;
 }
 
-fn test_network_struct() {
+fn _test_network_struct() {
     test_group("network_struct");
     var net: Network = network_new("stiva-bridge0", "172.17.0.0/16", "172.17.0.1", NETWORK_DRIVER_BRIDGE);
     assert_eq(streq(net.name, "stiva-bridge0"), 1, "name");
@@ -416,7 +416,7 @@ fn test_network_struct() {
     return 0;
 }
 
-fn test_network_driver_variants() {
+fn _test_network_driver_variants() {
     test_group("network_driver_variants");
     assert_eq(streq(network_driver_name(NETWORK_DRIVER_BRIDGE), "Bridge"), 1, "Bridge");
     assert_eq(streq(network_driver_name(NETWORK_DRIVER_OVERLAY), "Overlay"), 1, "Overlay");
@@ -424,7 +424,7 @@ fn test_network_driver_variants() {
     return 0;
 }
 
-fn test_container_network() {
+fn _test_container_network() {
     test_group("container_network");
     var cn: ContainerNetwork = container_network_new("172.17.0.2", 0, "bridge", "veth-abc", "eth0");
     assert_eq(streq(cn.ip, "172.17.0.2"), 1, "ip");
@@ -435,14 +435,14 @@ fn test_container_network() {
     return 0;
 }
 
-fn test_network_policy_default_no_restrictions() {
+fn _test_network_policy_default_no_restrictions() {
     test_group("network_policy_default_no_restrictions");
     var policy: NetworkPolicy = network_policy_default();
     assert_eq(network_policy_has_restrictions(policy), 0, "no restrictions");
     return 0;
 }
 
-fn test_network_policy_with_deny() {
+fn _test_network_policy_with_deny() {
     test_group("network_policy_with_deny");
     var policy: NetworkPolicy = network_policy_default();
     vec_push(policy.egress_deny, "10.0.0.0/8");
@@ -456,7 +456,7 @@ fn test_network_policy_with_deny() {
     return 0;
 }
 
-fn test_dns_registry_resolve() {
+fn _test_dns_registry_resolve() {
     test_group("dns_registry_resolve");
     var reg: DnsRegistry = dns_registry_new();
     dns_registry_register(reg, "web", "172.17.0.2");
@@ -467,7 +467,7 @@ fn test_dns_registry_resolve() {
     return 0;
 }
 
-fn test_dns_registry_unregister() {
+fn _test_dns_registry_unregister() {
     test_group("dns_registry_unregister");
     var reg: DnsRegistry = dns_registry_new();
     dns_registry_register(reg, "web", "172.17.0.2");
@@ -476,7 +476,7 @@ fn test_dns_registry_unregister() {
     return 0;
 }
 
-fn test_dns_registry_hosts_entries() {
+fn _test_dns_registry_hosts_entries() {
     test_group("dns_registry_hosts_entries");
     var reg: DnsRegistry = dns_registry_new();
     dns_registry_register(reg, "web", "172.17.0.2");
@@ -485,7 +485,7 @@ fn test_dns_registry_hosts_entries() {
     return 0;
 }
 
-fn test_dns_registry_inject() {
+fn _test_dns_registry_inject() {
     test_group("dns_registry_inject");
     var reg: DnsRegistry = dns_registry_new();
     dns_registry_register(reg, "db", "172.17.0.3");
@@ -502,7 +502,7 @@ fn test_dns_registry_inject() {
 }
 
 # ── network_bridge.cyr (rust-old/src/network/bridge.rs) ──
-fn test_network_bridge_veth_name() {
+fn _test_network_bridge_veth_name() {
     test_group("network_bridge_veth_name");
     var h = host_veth_name("abc123def456ghij");
     assert_eq(streq(h, "ve-abc123def456"), 1, "ve- prefix + first 12 chars");
@@ -515,7 +515,7 @@ fn test_network_bridge_veth_name() {
     return 0;
 }
 
-fn test_network_bridge_ipv4_fmt() {
+fn _test_network_bridge_ipv4_fmt() {
     test_group("network_bridge_ipv4_fmt");
     # 172.17.0.1 packed = (172<<24)|(17<<16)|(0<<8)|1
     var gw = 2886795265;
@@ -539,7 +539,7 @@ fn read_file_cstr(path) {
     return buf;
 }
 
-fn test_dns_parse_resolv_conf_basic() {
+fn _test_dns_parse_resolv_conf_basic() {
     test_group("network_dns::parse_resolv_conf_basic");
     var content = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
     var servers = network_dns_parse_resolv_conf(content);
@@ -549,7 +549,7 @@ fn test_dns_parse_resolv_conf_basic() {
     return 0;
 }
 
-fn test_dns_parse_resolv_conf_with_comments() {
+fn _test_dns_parse_resolv_conf_with_comments() {
     test_group("network_dns::parse_resolv_conf_with_comments");
     var content = "# DNS\nnameserver 1.1.1.1\nsearch example.com\nnameserver 1.0.0.1\n";
     var servers = network_dns_parse_resolv_conf(content);
@@ -558,14 +558,14 @@ fn test_dns_parse_resolv_conf_with_comments() {
     return 0;
 }
 
-fn test_dns_parse_resolv_conf_empty() {
+fn _test_dns_parse_resolv_conf_empty() {
     test_group("network_dns::parse_resolv_conf_empty");
     var servers = network_dns_parse_resolv_conf("");
     assert_eq(vec_len(servers), 0, "empty is empty");
     return 0;
 }
 
-fn test_dns_parse_resolv_conf_ipv6_skipped() {
+fn _test_dns_parse_resolv_conf_ipv6_skipped() {
     test_group("network_dns::parse_resolv_conf_ipv6_skipped");
     var content = "nameserver 8.8.8.8\nnameserver ::1\n";
     var servers = network_dns_parse_resolv_conf(content);
@@ -573,14 +573,14 @@ fn test_dns_parse_resolv_conf_ipv6_skipped() {
     return 0;
 }
 
-fn test_dns_ipv4_to_str_canonical() {
+fn _test_dns_ipv4_to_str_canonical() {
     test_group("network_dns::ipv4_to_str_canonical");
     assert_eq(streq(str_cstr(network_dns_ipv4_to_str(0x08080808)), "8.8.8.8"), 1, "8.8.8.8");
     assert_eq(streq(str_cstr(network_dns_ipv4_to_str(0xAC110002)), "172.17.0.2"), 1, "172.17.0.2");
     return 0;
 }
 
-fn test_dns_parse_ipv4_reject() {
+fn _test_dns_parse_ipv4_reject() {
     test_group("network_dns::parse_ipv4_reject");
     assert_eq(network_dns_parse_ipv4("::1"), network_dns_ipv4_invalid(), "ipv6 rejected");
     assert_eq(network_dns_parse_ipv4("1.2.3"), network_dns_ipv4_invalid(), "three octets");
@@ -591,7 +591,7 @@ fn test_dns_parse_ipv4_reject() {
     return 0;
 }
 
-fn test_dns_inject_resolv_conf_to_rootfs() {
+fn _test_dns_inject_resolv_conf_to_rootfs() {
     test_group("network_dns::inject_resolv_conf_to_rootfs");
     var dir = "/tmp/stiva_nd_rc";
     sys_mkdir(dir, 0x1ED);
@@ -605,7 +605,7 @@ fn test_dns_inject_resolv_conf_to_rootfs() {
     return 0;
 }
 
-fn test_dns_inject_resolv_conf_defaults_when_empty() {
+fn _test_dns_inject_resolv_conf_defaults_when_empty() {
     test_group("network_dns::inject_resolv_conf_defaults_when_empty");
     var dir = "/tmp/stiva_nd_def";
     sys_mkdir(dir, 0x1ED);
@@ -616,7 +616,7 @@ fn test_dns_inject_resolv_conf_defaults_when_empty() {
     return 0;
 }
 
-fn test_dns_inject_hosts_to_rootfs() {
+fn _test_dns_inject_hosts_to_rootfs() {
     test_group("network_dns::inject_hosts_to_rootfs");
     var dir = "/tmp/stiva_nd_hosts";
     sys_mkdir(dir, 0x1ED);
@@ -627,7 +627,7 @@ fn test_dns_inject_hosts_to_rootfs() {
     return 0;
 }
 
-fn test_dns_inject_hostname_to_rootfs() {
+fn _test_dns_inject_hostname_to_rootfs() {
     test_group("network_dns::inject_hostname_to_rootfs");
     var dir = "/tmp/stiva_nd_hn";
     sys_mkdir(dir, 0x1ED);
@@ -637,7 +637,7 @@ fn test_dns_inject_hostname_to_rootfs() {
     return 0;
 }
 
-fn test_dns_host_servers_returns_something() {
+fn _test_dns_host_servers_returns_something() {
     test_group("network_dns::host_dns_servers_returns_something");
     var servers = network_dns_host_servers();
     assert_eq(vec_len(servers) > 0, 1, "always at least defaults");
@@ -648,7 +648,7 @@ fn test_dns_host_servers_returns_something() {
 # which is precisely why it hid the defect. These drive the PARSER with the
 # inputs that produced an empty result, so the "always non-empty" contract is
 # tested rather than assumed.
-fn test_dns_parse_yields_empty_for_nameserverless_files() {
+fn _test_dns_parse_yields_empty_for_nameserverless_files() {
     test_group("network_dns::parse_empty_cases");
     # An IPv6-only resolv.conf: reads fine, parses to nothing.
     var v6 = "nameserver 2001:4860:4860::8888\nnameserver fe80::1\n";
@@ -664,7 +664,7 @@ fn test_dns_parse_yields_empty_for_nameserverless_files() {
     return 0;
 }
 
-fn test_dns_inject_defaults_when_empty() {
+fn _test_dns_inject_defaults_when_empty() {
     test_group("network_dns::inject_defaults_when_empty");
     # The downstream guard: an empty server list must still produce a usable
     # resolv.conf inside the container rather than an empty file.
@@ -687,7 +687,7 @@ fn test_dns_inject_defaults_when_empty() {
 # IPv4 addresses are the u32 host value; IPv6 addresses are 16-byte
 # big-endian buffer pointers. All 16 oracle #[cfg(test)] cases mirrored.
 
-fn test_np_new_pool() {
+fn _test_np_new_pool() {
     test_group("np_new_pool");
     var p = ip_pool_new("172.17.0.0/16");
     assert(p != 0, "pool created");
@@ -698,7 +698,7 @@ fn test_np_new_pool() {
     return 0;
 }
 
-fn test_np_allocate_sequential() {
+fn _test_np_allocate_sequential() {
     test_group("np_allocate_sequential");
     var q = ip_pool_new("172.17.0.0/24");
     var a1 = ip_pool_allocate(q);
@@ -711,7 +711,7 @@ fn test_np_allocate_sequential() {
     return 0;
 }
 
-fn test_np_release_and_reuse() {
+fn _test_np_release_and_reuse() {
     test_group("np_release_and_reuse");
     var r = ip_pool_new("172.17.0.0/24");
     var b1 = ip_pool_allocate(r);
@@ -724,14 +724,14 @@ fn test_np_release_and_reuse() {
     return 0;
 }
 
-fn test_np_release_nonexistent() {
+fn _test_np_release_nonexistent() {
     test_group("np_release_nonexistent");
     var r = ip_pool_new("172.17.0.0/24");
     assert_eq(ip_pool_release(r, 172*16777216 + 17*65536 + 99), 0, "release nonexistent false");
     return 0;
 }
 
-fn test_np_pool_exhaustion() {
+fn _test_np_pool_exhaustion() {
     test_group("np_pool_exhaustion");
     var e = ip_pool_new("10.0.0.0/30");
     var ei = ip_pool_allocate(e);
@@ -740,14 +740,14 @@ fn test_np_pool_exhaustion() {
     return 0;
 }
 
-fn test_np_skips_gateway() {
+fn _test_np_skips_gateway() {
     test_group("np_skips_gateway");
     var g = ip_pool_new("10.0.0.0/30");
     assert_eq(ip_pool_gateway(g), 10*16777216 + 1, "gateway 10.0.0.1");
     return 0;
 }
 
-fn test_np_invalid_subnet() {
+fn _test_np_invalid_subnet() {
     test_group("np_invalid_subnet");
     assert_eq(ip_pool_new("not-a-cidr"), 0, "not-a-cidr");
     assert_eq(ip_pool_new("172.17.0.0"), 0, "no slash");
@@ -756,13 +756,13 @@ fn test_np_invalid_subnet() {
     return 0;
 }
 
-fn test_np_invalid_address() {
+fn _test_np_invalid_address() {
     test_group("np_invalid_address");
     assert_eq(ip_pool_new("999.999.999.999/24"), 0, "bad octets");
     return 0;
 }
 
-fn test_np_large_pool() {
+fn _test_np_large_pool() {
     test_group("np_large_pool");
     var lp = ip_pool_new("10.0.0.0/24");
     var n = 0;
@@ -775,14 +775,14 @@ fn test_np_large_pool() {
     return 0;
 }
 
-fn test_np_network_alignment() {
+fn _test_np_network_alignment() {
     test_group("np_network_alignment");
     var na = ip_pool_new("172.17.0.5/24");
     assert_eq(streq(ip_pool_subnet(na), "172.17.0.0/24"), 1, "aligned to .0");
     return 0;
 }
 
-fn test_np_ipv6_pool_new() {
+fn _test_np_ipv6_pool_new() {
     test_group("np_ipv6_pool_new");
     var v6 = ipv6_pool_new("fd00::/64");
     assert(v6 != 0, "v6 created");
@@ -791,7 +791,7 @@ fn test_np_ipv6_pool_new() {
     return 0;
 }
 
-fn test_np_ipv6_pool_allocate() {
+fn _test_np_ipv6_pool_allocate() {
     test_group("np_ipv6_pool_allocate");
     var w6 = ipv6_pool_new("fd00::/64");
     var c1 = ipv6_pool_allocate(w6);
@@ -803,7 +803,7 @@ fn test_np_ipv6_pool_allocate() {
     return 0;
 }
 
-fn test_np_ipv6_pool_release() {
+fn _test_np_ipv6_pool_release() {
     test_group("np_ipv6_pool_release");
     var z6 = ipv6_pool_new("fd00::/64");
     var zi = ipv6_pool_allocate(z6);
@@ -816,7 +816,7 @@ fn test_np_ipv6_pool_release() {
     return 0;
 }
 
-fn test_np_ipv6_pool_invalid() {
+fn _test_np_ipv6_pool_invalid() {
     test_group("np_ipv6_pool_invalid");
     assert_eq(ipv6_pool_new("not-a-cidr"), 0, "not-a-cidr");
     assert_eq(ipv6_pool_new("fd00::"), 0, "no prefix");
@@ -824,7 +824,7 @@ fn test_np_ipv6_pool_invalid() {
     return 0;
 }
 
-fn test_np_dual_stack_v4_only() {
+fn _test_np_dual_stack_v4_only() {
     test_group("np_dual_stack_v4_only");
     var d1 = dual_stack_v4_only("172.17.0.0/24");
     assert(d1 != 0, "dual v4-only created");
@@ -836,7 +836,7 @@ fn test_np_dual_stack_v4_only() {
     return 0;
 }
 
-fn test_np_dual_stack_both() {
+fn _test_np_dual_stack_both() {
     test_group("np_dual_stack_both");
     var d2 = dual_stack_dual("172.17.0.0/24", "fd00::/64");
     assert(d2 != 0, "dual both created");
@@ -850,13 +850,14 @@ fn test_np_dual_stack_both() {
 }
 
 # ── network_rootless.cyr (rust-old/src/network/rootless.rs) ──
-fn test_rootless_backend_default_and_serde() {
+fn _test_rootless_backend_default_and_serde() {
     test_group("rootless_backend_default_and_serde");
     # Default is Auto (Rust #[default]).
     assert_eq(network_rootless_backend_default(), NETWORK_ROOTLESS_BACKEND_AUTO, "default auto");
     # Serde variant names (round-trip parity: name -> from_name).
     assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_AUTO), "Auto"), 1, "name auto");
-    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS), "Slirp4netns"), 1, "name slirp");
+    assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_SLIRP4NETNS), "Slirp4netns"), 1,
+      "name slirp");
     assert_eq(streq(network_rootless_backend_name(NETWORK_ROOTLESS_BACKEND_PASTA), "Pasta"), 1, "name pasta");
     assert_eq(network_rootless_backend_from_name("Auto"), NETWORK_ROOTLESS_BACKEND_AUTO, "from auto");
     assert_eq(network_rootless_backend_from_name("Pasta"), NETWORK_ROOTLESS_BACKEND_PASTA, "from pasta");
@@ -865,7 +866,7 @@ fn test_rootless_backend_default_and_serde() {
     return 0;
 }
 
-fn test_parse_port_mappings_simple() {
+fn _test_parse_port_mappings_simple() {
     test_group("parse_port_mappings_simple");
     var specs = vec_new();
     vec_push(specs, "8080:80");
@@ -878,7 +879,7 @@ fn test_parse_port_mappings_simple() {
     return 0;
 }
 
-fn test_parse_port_mappings_with_protocol() {
+fn _test_parse_port_mappings_with_protocol() {
     test_group("parse_port_mappings_with_protocol");
     var specs = vec_new();
     vec_push(specs, "5353:53/udp");
@@ -890,7 +891,7 @@ fn test_parse_port_mappings_with_protocol() {
     return 0;
 }
 
-fn test_parse_port_mappings_single_port() {
+fn _test_parse_port_mappings_single_port() {
     test_group("parse_port_mappings_single_port");
     var specs = vec_new();
     vec_push(specs, "80");
@@ -901,7 +902,7 @@ fn test_parse_port_mappings_single_port() {
     return 0;
 }
 
-fn test_parse_port_mappings_invalid() {
+fn _test_parse_port_mappings_invalid() {
     test_group("parse_port_mappings_invalid");
     var specs = vec_new();
     vec_push(specs, "not-a-port");
@@ -910,7 +911,7 @@ fn test_parse_port_mappings_invalid() {
     return 0;
 }
 
-fn test_parse_port_mappings_overflow() {
+fn _test_parse_port_mappings_overflow() {
     test_group("parse_port_mappings_overflow");
     var specs = vec_new();
     vec_push(specs, "99999");
@@ -919,7 +920,7 @@ fn test_parse_port_mappings_overflow() {
     return 0;
 }
 
-fn test_parse_port_mappings_multiple() {
+fn _test_parse_port_mappings_multiple() {
     test_group("parse_port_mappings_multiple");
     var specs = vec_new();
     vec_push(specs, "8080:80/tcp");
@@ -930,7 +931,7 @@ fn test_parse_port_mappings_multiple() {
     return 0;
 }
 
-fn test_rootless_runtime_probes() {
+fn _test_rootless_runtime_probes() {
     test_group("rootless_runtime_probes");
     # is_unprivileged must not crash and returns a bounded 0/1.
     var unp = is_unprivileged();
@@ -941,16 +942,15 @@ fn test_rootless_runtime_probes() {
     return 0;
 }
 
-
 # ── image.cyr (rust-old/src/image.rs) ──
 # ── registry.cyr (rust-old/src/registry.rs) ──
-fn test_registry_media_types() {
+fn _test_registry_media_types() {
     test_group("registry_media_types");
     assert_eq(streq(media_manifest_v2(), "application/vnd.docker.distribution.manifest.v2+json"), 1, "manifest v2");
     return 0;
 }
 
-fn test_registry_host() {
+fn _test_registry_host() {
     test_group("registry_host");
     assert_eq(streq(registry_host("docker.io"), "registry-1.docker.io"), 1, "docker.io mapped");
     assert_eq(streq(registry_host("ghcr.io"), "ghcr.io"), 1, "ghcr.io passthrough");
@@ -958,7 +958,7 @@ fn test_registry_host() {
     return 0;
 }
 
-fn test_registry_normalize_arch() {
+fn _test_registry_normalize_arch() {
     test_group("registry_normalize_arch");
     assert_eq(streq(normalize_arch("x86_64"), "amd64"), 1, "x86_64 -> amd64");
     assert_eq(streq(normalize_arch("aarch64"), "arm64"), 1, "aarch64 -> arm64");
@@ -968,9 +968,9 @@ fn test_registry_normalize_arch() {
     return 0;
 }
 
-fn test_registry_www_authenticate() {
+fn _test_registry_www_authenticate() {
     test_group("registry_www_authenticate");
-    var h = "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",scope=\"repository:library/nginx:pull\"";
+    var h = "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",scope=\"repository:library/nginx:pull\"";   #skip-lint
     var p = parse_www_authenticate(h);
     assert_eq(streq(auth_params_get(p, "realm"), "https://auth.docker.io/token"), 1, "realm");
     assert_eq(streq(auth_params_get(p, "service"), "registry.docker.io"), 1, "service");
@@ -984,7 +984,7 @@ fn test_registry_www_authenticate() {
     return 0;
 }
 
-fn test_registry_platform_eq() {
+fn _test_registry_platform_eq() {
     test_group("registry_platform_eq");
     var a = platform_new("amd64", "linux", 0, 0);
     var b = platform_new("amd64", "linux", 0, 0);
@@ -996,17 +996,19 @@ fn test_registry_platform_eq() {
     return 0;
 }
 
-fn test_registry_descriptor() {
+fn _test_registry_descriptor() {
     test_group("registry_descriptor");
-    var desc = descriptor_new(media_oci_manifest(), "sha256:abc0000000000000000000000000000000000000000000000000000000000000", 1234);
+    var desc = descriptor_new(media_oci_manifest(),
+      "sha256:abc0000000000000000000000000000000000000000000000000000000000000", 1234);
     var dd: Descriptor = desc;
     assert_eq(streq(dd.media_type, media_oci_manifest()), 1, "descriptor media_type");
-    assert_eq(streq(dd.digest, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1, "descriptor digest");
+    assert_eq(streq(dd.digest, "sha256:abc0000000000000000000000000000000000000000000000000000000000000"), 1,
+      "descriptor digest");
     assert_eq(dd.size, 1234, "descriptor size");
     return 0;
 }
 
-fn test_registry_media_oci_types() {
+fn _test_registry_media_oci_types() {
     test_group("registry_media_oci_types");
     assert_eq(streq(media_oci_config(), "application/vnd.oci.image.config.v1+json"), 1, "oci config media type");
     assert_eq(streq(media_oci_layer(), "application/vnd.oci.image.layer.v1.tar+gzip"), 1, "oci gzip layer media type");
@@ -1015,42 +1017,49 @@ fn test_registry_media_oci_types() {
     return 0;
 }
 
-fn test_registry_descriptor_serde() {
+fn _test_registry_descriptor_serde() {
     test_group("registry_descriptor_serde");
-    var d = descriptor_new(media_oci_config(), "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
+    var d = descriptor_new(media_oci_config(),
+      "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
     var json = json_v_build(descriptor_to_jv(d));
     var cs = str_cstr(json);
     assert_eq(strstr(cs, "\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1, "has mediaType");
-    assert_eq(strstr(cs, "\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\"") >= 0, 1, "has digest");
+    assert_eq(strstr(cs,
+        "\"digest\":\"sha256:cf00000000000000000000000000000000000000000000000000000000000000\"") >= 0, 1, "has digest");   #skip-lint
     assert_eq(strstr(cs, "\"size\":100") >= 0, 1, "has size");
     assert_eq(strstr(cs, "urls") >= 0, 0, "no urls key when None");
     var back = descriptor_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
     var bb: Descriptor = back;
     assert_eq(streq(bb.media_type, media_oci_config()), 1, "media_type round-trip");
-    assert_eq(streq(bb.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "digest round-trip");
+    assert_eq(streq(bb.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1,
+      "digest round-trip");
     assert_eq(bb.size, 100, "size round-trip");
     assert_eq(bb.urls, 0, "urls None round-trip");
     var badj = "{\"digest\":\"sha256:7800000000000000000000000000000000000000000000000000000000000000\",\"size\":1}";
     assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(badj, strlen(badj))), 0, "missing mediaType -> 0");
     # size must be an integer (strict) — a string size is rejected, not coerced to 0.
-    var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:7900000000000000000000000000000000000000000000000000000000000000\",\"size\":\"123\"}";
+    var badsize = "{\"mediaType\":\"x\",\"digest\":\"sha256:7900000000000000000000000000000000000000000000000000000000000000\",\"size\":\"123\"}";   #skip-lint
     assert_eq(descriptor_from_jv(bayan_json_v_parse_buf(badsize, strlen(badsize))), 0, "string size -> 0");
     return 0;
 }
 
-fn test_registry_manifest_serde() {
+fn _test_registry_manifest_serde() {
     test_group("registry_manifest_serde");
-    var cfg = descriptor_new(media_oci_config(), "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
+    var cfg = descriptor_new(media_oci_config(),
+      "sha256:cf00000000000000000000000000000000000000000000000000000000000000", 100);
     var layers = vec_new();
-    vec_push(layers, descriptor_new(media_oci_layer(), "sha256:6ca7900000000000000000000000000000000000000000000000000000000000", 200));
+    vec_push(layers, descriptor_new(media_oci_layer(),
+        "sha256:6ca7900000000000000000000000000000000000000000000000000000000000", 200));
     var m = oci_manifest_new(cfg, layers);
     var mm: OciManifest = m;
     mm.media_type = media_oci_manifest();
     var json = json_v_build(oci_manifest_to_jv(m));
     var cs = str_cstr(json);
     assert_eq(strstr(cs, "\"schemaVersion\":2,\"mediaType\":") >= 0, 1, "schemaVersion before mediaType");
-    assert_eq(strstr(cs, "\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1, "config descriptor");
-    assert_eq(strstr(cs, "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"") >= 0, 1, "layers array");
+    assert_eq(strstr(cs, "\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\"") >= 0, 1,
+      "config descriptor");
+    assert_eq(strstr(cs, "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"") >= 0, 1,
+      "layers array");
     var json2 = json_v_build(oci_manifest_to_jv(m));
     assert_eq(streq(str_cstr(json2), cs), 1, "deterministic build");
     var back = oci_manifest_from_jv(bayan_json_v_parse_buf(str_data(json), str_len(json)));
@@ -1058,10 +1067,12 @@ fn test_registry_manifest_serde() {
     assert_eq(bm.schema_version, 2, "schema_version round-trip");
     assert_eq(streq(bm.media_type, media_oci_manifest()), 1, "media_type round-trip");
     var bcfg: Descriptor = bm.config;
-    assert_eq(streq(bcfg.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1, "config digest round-trip");
+    assert_eq(streq(bcfg.digest, "sha256:cf00000000000000000000000000000000000000000000000000000000000000"), 1,
+      "config digest round-trip");
     assert_eq(vec_len(bm.layers), 1, "one layer round-trip");
     var blay: Descriptor = vec_get(bm.layers, 0);
-    assert_eq(streq(blay.digest, "sha256:6ca7900000000000000000000000000000000000000000000000000000000000"), 1, "layer digest round-trip");
+    assert_eq(streq(blay.digest, "sha256:6ca7900000000000000000000000000000000000000000000000000000000000"), 1,
+      "layer digest round-trip");
     assert_eq(blay.size, 200, "layer size round-trip");
     var badj = "{\"schemaVersion\":2,\"layers\":[]}";
     assert_eq(oci_manifest_from_jv(bayan_json_v_parse_buf(badj, strlen(badj))), 0, "missing config -> 0");
@@ -1077,14 +1088,14 @@ fn test_registry_manifest_serde() {
 # parse_minimal_spec / parse_no_steps / parse_missing_image_section /
 # parse_unknown_step_type / step_variants).
 
-fn test_build_default_tag() {
+fn _test_build_default_tag() {
     test_group("build_default_tag");
     # rust-old: image_def_default_tag — default_tag() == "latest"
     assert_eq(streq(default_tag(), "latest"), 1, "default tag latest");
     return 0;
 }
 
-fn test_build_config_default() {
+fn _test_build_config_default() {
     test_group("build_config_default");
     # rust-old: build_config_default — empty entrypoint/expose, None user/workdir
     var c = build_config_default();
@@ -1096,7 +1107,7 @@ fn test_build_config_default() {
     return 0;
 }
 
-fn test_build_step_type_names() {
+fn _test_build_step_type_names() {
     test_group("build_step_type_names");
     # serde `type` tag wire names (rename_all=lowercase; from_stage explicit)
     assert_eq(streq(build_step_type_name(BUILD_STEP_RUN), "run"), 1, "run");
@@ -1108,7 +1119,7 @@ fn test_build_step_type_names() {
     return 0;
 }
 
-fn test_build_step_variants() {
+fn _test_build_step_variants() {
     test_group("build_step_variants");
     # Mirrors rust-old step_variants: the payload each variant carries.
     var run = build_step_run(0);
@@ -1147,12 +1158,13 @@ fn test_build_step_variants() {
     return 0;
 }
 
-fn test_build_sha256_digest() {
+fn _test_build_sha256_digest() {
     test_group("build_sha256_digest");
     # rust-old sha256_digest_known_value / _deterministic (build.rs's private
     # sha256_digest is byte-identical to image.cyr's public one, reused here).
     var empty = sha256_digest("", 0);
-    assert_eq(streq(empty, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), 1, "sha256 of empty");
+    assert_eq(streq(empty, "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), 1,
+      "sha256 of empty");
     var a = sha256_digest("hello world", 11);
     var b = sha256_digest("hello world", 11);
     assert_eq(streq(a, b), 1, "sha256 deterministic");
@@ -1162,42 +1174,46 @@ fn test_build_sha256_digest() {
 # build_cache_key hashes "{base}:{index}:{serde_json(step)}". These pin the exact
 # serde-compatible BuildStep JSON by comparing against a hand-built hash input
 # (rust-old: build_cache_key + serde tag="type" rename_all="lowercase").
-fn test_build_cache_key_env() {
+fn _test_build_cache_key_env() {
     test_group("build_cache_key_env");
     var step = build_step_env("KEY", "VAL");
     var key = build_cache_key("sha256:ba00000000000000000000000000000000000000000000000000000000000000", 0, step);
-    var input = "sha256:ba00000000000000000000000000000000000000000000000000000000000000:0:{\"type\":\"env\",\"key\":\"KEY\",\"value\":\"VAL\"}";
+    var input = "sha256:ba00000000000000000000000000000000000000000000000000000000000000:0:{\"type\":\"env\",\"key\":\"KEY\",\"value\":\"VAL\"}";   #skip-lint
     assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "env key == manual hash");
     return 0;
 }
 
-fn test_build_cache_key_run() {
+fn _test_build_cache_key_run() {
     test_group("build_cache_key_run");
     var cmd = vec_new();
     vec_push(cmd, "echo");
     vec_push(cmd, "hi");
-    var key = build_cache_key("sha256:b000000000000000000000000000000000000000000000000000000000000000", 2, build_step_run(cmd));
-    var input = "sha256:b000000000000000000000000000000000000000000000000000000000000000:2:{\"type\":\"run\",\"command\":[\"echo\",\"hi\"]}";
+    var key = build_cache_key("sha256:b000000000000000000000000000000000000000000000000000000000000000", 2,
+      build_step_run(cmd));
+    var input = "sha256:b000000000000000000000000000000000000000000000000000000000000000:2:{\"type\":\"run\",\"command\":[\"echo\",\"hi\"]}";   #skip-lint
     assert_eq(streq(key, sha256_digest(input, strlen(input))), 1, "run key == manual hash");
     return 0;
 }
 
-fn test_build_cache_key_distinct() {
+fn _test_build_cache_key_distinct() {
     test_group("build_cache_key_distinct");
     var s1 = build_step_env("A", "1");
     var s2 = build_step_env("A", "2");
     var k1 = build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s1);
-    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s1)), 1, "deterministic");
-    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0, s2)), 0, "value change -> different key");
-    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 1, s1)), 0, "index change -> different key");
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0,
+          s1)), 1, "deterministic");
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 0,
+          s2)), 0, "value change -> different key");
+    assert_eq(streq(k1, build_cache_key("sha256:7800000000000000000000000000000000000000000000000000000000000000", 1,
+          s1)), 0, "index change -> different key");
     assert_eq(strstr(k1, "sha256:") >= 0, 1, "sha256 prefix");
     return 0;
 }
 
 # rust-old: parse_full_spec — full Stivafile with every step type + config.
-fn test_build_parse_full_spec() {
+fn _test_build_parse_full_spec() {
     test_group("build_parse_full_spec");
-    var src = "[image]\nbase = \"alpine:3.19\"\nname = \"myapp\"\ntag = \"v1.0\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"apk\", \"add\", \"--no-cache\", \"curl\"]\n\n[[steps]]\ntype = \"copy\"\nsource = \"./app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/app\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"/app/build.sh\"]\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\nworkdir = \"/app\"\n";
+    var src = "[image]\nbase = \"alpine:3.19\"\nname = \"myapp\"\ntag = \"v1.0\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"apk\", \"add\", \"--no-cache\", \"curl\"]\n\n[[steps]]\ntype = \"copy\"\nsource = \"./app\"\ndestination = \"/app\"\n\n[[steps]]\ntype = \"env\"\nkey = \"PORT\"\nvalue = \"8080\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/app\"\n\n[[steps]]\ntype = \"label\"\nkey = \"maintainer\"\nvalue = \"stiva\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"/app/build.sh\"]\n\n[config]\nentrypoint = [\"/app/start.sh\"]\nexpose = [8080]\nuser = \"nobody\"\nworkdir = \"/app\"\n";   #skip-lint
     var spec = parse_build_spec(src);
     assert_neq(spec, 0, "non-null spec");
     var ss: BuildSpec = spec;
@@ -1241,9 +1257,9 @@ fn test_build_parse_full_spec() {
 }
 
 # rust-old: parse_minimal_spec — omitted tag defaults to "latest", config empty.
-fn test_build_parse_minimal_spec() {
+fn _test_build_parse_minimal_spec() {
     test_group("build_parse_minimal_spec");
-    var src = "[image]\nbase = \"ubuntu:22.04\"\nname = \"minimal\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hello\"]\n";
+    var src = "[image]\nbase = \"ubuntu:22.04\"\nname = \"minimal\"\n\n[[steps]]\ntype = \"run\"\ncommand = [\"echo\", \"hello\"]\n";   #skip-lint
     var spec = parse_build_spec(src);
     assert_neq(spec, 0, "non-null spec");
     var ss: BuildSpec = spec;
@@ -1259,7 +1275,7 @@ fn test_build_parse_minimal_spec() {
 }
 
 # rust-old: parse_no_steps — [image] only, no steps.
-fn test_build_parse_no_steps() {
+fn _test_build_parse_no_steps() {
     test_group("build_parse_no_steps");
     var src = "[image]\nbase = \"alpine:3.19\"\nname = \"empty\"\n";
     var spec = parse_build_spec(src);
@@ -1270,23 +1286,22 @@ fn test_build_parse_no_steps() {
 }
 
 # rust-old: parse_missing_image_section — missing [image] → parse error (0).
-fn test_build_parse_missing_image() {
+fn _test_build_parse_missing_image() {
     test_group("build_parse_missing_image");
     assert_eq(parse_build_spec("[config]\nuser = \"nobody\"\n"), 0, "missing image -> 0");
     return 0;
 }
 
 # rust-old: parse_unknown_step_type — unknown `type` → parse error (0).
-fn test_build_parse_unknown_step_type() {
+fn _test_build_parse_unknown_step_type() {
     test_group("build_parse_unknown_step_type");
     var src = "[image]\nbase = \"alpine:3.19\"\nname = \"bad\"\n\n[[steps]]\ntype = \"frobnicate\"\narg = \"baz\"\n";
     assert_eq(parse_build_spec(src), 0, "unknown step type -> 0");
     return 0;
 }
 
-
 # ── network_nat.cyr (rust-old/src/network/nat.rs) ──
-fn test_nat_parse() {
+fn _test_nat_parse() {
     test_group("nat_parse");
 
     # parse_simple_port
@@ -1345,9 +1360,8 @@ fn test_nat_parse() {
     return 0;
 }
 
-
 # ── network_manager.cyr (rust-old/src/network/manager.rs) ──
-fn test_network_manager_creates_default_network() {
+fn _test_network_manager_creates_default_network() {
     test_group("network_manager_creates_default_network");
     var mgr = network_manager_new();
     assert(mgr != 0, "new manager");
@@ -1355,7 +1369,7 @@ fn test_network_manager_creates_default_network() {
     return 0;
 }
 
-fn test_network_manager_create_custom_network() {
+fn _test_network_manager_create_custom_network() {
     test_group("network_manager_create_custom_network");
     var mgr = network_manager_new();
     var rc = network_manager_create_network(mgr, "mynet", "10.0.0.0/24");
@@ -1364,7 +1378,7 @@ fn test_network_manager_create_custom_network() {
     return 0;
 }
 
-fn test_network_manager_create_duplicate_network_fails() {
+fn _test_network_manager_create_duplicate_network_fails() {
     test_group("network_manager_create_duplicate_network_fails");
     var mgr = network_manager_new();
     var rc = network_manager_create_network(mgr, network_manager_default_bridge(), "10.0.0.0/24");
@@ -1372,7 +1386,7 @@ fn test_network_manager_create_duplicate_network_fails() {
     return 0;
 }
 
-fn test_network_manager_delete_network() {
+fn _test_network_manager_delete_network() {
     test_group("network_manager_delete_network");
     var mgr = network_manager_new();
     var rc1 = network_manager_create_network(mgr, "temp", "10.1.0.0/24");
@@ -1383,7 +1397,7 @@ fn test_network_manager_delete_network() {
     return 0;
 }
 
-fn test_network_manager_delete_nonexistent_network_fails() {
+fn _test_network_manager_delete_nonexistent_network_fails() {
     test_group("network_manager_delete_nonexistent_network_fails");
     var mgr = network_manager_new();
     var rc = network_manager_delete_network(mgr, "nope");
@@ -1391,7 +1405,7 @@ fn test_network_manager_delete_nonexistent_network_fails() {
     return 0;
 }
 
-fn test_network_manager_connect_container_allocates_ip() {
+fn _test_network_manager_connect_container_allocates_ip() {
     test_group("network_manager_connect_container_allocates_ip");
     var mgr = network_manager_new();
     var empty = vec_new();
@@ -1404,7 +1418,7 @@ fn test_network_manager_connect_container_allocates_ip() {
     return 0;
 }
 
-fn test_network_manager_connect_multiple_containers() {
+fn _test_network_manager_connect_multiple_containers() {
     test_group("network_manager_connect_multiple_containers");
     var mgr = network_manager_new();
     var e1 = vec_new();
@@ -1419,7 +1433,7 @@ fn test_network_manager_connect_multiple_containers() {
     return 0;
 }
 
-fn test_network_manager_disconnect_container_releases_ip() {
+fn _test_network_manager_disconnect_container_releases_ip() {
     test_group("network_manager_disconnect_container_releases_ip");
     var mgr = network_manager_new();
     var e1 = vec_new();
@@ -1434,7 +1448,7 @@ fn test_network_manager_disconnect_container_releases_ip() {
     return 0;
 }
 
-fn test_network_manager_disconnect_nonexistent_fails() {
+fn _test_network_manager_disconnect_nonexistent_fails() {
     test_group("network_manager_disconnect_nonexistent_fails");
     var mgr = network_manager_new();
     var rc = network_manager_disconnect_container(mgr, "nope");
@@ -1442,7 +1456,7 @@ fn test_network_manager_disconnect_nonexistent_fails() {
     return 0;
 }
 
-fn test_network_manager_delete_network_with_connections_fails() {
+fn _test_network_manager_delete_network_with_connections_fails() {
     test_group("network_manager_delete_network_with_connections_fails");
     var mgr = network_manager_new();
     var rc1 = network_manager_create_network(mgr, "busy", "10.2.0.0/24");
@@ -1455,7 +1469,7 @@ fn test_network_manager_delete_network_with_connections_fails() {
     return 0;
 }
 
-fn test_network_manager_connect_with_port_specs() {
+fn _test_network_manager_connect_with_port_specs() {
     test_group("network_manager_connect_with_port_specs");
     var mgr = network_manager_new();
     var ports = vec_new();
@@ -1468,7 +1482,7 @@ fn test_network_manager_connect_with_port_specs() {
     return 0;
 }
 
-fn test_network_manager_connect_with_invalid_port_fails() {
+fn _test_network_manager_connect_with_invalid_port_fails() {
     test_group("network_manager_connect_with_invalid_port_fails");
     var mgr = network_manager_new();
     var ports = vec_new();
@@ -1478,7 +1492,7 @@ fn test_network_manager_connect_with_invalid_port_fails() {
     return 0;
 }
 
-fn test_network_manager_connect_to_nonexistent_network_fails() {
+fn _test_network_manager_connect_to_nonexistent_network_fails() {
     test_group("network_manager_connect_to_nonexistent_network_fails");
     var mgr = network_manager_new();
     var e1 = vec_new();
@@ -1487,7 +1501,7 @@ fn test_network_manager_connect_to_nonexistent_network_fails() {
     return 0;
 }
 
-fn test_network_manager_connect_with_dns_injection() {
+fn _test_network_manager_connect_with_dns_injection() {
     test_group("network_manager_connect_with_dns_injection");
     var root = "/tmp/stiva-nm-dns-test";
     sys_mkdir(root, 0x1FF);
@@ -1501,7 +1515,7 @@ fn test_network_manager_connect_with_dns_injection() {
     return 0;
 }
 
-fn test_network_manager_resolve_network_name_bridge() {
+fn _test_network_manager_resolve_network_name_bridge() {
     test_group("network_manager_resolve_network_name_bridge");
     var mgr = network_manager_new();
     var mode = network_mode_new(NETWORK_MODE_BRIDGE, 0);
@@ -1511,7 +1525,7 @@ fn test_network_manager_resolve_network_name_bridge() {
     return 0;
 }
 
-fn test_network_manager_resolve_network_name_custom() {
+fn _test_network_manager_resolve_network_name_custom() {
     test_group("network_manager_resolve_network_name_custom");
     var mgr = network_manager_new();
     var mode = network_mode_new(NETWORK_MODE_CUSTOM, "mynet");
@@ -1521,7 +1535,7 @@ fn test_network_manager_resolve_network_name_custom() {
     return 0;
 }
 
-fn test_network_manager_resolve_network_name_host() {
+fn _test_network_manager_resolve_network_name_host() {
     test_group("network_manager_resolve_network_name_host");
     var mgr = network_manager_new();
     var mode = network_mode_new(NETWORK_MODE_HOST, 0);
@@ -1530,7 +1544,7 @@ fn test_network_manager_resolve_network_name_host() {
     return 0;
 }
 
-fn test_network_manager_resolve_network_name_none() {
+fn _test_network_manager_resolve_network_name_none() {
     test_group("network_manager_resolve_network_name_none");
     var mgr = network_manager_new();
     var mode = network_mode_new(NETWORK_MODE_NONE, 0);
@@ -1539,7 +1553,7 @@ fn test_network_manager_resolve_network_name_none() {
     return 0;
 }
 
-fn test_network_manager_get_connection_info() {
+fn _test_network_manager_get_connection_info() {
     test_group("network_manager_get_connection_info");
     var mgr = network_manager_new();
     var e1 = vec_new();
@@ -1552,7 +1566,7 @@ fn test_network_manager_get_connection_info() {
     return 0;
 }
 
-fn test_network_manager_get_connection_nonexistent() {
+fn _test_network_manager_get_connection_nonexistent() {
     test_group("network_manager_get_connection_nonexistent");
     var mgr = network_manager_new();
     var got = network_manager_get_connection(mgr, "nope");
@@ -1560,23 +1574,25 @@ fn test_network_manager_get_connection_nonexistent() {
     return 0;
 }
 
-
 # ── encrypted.cyr (rust-old/src/encrypted.rs) ──
-fn test_encrypted_media_type_detection() {
+fn _test_encrypted_media_type_detection() {
     test_group("encrypted_media_type_detection");
-    assert_eq(is_encrypted_media_type("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"), 1, "encrypted detected");
+    assert_eq(is_encrypted_media_type("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"), 1,
+      "encrypted detected");
     assert_eq(is_encrypted_media_type("application/vnd.oci.image.layer.v1.tar+gzip"), 0, "plain not encrypted");
     return 0;
 }
 
-fn test_strip_encrypted_suffix_works() {
+fn _test_strip_encrypted_suffix_works() {
     test_group("strip_encrypted_suffix_works");
-    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"), "application/vnd.oci.image.layer.v1.tar+gzip", "stripped");
-    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip"), "application/vnd.oci.image.layer.v1.tar+gzip", "unchanged");
+    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip+encrypted"),
+      "application/vnd.oci.image.layer.v1.tar+gzip", "stripped");
+    assert_streq(strip_encrypted_suffix("application/vnd.oci.image.layer.v1.tar+gzip"),
+      "application/vnd.oci.image.layer.v1.tar+gzip", "unchanged");
     return 0;
 }
 
-fn test_load_key_from_file() {
+fn _test_load_key_from_file() {
     test_group("load_key_from_file");
     # Mirrors rust-old load_key_from_file: write 32 x 0x42 bytes, load, compare.
     var path = "/tmp/stiva_enc_test.key";
@@ -1592,7 +1608,7 @@ fn test_load_key_from_file() {
     return 0;
 }
 
-fn test_load_key_missing_file() {
+fn _test_load_key_missing_file() {
     test_group("load_key_missing_file");
     # rust-old load_key_missing_file: load_key(File("/nonexistent/key")).is_err()
     var src = key_source_new_file("/nonexistent/key");
@@ -1601,7 +1617,7 @@ fn test_load_key_missing_file() {
     return 0;
 }
 
-fn test_load_key_missing_env() {
+fn _test_load_key_missing_env() {
     test_group("load_key_missing_env");
     # rust-old load_key_missing_env: EnvVar("STIVA_NONEXISTENT_KEY_VAR").is_err()
     var src = key_source_new_env("STIVA_NONEXISTENT_KEY_VAR");
@@ -1610,7 +1626,7 @@ fn test_load_key_missing_env() {
     return 0;
 }
 
-fn test_luks_config_fields() {
+fn _test_luks_config_fields() {
     test_group("luks_config_fields");
     # rust-old luks_config_serde: mapper_name == "stiva-data", size_mb == 512.
     var c = luks_volume_config_new("/var/lib/agnos/volumes/data.img", "stiva-data", "/data", 512);
@@ -1620,16 +1636,17 @@ fn test_luks_config_fields() {
     return 0;
 }
 
-fn test_verity_config_fields() {
+fn _test_verity_config_fields() {
     test_group("verity_config_fields");
     # rust-old verity_config_serde: root_hash == "abc123".
-    var c = verity_volume_config_new("/var/lib/agnos/rootfs.img", "/var/lib/agnos/rootfs.hash", "abc123", "stiva-rootfs");
+    var c = verity_volume_config_new("/var/lib/agnos/rootfs.img", "/var/lib/agnos/rootfs.hash", "abc123",
+      "stiva-rootfs");
     var cc: VerityVolumeConfig = c;
     assert_streq(cc.root_hash, "abc123", "root hash");
     return 0;
 }
 
-fn test_open_volume_fields() {
+fn _test_open_volume_fields() {
     test_group("open_volume_fields");
     # rust-old open_volume_debug: debug string contains "stiva-data".
     var v = open_volume_new("/dev/mapper/stiva-data", "stiva-data");
@@ -1638,7 +1655,7 @@ fn test_open_volume_fields() {
     return 0;
 }
 
-fn test_availability_no_feature() {
+fn _test_availability_no_feature() {
     test_group("availability_no_feature");
     # rust-old cryptsetup_available_check / veritysetup_available_check: no-feature build -> false.
     assert_eq(cryptsetup_available(), 0, "cryptsetup unavailable");
@@ -1646,7 +1663,7 @@ fn test_availability_no_feature() {
     return 0;
 }
 
-fn test_disabled_entry_points() {
+fn _test_disabled_entry_points() {
     test_group("disabled_entry_points");
     # rust-old luks/verity *_nonexistent tests: without the feature these are Err.
     # Port: null OpenVolume / null path (0) for open/format, -1 for close.
@@ -1660,7 +1677,6 @@ fn test_disabled_entry_points() {
     assert_eq(stiva_verity_format("/nonexistent/data", "/nonexistent/hash"), 0, "verity_format disabled");
     return 0;
 }
-
 
 # ── runtime.cyr (rust-old/src/runtime.rs) ──
 # ── runtime module tests (mirror rust-old/src/runtime.rs #[cfg(test)]) ──
@@ -1678,7 +1694,7 @@ fn _rt_opts_contains(v, needle) {
     return 0;
 }
 
-fn test_runtime_namespace_names() {
+fn _test_runtime_namespace_names() {
     test_group("runtime_namespace_names");
     assert_eq(streq(namespace_name(RUNTIME_NS_PID), "Pid"), 1, "Pid");
     assert_eq(streq(namespace_name(RUNTIME_NS_NET), "Net"), 1, "Net");
@@ -1690,7 +1706,7 @@ fn test_runtime_namespace_names() {
     return 0;
 }
 
-fn test_runtime_standard_mounts_complete() {
+fn _test_runtime_standard_mounts_complete() {
     test_group("runtime_standard_mounts_complete");
     var mounts = standard_mounts();
     assert_eq(vec_len(mounts), 5, "5 standard mounts");
@@ -1713,7 +1729,7 @@ fn test_runtime_standard_mounts_complete() {
     return 0;
 }
 
-fn test_runtime_volume_mounts_conversion() {
+fn _test_runtime_volume_mounts_conversion() {
     test_group("runtime_volume_mounts_conversion");
     var specs = vec_new();
     vec_push(specs, "/a:/b");
@@ -1739,7 +1755,7 @@ fn test_runtime_volume_mounts_conversion() {
     return 0;
 }
 
-fn test_runtime_volume_mounts_invalid() {
+fn _test_runtime_volume_mounts_invalid() {
     test_group("runtime_volume_mounts_invalid");
     var specs = vec_new();
     vec_push(specs, "nocolon");
@@ -1748,7 +1764,7 @@ fn test_runtime_volume_mounts_invalid() {
     return 0;
 }
 
-fn test_runtime_parse_ppid_from_stat() {
+fn _test_runtime_parse_ppid_from_stat() {
     test_group("runtime_parse_ppid_from_stat");
     assert_eq(parse_ppid_from_stat("1234 (bash) S 1 1234 1234 0 -1 4194560"), 1, "basic ppid 1");
     assert_eq(parse_ppid_from_stat("1234 (my (app)) S 42 1234 1234 0"), 42, "comm with parens -> 42");
@@ -1756,7 +1772,7 @@ fn test_runtime_parse_ppid_from_stat() {
     return 0;
 }
 
-fn test_runtime_criu_available_returns_bool() {
+fn _test_runtime_criu_available_returns_bool() {
     test_group("runtime_criu_available_returns_bool");
     # Must not crash — returns 0 or 1 based on PATH.
     var a = criu_available();
@@ -1767,7 +1783,7 @@ fn test_runtime_criu_available_returns_bool() {
 }
 
 # ProcessInfo JSON round-trip (rust-old runtime.rs: process_info_serde).
-fn test_runtime_process_info_serde() {
+fn _test_runtime_process_info_serde() {
     test_group("runtime_process_info_serde");
     var info = process_info_new(123, 1, "sleep", "sleep 60", 83);   # 'S' = 83
     var json = json_v_build(process_info_to_jv(info));
@@ -1780,7 +1796,7 @@ fn test_runtime_process_info_serde() {
 
 # copy_into_container places a host file under the rootfs, creating parent dirs
 # (rust-old runtime.rs: copy_into_container_creates_file).
-fn test_runtime_copy_into_container() {
+fn _test_runtime_copy_into_container() {
     test_group("runtime_copy_into_container");
     sys_mkdir("/tmp/stiva_cp_in", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_in/rootfs", 0x1ED);
@@ -1796,7 +1812,7 @@ fn test_runtime_copy_into_container() {
 
 # copy_from_container extracts a rootfs file to the host (rust-old runtime.rs:
 # copy_from_container_reads_file).
-fn test_runtime_copy_from_container() {
+fn _test_runtime_copy_from_container() {
     test_group("runtime_copy_from_container");
     sys_mkdir("/tmp/stiva_cp_out", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_out/rootfs", 0x1ED);
@@ -1813,7 +1829,7 @@ fn test_runtime_copy_from_container() {
 
 # copy_from_container errors when the source is absent (rust-old runtime.rs:
 # copy_from_container_missing_source).
-fn test_runtime_copy_from_missing() {
+fn _test_runtime_copy_from_missing() {
     test_group("runtime_copy_from_missing");
     sys_mkdir("/tmp/stiva_cp_miss", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_miss/rootfs", 0x1ED);
@@ -1822,17 +1838,16 @@ fn test_runtime_copy_from_missing() {
     return 0;
 }
 
-# copy_dir_recursive copies a nested tree (rust-old runtime.rs:
-# copy_dir_recursive_works). Exercises the is_dir() directory branch that a
-# file-only copy test cannot reach.
-fn test_runtime_copy_dir_recursive() {
+# A directory copies as a nested tree (rust-old runtime.rs: copy_dir_recursive_works).
+# Exercises the is_dir() directory branch that a file-only copy test cannot reach.
+fn _test_runtime_copy_dir_recursive() {
     test_group("runtime_copy_dir_recursive");
     sys_mkdir("/tmp/stiva_cp_dir", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_dir/src", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_dir/src/sub", 0x1ED);
     file_write_all("/tmp/stiva_cp_dir/src/a.txt", "a", 1);
     file_write_all("/tmp/stiva_cp_dir/src/sub/b.txt", "b", 1);
-    assert_eq(copy_dir_recursive("/tmp/stiva_cp_dir/src", "/tmp/stiva_cp_dir/dst"), 0, "copy ok");
+    assert_eq(copy_into_container("/tmp/stiva_cp_dir", "/tmp/stiva_cp_dir/src", "/dst"), 0, "copy ok");
     var b1 = alloc(8);
     var n1 = file_read_all("/tmp/stiva_cp_dir/dst/a.txt", b1, 7);
     store8(b1 + n1, 0);
@@ -1846,7 +1861,7 @@ fn test_runtime_copy_dir_recursive() {
 
 # copy_into_container recursively copies a directory source into the rootfs
 # (regression for the is_dir(cstr) bug — a dir source must land as a tree).
-fn test_runtime_copy_into_container_dir() {
+fn _test_runtime_copy_into_container_dir() {
     test_group("runtime_copy_into_container_dir");
     sys_mkdir("/tmp/stiva_cp_ind", 0x1ED);
     sys_mkdir("/tmp/stiva_cp_ind/rootfs", 0x1ED);
@@ -1863,11 +1878,11 @@ fn test_runtime_copy_into_container_dir() {
 
 # parse_bundle ignores a negative resource limit / uid, matching serde_json
 # as_u64 (which returns None for negatives) — regression for the sign guard.
-fn test_parse_bundle_negative_limits() {
+fn _test_parse_bundle_negative_limits() {
     test_group("parse_bundle_negative_limits");
     var dir = "/tmp/stiva_oci_neg";
     sys_mkdir(dir, 0x1ED);
-    var cfg = "{\"process\":{\"args\":[\"/bin/true\"],\"user\":{\"uid\":-1}},\"linux\":{\"resources\":{\"memory\":{\"limit\":-1},\"pids\":{\"limit\":-5}}}}";
+    var cfg = "{\"process\":{\"args\":[\"/bin/true\"],\"user\":{\"uid\":-1}},\"linux\":{\"resources\":{\"memory\":{\"limit\":-1},\"pids\":{\"limit\":-5}}}}";   #skip-lint
     file_write_all("/tmp/stiva_oci_neg/config.json", cfg, strlen(cfg));
     var c: ContainerConfig = parse_bundle(dir);
     assert_eq(c.rootless, 0, "negative uid -> not rootless");
@@ -1878,20 +1893,25 @@ fn test_parse_bundle_negative_limits() {
 
 # ── container.cyr (rust-old/src/container.rs) ──
 # Mirrors rust-old container.rs #[cfg(test)] (portable subset).
-fn test_container_state_serde() {
+fn _test_container_state_serde() {
     test_group("container_state_serde");
     # Round-trip name <-> ordinal for every variant (rust-old container_state_serde).
-    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_CREATED)), CONTAINER_STATE_CREATED, "Created rt");
-    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_RUNNING)), CONTAINER_STATE_RUNNING, "Running rt");
-    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_PAUSED)), CONTAINER_STATE_PAUSED, "Paused rt");
-    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_STOPPED)), CONTAINER_STATE_STOPPED, "Stopped rt");
-    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_REMOVING)), CONTAINER_STATE_REMOVING, "Removing rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_CREATED)), CONTAINER_STATE_CREATED,
+      "Created rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_RUNNING)), CONTAINER_STATE_RUNNING,
+      "Running rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_PAUSED)), CONTAINER_STATE_PAUSED,
+      "Paused rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_STOPPED)), CONTAINER_STATE_STOPPED,
+      "Stopped rt");
+    assert_eq(container_state_from_name(container_state_name(CONTAINER_STATE_REMOVING)), CONTAINER_STATE_REMOVING,
+      "Removing rt");
     assert_eq(streq(container_state_name(CONTAINER_STATE_RUNNING), "Running"), 1, "Running token");
     assert_eq(container_state_from_name("Bogus"), 0 - 1, "unknown token -> -1");
     return 0;
 }
 
-fn test_container_config_defaults() {
+fn _test_container_config_defaults() {
     test_group("container_config_defaults");
     var cfg: ContainerConfig = container_config_default();
     assert_eq(cfg.name, 0, "name None");
@@ -1913,19 +1933,20 @@ fn test_container_config_defaults() {
     return 0;
 }
 
-fn test_default_stop_grace_ms() {
+fn _test_default_stop_grace_ms() {
     test_group("default_stop_grace_ms");
     assert_eq(default_stop_grace_ms(), 10000, "10_000");
     return 0;
 }
 
-fn test_container_serde_round_trip() {
+fn _test_container_serde_round_trip() {
     test_group("container_serde_round_trip");
     # Build a Container like rust-old container_serde_round_trip and read fields back.
     var cfg: ContainerConfig = container_config_default();
     cfg.memory_limit = 256 * 1024 * 1024;
     cfg.user = "nobody";
-    var c: Container = container_new("abc-123", "web", "sha256:696d670000000000000000000000000000000000000000000000000000000000",
+    var c: Container = container_new("abc-123", "web",
+      "sha256:696d670000000000000000000000000000000000000000000000000000000000",
       "docker.io/library/nginx:latest", CONTAINER_STATE_STOPPED, 0 - 1,
       1000, 2000, cfg, 0);
     assert_eq(streq(c.id, "abc-123"), 1, "id");
@@ -1937,7 +1958,7 @@ fn test_container_serde_round_trip() {
     return 0;
 }
 
-fn test_migration_bundle_serde() {
+fn _test_migration_bundle_serde() {
     test_group("migration_bundle_serde");
     var cfg = container_config_default();
     var b: MigrationBundle = migration_bundle_new("abc-123",
@@ -1949,7 +1970,7 @@ fn test_migration_bundle_serde() {
     return 0;
 }
 
-fn test_container_require_pid() {
+fn _test_container_require_pid() {
     test_group("container_require_pid");
     var allowed = vec_new();
     vec_push(allowed, CONTAINER_STATE_RUNNING);
@@ -1967,7 +1988,7 @@ fn test_container_require_pid() {
     return 0;
 }
 
-fn test_container_fixup_after_restart() {
+fn _test_container_fixup_after_restart() {
     test_group("container_fixup_after_restart");
     var cfg = container_config_default();
     # Running -> Stopped, pid cleared, changed=1.
@@ -1986,7 +2007,7 @@ fn test_container_fixup_after_restart() {
     return 0;
 }
 
-fn test_container_should_rotate() {
+fn _test_container_should_rotate() {
     test_group("container_should_rotate");
     # Disabled when either bound is 0.
     assert_eq(container_should_rotate(0, 3, 100, 100), 0, "max_bytes 0");
@@ -1998,7 +2019,7 @@ fn test_container_should_rotate() {
     return 0;
 }
 
-fn test_container_tail_start() {
+fn _test_container_tail_start() {
     test_group("container_tail_start");
     # rust-old: saturating_sub(lines).
     assert_eq(container_tail_start(5, 3), 2, "5-3=2");
@@ -2007,13 +2028,12 @@ fn test_container_tail_start() {
     return 0;
 }
 
-fn test_container_rotated_path() {
+fn _test_container_rotated_path() {
     test_group("container_rotated_path");
     assert_eq(streq(_container_rotated_path("/v/container.log", 1), "/v/container.log.1"), 1, ".1");
     assert_eq(streq(_container_rotated_path("/v/container.log", 12), "/v/container.log.12"), 1, ".12");
     return 0;
 }
-
 
 # ── health.cyr ──
 # ── health.cyr (rust-old/src/health.rs) ──────────────────────────
@@ -2033,7 +2053,7 @@ fn _test_vec_contains_cstr(v, needle) {
     return 0;
 }
 
-fn test_health_status_from_majra() {
+fn _test_health_status_from_majra() {
     test_group("health_status_from_majra");
     assert_eq(health_status_from_majra(HEALTH_MAJRA_ONLINE), HEALTH_STATUS_HEALTHY, "online->healthy");
     assert_eq(health_status_from_majra(HEALTH_MAJRA_SUSPECT), HEALTH_STATUS_STARTING, "suspect->starting");
@@ -2042,7 +2062,7 @@ fn test_health_status_from_majra() {
     return 0;
 }
 
-fn test_health_status_serde() {
+fn _test_health_status_serde() {
     test_group("health_status_serde");
     # Serde names round-trip (rust: serialize/deserialize identity). No JSON
     # codec in the base — check the wire names are stable & distinct.
@@ -2053,7 +2073,7 @@ fn test_health_status_serde() {
     return 0;
 }
 
-fn test_health_register_and_heartbeat() {
+fn _test_health_register_and_heartbeat() {
     test_group("health_register_and_heartbeat");
     var m = health_monitor_new();
     health_monitor_register(m, "c1", HEALTH_RESTART_NEVER, 0);
@@ -2063,7 +2083,7 @@ fn test_health_register_and_heartbeat() {
     return 0;
 }
 
-fn test_health_deregister() {
+fn _test_health_deregister() {
     test_group("health_deregister");
     var m = health_monitor_new();
     health_monitor_register(m, "c1", HEALTH_RESTART_NEVER, 0);
@@ -2072,7 +2092,7 @@ fn test_health_deregister() {
     return 0;
 }
 
-fn test_health_restart_count_increments() {
+fn _test_health_restart_count_increments() {
     test_group("health_restart_count_increments");
     # offline_after = 0 -> update drives the node OFFLINE immediately.
     var cfg = heartbeat_config_new(0, 0, 0);
@@ -2084,7 +2104,7 @@ fn test_health_restart_count_increments() {
     return 0;
 }
 
-fn test_health_never_policy_no_restart() {
+fn _test_health_never_policy_no_restart() {
     test_group("health_never_policy_no_restart");
     var cfg = heartbeat_config_new(0, 0, 0);
     var m = health_monitor_with_config(cfg);
@@ -2094,7 +2114,7 @@ fn test_health_never_policy_no_restart() {
     return 0;
 }
 
-fn test_health_on_failure_max_retries() {
+fn _test_health_on_failure_max_retries() {
     test_group("health_on_failure_max_retries");
     var cfg = heartbeat_config_new(0, 0, 0);
     var m = health_monitor_with_config(cfg);
@@ -2112,7 +2132,7 @@ fn test_health_on_failure_max_retries() {
     return 0;
 }
 
-fn test_health_unless_stopped_respects_user_stop() {
+fn _test_health_unless_stopped_respects_user_stop() {
     test_group("health_unless_stopped_respects_user_stop");
     var cfg = heartbeat_config_new(0, 0, 0);
     var m = health_monitor_with_config(cfg);
@@ -2123,27 +2143,26 @@ fn test_health_unless_stopped_respects_user_stop() {
     return 0;
 }
 
-fn test_health_unknown_status_for_unregistered() {
+fn _test_health_unknown_status_for_unregistered() {
     test_group("health_unknown_status_for_unregistered");
     var m = health_monitor_new();
     assert_eq(health_monitor_get_status(m, "nonexistent"), HEALTH_STATUS_UNKNOWN, "unknown for unregistered");
     return 0;
 }
 
-fn test_health_heartbeat_unregistered_returns_false() {
+fn _test_health_heartbeat_unregistered_returns_false() {
     test_group("health_heartbeat_unregistered_returns_false");
     var m = health_monitor_new();
     assert_eq(health_monitor_heartbeat(m, "nonexistent"), 0, "heartbeat false for unregistered");
     return 0;
 }
 
-fn test_health_default_monitor() {
+fn _test_health_default_monitor() {
     test_group("health_default_monitor");
     var m = health_monitor_new();
     assert_eq(health_monitor_is_empty(m), 1, "default is empty");
     return 0;
 }
-
 
 # ── ansamblu.cyr ──
 
@@ -2175,7 +2194,7 @@ fn _mcp_names_contains(tools, target) {
     return 0;
 }
 
-fn test_mcp_tool_list_has_nine_tools() {
+fn _test_mcp_tool_list_has_nine_tools() {
     test_group("mcp_tool_list_has_nine_tools");
     var tools = tool_list();
     assert_eq(vec_len(tools), 9, "the registry exposes exactly nine tools");
@@ -2191,7 +2210,7 @@ fn test_mcp_tool_list_has_nine_tools() {
     return 0;
 }
 
-fn test_mcp_tool_schemas_are_valid() {
+fn _test_mcp_tool_schemas_are_valid() {
     test_group("mcp_tool_schemas_are_valid");
     var tools = tool_list();
     var i = 0;
@@ -2208,7 +2227,7 @@ fn test_mcp_tool_schemas_are_valid() {
     return 0;
 }
 
-fn test_mcp_result_ok() {
+fn _test_mcp_result_ok() {
     test_group("mcp_result_ok");
     var r = mcp_result_ok("{\"key\": \"value\"}");
     assert_eq(mcp_result_success(r), 1, "ok result is a success");
@@ -2218,7 +2237,7 @@ fn test_mcp_result_ok() {
     return 0;
 }
 
-fn test_mcp_result_err() {
+fn _test_mcp_result_err() {
     test_group("mcp_result_err");
     var r = mcp_result_err("something failed");
     assert_eq(mcp_result_success(r), 0, "err result is not a success");
@@ -2228,7 +2247,7 @@ fn test_mcp_result_err() {
     return 0;
 }
 
-fn test_mcp_result_resource() {
+fn _test_mcp_result_resource() {
     test_group("mcp_result_resource");
     var r = mcp_result_resource("stiva://test/1", "{\"id\": \"1\"}");
     assert_eq(mcp_result_success(r), 1, "resource result is a success");
@@ -2247,7 +2266,7 @@ fn test_mcp_result_resource() {
 # belongs with the other live-dispatch handler tests, which need the facade.
 
 # mcp_handle_ansamblu (rust-old mcp.rs: handle_ansamblu — fully sync).
-fn test_mcp_handle_ansamblu() {
+fn _test_mcp_handle_ansamblu() {
     test_group("mcp_handle_ansamblu");
     # up: parse the ansamblu file, report service count.
     var up = json_v_obj_new();
@@ -2275,7 +2294,7 @@ fn test_mcp_handle_ansamblu() {
     return 0;
 }
 
-fn test_mcp_content_type_names() {
+fn _test_mcp_content_type_names() {
     test_group("mcp_content_type_names");
     # ContentPart #[serde(tag = "type")] wire values.
     assert_eq(streq(mcp_content_type_name(MCP_CONTENT_TEXT), "text"), 1, "MCP_CONTENT_TEXT names \"text\"");
@@ -2283,7 +2302,7 @@ fn test_mcp_content_type_names() {
     return 0;
 }
 
-fn test_mcp_content_part_text() {
+fn _test_mcp_content_part_text() {
     test_group("mcp_content_part_text");
     var part = content_part_text("hello");
     assert_eq(content_part_kind(part), MCP_CONTENT_TEXT, "text part kind");
@@ -2292,7 +2311,7 @@ fn test_mcp_content_part_text() {
     return 0;
 }
 
-fn test_mcp_content_part_resource() {
+fn _test_mcp_content_part_resource() {
     test_group("mcp_content_part_resource");
     var part = content_part_resource("stiva://containers/abc", "application/json", "{}");
     assert_eq(content_part_kind(part), MCP_CONTENT_RESOURCE, "resource part kind");
@@ -2302,9 +2321,8 @@ fn test_mcp_content_part_resource() {
     return 0;
 }
 
-
 # ── lib.cyr (rust-old/src/lib.rs) ──
-fn test_lib_default_config() {
+fn _test_lib_default_config() {
     test_group("lib::default_config");
     var c: StivaConfig = stiva_config_default();
     assert_eq(streq(c.root_path, "/var/lib/agnos/containers"), 1, "default root_path");
@@ -2316,7 +2334,7 @@ fn test_lib_default_config() {
     return 0;
 }
 
-fn test_lib_config_custom_values() {
+fn _test_lib_config_custom_values() {
     test_group("lib::config_custom_values");
     var d: StivaConfig = stiva_config_new(
       "/custom/containers",
@@ -2333,193 +2351,193 @@ fn test_lib_config_custom_values() {
     return 0;
 }
 
-
+# Runs every case in stiva.tcyr, and returns the failure count as the exit status.
 fn main() {
     alloc_init();
     # error + oci
-    test_error_names();
-    test_oci_version();
-    test_oci_status_names();
-    test_parse_signal_numeric();
-    test_parse_signal_names();
-    test_parse_signal_invalid();
-    test_oci_status_all_variants();
-    test_oci_state_serde();
-    test_build_state_json();
-    test_parse_bundle_minimal();
-    test_parse_bundle_with_resources();
-    test_parse_bundle_missing_config();
-    test_parse_bundle_negative_limits();
+    _test_error_names();
+    _test_oci_version();
+    _test_oci_status_names();
+    _test_parse_signal_numeric();
+    _test_parse_signal_names();
+    _test_parse_signal_invalid();
+    _test_oci_status_all_variants();
+    _test_oci_state_serde();
+    _test_build_state_json();
+    _test_parse_bundle_minimal();
+    _test_parse_bundle_with_resources();
+    _test_parse_bundle_missing_config();
+    _test_parse_bundle_negative_limits();
     # intents
-    test_parse_intent_not_implemented();
-    test_intent_serde();
-    test_intent_payload_serde();
-    test_intent_from_jv_strict();
+    _test_parse_intent_not_implemented();
+    _test_intent_serde();
+    _test_intent_payload_serde();
+    _test_intent_from_jv_strict();
     # audit
-    test_audit_operation_display();
-    test_audit_entry_container_serde();
-    test_audit_entry_image_serde();
-    test_audit_entry_with_metadata();
-    test_audit_result_serde();
-    test_audit_log_write_and_read();
-    test_audit_log_read_limit();
-    test_audit_log_empty();
+    _test_audit_operation_display();
+    _test_audit_entry_container_serde();
+    _test_audit_entry_image_serde();
+    _test_audit_entry_with_metadata();
+    _test_audit_result_serde();
+    _test_audit_log_write_and_read();
+    _test_audit_log_read_limit();
+    _test_audit_log_empty();
     # convert — see tests/convert.tcyr
     # network
-    test_network_mode_name();
-    test_network_mode_container();
-    test_network_struct();
-    test_network_driver_variants();
-    test_container_network();
-    test_network_policy_default_no_restrictions();
-    test_network_policy_with_deny();
-    test_dns_registry_resolve();
-    test_dns_registry_unregister();
-    test_dns_registry_hosts_entries();
-    test_dns_registry_inject();
-    test_network_bridge_veth_name();
-    test_network_bridge_ipv4_fmt();
-    test_dns_parse_resolv_conf_basic();
-    test_dns_parse_resolv_conf_with_comments();
-    test_dns_parse_resolv_conf_empty();
-    test_dns_parse_resolv_conf_ipv6_skipped();
-    test_dns_ipv4_to_str_canonical();
-    test_dns_parse_ipv4_reject();
-    test_dns_inject_resolv_conf_to_rootfs();
-    test_dns_inject_resolv_conf_defaults_when_empty();
-    test_dns_inject_hosts_to_rootfs();
-    test_dns_inject_hostname_to_rootfs();
-    test_dns_host_servers_returns_something();
-    test_dns_parse_yields_empty_for_nameserverless_files();
-    test_dns_inject_defaults_when_empty();
-    test_np_new_pool();
-    test_np_allocate_sequential();
-    test_np_release_and_reuse();
-    test_np_release_nonexistent();
-    test_np_pool_exhaustion();
-    test_np_skips_gateway();
-    test_np_invalid_subnet();
-    test_np_invalid_address();
-    test_np_large_pool();
-    test_np_network_alignment();
-    test_np_ipv6_pool_new();
-    test_np_ipv6_pool_allocate();
-    test_np_ipv6_pool_release();
-    test_np_ipv6_pool_invalid();
-    test_np_dual_stack_v4_only();
-    test_np_dual_stack_both();
-    test_rootless_backend_default_and_serde();
-    test_parse_port_mappings_simple();
-    test_parse_port_mappings_with_protocol();
-    test_parse_port_mappings_single_port();
-    test_parse_port_mappings_invalid();
-    test_parse_port_mappings_overflow();
-    test_parse_port_mappings_multiple();
-    test_rootless_runtime_probes();
+    _test_network_mode_name();
+    _test_network_mode_container();
+    _test_network_struct();
+    _test_network_driver_variants();
+    _test_container_network();
+    _test_network_policy_default_no_restrictions();
+    _test_network_policy_with_deny();
+    _test_dns_registry_resolve();
+    _test_dns_registry_unregister();
+    _test_dns_registry_hosts_entries();
+    _test_dns_registry_inject();
+    _test_network_bridge_veth_name();
+    _test_network_bridge_ipv4_fmt();
+    _test_dns_parse_resolv_conf_basic();
+    _test_dns_parse_resolv_conf_with_comments();
+    _test_dns_parse_resolv_conf_empty();
+    _test_dns_parse_resolv_conf_ipv6_skipped();
+    _test_dns_ipv4_to_str_canonical();
+    _test_dns_parse_ipv4_reject();
+    _test_dns_inject_resolv_conf_to_rootfs();
+    _test_dns_inject_resolv_conf_defaults_when_empty();
+    _test_dns_inject_hosts_to_rootfs();
+    _test_dns_inject_hostname_to_rootfs();
+    _test_dns_host_servers_returns_something();
+    _test_dns_parse_yields_empty_for_nameserverless_files();
+    _test_dns_inject_defaults_when_empty();
+    _test_np_new_pool();
+    _test_np_allocate_sequential();
+    _test_np_release_and_reuse();
+    _test_np_release_nonexistent();
+    _test_np_pool_exhaustion();
+    _test_np_skips_gateway();
+    _test_np_invalid_subnet();
+    _test_np_invalid_address();
+    _test_np_large_pool();
+    _test_np_network_alignment();
+    _test_np_ipv6_pool_new();
+    _test_np_ipv6_pool_allocate();
+    _test_np_ipv6_pool_release();
+    _test_np_ipv6_pool_invalid();
+    _test_np_dual_stack_v4_only();
+    _test_np_dual_stack_both();
+    _test_rootless_backend_default_and_serde();
+    _test_parse_port_mappings_simple();
+    _test_parse_port_mappings_with_protocol();
+    _test_parse_port_mappings_single_port();
+    _test_parse_port_mappings_invalid();
+    _test_parse_port_mappings_overflow();
+    _test_parse_port_mappings_multiple();
+    _test_rootless_runtime_probes();
     # image + registry
-    test_registry_media_types();
-    test_registry_host();
-    test_registry_normalize_arch();
-    test_registry_www_authenticate();
-    test_registry_platform_eq();
-    test_registry_descriptor();
-    test_registry_media_oci_types();
-    test_registry_descriptor_serde();
-    test_registry_manifest_serde();
+    _test_registry_media_types();
+    _test_registry_host();
+    _test_registry_normalize_arch();
+    _test_registry_www_authenticate();
+    _test_registry_platform_eq();
+    _test_registry_descriptor();
+    _test_registry_media_oci_types();
+    _test_registry_descriptor_serde();
+    _test_registry_manifest_serde();
     # storage + build
-    test_build_default_tag();
-    test_build_config_default();
-    test_build_step_type_names();
-    test_build_step_variants();
-    test_build_cache_key_env();
-    test_build_cache_key_run();
-    test_build_cache_key_distinct();
-    test_build_sha256_digest();
-    test_build_parse_full_spec();
-    test_build_parse_minimal_spec();
-    test_build_parse_no_steps();
-    test_build_parse_missing_image();
-    test_build_parse_unknown_step_type();
+    _test_build_default_tag();
+    _test_build_config_default();
+    _test_build_step_type_names();
+    _test_build_step_variants();
+    _test_build_cache_key_env();
+    _test_build_cache_key_run();
+    _test_build_cache_key_distinct();
+    _test_build_sha256_digest();
+    _test_build_parse_full_spec();
+    _test_build_parse_minimal_spec();
+    _test_build_parse_no_steps();
+    _test_build_parse_missing_image();
+    _test_build_parse_unknown_step_type();
     # network_nat + network_manager + encrypted
-    test_nat_parse();
-    test_network_manager_creates_default_network();
-    test_network_manager_create_custom_network();
-    test_network_manager_create_duplicate_network_fails();
-    test_network_manager_delete_network();
-    test_network_manager_delete_nonexistent_network_fails();
-    test_network_manager_connect_container_allocates_ip();
-    test_network_manager_connect_multiple_containers();
-    test_network_manager_disconnect_container_releases_ip();
-    test_network_manager_disconnect_nonexistent_fails();
-    test_network_manager_delete_network_with_connections_fails();
-    test_network_manager_connect_with_port_specs();
-    test_network_manager_connect_with_invalid_port_fails();
-    test_network_manager_connect_to_nonexistent_network_fails();
-    test_network_manager_connect_with_dns_injection();
-    test_network_manager_resolve_network_name_bridge();
-    test_network_manager_resolve_network_name_custom();
-    test_network_manager_resolve_network_name_host();
-    test_network_manager_resolve_network_name_none();
-    test_network_manager_get_connection_info();
-    test_network_manager_get_connection_nonexistent();
-    test_encrypted_media_type_detection();
-    test_strip_encrypted_suffix_works();
-    test_load_key_from_file();
-    test_load_key_missing_file();
-    test_load_key_missing_env();
-    test_luks_config_fields();
-    test_verity_config_fields();
-    test_open_volume_fields();
-    test_availability_no_feature();
-    test_disabled_entry_points();
+    _test_nat_parse();
+    _test_network_manager_creates_default_network();
+    _test_network_manager_create_custom_network();
+    _test_network_manager_create_duplicate_network_fails();
+    _test_network_manager_delete_network();
+    _test_network_manager_delete_nonexistent_network_fails();
+    _test_network_manager_connect_container_allocates_ip();
+    _test_network_manager_connect_multiple_containers();
+    _test_network_manager_disconnect_container_releases_ip();
+    _test_network_manager_disconnect_nonexistent_fails();
+    _test_network_manager_delete_network_with_connections_fails();
+    _test_network_manager_connect_with_port_specs();
+    _test_network_manager_connect_with_invalid_port_fails();
+    _test_network_manager_connect_to_nonexistent_network_fails();
+    _test_network_manager_connect_with_dns_injection();
+    _test_network_manager_resolve_network_name_bridge();
+    _test_network_manager_resolve_network_name_custom();
+    _test_network_manager_resolve_network_name_host();
+    _test_network_manager_resolve_network_name_none();
+    _test_network_manager_get_connection_info();
+    _test_network_manager_get_connection_nonexistent();
+    _test_encrypted_media_type_detection();
+    _test_strip_encrypted_suffix_works();
+    _test_load_key_from_file();
+    _test_load_key_missing_file();
+    _test_load_key_missing_env();
+    _test_luks_config_fields();
+    _test_verity_config_fields();
+    _test_open_volume_fields();
+    _test_availability_no_feature();
+    _test_disabled_entry_points();
     # runtime + container
-    test_runtime_namespace_names();
-    test_runtime_standard_mounts_complete();
-    test_runtime_volume_mounts_conversion();
-    test_runtime_volume_mounts_invalid();
-    test_runtime_parse_ppid_from_stat();
-    test_runtime_criu_available_returns_bool();
-    test_runtime_process_info_serde();
-    test_runtime_copy_into_container();
-    test_runtime_copy_from_container();
-    test_runtime_copy_from_missing();
-    test_runtime_copy_dir_recursive();
-    test_runtime_copy_into_container_dir();
-    test_container_state_serde();
-    test_container_config_defaults();
-    test_default_stop_grace_ms();
-    test_container_serde_round_trip();
-    test_migration_bundle_serde();
-    test_container_require_pid();
-    test_container_fixup_after_restart();
-    test_container_should_rotate();
-    test_container_tail_start();
-    test_container_rotated_path();
+    _test_runtime_namespace_names();
+    _test_runtime_standard_mounts_complete();
+    _test_runtime_volume_mounts_conversion();
+    _test_runtime_volume_mounts_invalid();
+    _test_runtime_parse_ppid_from_stat();
+    _test_runtime_criu_available_returns_bool();
+    _test_runtime_process_info_serde();
+    _test_runtime_copy_into_container();
+    _test_runtime_copy_from_container();
+    _test_runtime_copy_from_missing();
+    _test_runtime_copy_dir_recursive();
+    _test_runtime_copy_into_container_dir();
+    _test_container_state_serde();
+    _test_container_config_defaults();
+    _test_default_stop_grace_ms();
+    _test_container_serde_round_trip();
+    _test_migration_bundle_serde();
+    _test_container_require_pid();
+    _test_container_fixup_after_restart();
+    _test_container_should_rotate();
+    _test_container_tail_start();
+    _test_container_rotated_path();
     # health + ansamblu + agent + fleet
-    test_health_status_from_majra();
-    test_health_status_serde();
-    test_health_register_and_heartbeat();
-    test_health_deregister();
-    test_health_restart_count_increments();
-    test_health_never_policy_no_restart();
-    test_health_on_failure_max_retries();
-    test_health_unless_stopped_respects_user_stop();
-    test_health_unknown_status_for_unregistered();
-    test_health_heartbeat_unregistered_returns_false();
-    test_health_default_monitor();
+    _test_health_status_from_majra();
+    _test_health_status_serde();
+    _test_health_register_and_heartbeat();
+    _test_health_deregister();
+    _test_health_restart_count_increments();
+    _test_health_never_policy_no_restart();
+    _test_health_on_failure_max_retries();
+    _test_health_unless_stopped_respects_user_stop();
+    _test_health_unknown_status_for_unregistered();
+    _test_health_heartbeat_unregistered_returns_false();
+    _test_health_default_monitor();
     # fleet
     # mcp + stiva_core
-    test_mcp_tool_list_has_nine_tools();
-    test_mcp_tool_schemas_are_valid();
-    test_mcp_result_ok();
-    test_mcp_handle_ansamblu();
-    test_mcp_result_err();
-    test_mcp_result_resource();
-    test_mcp_content_type_names();
-    test_mcp_content_part_text();
-    test_mcp_content_part_resource();
-    test_lib_default_config();
-    test_lib_config_custom_values();
+    _test_mcp_tool_list_has_nine_tools();
+    _test_mcp_tool_schemas_are_valid();
+    _test_mcp_result_ok();
+    _test_mcp_handle_ansamblu();
+    _test_mcp_result_err();
+    _test_mcp_result_resource();
+    _test_mcp_content_type_names();
+    _test_mcp_content_part_text();
+    _test_mcp_content_part_resource();
+    _test_lib_default_config();
+    _test_lib_config_custom_values();
     # image index
     return assert_summary();
 }

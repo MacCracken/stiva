@@ -268,11 +268,11 @@ fn node_matches_constraints(node, constraints) {
     # A node with NO known profiles fails any non-NONE request. Treating unknown
     # as satisfying would place a GPU workload on a node nobody has inventoried,
     # which is the failure the constraint exists to prevent.
-    # RAW OFFSETS. Typed access to the two fields ADDED here segfaults — the
-    # cycc struct-id 20/21 miscompile, per-function-context, so `cap.memory_mb`
-    # a few lines below is fine and `cap.accel_profiles` is fatal. Verified by
-    # bisection: the two tests reaching this branch crashed, the one that only
-    # read the defaults passed.
+    # RAW OFFSETS. Typed access to the two fields ADDED here segfaulted at the pin that wrote this,
+    # which was blamed on the cycc struct-id 20/21 miscompile. cyrius 6.6.5's CHANGELOG traces this
+    # site to a guess about aggregate layout instead, fixed there, so the typed form may be safe
+    # again. It stays raw until a test that fails on a silently wrong value says so (see
+    # docs/architecture/001-cycc-struct-id-miscompile.md).
     #   FleetNodeCapacity:     memory_mb@0 cpus@8 max_containers@16
     #                          running_containers@24 accel_profiles@32
     #   DeploymentConstraints: node_labels@0 min_memory_mb@8 min_cpus@16
@@ -741,10 +741,3 @@ fn _fleet_select_and_reserve(nodes, count, constraints, skip_id) {
     store64(bcap + 24, load64(bcap + 24) + 1);
     return load64(best);
 }
-
-# ── DEFERRED (already-ported; no deferral needed) ───────────────
-# FleetDeployment.config is a container::ContainerConfig pointer. container
-# is already ported (src/container.cyr: struct ContainerConfig +
-# container_config_default). Callers build the config via
-# container_config_default() and pass the pointer to fleet_deployment_new —
-# fleet defines no config type of its own.

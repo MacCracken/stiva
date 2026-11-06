@@ -22,13 +22,11 @@ parity oracle; do not edit it.
   `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
   clean machine with no sibling checkouts.
 
-> ⚠️ **Do not commit a `cyrius.lock` produced through a `path` override.** Every
-> `path = "../<dep>"` line in `cyrius.cyml` is commented out deliberately: a path
-> override silently **wins** over its `tag`, and the lock records no dep name or
-> version under path resolution, so nothing detects the substitution. To develop a
-> dep alongside stiva, uncomment its `path` line, work, then **tag and release the
-> dep and bump the `tag` here** before committing the lock. CI compares the resolved
-> dep bundles against the tags and fails on a mismatch.
+> ⚠️ **A default build always builds the tag.** A `path = "../<dep>"` line beside `git` and `tag` is
+> used only in local mode. To develop a dep alongside stiva, uncomment its `path` line and run with
+> `CYRIUS_LOCAL=<dep>`, which resolves into `build/local-deps/lib/` and leaves `lib/` and
+> `cyrius.lock` alone. Then **tag and release the dep and bump the `tag` here**. CI compares the
+> resolved dep bundles against the tags and fails on a mismatch.
 
 ## Toolchain Commands
 
@@ -68,10 +66,9 @@ compare the bodies before calling it benign.
 
 ### Three traps specific to this codebase
 
-- **Every deferral marker in the source is tracked in the roadmap.** `cyrius lint` reports
-  untracked `TODO` / `deferred` / `not yet` comments per file, and the count is expected to
-  stay at **zero**. If you add one, add the matching roadmap item in the same change — or
-  delete the comment if it is stale.
+- **Every deferral marker in the source is tracked in the roadmap.** If you add a `TODO`,
+  `deferred` or `not yet` comment, add the matching roadmap item in the same change, or delete the
+  comment if it is stale.
 - **CLI verb ids are registration-ordered.** `cmdit_verb(h, ...)` returns an id derived from
   registration order and the dispatch table is indexed by it, so inserting a verb anywhere
   but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
@@ -137,4 +134,4 @@ Dependencies on sibling AGNOS projects (Cyrius `dist/*.cyr` bundles):
 - **bote** — MCP core service (tool registry, structured output)
 - **cmdit** — CLI parsing, verb introspection, shell completions
 - **samay** — cron expression parsing + scheduling for the `cron` module
-- **ai-hwaccel** — accelerator inventory + placement profiles (the `accel` feature, on by default)
+- **ai-hwaccel** — accelerator inventory + placement profiles 

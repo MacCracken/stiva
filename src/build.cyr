@@ -18,15 +18,7 @@
 #     (rust-old used toml::from_str). See the fn's own comment for the [image]
 #     / [[steps]] / [config] mapping and the stages caveat.
 #
-# What is DEFERRED (see the block at the bottom):
-#   * build_cache_key — hashes serde_json::to_string(step). ACHIEVABLE via
-#     bayan's JSON serializer; just not wired yet (NOT a Cyrius gap).
-#   * build_run_layer / build_copy_layer / append_dir_recursive / build_image
-#     — construct tar.gz layers (flate2 GzEncoder + tar::Builder) and
-#     build_image is async (drives ImageStore::pull over the network). The
-#     ported base has neither a tar builder / gzip encoder nor the async
-#     registry network layer, so these land with those.
-#
+
 # sha256_digest is NOT re-ported here — build.rs's private copy is
 # byte-identical to image.cyr's public sha256_digest; we reuse that one to
 # avoid a duplicate global (Cyrius hoists fns to globals, last-def-wins).
@@ -84,6 +76,7 @@ struct BuildStep {
     stage;
 }
 
+# A `run` BuildStep for `command`, a vec of cstrs.
 fn build_step_run(command) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -97,6 +90,7 @@ fn build_step_run(command) {
     return s;
 }
 
+# A `copy` BuildStep from `source`, under the build context, to `destination` in the image.
 fn build_step_copy(source, destination) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -110,6 +104,7 @@ fn build_step_copy(source, destination) {
     return s;
 }
 
+# An `env` BuildStep setting `key` to `value` in the image config.
 fn build_step_env(key, value) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -123,6 +118,7 @@ fn build_step_env(key, value) {
     return s;
 }
 
+# A `workdir` BuildStep.
 fn build_step_workdir(path) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -136,6 +132,7 @@ fn build_step_workdir(path) {
     return s;
 }
 
+# A `label` BuildStep.
 fn build_step_label(key, value) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -149,6 +146,7 @@ fn build_step_label(key, value) {
     return s;
 }
 
+# A `from_stage` BuildStep, which copies `source` out of the named earlier stage.
 fn build_step_from_stage(stage, source, destination) {
     var s = alloc(56);
     var ss: BuildStep = s;
@@ -171,6 +169,7 @@ struct ImageDef {
     tag;
 }
 
+# The `[image]` table of a Stivafile: its base reference, and the name and tag it builds.
 fn image_def_new(base, name, tag) {
     var d = alloc(24);
     var dd: ImageDef = d;
@@ -195,6 +194,7 @@ struct BuildStage {
     steps;
 }
 
+# One stage of a multi-stage build.
 fn build_stage_new(name, base, steps) {
     var s = alloc(24);
     var ss: BuildStage = s;
@@ -227,6 +227,7 @@ fn build_config_default() {
     return c;
 }
 
+# The `[config]` table of a Stivafile. `expose` is a vec of port numbers.
 fn build_config_new(entrypoint, expose, user, workdir) {
     var c = alloc(32);
     var cc: BuildConfig = c;
@@ -247,6 +248,7 @@ struct BuildSpec {
     stages;
 }
 
+# A parsed Stivafile. `steps` and `stages` are vecs.
 fn build_spec_new(image, steps, config, stages) {
     var s = alloc(32);
     var ss: BuildSpec = s;
@@ -393,8 +395,7 @@ fn store_layer(store, data, len) {
 #
 # Multi-stage `[[stages]]` are NOT reconstructed here: bayan's section model is
 # flat (it cannot re-nest a stage's own `[[steps]]` under its stage table the
-# way serde does), and the tar.gz stage BUILDER that consumes them stays
-# deferred (docs/development/roadmap.md §F). `stages` therefore parses to an
+# way serde does), and nothing yet builds a stage (roadmap v3.3.2). `stages` therefore parses to an
 # empty vec — matching the oracle's
 # `#[serde(default)]` when no stages are present, which is every case the
 # parse tests exercise.
@@ -494,6 +495,53 @@ fn _bld_step_from_pairs(pairs) {
     return 0;                              # unknown step type → parse failure
 }
 
+# 1 iff `name` can be an image repository: letters, digits and `._-`, in `/`-separated components
+# that begin with a letter or digit. It becomes part of a reference, and so of what `images` prints.
+#[must_use]
+fn _bld_name_is_valid(name) {
+    var at_start = 1;
+    var i = 0;
+    var c = load8(name);
+    if (c == 0) { return 0; }
+    while (c != 0) {
+        var alnum = 0;
+        if (c >= 48 && c <= 57) { alnum = 1; }
+        if (c >= 65 && c <= 90) { alnum = 1; }
+        if (c >= 97 && c <= 122) { alnum = 1; }
+        if (at_start == 1) {
+            if (alnum == 0) { return 0; }
+            at_start = 0;
+        } elif (c == 47) {
+            at_start = 1;
+        } elif (alnum == 0 && c != 46 && c != 95 && c != 45) {
+            return 0;
+        }
+        i = i + 1;
+        c = load8(name + i);
+    }
+    return at_start == 0;
+}
+
+# 1 iff `tag` is a valid OCI tag: a letter, digit or `_`, then up to 127 of those, `.` and `-`.
+#[must_use]
+fn _bld_tag_is_valid(tag) {
+    var n = strlen(tag);
+    if (n == 0 || n > 128) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var c = load8(tag + i);
+        var ok = 0;
+        if (c >= 48 && c <= 57) { ok = 1; }
+        if (c >= 65 && c <= 90) { ok = 1; }
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c == 95) { ok = 1; }
+        if (i > 0 && (c == 46 || c == 45)) { ok = 1; }
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # Parse a Stivafile TOML string (cstr) into a BuildSpec* (rust-old:
 # parse_build_spec). Returns 0 (STIVA_ERR_INVALID_STATE) on a missing [image]
 # section or an unknown step type; otherwise the heap BuildSpec pointer.
@@ -510,8 +558,10 @@ fn parse_build_spec(toml_str) {
     var name = _bld_val_cstr(bayan_toml_get_by_cstr(image_pairs, "name"));
     if (base == 0) { return 0; }                    # missing field `base`
     if (name == 0) { return 0; }                    # missing field `name`
+    if (_bld_name_is_valid(name) == 0) { return 0; }
     var tag = _bld_val_cstr(bayan_toml_get_by_cstr(image_pairs, "tag"));
     if (tag == 0) { tag = default_tag(); }          # serde default = "latest"
+    if (_bld_tag_is_valid(tag) == 0) { return 0; }
     var image = image_def_new(base, name, tag);
 
     # ── [[steps]] → Vec<BuildStep> (serde default = empty) ────
@@ -535,13 +585,18 @@ fn parse_build_spec(toml_str) {
         var cp = bayan_toml_section_pairs(vec_get(config_secs, 0));
         var entrypoint = _bld_str_vec(cp, "entrypoint");
         var expose = _bld_int_vec(cp, "expose");
+        var ei = 0;
+        while (ei < vec_len(expose)) {
+            if (vec_get(expose, ei) < 1 || vec_get(expose, ei) > 65535) { return 0; }
+            ei = ei + 1;
+        }
         var user = _bld_val_cstr(bayan_toml_get_by_cstr(cp, "user"));
         var workdir = _bld_val_cstr(bayan_toml_get_by_cstr(cp, "workdir"));
         config = build_config_new(entrypoint, expose, user, workdir);
     }
 
     # ── stages: flat bayan model cannot re-nest per-stage steps; the
-    # consuming tar.gz stage builder is deferred (roadmap.md §F) → empty vec
+    # stage builder is roadmap v3.3.2 → empty vec
     # (serde default). `build_image` below refuses `from_stage` outright.
     sakshi_debug("build spec parsed", strlen("build spec parsed"));
     return build_spec_new(image, steps, config, vec_new());
@@ -669,18 +724,15 @@ fn _bld_fnv1a(s, len) {
 # never through a symlink, matching `_stor_tar_collect`.
 fn _bld_fp_walk(abs_dir, rel_prefix, acc, depth) {
     if (depth > 64) {
-        # Past the cap, perturb the accumulator instead of returning quietly.
-        # Silently skipping made every tree deeper than 64 levels fingerprint
-        # IDENTICALLY regardless of what changed down there, so an edit below
-        # the cap served a stale cached layer. A constant nudge does not
-        # identify WHAT changed, but it guarantees a deep tree never collides
-        # with the same tree truncated — and the cache's job is only to notice
-        # that something differs.
-        store64(acc, load64(acc) + 1);
+        # Nothing below here can be fingerprinted, so this tree must never match a cached layer.
+        # A constant nudge did not do that: the same tree nudged the same way each time, and an
+        # edit past the cap served the stale layer. The clock makes every key unique, so a tree
+        # this deep costs a rebuild and is never wrong.
+        store64(acc, load64(acc) + clock_epoch_ns());
         store64(acc + 16, load64(acc + 16) + 1);
         return 0;
     }
-    var fd = sys_open(abs_dir, 65536, 0);          # O_DIRECTORY
+    var fd = sys_open(abs_dir, O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0) { return 0; }
     var buf = alloc(4096);
     var sb = alloc(144);
@@ -706,12 +758,12 @@ fn _bld_fp_walk(abs_dir, rel_prefix, acc, depth) {
                         rel_child = _stor_cat2(_stor_cat2(rel_prefix, "/"), named);
                     }
                     if (sys_lstat(abs_child, sb) == 0) {
-                        var mode = load64(sb + 24) & 65535;
-                        var uid = (load64(sb + 24) >> 32) & 4294967295;
-                        var gid = load64(sb + 32) & 4294967295;
-                        var size = load64(sb + 48);
-                        var mts = load64(sb + 88);             # st_mtime.tv_sec
-                        var mtn = load64(sb + 96);             # st_mtime.tv_nsec
+                        var mode = _stor_st_mode(sb);
+                        var uid = _stor_st_uid(sb);
+                        var gid = _stor_st_gid(sb);
+                        var size = _stor_st_size(sb);
+                        var mts = _stor_st_mtime(sb);             # st_mtime.tv_sec
+                        var mtn = _stor_st_mtime_ns(sb);             # st_mtime.tv_nsec
                         var eb = str_builder_new();
                         str_builder_add_cstr(eb, rel_child);
                         str_builder_add_cstr(eb, "|");
@@ -756,7 +808,7 @@ fn _bld_source_fingerprint(context_dir, source) {
     store64(acc, 0);
     store64(acc + 8, 0);
     store64(acc + 16, 0);
-    var mode = load64(sb + 24) & 65535;
+    var mode = _stor_st_mode(sb);
     if ((mode & 61440) == 16384) {
         # Fold the source root's OWN metadata in, not just its children's.
         # `_bld_fp_walk` starts INSIDE the directory, so a chmod/chown of the
@@ -767,9 +819,9 @@ fn _bld_source_fingerprint(context_dir, source) {
         str_builder_add_cstr(rb, "|");
         str_builder_add_int(rb, mode);
         str_builder_add_cstr(rb, "|");
-        str_builder_add_int(rb, (load64(sb + 24) >> 32) & 4294967295);
+        str_builder_add_int(rb, _stor_st_uid(sb));
         str_builder_add_cstr(rb, "|");
-        str_builder_add_int(rb, load64(sb + 32) & 4294967295);
+        str_builder_add_int(rb, _stor_st_gid(sb));
         var rs = str_builder_build(rb);
         var rh = _bld_fnv1a(str_data(rs), str_len(rs));
         store64(acc, rh);
@@ -780,11 +832,15 @@ fn _bld_source_fingerprint(context_dir, source) {
         var eb = str_builder_new();
         str_builder_add_int(eb, mode);
         str_builder_add_cstr(eb, "|");
-        str_builder_add_int(eb, load64(sb + 48));              # size
+        str_builder_add_int(eb, _stor_st_size(sb));              # size
         str_builder_add_cstr(eb, "|");
-        str_builder_add_int(eb, load64(sb + 88));              # mtime sec
+        str_builder_add_int(eb, _stor_st_mtime(sb));              # mtime sec
         str_builder_add_cstr(eb, "|");
-        str_builder_add_int(eb, load64(sb + 96));              # mtime nsec
+        str_builder_add_int(eb, _stor_st_mtime_ns(sb));              # mtime nsec
+        str_builder_add_cstr(eb, "|");
+        str_builder_add_int(eb, _stor_st_uid(sb));
+        str_builder_add_cstr(eb, "|");
+        str_builder_add_int(eb, _stor_st_gid(sb));
         var es = str_builder_build(eb);
         var h = _bld_fnv1a(str_data(es), str_len(es));
         store64(acc, h);
@@ -872,7 +928,7 @@ fn _bld_path_has_symlink(context_dir, source) {
                 var prefix = _img_slice(source, 0, i);
                 var full = _img_cat3(context_dir, "/", prefix);
                 if (sys_lstat(full, sb) == 0) {
-                    if ((load64(sb + 24) & 61440) == 40960) { return 1; }   # S_IFLNK
+                    if ((_stor_st_mode(sb) & 61440) == 40960) { return 1; }   # S_IFLNK
                 }
             }
             # A trailing '/' makes the kernel resolve the FINAL component too,
@@ -977,43 +1033,74 @@ fn _bld_dest_is_safe(destination) {
     return 1;
 }
 
+# Tar `source`, under `context_dir`, into a gzip layer rooted at `destination`. Returns the layer
+# bytes, or 0 with the detail printed; writes the length to `out_len` and the uncompressed digest to
+# `out_diff`.
 fn build_copy_layer(context_dir, source, destination, out_len, out_diff) {
     if (_bld_copy_step_is_safe(context_dir, source, destination) == 0) { return 0; }
     var src_path = _img_cat3(context_dir, "/", source);
-    var sb = alloc(144);
-    if (sys_lstat(src_path, sb) != 0) {
+    # Down from the context by fd, so a symlink swapped in after the checks above cannot be read
+    # through: a build context can be changing while it builds.
+    var leaf_cell = alloc(8);
+    var dfd = _stor_walk_to_parent(context_dir, source, 0, leaf_cell);
+    var sb = alloc(STAT_BUFSZ);
+    if (dfd < 0) {
         stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("copy source not found: ", src_path));
         return 0;
     }
-    var st_mode = load64(sb + 24) & 65535;
+    var leaf = load64(leaf_cell);
+    if (sys_fstatat(dfd, leaf, sb, AT_SYMLINK_NOFOLLOW) != 0) {
+        sys_close(dfd);
+        stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("copy source not found: ", src_path));
+        return 0;
+    }
+    var st_mode = _stor_st_mode(sb);
     var typ = st_mode & 61440;                      # S_IFMT
     var perms = st_mode & 4095;
-    var uid = (load64(sb + 24) >> 32) & 4294967295;
-    var gid = load64(sb + 32) & 4294967295;
+    var uid = _stor_st_uid(sb);
+    var gid = _stor_st_gid(sb);
 
     var dest_prefix = _bld_dest_prefix(destination);
     var entries = vec_new();
     if (typ == 16384) {                             # S_IFDIR
-        # `_stor_tar_collect` emits CHILDREN only, so the destination directory
+        # `_stor_tar_collect_fd` emits CHILDREN only, so the destination directory
         # itself needs an explicit entry — without it `copy ./app -> /app`
         # produces `app/start.sh` with no `app/` member, and a reader that
         # creates parents implicitly loses the directory's real mode.
         if (strlen(dest_prefix) > 0) {
             vec_push(entries, _tar_entry_new(_img_cat2(dest_prefix, "/"), 53, perms, uid, gid, 0, 0));
         }
-        _stor_tar_collect(src_path, dest_prefix, entries);
+        var sub = _stor_open_dir_at(dfd, leaf);
+        var collected = 0 - 1;
+        if (sub >= 0) {
+            collected = _stor_tar_collect_fd(sub, dest_prefix, entries);
+            sys_close(sub);
+        }
+        sys_close(dfd);
+        if (collected != 0) {
+            stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("cannot read all of copy source: ", src_path));
+            return 0;
+        }
     } else {
         if (typ != 32768) {                         # S_IFREG
+            sys_close(dfd);
             stiva_err_print(STIVA_ERR_INVALID_STATE,
               _img_cat2("copy source is neither a regular file nor a directory: ", src_path));
             return 0;
         }
         if (strlen(dest_prefix) == 0) {
-            stiva_err_print(STIVA_ERR_INVALID_STATE, "copy destination cannot be the rootfs root for a file source");
+            sys_close(dfd);
+            stiva_err_print(STIVA_ERR_INVALID_STATE, "copy destination cannot be the rootfs root for a file");
             return 0;
         }
         var fc = alloc(8);
-        var data = _img_read_file(src_path, fc);
+        var data = 0;
+        var fd = _stor_open_reg_at(dfd, leaf, sb);
+        if (fd >= 0) {
+            data = _stor_read_fd(fd, _stor_st_size(sb), fc);
+            sys_close(fd);
+        }
+        sys_close(dfd);
         if (data == 0) {
             stiva_err_print(STIVA_ERR_STORAGE, _img_cat2("cannot read copy source: ", src_path));
             return 0;
@@ -1154,7 +1241,7 @@ fn _bld_cache_hit(store, cache_key, out_size, out_diff) {
     if (path == 0) { return 0; }
     var sb = alloc(144);
     if (sys_lstat(path, sb) != 0) { return 0; }
-    store64(out_size, load64(sb + 48));                   # st_size
+    store64(out_size, _stor_st_size(sb));                   # st_size
     store64(out_diff, diff_id);
     return buf;
 }
@@ -1305,7 +1392,7 @@ fn build_image(spec, store, client, context_dir) {
     var workdir = bc.workdir;
     if (workdir == 0) { workdir = step_workdir; }
 
-    var arch = normalize_arch("x86_64");
+    var arch = host_arch();
     var cfg_obj = oci_config_object_jv(env_vars, 0, bc.entrypoint, workdir, bc.user, exposed, labels);
     var cfg_s = json_v_build(oci_config_build(arch, "linux", 0, cfg_obj, all_diff_ids, 0));
     var config_digest = sha256_digest(str_data(cfg_s), str_len(cfg_s));

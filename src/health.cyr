@@ -280,22 +280,7 @@ fn health_monitor_is_empty(m) {
     return chb_is_empty(mm.tracker);
 }
 
-# ── DEFERRED (land with runtime async exec + tokio infra) ──────────
-# rust-old/src/health.rs also defines two probe-driver methods that depend
-# on runtime::exec_in_container (itself DEFERRED in src/runtime.cyr — async,
-# kavach exec) plus tokio timeout / task spawn / interval, none of which the
-# ported base provides yet:
-#
-#   async fn run_probe(&self, container_id: &str, pid: u32,
-#                      command: &[String], timeout_secs: u64) -> bool
-#       tokio::time::timeout(runtime::exec_in_container(pid, command, [], None));
-#       on Ok(exit_code == 0) -> heartbeat + true; else false.
-#
-#   fn start_probe_loop(container_id: String, pid: u32, command: Vec<String>,
-#                       interval_secs: u64, timeout_secs: u64)
-#                       -> tokio::task::JoinHandle<()>
-#       tokio::spawn loop: a fresh HealthMonitor registers the container
-#       (RestartPolicy::Never) and runs run_probe every interval_secs.
-#
-# These land once runtime's async exec surface and a Cyrius task/timer
-# runtime are available. Tracked in the roadmap.
+# ── Not ported: the probe driver (roadmap v3.3.2) ──
+# rust-old's run_probe runs a health command in the container and calls heartbeat on success, and
+# start_probe_loop repeats that on an interval. `exec_in_container` and `sleep_ms` are all either
+# needs, but a one-shot CLI has no process to run the loop in, so that is the question to settle.

@@ -133,11 +133,12 @@ fn _np_fmt_ipv4(v) {
 }
 
 # Parse a decimal prefix-length cstr into its value. Returns 1 on success
-# (value stored at `out`), 0 on invalid (empty / non-digit).
+# (value stored at `out`), 0 on invalid (empty / non-digit). Past three digits it cannot be a
+# prefix, and a long one would wrap around into a small value that looks like one.
 #[must_use]
 fn _np_parse_prefix(s, out) {
     var len = strlen(s);
-    if (len == 0) { return 0; }
+    if (len == 0 || len > 3) { return 0; }
     var val = 0;
     var i = 0;
     while (i < len) {
@@ -479,11 +480,11 @@ fn _np_fmt_ipv6(buf) {
     var k = 0;
     while (k < 8) {
         if (best_start >= 0 && k == best_start) {
-            # A colon before the gap (unless the gap starts at index 0).
-            if (k > 0) { str_builder_putc(sb, 58); }
-            str_builder_putc(sb, 58);            # the gap's own colon
+            # One colon here, and the next group brings the second. With no next group, this
+            # writes both. (It always wrote two, which made "2001:db8:::1" out of a middle gap.)
+            str_builder_putc(sb, 58);
+            if (k + best_len >= 8) { str_builder_putc(sb, 58); }
             k = k + best_len;
-            # If the run reached the end, we already have the trailing "::".
             continue;
         }
         if (k > 0) { str_builder_putc(sb, 58); }
@@ -642,8 +643,20 @@ fn ipv6_pool_allocate(pool) {
     var p: Ipv6Pool = pool;
     var max_scan = 65534;
     var iter = 0;
+    var wrapped = 0;
     while (iter < max_scan) {
         var candidate = _np_ipv6_dup(p.next);
+        # Past the end of the subnet, back to the start: released addresses are down there, and
+        # handing out what is up here would give a container an address no route reaches.
+        var masked = _np_ipv6_dup(candidate);
+        _np_ipv6_mask(masked, p.prefix_len);
+        if (_np_ipv6_eq(masked, p.base) == 0) {
+            if (wrapped == 1) { return 0; }
+            wrapped = 1;
+            p.next = _np_ipv6_dup(p.gateway);
+            _np_ipv6_inc(p.next);
+            continue;
+        }
         _np_ipv6_inc(p.next);                    # advance next
 
         if (_np_ipv6_eq(candidate, p.gateway) == 1 || _ipv6_pool_contains(pool, candidate) == 1) {

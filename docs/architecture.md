@@ -10,7 +10,7 @@ stiva (this crate)
   ├── bote       (MCP core service: JSON-RPC 2.0, tool registry, structured output)
   ├── cmdit      (CLI parsing, verb introspection, shell completions)
   ├── samay      (cron expressions + scheduling, the `cron` module)
-  ├── ai-hwaccel (accelerator inventory + placement profiles, the `accel` feature)
+  ├── ai-hwaccel (accelerator inventory + placement profiles)
   └── sakshi     (structured logging)
 ```
 
@@ -46,11 +46,11 @@ stiva (this crate)
 | `image` | Substrate: image ref parsing, `Image`/`Layer` structs, content-addressable blob store + digests, integrity verify |
 | `imagelayout` | OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store, `oci-archive`/`docker-archive` save/load, the pull/push drivers (net-new) |
 | `container` | The `ContainerManager`, container lifecycle, state persistence, the persisted event log, `diff` |
-| `runtime` | OCI spec generation, kavach integration, cgroups v2, `exec_in_container`, output scanning, CRIU (v3.1) |
+| `runtime` | OCI spec generation, kavach integration, cgroups v2, `exec_in_container`, output scanning |
 | `network` | Bridge networks, NAT, DNS, IP pools, port mapping, rootless networking (slirp4netns/pasta) |
 | `storage` | Overlay filesystem, volume mounts, layer unpacking (gzip + zstd) with OCI whiteouts, perms-preserving USTAR tar codec |
 | `registry` | OCI distribution client (pull + push + chunked upload), token auth, discovery |
-| `build` | TOML-based image builds (Stivafile), the `build_image` driver, content-fingerprinted layer cache |
+| `build` | TOML-based image builds (Stivafile), the `build_image` driver, metadata-fingerprinted layer cache |
 | `ansamblu` | Multi-container orchestration, DAG ordering |
 | `health` | Heartbeat monitoring, restart policies |
 | `cron` | Scheduled containers over samay (net-new) |
@@ -58,7 +58,7 @@ stiva (this crate)
 | `agent` | Daimon agent registration |
 | `mcp` | MCP tools for AI agent integration, live dispatch over the `Stiva` facade |
 | `encrypted` | LUKS + dm-verity — ⛔ **STUBBED.** There is no `encrypted` feature in `cyrius.cyml`; every entry point returns the disabled-path error |
-| `intents` | Agnoshi intent stubs |
+| `intents` | Agnoshi intent values |
 | `stiva_core` | The top-level `Stiva` facade + `StivaConfig`; MCP dispatch |
 | `oci` · `audit` · `error` | OCI type substrate · audit trail · error types |
 
@@ -70,6 +70,6 @@ stiva (this crate)
 | Pod sandbox | kavach (process-level) | kavach + stiva (full container isolation) |
 | Image registry | ark packages only | OCI images + ark packages |
 | Docker Compose | Not supported | `stiva convert -f compose` → Stivafile TOML, driven by the `ansamblu` module (library + MCP `stiva_ansamblu`; there is **no** `stiva ansamblu` CLI verb) |
-| Container networking | agnosys netns only | Rootless slirp4netns/pasta on `run -d` (with port forwarding). ⛔ The bridge/NAT/DNS/IP-pool layer is **library-only** — no run path constructs a `NetworkManager` |
+| Container networking | agnosys netns only | Rootless slirp4netns/pasta on `run -d`. ⛔ The bridge/NAT/DNS/IP-pool layer is **library-only** — no run path constructs a `NetworkManager` |
 | Health/restart | Manual | Heartbeat FSM + restart policies |
 | Orchestration | None | DAG-ordered ansamblu + sutra playbooks |

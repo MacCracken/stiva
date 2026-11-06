@@ -205,6 +205,19 @@ fn _audit_json_escape(s) {
             store8(out + pos + 4, load8(hex + ((c >> 4) & 15)));
             store8(out + pos + 5, load8(hex + (c & 15)));
             pos = pos + 6;
+        } elif (c >= 128) {
+            # A line that is not UTF-8 is not JSON, and the reader skips what it cannot parse, so
+            # one bad byte in a name would hide the entry from its own audit log.
+            var seq = _audit_utf8_len(s + i, n - i);
+            if (seq == 0) {
+                memcpy(out + pos, "\\ufffd", 6);
+                pos = pos + 6;
+                seq = 1;
+            } else {
+                memcpy(out + pos, s + i, seq);
+                pos = pos + seq;
+            }
+            i = i + seq - 1;
         } else {
             store8(out + pos, c); pos = pos + 1;
         }
@@ -212,6 +225,36 @@ fn _audit_json_escape(s) {
     }
     store8(out + pos, 0);
     return out;
+}
+
+# The length of the well-formed UTF-8 sequence at `p` (RFC 3629: no overlong forms, no surrogates,
+# nothing past U+10FFFF), or 0 if there is none within `avail` bytes.
+#[must_use]
+fn _audit_utf8_len(p, avail) {
+    var c = load8(p);
+    var n = 0;
+    var lo = 128;
+    var hi = 191;
+    if (c >= 194 && c <= 223) { n = 2; }
+    elif (c >= 224 && c <= 239) {
+        n = 3;
+        if (c == 224) { lo = 160; }
+        if (c == 237) { hi = 159; }
+    } elif (c >= 240 && c <= 244) {
+        n = 4;
+        if (c == 240) { lo = 144; }
+        if (c == 244) { hi = 143; }
+    }
+    if (n == 0 || n > avail) { return 0; }
+    var i = 1;
+    while (i < n) {
+        var b = load8(p + i);
+        if (b < lo || b > hi) { return 0; }
+        lo = 128;
+        hi = 191;
+        i = i + 1;
+    }
+    return n;
 }
 
 # ── Serialization ─────────────────────────
@@ -333,16 +376,18 @@ fn audit_log_log(log, entry) {
 }
 
 # Read the most recent entries, up to `limit` (rust-old: AuditLog::read_entries).
-# Reads the whole file, splits on '\n', walks lines in reverse taking up to
+# Reads the newest 1 MiB, splits on '\n', walks lines in reverse taking up to
 # `limit`, and parses each. Unparseable lines are skipped (filter_map .ok()).
 # Returns a Vec of AuditEntry (most-recent first), or 0 on read failure.
 # An absent/empty file yields an empty Vec (parity: read_to_string of an
 # empty log gives no lines).
 fn audit_log_read_entries(log, limit) {
     var path = AuditLog_path(log);
-    var buf = alloc(1048576);        # 1 MiB read cap
-    var n = file_read_all(path, buf, 1048576);
+    var cell = alloc(8);
+    var buf = _img_read_tail(path, 1048576, cell);
     var out = vec_new();
+    if (buf == 0) { return out; }
+    var n = load64(cell);
     if (n <= 0) { return out; }
 
     # Collect line [start,end) offsets, then walk them in reverse.
@@ -495,19 +540,13 @@ fn audit_log_path(log) {
 }
 
 # ── current_user ──────────────────────────
-# Current effective user name, best-effort (rust-old: current_user).
-# Tries $USER, then $LOGNAME, then falls back to "uid:<euid>".
+# Who is acting, as "uid:<euid>". The oracle took $USER, then $LOGNAME, which the caller sets: an
+# audit trail that says whoever `USER=root stiva ...` claims to be records nothing. The kernel's
+# answer is the only one here that the subject cannot choose.
 #[inline]
 fn current_user() {
-    # Rust: std::env::var("USER").or_else(|_| var("LOGNAME")). var() is Ok
-    # even for a set-but-empty value, so a set USER (even "") is returned
-    # verbatim; only an UNSET var (getenv → 0) falls through. Match that.
-    var u = getenv("USER");
-    if (u != 0) { return u; }
-    var l = getenv("LOGNAME");
-    if (l != 0) { return l; }
     var buf[24];
-    var len = fmt_int_buf(sys_getuid(), &buf);
+    var len = fmt_int_buf(sys_geteuid(), &buf);
     var out = alloc(len + 5);
     memcpy(out, "uid:", 4);
     memcpy(out + 4, &buf, len);

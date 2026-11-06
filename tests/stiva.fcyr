@@ -1,13 +1,451 @@
-# stiva fuzz harness
+# stiva fuzz harness: every parser that reads bytes stiva does not control.
+#
+# Each target mutates a few valid seeds, deterministically, so a failure repeats. A batch runs in a
+# forked child for two reasons. `alloc` never frees, so a child's exit is what frees a batch. And a
+# crash or a hang takes down one child, which the parent names as a finding. The input in flight sits
+# in a shared page, so a failure leaves `build/fuzz-crash-<target>.bin` behind to replay.
+#
+#   cyrius fuzz tests/stiva.fcyr            # the CI form
+#   cyrius fuzz --poison tests/stiva.fcyr   # redzones: an overwrite exits 86
+#   cyrius fuzz --bounds tests/stiva.fcyr   # bounds-checked slices and arrays
+#   STIVA_FUZZ_ROUNDS=200 cyrius fuzz tests/stiva.fcyr   # a soak: 60,000 inputs per target
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+include "src/error.cyr"
+include "src/oci.cyr"
+include "src/intents.cyr"
+include "src/audit.cyr"
+include "src/convert.cyr"
+include "src/network_mod.cyr"
+include "src/network_bridge.cyr"
+include "src/network_dns.cyr"
+include "src/network_pool.cyr"
+include "src/network_rootless.cyr"
+include "src/network_nat.cyr"
+include "src/network_manager.cyr"
+include "src/image.cyr"
+include "src/registry.cyr"
+include "src/storage.cyr"
+include "src/imagelayout.cyr"
+include "src/build.cyr"
+include "src/encrypted.cyr"
+include "src/runtime.cyr"
+include "src/container.cyr"
+include "src/cron.cyr"
+include "src/health.cyr"
+include "src/ansamblu.cyr"
+include "src/agent.cyr"
+include "src/fleet.cyr"
+
+var FZ_CAP = 262144;            # the largest mutated input, in bytes
+var FZ_ROUNDS = 4;              # forked batches per target; STIVA_FUZZ_ROUNDS overrides it
+var FZ_ITERS = 300;             # inputs per batch
+var FZ_DEADLINE_MS = 60000;     # a batch still running after this is a hang
+
+var _fz_s = 0;                  # PRNG state
+var _fz_root = 0;               # scratch directory for targets that touch the filesystem
+var _fz_shared = 0;             # MAP_SHARED: the input in flight, length first
+
+# The next pseudo-random 31-bit value (a 64-bit LCG's high bits).
+fn _fz_rand() {
+    _fz_s = _fz_s * 6364136223846793005 + 1442695040888963407;
+    return (_fz_s >> 33) & 0x7FFFFFFF;
+}
+
+# A pseudo-random value in [0, n).
+fn _fz_below(n) {
+    return _fz_rand() % n;
+}
+
+# A byte that tends to mean something to a parser.
+fn _fz_byte() {
+    var t = "\x00\x01\t\n\r \"'/.\\[]{}:=\x7f\x80\xff";
+    return load8(t + _fz_below(20)) & 0xFF;
+}
+
+# A token that tends to mean something to a parser.
+fn _fz_token() {
+    var i = _fz_below(16);
+    if (i == 0) { return "../"; }
+    if (i == 1) { return "//"; }
+    if (i == 2) { return "\n"; }
+    if (i == 3) { return "\""; }
+    if (i == 4) { return ":"; }
+    if (i == 5) { return "-1"; }
+    if (i == 6) { return "99999999999999999999"; }
+    if (i == 7) { return "9223372036854775807"; }
+    if (i == 8) { return ".wh."; }
+    if (i == 9) { return "sha256:"; }
+    if (i == 10) { return "[["; }
+    if (i == 11) { return "{{"; }
+    if (i == 12) { return "%"; }
+    if (i == 13) { return "*"; }
+    if (i == 14) { return "null"; }
+    return "\\";
+}
+
+# Insert `len` bytes of `src` into `b` at `at`. Returns the new length.
+fn _fz_insert(b, n, cap, at, src, len) {
+    if (n + len >= cap) { return n; }
+    var i = n - 1;
+    while (i >= at) {
+        store8(b + i + len, load8(b + i));
+        i = i - 1;
+    }
+    i = 0;
+    while (i < len) {
+        store8(b + at + i, load8(src + i));
+        i = i + 1;
+    }
+    return n + len;
+}
+
+# Remove `len` bytes of `b` at `at`. Returns the new length.
+fn _fz_delete(b, n, at, len) {
+    if (at + len > n) { len = n - at; }
+    var i = at + len;
+    while (i < n) {
+        store8(b + i - len, load8(b + i));
+        i = i + 1;
+    }
+    return n - len;
+}
+
+# One mutation of the `n` bytes at `b`. Returns the new length.
+fn _fz_mutate1(b, n, cap) {
+    if (n == 0) {
+        store8(b, _fz_byte());
+        return 1;
+    }
+    var op = _fz_below(7);
+    var at = _fz_below(n);
+    if (op == 0) {
+        store8(b + at, (load8(b + at) & 0xFF) ^ (1 << _fz_below(8)));
+        return n;
+    }
+    if (op == 1) {
+        store8(b + at, _fz_byte());
+        return n;
+    }
+    if (op == 2) { return at; }
+    if (op == 3) { return _fz_delete(b, n, at, 1 + _fz_below(16)); }
+    if (op == 4) {
+        var from = _fz_below(n);
+        var len = 1 + _fz_below(32);
+        if (from + len > n) { len = n - from; }
+        return _fz_insert(b, n, cap, at, b + from, len);
+    }
+    if (op == 5) {
+        var t = _fz_token();
+        return _fz_insert(b, n, cap, at, t, strlen(t));
+    }
+    var d = 0;
+    while (d < 12 && at + d < n) {
+        store8(b + at + d, 48 + _fz_below(10));
+        d = d + 1;
+    }
+    return n;
+}
+
+# Copy a seed into `out` and mutate it. NUL-terminates, and returns the length.
+fn _fz_mutate(seed, slen, out) {
+    var n = slen;
+    if (n > FZ_CAP - 1) { n = FZ_CAP - 1; }
+    memcpy(out, seed, n);
+    var ops = 1 + _fz_below(4);
+    var i = 0;
+    while (i < ops) {
+        n = _fz_mutate1(out, n, FZ_CAP);
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    return n;
+}
+
+# Repair every ustar header's checksum, so a mutation reaches past the first line of defence.
+fn _fz_tar_fix(b, n) {
+    var pos = 0;
+    while (pos + 512 <= n) {
+        if (memeq(b + pos + 257, "ustar", 5) == 1) {
+            var sum = 0;
+            var i = 0;
+            while (i < 512) {
+                if (i >= 148 && i < 156) {
+                    sum = sum + 32;
+                } else {
+                    sum = sum + (load8(b + pos + i) & 0xFF);
+                }
+                i = i + 1;
+            }
+            var d = 5;
+            while (d >= 0) {
+                store8(b + pos + 148 + d, 48 + (sum & 7));
+                sum = sum >> 3;
+                d = d - 1;
+            }
+            store8(b + pos + 154, 0);
+            store8(b + pos + 155, 32);
+        }
+        pos = pos + 512;
+    }
     return 0;
 }
 
+# A small tar with a file, a directory, a symlink and a whiteout.
+fn _fz_tar_seed(out_len) {
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc", 53, 493, 0, 0, 0, 0));
+    vec_push(entries, _tar_entry_new("etc/hosts", 48, 420, 0, 0, 6, "hello\n"));
+    vec_push(entries, _tar_entry_new("link", 50, 511, 0, 0, 0, "etc/hosts"));
+    vec_push(entries, _tar_entry_new("etc/.wh.gone", 48, 420, 0, 0, 0, ""));
+    return _stor_tar_bytes(entries, out_len);
+}
+
+# A one-element vec.
+fn _fz_vec1(s) {
+    var v = vec_new();
+    vec_push(v, s);
+    return v;
+}
+
+# The name of target `t`, or 0 past the last one.
+fn _fz_name(t) {
+    if (t == 0) { return "image_ref"; }
+    if (t == 1) { return "port_spec"; }
+    if (t == 2) { return "port_mappings"; }
+    if (t == 3) { return "ip_pool"; }
+    if (t == 4) { return "volume"; }
+    if (t == 5) { return "www_authenticate"; }
+    if (t == 6) { return "cron_expr"; }
+    if (t == 7) { return "dockerfile"; }
+    if (t == 8) { return "compose"; }
+    if (t == 9) { return "stivafile"; }
+    if (t == 10) { return "ansamblu"; }
+    if (t == 11) { return "manifest"; }
+    if (t == 12) { return "state_json"; }
+    if (t == 13) { return "cron_json"; }
+    if (t == 14) { return "tar"; }
+    if (t == 15) { return "gzip"; }
+    if (t == 16) { return "zstd"; }
+    if (t == 17) { return "index"; }
+    return 0;
+}
+
+# The valid input target `t` starts from. Writes its length through `out_len`.
+fn _fz_seed(t, out_len) {
+    var s = "";
+    if (t == 0) { s = "ghcr.io:443/org/app:v1@sha256:0123456789abcdef"; }
+    if (t == 1) { s = "127.0.0.1:8080:80/tcp"; }
+    if (t == 2) { s = "8080:80/udp"; }
+    if (t == 3) { s = "10.88.0.0/24"; }
+    if (t == 4) { s = "/host/data:/data:ro"; }
+    if (t == 5) { s = "Bearer realm=\"https://a.io/token\",service=\"a.io\",scope=\"repository:x:pull\""; }
+    if (t == 6) { s = "*/5 0-6 1,15 * 1-5"; }
+    if (t == 7) {
+        s = "FROM alpine:3.20 AS b\nENV A=1 B=\"two words\"\nCOPY a /b\nRUN echo hi\nLABEL k=v\nEXPOSE 80/tcp\nCMD [\"a\"]\n";   #skip-lint
+    }
+    if (t == 8) {
+        s = "services:\n  web:\n    image: nginx\n    command: [\"a\", \"b c\"]\n    ports:\n      - \"80:80\"\n    depends_on: [db]\n  db:\n    image: pg\n    environment:\n      A: \"1\"\n";   #skip-lint
+    }
+    if (t == 9) {
+        s = "[image]\nbase = \"a:1\"\nname = \"b\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"copy\"\nsource = \"x\"\ndestination = \"/y\"\n\n[[steps]]\ntype = \"label\"\nkey = \"a\"\nvalue = \"b\"\n\n[config]\nentrypoint = [\"/a\"]\nexpose = [80]\n";   #skip-lint
+    }
+    if (t == 10) {
+        s = "[services.web]\nimage = \"nginx\"\ncommand = [\"a\"]\nports = [\"80:80\"]\nreplicas = 2\ndepends_on = [\"db\"]\nenv = { A = \"1\" }\n\n[services.web.health_check]\ncommand = [\"true\"]\n\n[services.db]\nimage = \"pg\"\n";   #skip-lint
+    }
+    if (t == 11) {
+        s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"digest\":\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":1},\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"digest\":\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":2}]}";   #skip-lint
+    }
+    if (t == 17) {
+        s = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.index.v1+json\",\"manifests\":[{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size\":3,\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"}}]}";   #skip-lint
+    }
+    if (t == 12) {
+        s = "[{\"id\":\"abc\",\"name\":\"c1\",\"image_id\":\"sha256:aa\",\"image_ref\":\"a:1\",\"state\":\"Running\",\"pid\":42,\"start_ticks\":7,\"created_at\":\"t\",\"config\":{\"command\":[\"a\"],\"env\":{\"A\":\"1\"},\"labels\":{}}}]";   #skip-lint
+    }
+    if (t == 13) {
+        s = "{\"jobs\":[{\"name\":\"j\",\"expr\":\"* * * * *\",\"image\":\"a:1\",\"command\":[\"a\"],\"enabled\":1,\"last_fired_ns\":5}]}";   #skip-lint
+    }
+    if (t == 14) { return _fz_tar_seed(out_len); }
+    if (t == 15 || t == 16) {
+        var tl = alloc(8);
+        var tar = _fz_tar_seed(tl);
+        var out = alloc(load64(tl) + 4096);
+        var n = 0;
+        if (t == 15) {
+            n = _stor_gzip_compress(tar, load64(tl), out, load64(tl) + 4096);
+        } else {
+            n = zstd_compress(tar, load64(tl), out, load64(tl) + 4096);
+        }
+        if (n < 0) { n = 0; }
+        store64(out_len, n);
+        return out;
+    }
+    store64(out_len, strlen(s));
+    return s;
+}
+
+# Write `n` bytes of `b` to `{_fz_root}/name`, replacing what is there.
+fn _fz_put(name, b, n) {
+    var p = _stor_join(_fz_root, name);
+    file_write_all(p, b, n);
+    return p;
+}
+
+# Run target `t` on the `n` NUL-terminated bytes at `b`. Surviving is the whole assertion.
+fn _fz_call(t, b, n) {
+    if (t == 0) { image_ref_parse(b); }
+    if (t == 1) { network_nat_parse_port_spec(b); }
+    if (t == 2) { parse_port_mappings(_fz_vec1(b)); }
+    if (t == 3) { ip_pool_new(b); }
+    if (t == 4) { parse_volume(b); }
+    if (t == 5) { parse_www_authenticate(b); }
+    if (t == 6) { cron_expr_is_valid(b); }
+    if (t == 7) { dockerfile_to_toml(b); }
+    if (t == 8) { compose_yaml_to_toml(b); }
+    if (t == 9) { parse_build_spec(b); }
+    if (t == 10) { parse_ansamblu(b); }
+    if (t == 11) {
+        var v = bayan_json_v_parse_buf(b, n);
+        if (v != 0) {
+            oci_manifest_from_jv(v);
+        }
+    }
+    if (t == 17) {
+        var iv = bayan_json_v_parse_buf(b, n);
+        if (iv != 0) {
+            oci_index_from_jv(iv);
+        }
+    }
+    if (t == 12) {
+        _fz_put("state.json", b, n);
+        container_state_load(_fz_root);
+    }
+    if (t == 13) {
+        _fz_put("cron.json", b, n);
+        cron_store_load(_fz_root);
+    }
+    if (t >= 14 && t <= 16) {
+        var dest = _stor_join(_fz_root, "rootfs");
+        _stor_remove_dir_all(dest);
+        _stor_mkdir_p(dest);
+        if (t == 14) {
+            _fz_tar_fix(b, n);
+            _stor_extract_tar(b, n, dest);
+        }
+        if (t == 15) { _stor_unpack_gz_bytes(b, n, dest); }
+        if (t == 16) { _stor_unpack_zstd_bytes(b, n, dest); }
+    }
+    return 0;
+}
+
+# The body of a forked batch: `FZ_ITERS` mutated inputs against target `t`.
+fn _fz_child(t, round) {
+    var nul = file_open("/dev/null", O_WRONLY, 0);
+    if (nul >= 0) {
+        sys_dup2(nul, 1);
+        sys_dup2(nul, 2);
+    }
+    _fz_s = (t + 1) * 1000003 + round * 7919;
+    var cell = alloc(8);
+    var seed = _fz_seed(t, cell);
+    var slen = load64(cell);
+    var buf = alloc(FZ_CAP + 1);
+    var i = 0;
+    while (i < FZ_ITERS) {
+        var n = _fz_mutate(seed, slen, buf);
+        store64(_fz_shared, n);
+        memcpy(_fz_shared + 8, buf, n);
+        _fz_call(t, buf, n);
+        i = i + 1;
+    }
+    sys_exit(0);
+    return 0;
+}
+
+# Print `s` with no line ending.
+fn _fz_puts(s) {
+    return print(s, strlen(s));
+}
+
+# Save the input in flight for target `t`, and say so.
+fn _fz_report(t, status) {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "build/fuzz-crash-");
+    str_builder_add_cstr(sb, _fz_name(t));
+    str_builder_add_cstr(sb, ".bin");
+    var path = str_cstr(str_builder_build(sb));
+    sys_mkdir("build", 493);
+    file_write_all(path, _fz_shared + 8, load64(_fz_shared));
+    _fz_puts("fuzz: FAIL ");
+    _fz_puts(_fz_name(t));
+    _fz_puts(" wait status ");
+    print_num(status);
+    _fz_puts(": ");
+    println(path);
+    return 0;
+}
+
+# One forked batch. Returns 0 when it ran to the end, else its wait status (-1 for a hang).
+fn _fz_batch(t, round) {
+    var pid = sys_fork();
+    if (pid == 0) { _fz_child(t, round); }
+    if (pid < 0) { return 0 - 1; }
+    var st = alloc(8);
+    var waited = 0;
+    while (waited < FZ_DEADLINE_MS) {
+        var r = sys_waitpid(pid, st, 1);
+        if (r == pid) { return load64(st) & 0xFFFFFFFF; }
+        if (r < 0) { return 0 - 1; }
+        sleep_ms(2);
+        waited = waited + 2;
+    }
+    sys_kill(pid, 9);
+    sys_waitpid(pid, st, 0);
+    return 0 - 1;
+}
+
+# Runs every target, and exits non-zero if any batch crashed or hung.
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
+    _fz_shared = cyr_mmap(0, FZ_CAP + 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, 0 - 1, 0);
+    if (_fz_shared <= 0) {
+        println("fuzz: no shared page");
+        return 2;
+    }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "/tmp/stiva-fuzz-");
+    str_builder_add_int(sb, sys_getpid());
+    _fz_root = str_cstr(str_builder_build(sb));
+    _stor_mkdir_p(_fz_root);
+
+    var env = getenv("STIVA_FUZZ_ROUNDS");
+    if (env != 0) {
+        var want = atoi(env);
+        if (want > 0) { FZ_ROUNDS = want; }
+    }
+
+    var failed = 0;
+    var t = 0;
+    while (_fz_name(t) != 0) {
+        var round = 0;
+        var bad = 0;
+        while (round < FZ_ROUNDS) {
+            var st = _fz_batch(t, round);
+            if (st != 0) {
+                _fz_report(t, st);
+                bad = 1;
+                round = FZ_ROUNDS;
+            }
+            round = round + 1;
+        }
+        if (bad == 0) {
+            _fz_puts("fuzz: ok ");
+            println(_fz_name(t));
+        }
+        failed = failed + bad;
+        t = t + 1;
+    }
+    _stor_remove_dir_all(_fz_root);
+    if (failed != 0) { return 1; }
     println("fuzz: ok");
     return 0;
 }
