@@ -21,8 +21,8 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2193 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 304 · convert 116; run via `cyrius test tests/`), **89** CLI smoke
+**2197 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 363 ·
+mgmt 326 · store 304 · convert 116; run via `cyrius test tests/`), **92** CLI smoke
 assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
@@ -118,7 +118,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.2** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.3** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.13.0** |
 | nein | nftables firewall, NAT, port mapping — pin **1.9.1** |
 | bote-core | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.8.15** |
@@ -231,6 +231,8 @@ dispatched to `completions`). Register new verbs **last**, and use
 Stiva uses these kavach features — keep them wired:
 
 - **Sandbox** — `Sandbox::create`, `exec`, `spawn`, `destroy`
+- **sandbox_exec_argv / sandbox_spawn_argv** — real argv for a command of two or more elements. One
+  element stays a command line: `_rt_is_command_line` says why
 - **SpawnedProcess** — daemon containers (pid, wait, kill, try_wait)
 - **SandboxPolicy** — memory, CPU, PID limits, seccomp, network
 - **SandboxConfig** — hostname, domainname (UTS namespace, OCI v1.2.0)
@@ -319,7 +321,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2193 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2197 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -354,7 +356,7 @@ docs/ (when earned):
 
 ## Testing
 
-**2193 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 359 ·
+**2197 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 363 ·
 mgmt 326 · store 304 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
@@ -370,7 +372,7 @@ whole document, and several callers read that 0 as an empty store (`container.cy
 fresh", `cron.cyr` "treating the schedule as empty"). A writer whose keys come from data must
 iterate a hashmap or de-duplicate first, as `_il_kv_obj` does, and its test must parse what it wrote.
 
-`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**89** assertions
+`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**92** assertions
 against the built binary) — the `.tcyr` files cannot include `main.cyr`.
 
 ```bash

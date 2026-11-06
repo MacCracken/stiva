@@ -23,7 +23,7 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2193 across `tests/*.tcyr` · 89 CLI smoke assertions · 14 benchmarks |
+| Tests | 2197 across `tests/*.tcyr` · 92 CLI smoke assertions · 14 benchmarks |
 | Deps | pinned in [`cyrius.cyml`](../../cyrius.cyml) (`[package].cyrius` and the `[deps.*]` tags); [`state.md`](state.md) lists them and CI checks that list against the manifest. Not restated here. |
 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
@@ -95,35 +95,6 @@ section lists only what 6.6.5 itself changes.
 *(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
 not here. What follows is only what is still open.)*
 
-### Open — `stiva run` loses argument boundaries
-
-`spawn_container` and `exec_container` (`src/runtime.cyr:961`, `:984`) join `spec.command` with spaces,
-as the oracle's `command.join(" ")` did, because `sandbox_exec` and `sandbox_spawn` take one string.
-kavach's `_split_command` then splits that string on spaces and tabs, so an argument holding either
-does not survive. Run against a real Alpine image on 3.1.0 and 3.1.1:
-`run IMG -- /bin/sh -c 'echo one; echo two'` prints an empty line, and
-`run IMG -- /bin/echo 'a  b'` prints `a b`. `run -d` shares the defect. `stiva exec` does not: it goes
-through nsenter with real argv. The argv is intact from the CLI through `state.json` to the spec, and is
-lost only at this call.
-
-The fix needs kavach 3.14.3, which adds `sandbox_exec_argv` and `sandbox_spawn_argv`. That release is
-prepared in the sibling checkout and **not tagged yet**, and an undefined fn is a hard error, so stiva's
-side cannot land first. Once the tag exists:
-
-1. Move `[deps.kavach]` to 3.14.3, then `rm -rf lib cyrius.lock && cyrius deps`, and update the pin in
-   `CLAUDE.md` and `docs/development/state.md`.
-2. In both functions, call the `_argv` form when `sp.command` has two or more elements. ⚠ **One element
-   stays the string form.** `run IMG "/bin/sleeper now"` relies on that split, `scripts/cli-smoke.sh` uses
-   it, and kavach refuses an argv[0] holding a space because its guard reads the first word as the program.
-3. Assert on what the payload observes: a static `argvp` in the smoke fixture that prints each argument
-   it received, on `run` and `run -d`, and that one quoted string is still split.
-
-Measured on a scratch copy against that kavach: 2197 tests and 92 smoke assertions, also under `--dce`;
-putting the old call back fails both. A real Alpine image runs `sh -c 'echo one; echo two'` on both paths.
-
-Still refused after it, by kavach's policy and by name: `$(...)` and `| sh` inside an argument (the
-runtime guard), and a newline in an argument on `run -d`.
-
 ### Open cleanliness item — `accel` cannot be switched off
 
 `cyrius.cyml` declares `samay` and `ai-hwaccel` optional, and `[features]` lets a consumer drop
@@ -136,7 +107,7 @@ two deps are required.
 
 ### Open cleanliness item — `cyrius audit` exits 1 on two counts
 
-At 3.1.1 on cyrius 6.7.18, `fmt` is clean and tests are 2193/0, and `rc = 1` comes from two
+At 3.1.1 on cyrius 6.7.18, `fmt` is clean and tests are 2197/0, and `rc = 1` comes from two
 stages, either of which sets it alone: **147 lint warnings** (the next item) and **492
 undocumented public fns** across the audit's scope (`src tests benches`). Both counts are `rc = 1`
 at any value above zero (`_audit_sweep` in cyrius's `cbt/commands.cyr`). The audit's closing

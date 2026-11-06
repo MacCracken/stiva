@@ -79,8 +79,12 @@ if command -v cc >/dev/null 2>&1; then
     # a real image.
     printf '#include <unistd.h>\nint main(int argc,char**argv){if(argc<2)sleep(30);return 0;}\n' > "$WORK/s.c"
     printf '#include <unistd.h>\nint main(void){write(1,"to-stdout\\n",10);write(2,"to-stderr\\n",10);return 3;}\n' > "$WORK/e.c"
+    # `argvp` prints each argument it received between brackets, so a test reads
+    # what the payload observed rather than what the spec carried.
+    printf '#include <stdio.h>\nint main(int c,char**v){for(int i=1;i<c;i++)printf("[%%s]",v[i]);putchar(10);return 0;}\n' > "$WORK/a.c"
     if cc -static -o "$WORK/rootfs/bin/sleeper" "$WORK/s.c" 2>/dev/null \
-       && cc -static -o "$WORK/rootfs/bin/errw" "$WORK/e.c" 2>/dev/null; then
+       && cc -static -o "$WORK/rootfs/bin/errw" "$WORK/e.c" 2>/dev/null \
+       && cc -static -o "$WORK/rootfs/bin/argvp" "$WORK/a.c" 2>/dev/null; then
         HAVE_PAYLOAD=1
     fi
 fi
@@ -449,6 +453,24 @@ out="$(run build -f "$WORK/Stivafile.dup" -c "$WORK/bctx")"
 assert_contains "a repeated label and port still build" "sha256:" "$out"
 out="$(run build -f "$WORK/Stivafile.child" -c "$WORK/bctx")"
 assert_contains "and the image they built can be derived from" "sha256:" "$out"
+
+group "arguments"
+# Until kavach 3.14.3 stiva could only hand over one string, which was split on
+# spaces and tabs: an argument could hold neither, and an empty one vanished, so
+# `sh -c 'echo one; echo two'` ran `echo`. Each case reads what the payload received.
+if [ "$HAVE_PAYLOAD" -eq 1 ]; then
+    TAB="$(printf '\t')"
+    out="$(run run local/demo:v1 -- /bin/argvp "a  b" "" "c${TAB}d")"
+    assert_contains "run keeps each argument whole" "[a  b][][c${TAB}d]" "$out"
+    run run -d --name argd local/demo:v1 -- /bin/argvp "a  b" "" "c${TAB}d" >/dev/null 2>&1
+    sleep 1
+    out="$(run logs argd)"
+    assert_contains "run -d keeps each argument whole" "[a  b][][c${TAB}d]" "$out"
+    out="$(run run local/demo:v1 "/bin/argvp one two")"
+    assert_contains "one quoted string is still a command line" "[one][two]" "$out"
+else
+    printf '  skip (no static compiler for an in-image payload)\n'
+fi
 
 group "exec"
 # Usage/validation cases run everywhere. The live-exec cases need nsenter AND a

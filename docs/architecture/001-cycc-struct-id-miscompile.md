@@ -5,7 +5,7 @@ NOT re-verified at 6.5.33, 6.6.2, 6.6.10, 6.6.20, 6.7.9 or 6.7.18** — the pin 
 3.0.21, 3.0.23, 3.1.0 and 3.1.1 and no probe was run against any of them, so treat the status as *unknown at the current pin, and
 assume live*.
 
-The full suite (2193 assertions) and the 89 CLI smoke assertions are green at 6.7.18 with the
+The full suite (2197 assertions) and the 92 CLI smoke assertions are green at 6.7.18 with the
 workarounds below still in place. **That is not evidence the bug is gone** — see "the
 expensive lesson" below, where a green probe and a green suite coexisted with live silent
 corruption. Assume live until someone runs the retirement checklist at the end of this

@@ -16,9 +16,9 @@ cyrius test tests/stiva.tcyr
 cyrius bench tests/stiva.bcyr
 ```
 
-**2193 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `registry.tcyr` (421),
-`runpath.tcyr` (359), `mgmt.tcyr` (326), `store.tcyr` (304), `convert.tcyr` (116).
-Plus **89** CLI smoke assertions and **14** benchmarks.
+**2197 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `registry.tcyr` (421),
+`runpath.tcyr` (363), `mgmt.tcyr` (326), `store.tcyr` (304), `convert.tcyr` (116).
+Plus **92** CLI smoke assertions and **14** benchmarks.
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
 > global counter per `assert*()` call and `assert_summary()` prints it.
@@ -73,7 +73,7 @@ many small tests.)
 |------|-------|
 | `tests/stiva.tcyr` (667) | the per-module unit tests — every ported module's `#[cfg(test)]` cases (error, oci, intents, audit, convert, network, image, registry, storage, build, runtime, container, mcp, …) |
 | `tests/registry.tcyr` (421) | the registry client: auth challenge/token cache, manifest resolution, streamed blob fetch with digest verification, blob upload + manifest PUT, discovery. Includes 6 `src/` modules |
-| `tests/runpath.tcyr` (359) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `exec_in_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`), `scan_output` over kavach's externalization gate, and `container_manager_diff` |
+| `tests/runpath.tcyr` (363) | the synchronous **run path** + image store: `generate_spec`, `build_sandbox` (backend cascade / min-score), `exec_container`, `exec_in_container`, `send_signal`, cgroup resolve/quota/limits, security scoring, image store round-trips (real `import`→`index.json`→reconstruct→`remove`/`gc`/`tag`), `scan_output` over kavach's externalization gate, and `container_manager_diff` |
 | `tests/mgmt.tcyr` (326) | orchestration/management: `ansamblu` (TOML parse, DAG ordering, rolling update, scale), `fleet` scheduling + accelerator placement, `cron`, `agent` registration records, `health` policies |
 | `tests/store.tcyr` (304) | **group A**, the store/layout/archive surface: `imagelayout` (OCI config/manifest serde, index descriptors, `_il_parse_full_ref`, platform passthrough), tar hardening (perms, long-name, base-256, traversal/symlink/DoS), OCI whiteouts, `oci-archive`/`docker-archive` save+load, overlay/volume mounts, blob-store integrity. Includes only 6 `src/` modules (error, oci, image, registry, storage, imagelayout) |
 | `tests/convert.tcyr` (116) | `dockerfile_to_toml` (all instruction arms) and `compose_yaml_to_toml`: the four oracle fixtures, BTreeMap-order parity at all five sorted sites, every per-field arm, the `Ok("")` cases, one test per construct bayan rejects, and one per finding from the v3.0.6 adversarial review. Includes only 2 `src/` modules (error, convert) — the cheapest unit here |
@@ -85,7 +85,7 @@ Run one group by grepping its `test_group("...")` label, or run everything with
 
 A `.tcyr` file cannot include `main.cyr` — it has its own entry point. CLI coverage
 therefore lives in `./scripts/cli-smoke.sh`, which drives the **built binary** and
-asserts on its stdout, stderr and exit code (89 assertions). Anything that only
+asserts on its stdout, stderr and exit code (92 assertions). Anything that only
 exists in `main.cyr` — flag registration, verb dispatch, usage strings, exit codes —
 is covered there or not at all.
 

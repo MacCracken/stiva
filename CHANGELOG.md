@@ -9,15 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 Toolchain **6.7.9 → 6.7.18**, every dep to its newest tag, and `[deps.agnodrm]` removed. This is the
 release that reaches sigil's 2026-10-22 audit fixes, which 3.1.0 recorded as out of reach at its pin.
-It carries one source fix: the new bayan turned a parity bug in `build` into an image stiva could
-not read back.
+It carries two source fixes: the new bayan turned a parity bug in `build` into an image stiva could
+not read back, and `stiva run` now keeps each argument whole.
 
-⚠ **Consumers: `dist/stiva.cyr` now needs cyrius ≥ 6.7.17.** It calls `bayan_toml_get_by_cstr` and
-its siblings, which bayan 1.11.0 added: 0 definitions in 6.7.16's `lib/bayan.cyr`, 1 in 6.7.17's.
+⚠ **Consumers: `dist/stiva.cyr` now needs cyrius ≥ 6.7.17 and kavach ≥ 3.14.3.** It calls
+`bayan_toml_get_by_cstr` and its siblings, which bayan 1.11.0 added: 0 definitions in 6.7.16's
+`lib/bayan.cyr`, 1 in 6.7.17's. It also calls `sandbox_exec_argv` and `sandbox_spawn_argv`, which are new
+in kavach 3.14.3, and that release is built on cyrius 6.7.18.
 
 | Dep | 3.1.0 | 3.1.1 | Dep | 3.1.0 | 3.1.1 |
 |---|---|---|---|---|---|
-| sigil | 3.13.11 | **3.13.15** | kavach | 3.14.0 | **3.14.2** |
+| sigil | 3.13.11 | **3.13.15** | kavach | 3.14.0 | **3.14.3** |
 | sakshi | 2.5.8 | **2.5.10** | samay | 1.2.0 | **1.5.1** |
 | libro | 2.11.0 | **2.11.3** | ai-hwaccel | 2.4.2 | **2.5.6** |
 | majra | 2.12.0 | **2.13.0** | cmdit | 1.4.0 | **1.5.0** |
@@ -46,6 +48,27 @@ The other data-keyed writers iterate a hashmap (`_ct_map_to_jv`, the credential 
 so they cannot repeat a key. A scan of everything a full smoke run writes found 0 duplicate keys in
 27 documents across 16 files.
 
+### Fixed — `stiva run` lost argument boundaries
+
+`run` and `run -d` joined the command with spaces, as the oracle's `command.join(" ")` did, because
+kavach took one string. kavach then split that string on spaces and tabs, so an argument could hold
+neither and an empty one vanished. `run IMG -- /bin/sh -c 'echo one; echo two'` ran `sh -c echo` and
+printed an empty line, and `run IMG -- /bin/echo 'a  b'` printed `a b`. `stiva exec` was never affected,
+because it reaches the payload through nsenter with real argv.
+
+kavach 3.14.3 adds `sandbox_exec_argv` and `sandbox_spawn_argv`, and a command of two or more elements
+now goes through them. **One element stays a command line,** split as it always was:
+`run IMG "/bin/sleeper now"` depends on that, and kavach refuses a program path holding a space, because
+its guard reads the first word as the program. A multi-element command whose first element holds a space
+used to be split and run, and is now refused by name.
+
+Still refused, by kavach's policy: `$(...)` and `| sh` anywhere in the command (the runtime guard), and a
+newline on `run -d`. The output gate still applies to what the payload prints.
+
+The tests read what the payload received: a static `argvp` in the smoke fixture prints each argument
+between brackets, on `run` and `run -d`, and `tests/runpath.tcyr` checks which form reaches kavach. Putting
+the old call back fails both.
+
 ### Removed — `[deps.agnodrm]`
 
 agnodrm has held neither LUKS nor dm-verity since its 1.4.4 decomposition: both moved to sigil. No
@@ -70,8 +93,8 @@ nothing else in that module changed.
   it stayed unclaimed and nein's 3.8.9 landed while this manifest said 3.8.15, with a green build.
   `CYRIUS_LOCAL=bote-core` is the local-mode spelling now. CLAUDE.md records the rule.
 - **Release binaries are built with `--dce`.** `release.yml` sets it and development builds do not
-  change. A default build grew to 6,100,128 B from 5,150,216 B, mostly unreachable code (2,973,148 B).
-  `--dce` removes that, for **3,126,432 B**: half a default build, and 39 % below 3.1.0's release
+  change. A default build grew to 6,104,368 B from 5,150,216 B, mostly unreachable code (2,973,309 B).
+  `--dce` removes that, for **3,130,672 B**: half a default build, and 39 % below 3.1.0's release
   binary. At 6.7.9 the same flag declined to compact and saved nothing. It adds about 5 % to build time,
   and benchmarks stay within 2.5 %. `ci.yml`, which gates the release, now runs the suite under
   `CYRIUS_DCE=1` and builds and runs the `--dce` CLI, so a release never ships a shape CI has not built.
@@ -81,7 +104,7 @@ nothing else in that module changed.
 - **`stiva completions`** (cmdit 1.5.0): bash keeps filenames with spaces whole, and fish completes
   files after a subcommand.
 - **`stiva info`** no longer prints a stray `[INFO] detect:` line in the middle of `Accelerators:`.
-- **Tests:** 2188 → 2193, smoke 87 → 89.
+- **Tests:** 2188 → 2197, smoke 87 → 92.
 
 ### Checked — what could have changed without an error
 
@@ -106,10 +129,6 @@ nothing else in that module changed.
   line that `stiva events` reads.
 - **nein 1.9.1 pins bote-core 3.8.9**, and stiva compiles it against 3.8.15, so that pairing is
   tested by stiva's suite and not by nein's.
-- **`stiva run` loses argument boundaries**, so `run IMG -- /bin/sh -c 'echo one; echo two'` does not
-  run what it says. Found while testing the `--dce` binary. It is not new and not DCE: 3.1.0 does the
-  same, and the oracle joined the command with spaces too. `run -d` shares it and `stiva exec` does not.
-  The fix needs kavach 3.14.3, which is not tagged yet. The roadmap has the steps.
 - **The `accel` feature cannot be switched off**, though `cyrius.cyml` said it could. `src/cron.cyr`
   and `src/fleet.cyr` use samay and ai-hwaccel with no gate, so a build without it fails to compile.
   This is not new: a clean export of 3.1.0 fails the same way. The manifest comment is corrected and
@@ -122,10 +141,15 @@ nothing else in that module changed.
 `event_ts_parse` +78 % in the recorded run (see Known). The other eight moved −4.3 % to +1.7 %, ignoring
 `noop`.
 
+The argv fix and kavach 3.14.3 move nothing past the spread. Interleaved on one pinned CPU over five
+rounds, against the same tree without them, every row is +2.6 % or less, where rounds of one build
+differ by 10 % to 18 %. ⚠ The last rows in `bench-history.csv` were recorded on a loaded machine (load
+5.7) and read 4 % to 16 % worse than the run before; they are not a regression.
+
 ### Verified
 
-- `cyrius test tests/`: exit 0, 0 `FAIL` lines, **2193** assertions (stiva 667 · registry 421 · runpath
-  359 · mgmt 326 · store 304 · convert 116). Smoke **89/89**. `cyrius test --features accel`: exit 0.
+- `cyrius test tests/`: exit 0, 0 `FAIL` lines, **2197** assertions (stiva 667 · registry 421 · runpath
+  363 · mgmt 326 · store 304 · convert 116). Smoke **92/92**. `cyrius test --features accel`: exit 0.
 - **CI's own steps, replayed** in a clean copy of the tracked files: all pass, with 27 pin statements
   (agnodrm's two are gone) and 10 dep bundles matching their tags. `cyrius deps --locked` and `--verify`
   pass (94 files), and the lock is byte-identical from empty: 12 commit rows, one version each.
@@ -133,11 +157,13 @@ nothing else in that module changed.
   same digests on the 3.1.0 and 3.1.1 binaries.
 - **CLI output:** 71 of 75 captures match 3.1.0. The other four are the completions and `info` changes
   above.
-- **The `--dce` binary against a default build:** 75 of 75 CLI captures identical, smoke 89/89, `save`
+- **The `--dce` binary against a default build:** 75 of 75 CLI captures identical, smoke 92/92, `save`
   output byte-identical, and a real Alpine image gives the same results through pull, run, `run -d`,
-  ps, exec, top, stats, stop, rmi, load and run. `CYRIUS_DCE=1 cyrius test tests/`: exit 0, 2193. Test
+  ps, exec, top, stats, stop, rmi, load and run. `CYRIUS_DCE=1 cyrius test tests/`: exit 0, 2197. Test
   binaries compact as the release does (`convert.tcyr`: 5,738,224 → 2,428,656 B), and `--dce` output is
   byte-identical run to run.
+- **`run` against a real Alpine image, on the `--dce` bytes:** `sh -c 'echo one; echo two'` prints both
+  lines on `run` and `run -d`, and `a  b`, an empty argument and a tab each arrive as one argument.
 - `fmt` is clean and `src/` lints at 0. `cyrius audit` stays `rc = 1` on the same two counts, 147 lint
   warnings in `tests/` and 492 undocumented public fns.
 - **aarch64** compiles, to 7,029,472 B, and was not run. Nothing here ran on GitHub's runners.

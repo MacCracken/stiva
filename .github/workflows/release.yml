@@ -50,7 +50,7 @@ jobs:
         run: cyrius deps
 
       - name: Build
-        # --dce removes what nothing reaches: 6,100,128 -> 3,126,432 B at 3.1.1, and
+        # --dce removes what nothing reaches: 6,104,368 -> 3,130,672 B at 3.1.1, and
         # the bytes are reproducible. Only this build sets it; ci.yml's gate runs the
         # same shape, so a release never ships one CI has not built.
         run: |

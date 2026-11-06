@@ -288,6 +288,40 @@ fn test_exec_container_noop() {
     return 0;
 }
 
+# The noop backend takes a command line, so it shows which form the spec reached
+# kavach in: it refuses an argument real argv would keep, and only real argv can
+# be refused. The run itself is covered against a real payload in cli-smoke.sh.
+fn test_exec_container_argv_forms() {
+    test_group("exec_container_argv_forms");
+    kavach_init();
+    assert_eq(_rt_is_command_line(_rp_cmd1("/bin/sleeper now")), 1, "one element is a command line");
+    assert_eq(_rt_is_command_line(_rp_cmd2("/bin/echo", "x")), 0, "two elements are argv");
+    var cfg: ContainerConfig = container_config_default();
+    cfg.backend = "noop";
+    cfg.command = _rp_cmd1("echo a  b");
+    var sp = generate_spec(_rt_make_container(cfg), "/rootfs");
+    assert(exec_container(sp) != 0, "one element runs as a command line");
+    var cfg2: ContainerConfig = container_config_default();
+    cfg2.backend = "noop";
+    cfg2.command = _rp_cmd2("echo", "a  b");
+    var sp2 = generate_spec(_rt_make_container(cfg2), "/rootfs");
+    assert_eq(exec_container(sp2), 0, "two elements reach kavach as argv, never flattened");
+    return 0;
+}
+
+fn _rp_cmd1(a) {
+    var v = vec_new();
+    vec_push(v, a);
+    return v;
+}
+
+fn _rp_cmd2(a, b) {
+    var v = vec_new();
+    vec_push(v, a);
+    vec_push(v, b);
+    return v;
+}
+
 fn test_exec_container_bad_backend() {
     test_group("exec_container_bad_backend");
     kavach_init();
@@ -1539,6 +1573,7 @@ fn main() {
     test_build_sandbox_fallback();
     test_build_sandbox_min_score_none();
     test_exec_container_noop();
+    test_exec_container_argv_forms();
     test_exec_container_bad_backend();
     test_scan_output_clean_passes();
     test_scan_output_blocks_private_key();

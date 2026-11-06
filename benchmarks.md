@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-11-06T07:52:12Z** — commit `2ed9283`
+Latest: **2026-11-06T08:58:08Z** — commit `c3c0b07`
 
-Tracking: `3808225` (baseline) → `d1d5079` (mid) → `2ed9283` (current)
+Tracking: `3808225` (baseline) → `8b70d84` (mid) → `c3c0b07` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`d1d5079`) | Current (`2ed9283`) |
+| Benchmark | Baseline (`3808225`) | Mid (`8b70d84`) | Current (`c3c0b07`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 6.840 µs **-5%** | 5.869 µs **-19%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.096 µs **-5%** | 13.217 µs **-16%** |
-| `compose_yaml_to_toml` | — | 28.742 µs | 25.914 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.318 ms | 1.386 ms |
-| `flatten_layers_2x60_files_4kib` | — | 1.382 ms | 1.530 ms |
-| `event_json_build` | — | 5.955 µs | 5.385 µs |
-| `event_log_append` | — | 7.803 µs | 8.014 µs |
-| `event_ts_parse` | — | 1.583 µs | 2.416 µs |
-| `gzip_compress_2mib` | — | — | 35.772 ms |
-| `gzip_decompress_2mib` | — | — | 6.860 ms |
-| `unpack_layer_gz_20_files_4kib` | — | — | 835.449 µs |
-| `build_copy_layer_20_files_4kib` | — | — | 2.568 ms |
-| `exec_capture2_trivial_child` | — | — | 2.095 ms |
+| `oci_config_build+serialize` | 7.203 µs | 7.175 µs | 5.613 µs **-22%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.733 µs | 13.853 µs **-12%** |
+| `compose_yaml_to_toml` | — | 29.351 µs | 30.174 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.401 ms | 1.512 ms |
+| `flatten_layers_2x60_files_4kib` | — | 1.471 ms | 1.755 ms |
+| `event_json_build` | — | 6.143 µs | 5.620 µs |
+| `event_log_append` | — | 8.115 µs | 8.226 µs |
+| `event_ts_parse` | — | 1.710 µs | 2.721 µs |
+| `gzip_compress_2mib` | — | — | 38.491 ms |
+| `gzip_decompress_2mib` | — | — | 7.196 ms |
+| `unpack_layer_gz_20_files_4kib` | — | — | 877.525 µs |
+| `build_copy_layer_20_files_4kib` | — | — | 2.737 ms |
+| `exec_capture2_trivial_child` | — | — | 2.048 ms |
 
 ---
 

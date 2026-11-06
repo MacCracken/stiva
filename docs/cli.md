@@ -78,6 +78,12 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 | `-w, --workdir <DIR>` | ⛔ **Accepted and silently ignored.** Registered, stored on the spec, and never read — `build_sandbox` does not call `config_workdir` and the OCI spec hardcodes `"cwd":"/"`. Roadmap v3.1.0 item 10 |
 | `-d, --detach` | Run detached over kavach `sandbox_spawn`; prints the container id and returns |
 
+**Arguments.** Two or more words after the image are the payload's argv, and each reaches it as one
+argument, so `stiva run IMG -- /bin/sh -c 'echo one; echo two'` runs as written. One word is a command
+line, split on spaces and tabs with no quote handling, as in `stiva run IMG "/bin/sleeper now"`. Either
+way kavach's runtime guard reads the command and refuses `$(...)` and `| sh` anywhere in it. `run -d`
+also refuses a newline, and a program path may not hold a space or a tab.
+
 > These four are the **complete** set `src/main.cyr` registers for `run`. Port mapping
 > (`-p`), env (`-e`) and secret injection (`-s`) are **not** wired — passing them is a
 > usage error. Secret injection is roadmap v3.1.0 item 1 (containers currently get no

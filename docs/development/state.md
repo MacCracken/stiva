@@ -23,8 +23,8 @@
 
 ## Tests
 
-**2193** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 304 · convert 116 — plus **89** CLI smoke assertions
+**2197** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 363 ·
+mgmt 326 · store 304 · convert 116 — plus **92** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 and **14** benchmarks.
 
@@ -39,7 +39,7 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.13.15 | kavach | 3.14.2 |
+| sigil | 3.13.15 | kavach | 3.14.3 |
 | sakshi | 2.5.10 | samay | 1.5.1 (optional) |
 | libro | 2.11.3 | ai-hwaccel | 2.5.6 (optional, on by default) |
 | majra | 2.13.0 | cmdit | 1.5.0 |

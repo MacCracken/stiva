@@ -14153,6 +14153,8 @@ fn build_sandbox(spec) {
 }
 
 # Join a vec of cstrs with `sep` into a fresh heap cstr (rust-old: command.join(" ")).
+# The run paths use it for their log line, and hand it to kavach only for a
+# one-element command: see _rt_is_command_line.
 #[must_use]
 fn _rt_join(v, sep) {
     var n = vec_len(v);
@@ -14179,6 +14181,16 @@ fn _rt_join(v, sep) {
     }
     store8(out + pos, 0);
     return out;
+}
+
+# 1 when `command` is one element: a command line, which kavach splits on spaces
+# and tabs. That is what `run IMG "/bin/sleeper now"` has always meant. Two or
+# more elements are real argv, and each reaches the payload as one argument (the
+# oracle joined and re-split those too, so `sh -c 'a; b'` could not work).
+#[must_use]
+fn _rt_is_command_line(command) {
+    if (vec_len(command) == 1) { return 1; }
+    return 0;
 }
 
 # ── One-shot exec (rust-old: exec_container) ──────────────────────
@@ -14210,7 +14222,12 @@ fn spawn_container(spec, log_path) {
     var sb = build_sandbox(spec);
     if (sb == 0) { return 0; }   # error already printed by build_sandbox
 
-    var handle = sandbox_spawn(sb, command, log_path);
+    var handle = 0;
+    if (_rt_is_command_line(sp.command) == 1) {
+        handle = sandbox_spawn(sb, command, log_path);
+    } else {
+        handle = sandbox_spawn_argv(sb, sp.command, log_path);
+    }
     if (handle == 0) {
         # kavach prints the specific reason (guard violation, a policy it
         # cannot honour, fork failure), so do not paper over it with a generic
@@ -14233,7 +14250,12 @@ fn exec_container(spec) {
     var sb = build_sandbox(spec);
     if (sb == 0) { return 0; }   # error already printed by build_sandbox
 
-    var r = sandbox_exec(sb, command);
+    var r = 0;
+    if (_rt_is_command_line(sp.command) == 1) {
+        r = sandbox_exec(sb, command);
+    } else {
+        r = sandbox_exec_argv(sb, sp.command);
+    }
     if (r == 0) {
         sakshi_error("sandbox execution failed", strlen("sandbox execution failed"));
         stiva_err_print(STIVA_ERR_SANDBOX, "sandbox execution failed");
