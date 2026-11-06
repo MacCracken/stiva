@@ -16,7 +16,7 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.6.20** (see `cyrius.cyml`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.7.9** (see `cyrius.cyml`).
 - Nothing else. AGNOS dependencies are resolved **by git tag** from
   `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote`, `agnodrm`,
   `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
@@ -37,7 +37,7 @@ parity oracle; do not edit it.
 | Resolve deps | `cyrius deps` |
 | Vendor the stdlib subset into `lib/` | `cyrius lib sync` (after editing `[deps].stdlib`) |
 | Build the binary | `cyrius build src/main.cyr build/stiva` |
-| Run the full test suite | `cyrius tests tests/` (all `tests/*.tcyr`) |
+| Run the full test suite | `cyrius test tests/` (all `tests/*.tcyr`) |
 | Run one test file | `cyrius test tests/stiva.tcyr` |
 | Benchmarks | `cyrius bench tests/stiva.bcyr` |
 | Format check (per file) | `cyrius fmt <file.cyr> --check` |
@@ -78,7 +78,7 @@ compare the bodies before calling it benign.
   but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
   what catches this.
 - **The cycc struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and has
-  not been re-verified at the 6.6.20 pin — assume live.** A typed
+  not been re-verified at the 6.7.9 pin — assume live.** A typed
   `var x: T = p; x.field` can read garbage **silently**, and it varies per function *and* per
   compilation unit. The raw-offset accessors in hot paths (`_img_id`, `_layer_digest`,
   `load64(p + N)`, …) are deliberate workarounds — do not "clean them up". When a test needs

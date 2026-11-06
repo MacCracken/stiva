@@ -53,7 +53,7 @@ echo ""
 # Run the full test suite (timing + assertion count).
 echo "--- Test suite timing ---"
 TEST_START=$(date +%s%N)
-TEST_OUTPUT=$(cyrius tests tests/ 2>&1 || true)
+TEST_OUTPUT=$(cyrius test tests/ 2>&1 || true)
 TEST_END=$(date +%s%N)
 TEST_MS=$(( (TEST_END - TEST_START) / 1000000 ))
 echo "$TEST_OUTPUT" | grep -E '^[0-9]+ passed, [0-9]+ failed' || true

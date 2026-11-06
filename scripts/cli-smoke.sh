@@ -4,7 +4,7 @@
 # main.cyr ends in `var exit_code = main(); syscall(60, exit_code);`, so it
 # cannot be included in a .tcyr unit: any test file that included it would run
 # the CLI and exit before reaching its own assertions. Every other module is
-# covered by `cyrius tests tests/`; the CLI handlers are covered here or not at
+# covered by `cyrius test tests/`; the CLI handlers are covered here or not at
 # all. That gap is not theoretical — the v3.0.7 §C work shipped `logs` and
 # `get_rootfs` resolving the container NAME where they needed the ID, and only a
 # binary smoke test caught it.

@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 [build]
 entry = "src/main.cyr"
@@ -122,28 +122,28 @@ stdlib = [
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 # path = "../sigil"   # see "Local dep development" above
-tag = "3.13.10"
+tag = "3.13.11"
 modules = ["dist/sigil.cyr"]
 
 # Structured tracing (libro's transitive).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
 # path = "../sakshi"   # see "Local dep development" above
-tag = "2.5.7"
+tag = "2.5.8"
 modules = ["dist/sakshi.cyr"]
 
 # Audit-chain crypto tools (bote's + nein's transitive).
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
 # path = "../libro"   # see "Local dep development" above
-tag = "2.10.8"
+tag = "2.11.0"
 modules = ["dist/libro.cyr"]
 
 # Job queue, heartbeat FSM, pub/sub — fleet / health / ansamblu / container.
 [deps.majra]
 git = "https://github.com/MacCracken/majra.git"
 # path = "../majra"   # see "Local dep development" above
-tag = "2.9.3"
+tag = "2.12.0"
 modules = ["dist/majra.cyr"]
 
 # MCP core (JSON-RPC 2.0, tool registry, structured output) — mcp. `bote-core`
@@ -152,14 +152,14 @@ modules = ["dist/majra.cyr"]
 [deps.bote]
 git = "https://github.com/MacCracken/bote.git"
 # path = "../bote"   # see "Local dep development" above
-tag = "3.3.17"
+tag = "3.4.10"
 modules = ["dist/bote-core.cyr"]
 
 # nftables firewall, NAT, port mapping — network/nat + network/manager.
 [deps.nein]
 git = "https://github.com/MacCracken/nein.git"
 # path = "../nein"   # see "Local dep development" above
-tag = "1.7.1"
+tag = "1.8.0"
 modules = ["dist/nein.cyr"]
 
 # Sandbox isolation — runtime + container (Sandbox, SandboxPolicy/Config,
@@ -167,7 +167,7 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 # path = "../kavach"   # see "Local dep development" above
-tag = "3.13.3"
+tag = "3.14.0"
 modules = ["dist/kavach.cyr"]
 
 # ── samay + ai-hwaccel — declared, pinned, and DEFAULT-OFF ────────
@@ -183,18 +183,12 @@ modules = ["dist/kavach.cyr"]
 # The two historical objections are both dead. The identifier-cap warning below
 # was written against cycc's 262144-entry buffer; 6.4.76 raised it to 524288 and
 # the worst unit with `accel` on measures 276,898 (52.8%) — a full
-# `cyrius tests --features accel` run passes with no splitting. The size
+# `cyrius test --features accel` run passes with no splitting. The size
 # objection (~279 KB reaching every consumer of dist/stiva.cyr) is real but not
 # material for a container runtime.
 #
 # They stay declared `optional` so the feature can still be switched off by a
 # consumer that genuinely wants neither.
-#
-# NOTE: `path` OVERRIDES `tag` — a local sibling checkout wins outright. That is
-# how kavach 3.8.1 arrived here while this file still said 3.7.1. `cyrius.lock`
-# records only bare `<sha256>  lib/<file>` lines (no dep name / version / rev),
-# so it cannot detect the substitution; `git diff cyrius.lock` after
-# `cyrius deps` is the only reliable check.
 [features]
 default = ["accel"]
 accel = ["samay", "ai-hwaccel"]
@@ -203,7 +197,7 @@ accel = ["samay", "ai-hwaccel"]
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 # path = "../samay"   # see "Local dep development" above
-tag = "1.1.7"
+tag = "1.2.0"
 modules = ["dist/samay.cyr"]
 optional = true
 
@@ -221,31 +215,24 @@ optional = true
 
 # ── Local dep development ────────────────────────────────
 #
-# Every `path = "../<dep>"` override is COMMENTED OUT, deliberately.
+# Since cyrius 6.7.6 a default build always builds the tag. A `path` beside
+# `git` / `tag` is used only in local mode: uncomment it and run with
+# `CYRIUS_LOCAL=<dep>` or `CYRIUS_LOCAL=1`. Local mode resolves into
+# build/local-deps/lib/, leaves lib/ and cyrius.lock alone, and prints how far the
+# sibling is past the tag. Measured at 6.7.9 with a sibling cmdit at 1.5.0 and the
+# tag at 1.4.0: a default `cyrius deps` vendors 1.4.0 with the `path` line live.
 #
-# A `path` override silently WINS over its `tag`, and `cyrius.lock` records no
-# dep name or version, so nothing detects the substitution. The practical
-# consequence, observed: the committed lock described whatever the sibling
-# checkouts happened to be, `~/Repos/sakshi` sat 3 commits past its 2.4.6 tag,
-# and every local build and test ran against a sakshi that exists at no tag —
-# while CI, which has no siblings, resolved the tag and got different bytes.
-# This is the same mechanism by which kavach 3.8.1 once arrived here unannounced
-# while this file still said 3.7.1.
+# Below 6.7.6 a `path` silently won over its tag. That is how kavach 3.8.1 once
+# arrived here while this file said 3.7.1, and why every local build once ran
+# against a sakshi that existed at no tag.
 #
-# With the overrides off, `cyrius deps` resolves from the tags on every machine,
-# so the lock means one thing and CI's build is the build.
-#
-# To develop a dep alongside stiva: uncomment its `path` line, work, then tag
-# and release the dep and bump the `tag` here before committing the lock. Do not
-# commit a lock produced with an override active — the CI guard in
-# .github/workflows/ci.yml compares the dep bundles against the tags and will
-# reject it, naming the file.
+# When the dep change is ready, tag and release it, then bump the `tag` here.
 
 # LUKS + dm-verity — encrypted.
 [deps.agnodrm]
 git = "https://github.com/MacCracken/agnodrm.git"
 # path = "../agnodrm"   # see "Local dep development" above
-tag = "1.6.3"
+tag = "1.7.0"
 modules = ["dist/agnodrm.cyr"]
 
 # CLI / argument parsing (getopt-long + verb dispatch) — src/main.cyr registers
@@ -256,5 +243,5 @@ modules = ["dist/agnodrm.cyr"]
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
 # path = "../cmdit"   # see "Local dep development" above
-tag = "1.2.6"
+tag = "1.4.0"
 modules = ["dist/cmdit.cyr"]

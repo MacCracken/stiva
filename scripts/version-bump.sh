@@ -55,6 +55,6 @@ Still to do by hand:
   - CHANGELOG.md      — add a '## [$NEW_VERSION] — <date>' section
   - README.md / CLAUDE.md — current-version statements (leave history alone)
   - zugot recipe      — marketplace/stiva.cyml 'version = "$NEW_VERSION"'
-  - rebuild + verify  — cyrius build src/main.cyr build/stiva && cyrius tests tests/
+  - rebuild + verify  — cyrius build src/main.cyr build/stiva && cyrius test tests/
                         then confirm: ./build/stiva --version
 EOF

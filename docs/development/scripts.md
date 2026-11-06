@@ -36,7 +36,7 @@ Benchmark runner that measures test suite timing and release build timing, appen
 ```
 
 **What it measures:**
-- **Test suite time** — `cyrius tests tests/` wall-clock duration (ms)
+- **Test suite time** — `cyrius test tests/` wall-clock duration (ms)
 - **Build time** — `cyrius build src/main.cyr build/stiva` wall-clock duration (ms)
 - **Test count** — number of passing tests
 - **Lines of code** — total `.cyr` lines in `src/`

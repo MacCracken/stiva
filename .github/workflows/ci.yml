@@ -37,9 +37,9 @@ jobs:
         run: cyrius deps
 
       - name: Verify the dep bundles match the pinned tags
-        # A local `path = "../<dep>"` override SILENTLY WINS over the `tag` pin —
-        # that is how kavach 3.8.1 once arrived unannounced — and cyrius.lock
-        # records no dep name or version, so it cannot detect the substitution.
+        # Below cyrius 6.7.6 a local `path = "../<dep>"` override silently won over
+        # the `tag` pin, which is how kavach 3.8.1 once arrived unannounced. A default
+        # build now always builds the tag, so what this catches is a stale lock.
         #
         # Scoped to the files a [deps.*] entry OWNS (its `modules` basenames):
         #

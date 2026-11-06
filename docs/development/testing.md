@@ -4,7 +4,7 @@
 
 ```bash
 # All tests (every tests/*.tcyr file)
-cyrius tests tests/
+cyrius test tests/
 
 # A single test file
 cyrius test tests/stiva.tcyr
@@ -79,7 +79,7 @@ many small tests.)
 | `tests/convert.tcyr` (116) | `dockerfile_to_toml` (all instruction arms) and `compose_yaml_to_toml`: the four oracle fixtures, BTreeMap-order parity at all five sorted sites, every per-field arm, the `Ok("")` cases, one test per construct bayan rejects, and one per finding from the v3.0.6 adversarial review. Includes only 2 `src/` modules (error, convert) — the cheapest unit here |
 
 Run one group by grepping its `test_group("...")` label, or run everything with
-`cyrius tests tests/`.
+`cyrius test tests/`.
 
 ## Testing `src/main.cyr`
 
@@ -97,7 +97,7 @@ was found.
 ## Writing tests under the cycc struct-id miscompile
 
 The struct-id 20/21 ↔ SIMD-sentinel miscompile was **last verified live at 6.4.78 and has
-not been re-verified at the current 6.6.20 pin — assume live**: a typed
+not been re-verified at the current 6.7.9 pin — assume live**: a typed
 `var x: T = p; x.field` can silently read garbage, and it varies per function *and*
 per compilation unit. Two consequences for tests:
 

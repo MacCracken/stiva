@@ -14,7 +14,7 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.0.23
+## Where stiva is — v3.1.0
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
@@ -29,8 +29,8 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
 
 - **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
-  it has not been re-verified at any later pin, including the cyrius 6.6.20 pin in force at
-  v3.0.23, so assume live.** A typed
+  it has not been re-verified at any later pin, including the cyrius 6.7.9 pin in force at
+  v3.1.0, so assume live.** A typed
   `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
@@ -95,9 +95,19 @@ section lists only what 6.6.5 itself changes.
 *(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
 not here. What follows is only what is still open.)*
 
+### Open — sigil's 2026-10-22 audit fixes need cyrius 6.7.18
+
+sigil 3.13.14 fixes CYRIUS-2026-0042 (X.509 nameConstraints were never read) and CYRIUS-2026-0040
+(ChaCha20-Poly1305 accepted a forged record when two threads shared a crypto lane). Neither is in
+this pin, and no dep tag can bring them, because `lib/sigil.cyr` is the toolchain's fold. Run at
+6.7.9 with `sigil` out of `[deps].stdlib` and `[deps.sigil]` at 3.13.15: `lib/sigil.cyr` stays
+3.13.11, with 0 `name_constraints` references. The check also needs cyrius's native verifier to
+call it: 0 references in `lib/tls_native*.cyr` at 6.7.9, 4 at 6.7.18. Native TLS is the default,
+so 0042 is on stiva's HTTPS registry path. 0040 needs threads, which `src/` does not create.
+
 ### Open cleanliness item — `cyrius audit` exits 1 on two counts
 
-At 3.0.23 on cyrius 6.6.20, `fmt` is clean and tests are 2188/0, and `rc = 1` comes from two
+At 3.1.0 on cyrius 6.7.9, `fmt` is clean and tests are 2188/0, and `rc = 1` comes from two
 stages, either of which sets it alone: **147 lint warnings** (the next item) and **492
 undocumented public fns** across the audit's scope (`src tests benches`). Both counts are `rc = 1`
 at any value above zero (`_audit_sweep` in cyrius's `cbt/commands.cyr`). The audit's closing
@@ -123,6 +133,9 @@ fell from 163 with no test line changing to fix it.
 ---
 
 ## v3.1.0 — secrets, interactivity, and mobility
+
+> The 3.1.0 release itself is the move to cyrius 6.7.9 and carries **none** of the items below.
+> They stay open and keep these numbers, because `src/` and the docs cite them as "v3.1.0 item N".
 
 > ⛔ **REWRITTEN 2026-08-21 after an adversarial re-audit. The previous version of this section
 > claimed eight items were blocked on upstream releases. ZERO of them were.** Seven were never
@@ -299,7 +312,7 @@ pre-warm) unless that run goes 9/9 without one. Then a mutex on the token cache
 (`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl` scratch), and a
 fixed 4-worker pool with layer order taken from the descriptor list.
 ⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn — that is the
-struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.6.20.
+struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.7.9.
 
 ### 9. Wire `RuntimeSpec.mounts` — NEW, and it gates more than it looks
 

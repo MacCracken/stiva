@@ -5,6 +5,123 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-11-05 — cyrius 6.7.9, the 6.7 language line
+
+Toolchain **6.6.20 → 6.7.9**, and every dep with it. **`src/` needed no change** beyond the version
+string. This is a minor because of what it asks of consumers: bote-core 3.4.x, which stiva and nein
+both resolve, needs cyrius ≥ 6.7.2 (measured by bote 3.4.9), so a consumer of `dist/stiva.cyr` must
+be on 6.7.2 or later.
+
+None of the roadmap's **v3.1.0 items** are in this release. They stay open under their numbers, and
+the roadmap's heading now says so.
+
+| dep | was | now | its `cyrius` pin | | dep | was | now | its `cyrius` pin |
+|---|---|---|---|---|---|---|---|---|
+| sigil | 3.13.10 | **3.13.11** | 6.7.5 | | kavach | 3.13.3 | **3.14.0** | 6.7.9 |
+| sakshi | 2.5.7 | **2.5.8** | 6.7.5 | | samay | 1.1.7 | **1.2.0** | 6.7.9 |
+| libro | 2.10.8 | **2.11.0** | 6.7.9 | | ai-hwaccel | 2.4.2 | 2.4.2 | 6.6.20 |
+| majra | 2.9.3 | **2.12.0** | 6.7.9 | | agnodrm | 1.6.3 | **1.7.0** | 6.7.9 |
+| bote | 3.3.17 | **3.4.10** | 6.7.9 | | cmdit | 1.2.6 | **1.4.0** | 6.7.9 |
+| nein | 1.7.1 | **1.8.0** | 6.7.9 | | | | | |
+
+The transitive `patra` (1.15.2 → 1.16.0) and `bayan` (1.5.12 → 1.5.13) follow.
+
+**sigil and sakshi are deliberately not their newest tags on this pin** (3.13.15 and 2.5.10). stiva
+compiles the toolchain's fold of each, and 6.7.9 folds 3.13.11 and 2.5.8, so a newer tag would name
+a version that does not build, the mismatch 3.0.23 removed. kavach 3.14.0 and nein 1.8.0 pin sigil
+the same way, and samay 1.2.0 states the same rule for bayan. libro 2.11.0 asks for sigil 3.13.12;
+the resolver reports `3.13.11 (the root) resolved first`. **ai-hwaccel stays at 2.4.2:** no release
+targets 6.7.9, 2.5.0 moves to 6.7.18, and samay 1.2.0 and kavach 3.14.0 both use 2.4.2.
+
+Regenerated from empty (`rm -rf lib cyrius.lock && cyrius deps`): 14 commit rows, one per dep, and
+`cyrius deps --verify` reports 87 verified, 0 failed. Every vendored bundle is byte-identical to its
+tag's `dist/`, and all 113 `.cyr` files in the local 6.7.9 snapshot match cyrius's `6.7.9` tag.
+`cyrius.lock` gains the `cyrius 6.7.9` trailer line that 6.7.x writes.
+
+### Corrected — two things the 3.0.23 entry got wrong
+
+Both entries above now carry a note pointing here.
+
+- **"Only a move to the 6.7.x line brings sigil's audit fixes" was too broad: it takes 6.7.18.**
+  3.0.23 read sigil 3.13.14's own `cyrius` pin (6.7.9) as the floor, but what compiles is the fold,
+  and the folds run 6.7.9 → 3.13.11, 6.7.10 → 3.13.12, 6.7.16 → 3.13.13, 6.7.18 → 3.13.15. See
+  *Known / not fixed*.
+- **"A uutils-coreutils payload exits 1 under kavach's pinned exec" does not apply to stiva
+  containers.** A child that enters a rootfs execs by path, so the `/dev/fd/N` name that uutils
+  refuses never occurs. 3.0.23 repeated kavach's known issue without testing stiva's path. Measured
+  with a static payload printing `getauxval(AT_EXECFN)` through real `stiva run` and `run -d`, on
+  the 3.0.23 binary and on this one: `AT_EXECFN=/bin/probe` in all four runs. No real uutils image
+  was run. kavach 3.14.0 fixes the non-rootfs case upstream.
+
+### Changed
+
+- **`cyrius test tests/` replaces `cyrius tests tests/`** in the docs and `scripts/bench.sh`. 6.7.9
+  warns that `cyrius tests` goes in the next release, and at 6.7.12 it is an unknown command, which
+  would have broken `bench.sh`. Checked before relying on it: with one deliberate failure,
+  `cyrius test tests/` and bare `cyrius test` both exit 1 and print the same `  FAIL:` lines.
+- **`path` overrides no longer win (cyrius 6.7.6).** A default build always builds the tag; a `path`
+  is used only under `CYRIUS_LOCAL`, which resolves into `build/local-deps/lib/` and leaves `lib/`
+  and the lock alone. CLAUDE.md, `cyrius.cyml` and `ci.yml` said a `path` "silently wins"; they now
+  describe this. Measured with a live `path` to a cmdit sibling at 1.5.0 and the tag at 1.4.0: a
+  default `cyrius deps` vendors 1.4.0, and `CYRIUS_LOCAL=cmdit` prints `CI builds 1.4.0`.
+- **CLAUDE.md's dep-selection rule gains the fold exception** described above.
+- **CLI errors name what was typed**, through cmdit 1.3.3: `stiva run: unknown flag: --nosuchflag`,
+  where 3.0.23 printed `stiva run: unknown flag`.
+- `dist/stiva.cyr` regenerated (version header only). `dist/stiva.deps` is unchanged at 2 leaves.
+
+### Checked — 6.7.x changes that alter meaning without an error
+
+`src/`, `tests/` and the benches were swept with strings and comments stripped:
+
+- **6.7.3: `!` is a real operator.** It was silently dropped before, so `if (!ok)` meant `if (ok)`.
+  No lone `!` anywhere.
+- **6.7.9: unary `-` / `~` on a constant binds tighter.** No unparenthesised case. The two `~` uses,
+  both in `src/network_pool.cyr`, are parenthesised over non-constants.
+- **6.7.0: `impl` `self`, and `var q: T = p` copying from a `*T`.** No `impl`, no `self`, no `*T`.
+- **6.7.3 `bool`, 6.7.6 `f32`, 6.7.8 narrow `*T` and signed slices.** None declared.
+- **Compile-time refusals pass:** the reserved words, 6.7.7's arity check on every forward call, and
+  6.7.9's unmatched `}`, which used to end a file silently. So no definition had been dropped.
+- **6.6.20's last-definition binding.** Still the same 3 duplicates. `result_print_err` and
+  `wrap_syscall` differ from sigil's only by prefix, over the same error layout, and the only
+  caller of either remains the dead `secureboot_enroll_key`.
+- **Dep APIs.** Across 9 dep bundles and 26 stdlib leaves, no function `src/` calls was removed or
+  changed signature, and 24 changed body. Five are not cmdit's: `chb_list_by_status` changes
+  allocator into a vec `vec_len` still reads, `pubsub_publish` gains a comment, and the bayan three
+  are `bayan_toml_parse` reporting a refused allocation and two parsers sizing a state buffer by
+  name. 19 are cmdit's refactor, checked by output rather than read one by one, below.
+- **CLI output, 3.0.23 binary against this one:** `--help`, each of the 36 verbs' `--help`, the
+  three completion scripts and a bad flag on 35 verbs, 75 outputs. After normalizing timestamps and
+  the version, the only difference is the error line above.
+- **bote 3.4.5 / 3.4.8 are marked Breaking, and neither reaches stiva:** it calls six schema and
+  tool-definition helpers with `cstring`s and registers through no dispatcher. bote's own audit
+  lists stiva as unaffected. **agnodrm 1.7.0 lists an unfixed HIGH (`update_rollback`):** `src/`
+  calls nothing in agnodrm.
+
+### Known / not fixed
+
+- ⚠ **sigil's 2026-10-22 audit fixes are not in this pin, and no dep tag can bring them.** Tried at
+  6.7.9 with `sigil` out of `[deps].stdlib` and `[deps.sigil]` at 3.13.15: `lib/sigil.cyr` stayed
+  3.13.11. The native verifier must call the new check too: 0 `name_constraints` references in
+  `lib/tls_native*.cyr` at 6.7.9, 4 at 6.7.18. CYRIUS-2026-0042 therefore stays reachable on HTTPS
+  registry connections until the pin reaches 6.7.18. CYRIUS-2026-0040 needs threads, which `src/`
+  does not create. Tracked in the roadmap.
+- **`run -d` still has no `/proc`:** measured `PROC_MOUNTED=0` detached, `1` foreground, on both
+  binaries. Roadmap v3.1.0 item 9 covers it. Ubuntu's patched uutils 0.10 also reads
+  `/proc/self/exe`, so a detached uutils payload is the one case above that remains untested.
+
+### Verified
+
+Built and run on cyrius 6.7.9 on x86_64. `cyrius test tests/` exits 0, no `  FAIL` lines, 2188
+assertions (mgmt 326 · store 299 · stiva 667 · convert 116 · registry 421 · runpath 359).
+`./scripts/cli-smoke.sh`: 87 of 87. `cyrius build`: 5,150,216 B, up from 5,084,848. `cyrius fmt
+--check` is clean on `src/` and `tests/`. `cyrius audit` still exits 1 on the same two counts, 147
+lint warnings and 492 undocumented fns, unchanged by this move. A `--aarch64` cross-build succeeds;
+it is compiled, not run.
+
+Benchmarks, interleaved A/B against a tree exported from 3.0.23 at 6.6.20, three rounds, by minimum:
+all 14 within their run-to-run spread, from `oci_config_build+serialize` −3.8 % to
+`exec_capture2_trivial_child` +1.1 %.
+
 ## [3.0.23] — 2026-11-05 — cyrius 6.6.20, with every dep at its newest tag on that line
 
 Toolchain **6.6.10 → 6.6.20**, the last release of the 6.6.x line. Each `[deps.*]` tag moves to
@@ -126,11 +243,13 @@ the move made false are corrected:
 - ⚠ **sigil's 2026-10-22 audit fixes are not in this pin.** sigil 3.13.14 fixes CYRIUS-2026-0040
   (ChaCha20-Poly1305 accepted a forged record when two threads shared a crypto lane) and
   CYRIUS-2026-0042 (X.509 nameConstraints were never read). It needs cyrius ≥ 6.7.9, and since the
-  fold is what compiles, only a move to the 6.7.x line brings them. stiva creates no threads, so
+  fold is what compiles, only a move to the 6.7.x line brings them. *(Corrected at 3.1.0: only
+  **6.7.18** brings them. 6.7.9 folds sigil 3.13.11.)* stiva creates no threads, so
   0040 is not reachable. 0042 is reachable: native TLS is the default backend, so every HTTPS
   registry connection verifies chains with no nameConstraints check. Exposure is limited to a
   chain through a name-constrained CA that issued outside its constraint.
-- ⚠ **A uutils-coreutils payload exits 1 under kavach's pinned exec** ("Requested utility `9` does
+- *(Corrected at 3.1.0: this does not apply to stiva containers, which enter a rootfs and exec by
+  path. Measured there, see 3.1.0.)* ⚠ **A uutils-coreutils payload exits 1 under kavach's pinned exec** ("Requested utility `9` does
   not match executable name"), per kavach 3.13.3's known issue, open upstream. It predates this
   bump and affects images built on uutils, Ubuntu 25.10 and later among them. stiva's CI is not
   exposed, so `ubuntu-latest` stays: the `.tcyr` suites run on the `noop` backend and `cli-smoke.sh`,

@@ -5,12 +5,12 @@
 
 ## Version
 
-**3.0.23** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.1.0** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -28,7 +28,7 @@ mgmt 326 · store 299 · convert 116 — plus **87** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 and **14** benchmarks.
 
-⚠ Counting note: `cyrius tests tests/` prints a trailing `6 passed, 0 failed`, which is the
+⚠ Counting note: `cyrius test tests/` prints a trailing `6 passed, 0 failed`, which is the
 **file** tally, not six extra assertions. Adding it to the per-file sum overstates the count
 by 6 — a mistake that reached four documents before it was caught.
 
@@ -39,18 +39,19 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.13.10 | kavach | 3.13.3 |
-| sakshi | 2.5.7 | samay | 1.1.7 (optional) |
-| libro | 2.10.8 | ai-hwaccel | 2.4.2 (optional, on by default) |
-| majra | 2.9.3 | agnodrm | 1.6.3 |
-| bote | 3.3.17 | cmdit | 1.2.6 |
-| nein | 1.7.1 | | |
+| sigil | 3.13.11 | kavach | 3.14.0 |
+| sakshi | 2.5.8 | samay | 1.2.0 (optional) |
+| libro | 2.11.0 | ai-hwaccel | 2.4.2 (optional, on by default) |
+| majra | 2.12.0 | agnodrm | 1.7.0 |
+| bote | 3.4.10 | cmdit | 1.4.0 |
+| nein | 1.8.0 | | |
 
 `sigil` is declared **first** and deliberately — it claims the name before libro's transitive
 thin sub-bundle selection, which would otherwise collide with the full bundle and break the
-build outright. Each tag is that dep's newest whose own `cyrius` pin is ≤ 6.6.20; the next tag
-of every one moves to 6.7.x. `sigil` and `sakshi` compile from the toolchain snapshot's folds,
-which at this pin are the same versions and the same bytes as the tags above.
+build outright. Each tag is that dep's newest whose own `cyrius` pin is ≤ 6.7.9, except `sigil`
+and `sakshi`: they compile from the toolchain snapshot's folds, so they are pinned to the versions
+6.7.9 folds, the same bytes as the tags above, though newer tags exist on this pin. `ai-hwaccel`
+stays at 2.4.2 because no release targets 6.7.9; 2.5.0 moves to 6.7.18.
 
 ## Consumers
 

@@ -6,8 +6,8 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.6.20** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.23
+- **Toolchain**: Cyrius, pin **6.7.9** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.1.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -22,8 +22,8 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
 **2188 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
-assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.6.20**.
+mgmt 326 · store 299 · convert 116; run via `cyrius test tests/`), **87** CLI smoke
+assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.9**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
 image-layout + transfer surface (v3.0.1–v3.0.4) · §G output scanning + `convert compose`
@@ -65,7 +65,7 @@ surface, `cron.cyr`, whiteouts and `diff` are **net-new**, so the OCI **image-sp
 rust-old) is their oracle.
 
 > ⚠️ **cycc struct-id miscompile — last verified live at 6.4.78; NOT re-verified at the
-> current 6.6.20 pin. Assume live.** The suite is green at 6.6.20 with the workarounds in
+> current 6.7.9 pin. Assume live.** The suite is green at 6.7.9 with the workarounds in
 > place, which this bug has already demonstrated is not evidence of anything. The struct-id
 > **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes typed field access
 > (`var x: T = p; x.field`) read
@@ -117,16 +117,16 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.13.3** |
-| majra | Job queue, heartbeat FSM, pub/sub — pin **2.9.3** |
-| nein | nftables firewall, NAT, port mapping — pin **1.7.1** |
-| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.17** |
-| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.6.3** |
-| cmdit | CLI parsing, verb introspection, shell completions — pin **1.2.6** |
-| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.1.7** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.0** |
+| majra | Job queue, heartbeat FSM, pub/sub — pin **2.12.0** |
+| nein | nftables firewall, NAT, port mapping — pin **1.8.0** |
+| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.4.10** |
+| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.7.0** |
+| cmdit | CLI parsing, verb introspection, shell completions — pin **1.4.0** |
+| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.2.0** |
 | ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.4.2** |
-| sakshi · libro | Structured logging · docs tooling — pins **2.5.7** / **2.10.8** |
-| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.10** |
+| sakshi · libro | Structured logging · docs tooling — pins **2.5.8** / **2.11.0** |
+| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.11** |
 
 All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cyml`
 `[deps.*]` **by git tag**.
@@ -141,7 +141,8 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > leaves, so `lib/sigil.cyr` and `lib/sakshi.cyr` are the pinned snapshot's folds (`cyrius deps`
 > prints `kept (stdlib snapshot)`). A sigil fix reaches stiva when the **toolchain** pin moves.
 > Keep the tag equal to the fold's `# Version:` line so the manifest says what builds: 3.0.21
-> and 3.0.22 said 3.12.16 while 3.13.4 compiled.
+> and 3.0.22 said 3.12.16 while 3.13.4 compiled. Dropping `sigil` from `[deps].stdlib` does not
+> change this: measured at 6.7.9 with the tag at 3.13.15, `lib/sigil.cyr` stayed the 3.13.11 fold.
 
 > ⚠️ **A dep's `.deps` sidecar may name stdlib leaves ONLY.** A consumer resolves every line
 > in it against the pinned toolchain snapshot, so a git-dep bundle listed there is an
@@ -151,17 +152,13 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > the CHANGELOG). If a dep bump ever reintroduces `dep X requires 'Y' but it is not in the
 > cyrius stdlib`, the fix is upstream in X's manifest, not in stiva's `[deps].stdlib`.
 
-> ⚠️ **Every `path = "../<dep>"` override is deliberately COMMENTED OUT.** A `path`
-> override silently WINS over its `tag`, and `cyrius.lock` records no dep name or version
-> under path resolution, so nothing detects the substitution. That once meant local builds
-> resolved a sakshi that existed at no tag (a sibling checkout sat 3 commits past 2.4.6)
-> while CI resolved the tag and got different bytes — a green local suite and a red CI, with
-> no diff to look at. `.github/workflows/ci.yml` now compares the resolved dep bundles
-> against the tags and fails on a mismatch.
->
-> To develop a dep alongside stiva: uncomment its `path` line, work, then **tag and release
-> the dep and bump the `tag` here** before committing `cyrius.lock`. Do not commit a lock
-> produced through a path override.
+> ⚠️ **A default build always builds the tag (cyrius 6.7.6+).** A `path` beside `git` / `tag` is
+> used only in local mode. To develop a dep alongside stiva, uncomment its `path` line and run
+> with `CYRIUS_LOCAL=<dep>`, which resolves into `build/local-deps/lib/`, leaves `lib/` and
+> `cyrius.lock` alone, and prints how far the sibling is past the tag. Then **tag and release the
+> dep and bump the `tag` here.** Below 6.7.6 a `path` silently won over its tag, which once meant
+> a green local suite and a red CI with no diff to look at, so the commented-out lines stay
+> commented out.
 
 > ⚠ **Bumping a `tag` and re-resolving `cyrius.lock` are ONE change. Never commit them apart.**
 > A pin bumped without `cyrius deps` leaves the lock recording the *previous* release, and the
@@ -173,7 +170,10 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > the lock cannot be regenerated. (The gate's message now names this cause first.)
 
 > ⚠ **A dep's tag for a toolchain pin is its newest tag whose own `cyrius` pin is ≤ ours — not
-> its latest tag.** Read the pin out of each tag (`git show <tag>:cyrius.cyml`), and check that the
+> its latest tag — and a package the stdlib folds (sigil, sakshi, bayan, patra) takes the version
+> the snapshot folds,** even when a newer tag is built on our pin: at 6.7.9 that is sigil 3.13.11,
+> not 3.13.15. Read a fold from `~/.cyrius/versions/<pin>/lib/<name>.cyr`'s `# Version:` line. Read
+> a dep's pin out of each tag (`git show <tag>:cyrius.cyml`), and check that the
 > set agrees with itself: each dep's own `[deps.*]` tags should name the versions chosen for the
 > others. To re-pin, `rm -rf lib cyrius.lock && cyrius deps`. ⛔ `cyrius deps --relock` keeps every
 > old tag's `commit` row beside the new one, which is the stale-lock tell above. Then check that
@@ -291,7 +291,7 @@ Four rules, binding on new work:
 - **Never type a number about a dependency** — struct sizes, field counts, version-gated
   behaviour. Read it out of `lib/` at the moment you write it, or leave it out. "`SandboxConfig`
   is 8 fields / 64 bytes" was wrong on the day it was typed.
-- **A green report is not a green suite — check the EXIT CODE.** `cyrius tests tests/` exits
+- **A green report is not a green suite — check the EXIT CODE.** `cyrius test tests/` exits
   non-zero on any failure and prints `  FAIL:` lines; that is the signal. Do not summarise the
   run by parsing the summary lines unless you have verified the parse against a line that
   actually contains a failure. ⚠ In 3.0.19 an aggregate `awk -F'[ ,]' '{f+=$3}'` over
@@ -363,7 +363,7 @@ observes — see **Blocks and claims** above.
 against the built binary) — the `.tcyr` files cannot include `main.cyr`.
 
 ```bash
-cyrius tests tests/            # run every tests/*.tcyr (the full suite)
+cyrius test tests/             # run every tests/*.tcyr (the full suite)
 cyrius test tests/stiva.tcyr   # run one test file
 ./scripts/cli-smoke.sh         # CLI smoke assertions against build/stiva
 cyrius bench tests/stiva.bcyr  # benchmarks
