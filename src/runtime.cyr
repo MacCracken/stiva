@@ -1293,20 +1293,20 @@ fn process_info_to_jv(info) {
 # JSON object → ProcessInfo* (rust-old: deserialize ProcessInfo). 0 when v is 0.
 fn process_info_from_jv(v) {
     if (v == 0) { return 0; }
-    var pf = json_v_obj_get(v, "pid");
+    var pf = bayan_json_v_obj_get_by_cstr(v, "pid");
     var pid = 0;
     if (json_v_is_int(pf) == 1) { pid = json_v_int(pf); }
-    var ppf = json_v_obj_get(v, "ppid");
+    var ppf = bayan_json_v_obj_get_by_cstr(v, "ppid");
     var ppid = 0;
     if (json_v_is_int(ppf) == 1) { ppid = json_v_int(ppf); }
-    var cf = json_v_obj_get(v, "comm");
+    var cf = bayan_json_v_obj_get_by_cstr(v, "comm");
     var comm = "";
     if (json_v_is_str(cf) == 1) { comm = str_cstr(json_v_str(cf)); }
-    var clf = json_v_obj_get(v, "cmdline");
+    var clf = bayan_json_v_obj_get_by_cstr(v, "cmdline");
     var cmdline = "";
     if (json_v_is_str(clf) == 1) { cmdline = str_cstr(json_v_str(clf)); }
     var state = 63;                               # '?'
-    var sf = json_v_obj_get(v, "state");
+    var sf = bayan_json_v_obj_get_by_cstr(v, "state");
     if (json_v_is_str(sf) == 1) {
         var sc = str_cstr(json_v_str(sf));
         if (load8(sc) != 0) { state = load8(sc); }

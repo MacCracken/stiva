@@ -179,9 +179,9 @@ fn _il_config_diff_ids(store, image) {
     if (cbuf == 0) { return out; }
     var cv = bayan_json_v_parse_buf(cbuf, load64(cc));
     if (cv == 0) { return out; }
-    var rootfs = json_v_obj_get(cv, "rootfs");
+    var rootfs = bayan_json_v_obj_get_by_cstr(cv, "rootfs");
     if (rootfs == 0) { return out; }
-    var arr = json_v_obj_get(rootfs, "diff_ids");
+    var arr = bayan_json_v_obj_get_by_cstr(rootfs, "diff_ids");
     if (arr == 0) { return out; }
     if (json_v_is_arr(arr) == 0) { return out; }
     var n = json_v_arr_len(arr);
@@ -232,7 +232,7 @@ fn _il_atomic_write(path, data, len) {
 # field is absent/null/non-string.
 #[must_use]
 fn _il_jv_str_field(v, key) {
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (json_v_is_str(f) == 0) { return 0; }
     return str_cstr(json_v_str(f));
 }
@@ -267,7 +267,7 @@ fn _il_index_read_jv(store) {
 #[must_use]
 fn _il_index_manifests(idx) {
     if (idx == 0) { return 0; }
-    var m = json_v_obj_get(idx, "manifests");
+    var m = bayan_json_v_obj_get_by_cstr(idx, "manifests");
     if (json_v_is_arr(m) == 0) { return 0; }
     return m;
 }
@@ -275,7 +275,7 @@ fn _il_index_manifests(idx) {
 # The ref.name annotation of an index descriptor jv, or 0.
 #[must_use]
 fn _il_desc_ref_name(desc) {
-    var ann = json_v_obj_get(desc, "annotations");
+    var ann = bayan_json_v_obj_get_by_cstr(desc, "annotations");
     if (json_v_is_obj(ann) == 0) { return 0; }
     return _il_jv_str_field(ann, _il_ref_name_key());
 }
@@ -912,7 +912,7 @@ fn _il_load_docker_archive(store, dir) {
                     var layers = vec_new();
                     var total = 0;
                     var ok = 1;
-                    var larr = json_v_obj_get(entry, "Layers");
+                    var larr = bayan_json_v_obj_get_by_cstr(entry, "Layers");
                     if (json_v_is_arr(larr) == 1) {
                         var ln = json_v_arr_len(larr);
                         var lj = 0;
@@ -934,7 +934,7 @@ fn _il_load_docker_archive(store, dir) {
                         var mdig = sha256_digest(str_data(man_s), str_len(man_s));
                         if (image_store_store_blob(store, mdig, str_data(man_s), str_len(man_s)) != 0) {
                             var reference = 0;
-                            var rt = json_v_obj_get(entry, "RepoTags");
+                            var rt = bayan_json_v_obj_get_by_cstr(entry, "RepoTags");
                             if (json_v_is_arr(rt) == 1) {
                                 if (json_v_arr_len(rt) > 0) {
                                     var rt0 = json_v_arr_get(rt, 0);

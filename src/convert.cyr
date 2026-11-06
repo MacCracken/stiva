@@ -1085,7 +1085,7 @@ fn _cv_emit_compose_depends(sb, deps) {
 # `<key> = "<str>"\n` if `v` holds a JTAG_STR under `field`, else nothing.
 # Mirrors the oracle's `.get(f).and_then(|v| v.as_str())` chains.
 fn _cv_emit_compose_str_field(sb, v, field, key) {
-    var f = bayan_json_v_obj_get(v, field);
+    var f = bayan_json_v_obj_get_by_cstr(v, field);
     if (_cv_is_yaml_str(f) == 0) { return 0; }
     str_builder_add_cstr(sb, key);
     str_builder_add_cstr(sb, " = ");
@@ -1184,7 +1184,7 @@ fn compose_yaml_to_toml(yaml) {
     var out = str_builder_new();
 
     # ── services ──
-    var services = bayan_json_v_obj_get(doc, "services");
+    var services = bayan_json_v_obj_get_by_cstr(doc, "services");
     if (bayan_json_v_is_obj(services) == 1) {
         var sn = bayan_json_v_obj_len(services);
         var sorder = _cv_sorted_idx(services);
@@ -1200,23 +1200,23 @@ fn compose_yaml_to_toml(yaml) {
 
             _cv_emit_compose_str_field(out, svc, "image", "image");
 
-            var cmd = bayan_json_v_obj_get(svc, "command");
+            var cmd = bayan_json_v_obj_get_by_cstr(svc, "command");
             if (cmd != 0) { _cv_emit_compose_command(out, cmd); }
 
-            var env = bayan_json_v_obj_get(svc, "environment");
+            var env = bayan_json_v_obj_get_by_cstr(svc, "environment");
             if (env != 0) { _cv_emit_compose_env(out, env); }
 
-            var ports = bayan_json_v_obj_get(svc, "ports");
+            var ports = bayan_json_v_obj_get_by_cstr(svc, "ports");
             if (bayan_json_v_is_arr(ports) == 1) {
                 _cv_emit_str_arr(out, "ports", ports, 1);
             }
 
-            var vols = bayan_json_v_obj_get(svc, "volumes");
+            var vols = bayan_json_v_obj_get_by_cstr(svc, "volumes");
             if (bayan_json_v_is_arr(vols) == 1) {
                 _cv_emit_str_arr(out, "volumes", vols, 0);
             }
 
-            var deps = bayan_json_v_obj_get(svc, "depends_on");
+            var deps = bayan_json_v_obj_get_by_cstr(svc, "depends_on");
             if (deps != 0) { _cv_emit_compose_depends(out, deps); }
 
             _cv_emit_compose_str_field(out, svc, "restart", "restart");
@@ -1227,7 +1227,7 @@ fn compose_yaml_to_toml(yaml) {
     }
 
     # ── top-level networks ──
-    var networks = bayan_json_v_obj_get(doc, "networks");
+    var networks = bayan_json_v_obj_get_by_cstr(doc, "networks");
     if (bayan_json_v_is_obj(networks) == 1) {
         var nn = bayan_json_v_obj_len(networks);
         var norder = _cv_sorted_idx(networks);
@@ -1244,7 +1244,7 @@ fn compose_yaml_to_toml(yaml) {
             # .ipam.config[0].subnet — index 0 only (Rust `.first()`).
             # Every bayan accessor is null- and tag-safe, so the chain
             # needs no guards beyond the two the oracle itself performs.
-            var cfg = bayan_json_v_obj_get(bayan_json_v_obj_get(net, "ipam"), "config");
+            var cfg = bayan_json_v_obj_get_by_cstr(bayan_json_v_obj_get_by_cstr(net, "ipam"), "config");
             if (bayan_json_v_is_arr(cfg) == 1) {
                 if (bayan_json_v_arr_len(cfg) > 0) {
                     _cv_emit_compose_str_field(out,
@@ -1257,7 +1257,7 @@ fn compose_yaml_to_toml(yaml) {
     }
 
     # ── top-level volumes ──
-    var volumes = bayan_json_v_obj_get(doc, "volumes");
+    var volumes = bayan_json_v_obj_get_by_cstr(doc, "volumes");
     if (bayan_json_v_is_obj(volumes) == 1) {
         var vn = bayan_json_v_obj_len(volumes);
         var vorder = _cv_sorted_idx(volumes);

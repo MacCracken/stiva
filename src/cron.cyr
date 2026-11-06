@@ -111,7 +111,7 @@ fn cron_store_load(root) {
           strlen("cron.json is not valid JSON; treating the schedule as empty"));
         return out;
     }
-    var arr = json_v_obj_get(v, "jobs");
+    var arr = bayan_json_v_obj_get_by_cstr(v, "jobs");
     if (arr == 0) { return out; }
     if (json_v_is_arr(arr) == 0) { return out; }
     var n = json_v_arr_len(arr);
@@ -123,7 +123,7 @@ fn cron_store_load(root) {
         var im = _cron_jv_str(e, "image");
         if (nm != 0 && ex != 0 && im != 0) {
             var cmd = vec_new();
-            var ca = json_v_obj_get(e, "command");
+            var ca = bayan_json_v_obj_get_by_cstr(e, "command");
             if (ca != 0) {
                 if (json_v_is_arr(ca) == 1) {
                     var k = 0;
@@ -135,10 +135,10 @@ fn cron_store_load(root) {
                 }
             }
             var en = 1;
-            var ev = json_v_obj_get(e, "enabled");
+            var ev = bayan_json_v_obj_get_by_cstr(e, "enabled");
             if (ev != 0) { en = json_v_int(ev); }
             var lf = 0;
-            var lv = json_v_obj_get(e, "last_fired_ns");
+            var lv = bayan_json_v_obj_get_by_cstr(e, "last_fired_ns");
             if (lv != 0) { lf = json_v_int(lv); }
             vec_push(out, cron_job_new(nm, ex, im, cmd, en, lf));
         }
@@ -150,7 +150,7 @@ fn cron_store_load(root) {
 #[must_use]
 fn _cron_jv_str(v, key) {
     if (v == 0) { return 0; }
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (f == 0) { return 0; }
     if (json_v_is_str(f) == 0) { return 0; }
     return str_cstr(json_v_str(f));

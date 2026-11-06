@@ -5,17 +5,17 @@
 
 ## Version
 
-**3.0.22** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.0.23** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.10` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.6.20` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
 - Rust oracle: 18622 lines at `rust-old/` (frozen).
-- Cyrius: **22,667 lines** across `src/*.cyr` — **27 domain modules** listed in
+- Cyrius: **22,712 lines** across `src/*.cyr` — **27 domain modules** listed in
   `cyrius.cyml [lib].modules`, plus `src/lib.cyr` (aggregation header) and `src/main.cyr`
   (entry + CLI). `cyrius distlib` folds the 27 into `dist/stiva.cyr`.
 - CLI: **36 registered verbs, 34 live**. `checkpoint` and `restore` print "not wired yet" —
@@ -39,16 +39,18 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.12.16 | kavach | 3.13.1 |
-| sakshi | 2.5.1 | samay | 1.1.2 (optional) |
-| libro | 2.10.0 | ai-hwaccel | 2.3.22 (optional, on by default) |
-| majra | 2.7.2 | agnodrm | 1.6.0 |
-| bote | 3.3.7 | cmdit | 1.2.4 |
-| nein | 1.6.11 | | |
+| sigil | 3.13.10 | kavach | 3.13.3 |
+| sakshi | 2.5.7 | samay | 1.1.7 (optional) |
+| libro | 2.10.8 | ai-hwaccel | 2.4.2 (optional, on by default) |
+| majra | 2.9.3 | agnodrm | 1.6.3 |
+| bote | 3.3.17 | cmdit | 1.2.6 |
+| nein | 1.7.1 | | |
 
 `sigil` is declared **first** and deliberately — it claims the name before libro's transitive
 thin sub-bundle selection, which would otherwise collide with the full bundle and break the
-build outright.
+build outright. Each tag is that dep's newest whose own `cyrius` pin is ≤ 6.6.20; the next tag
+of every one moves to 6.7.x. `sigil` and `sakshi` compile from the toolchain snapshot's folds,
+which at this pin are the same versions and the same bytes as the tags above.
 
 ## Consumers
 

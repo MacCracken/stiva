@@ -6,8 +6,8 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.6.10** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.0.22
+- **Toolchain**: Cyrius, pin **6.6.20** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.0.23
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -23,7 +23,7 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 
 **2188 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
 mgmt 326 · store 299 · convert 116; run via `cyrius tests tests/`), **87** CLI smoke
-assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.6.10**.
+assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.6.20**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
 image-layout + transfer surface (v3.0.1–v3.0.4) · §G output scanning + `convert compose`
@@ -65,7 +65,7 @@ surface, `cron.cyr`, whiteouts and `diff` are **net-new**, so the OCI **image-sp
 rust-old) is their oracle.
 
 > ⚠️ **cycc struct-id miscompile — last verified live at 6.4.78; NOT re-verified at the
-> current 6.6.10 pin. Assume live.** The suite is green at 6.6.10 with the workarounds in
+> current 6.6.20 pin. Assume live.** The suite is green at 6.6.20 with the workarounds in
 > place, which this bug has already demonstrated is not evidence of anything. The struct-id
 > **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes typed field access
 > (`var x: T = p; x.field`) read
@@ -117,34 +117,31 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.13.1** |
-| majra | Job queue, heartbeat FSM, pub/sub — pin **2.7.2** |
-| nein | nftables firewall, NAT, port mapping — pin **1.6.11** |
-| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.7** |
-| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.6.0** |
-| cmdit | CLI parsing, verb introspection, shell completions — pin **1.2.4** |
-| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.1.2** |
-| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.3.22** |
-| sakshi · libro | Structured logging · docs tooling — pins **2.5.1** / **2.10.0** |
-| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.12.16** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.13.3** |
+| majra | Job queue, heartbeat FSM, pub/sub — pin **2.9.3** |
+| nein | nftables firewall, NAT, port mapping — pin **1.7.1** |
+| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.3.17** |
+| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.6.3** |
+| cmdit | CLI parsing, verb introspection, shell completions — pin **1.2.6** |
+| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.1.7** |
+| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.4.2** |
+| sakshi · libro | Structured logging · docs tooling — pins **2.5.7** / **2.10.8** |
+| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.10** |
 
 All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cyml`
 `[deps.*]` **by git tag**.
 
-> ⚠️ **`[deps.sigil]` must stay declared FIRST and at the latest sigil.** libro declares its
+> ⚠️ **`[deps.sigil]` must stay declared FIRST, at the version the toolchain pin folds.** libro declares its
 > own `[deps.sigil]` selecting four *thin* sub-bundles; stiva takes the full monolith, which
 > already inlines all four. Claiming the name before the transitive walk reaches libro is
 > what keeps both surfaces out of one compilation unit — and that is a hard build failure,
 > not a warning: two copies push cycc's 16-slot `#define`/flag table to 17.
-
-> ⚠️ **`src/error.cyr` carries a samay 1.0.1 compatibility shim — `json_v_parse_str`.**
-> samay still calls that unprefixed bayan name, which bayan 1.3.0 (cyrius 6.5.0) removed, so
-> without the shim the symbol is undefined at link time and cycc refuses to emit. It sits in
-> `error.cyr` — not beside the samay consumer in `cron.cyr` — because cyrius auto-prepends
-> every active `[deps.*]` module into *every* compilation unit, so the reference exists even
-> in `convert.tcyr`; `error.cyr` is the one module every unit includes. **Retire it the
-> moment samay ≥ 1.0.2 lands** with the call updated: past that point it shadows a real
-> definition rather than supplying a missing one.
+>
+> ⚠ **The tag does not choose what compiles.** `sigil` and `sakshi` are also `[deps].stdlib`
+> leaves, so `lib/sigil.cyr` and `lib/sakshi.cyr` are the pinned snapshot's folds (`cyrius deps`
+> prints `kept (stdlib snapshot)`). A sigil fix reaches stiva when the **toolchain** pin moves.
+> Keep the tag equal to the fold's `# Version:` line so the manifest says what builds: 3.0.21
+> and 3.0.22 said 3.12.16 while 3.13.4 compiled.
 
 > ⚠️ **A dep's `.deps` sidecar may name stdlib leaves ONLY.** A consumer resolves every line
 > in it against the pinned toolchain snapshot, so a git-dep bundle listed there is an
@@ -174,6 +171,13 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > version than the `[deps.<dep>]` tag it is supposed to describe. If a dep is not tagged yet,
 > **do not bump the pin** — finish the upstream release first, or the tree cannot resolve and
 > the lock cannot be regenerated. (The gate's message now names this cause first.)
+
+> ⚠ **A dep's tag for a toolchain pin is its newest tag whose own `cyrius` pin is ≤ ours — not
+> its latest tag.** Read the pin out of each tag (`git show <tag>:cyrius.cyml`), and check that the
+> set agrees with itself: each dep's own `[deps.*]` tags should name the versions chosen for the
+> others. To re-pin, `rm -rf lib cyrius.lock && cyrius deps`. ⛔ `cyrius deps --relock` keeps every
+> old tag's `commit` row beside the new one, which is the stale-lock tell above. Then check that
+> each row names one version and `lib/<dep>.cyr` is byte-identical to `<tag>:dist/<dep>.cyr`.
 
 ## Consumers
 

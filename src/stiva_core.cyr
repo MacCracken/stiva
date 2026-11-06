@@ -604,7 +604,7 @@ fn mcp_handle_build(s, params) {
 fn mcp_handle_exec(s, params) {
     var id = _mcp_param_str(params, "id");
     if (id == 0) { return mcp_result_err("missing required parameter: id"); }
-    var cmd_v = json_v_obj_get(params, "command");
+    var cmd_v = bayan_json_v_obj_get_by_cstr(params, "command");
     if (cmd_v == 0) { return mcp_result_err("missing required parameter: command"); }
     if (json_v_is_arr(cmd_v) == 0) { return mcp_result_err("command must be an array of strings"); }
     var command = vec_new();
@@ -624,7 +624,7 @@ fn mcp_handle_exec(s, params) {
     if (vec_len(command) == 0) { return mcp_result_err("command must be a non-empty array of strings"); }
 
     var env = vec_new();
-    var env_v = json_v_obj_get(params, "env");
+    var env_v = bayan_json_v_obj_get_by_cstr(params, "env");
     if (env_v != 0) {
         if (json_v_is_arr(env_v) == 1) {
             var j = 0;

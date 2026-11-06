@@ -2230,19 +2230,19 @@ fn test_bld_config_has_platform_and_fields() {
     assert_eq(streq(_il_jv_str_field(cv, "architecture"), "amd64"), 1, "architecture present");
     assert_eq(streq(_il_jv_str_field(cv, "os"), "linux"), 1, "os present");
 
-    var co = json_v_obj_get(cv, "config");
+    var co = bayan_json_v_obj_get_by_cstr(cv, "config");
     assert(co != 0, "config sub-object");
     if (co == 0) { return 0; }
     assert_eq(streq(_il_jv_str_field(co, "User"), "nobody"), 1, "User");
     assert_eq(streq(_il_jv_str_field(co, "WorkingDir"), "/w"), 1, "WorkingDir from the workdir step");
-    var env = json_v_obj_get(co, "Env");
+    var env = bayan_json_v_obj_get_by_cstr(co, "Env");
     assert_eq(json_v_arr_len(env), 1, "one env var");
     assert_eq(streq(str_cstr(json_v_str(json_v_arr_get(env, 0))), "A=1"), 1, "Env is K=V");
-    var ports = json_v_obj_get(co, "ExposedPorts");
+    var ports = bayan_json_v_obj_get_by_cstr(co, "ExposedPorts");
     assert(ports != 0, "ExposedPorts present");
-    assert(json_v_obj_get(ports, "80/tcp") != 0, "80/tcp");
-    assert(json_v_obj_get(ports, "443/tcp") != 0, "443/tcp");
-    var labels = json_v_obj_get(co, "Labels");
+    assert(bayan_json_v_obj_get_by_cstr(ports, "80/tcp") != 0, "80/tcp");
+    assert(bayan_json_v_obj_get_by_cstr(ports, "443/tcp") != 0, "443/tcp");
+    var labels = bayan_json_v_obj_get_by_cstr(co, "Labels");
     assert_eq(streq(_il_jv_str_field(labels, "k"), "v"), 1, "label");
     return 0;
 }
@@ -2260,7 +2260,7 @@ fn test_bld_spec_workdir_beats_step() {
     var img = build_image(parse_build_spec(src), store, 0, ctx);
     assert(img != 0, "build ok");
     if (img == 0) { return 0; }
-    var co = json_v_obj_get(_bld_t_config_jv(store, img), "config");
+    var co = bayan_json_v_obj_get_by_cstr(_bld_t_config_jv(store, img), "config");
     assert_eq(streq(_il_jv_str_field(co, "WorkingDir"), "/from-config"), 1, "spec config wins");
     return 0;
 }

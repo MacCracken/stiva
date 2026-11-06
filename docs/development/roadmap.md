@@ -14,7 +14,7 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.0.22
+## Where stiva is — v3.0.23
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
@@ -29,8 +29,8 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
 
 - **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
-  it has not been re-verified at any later pin, including the cyrius 6.6.10 pin in force at
-  v3.0.22, so assume live.** A typed
+  it has not been re-verified at any later pin, including the cyrius 6.6.20 pin in force at
+  v3.0.23, so assume live.** A typed
   `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
@@ -95,36 +95,30 @@ section lists only what 6.6.5 itself changes.
 *(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
 not here. What follows is only what is still open.)*
 
-### Carried debt — the samay 1.0.1 shim in `src/error.cyr`
+### Open cleanliness item — `cyrius audit` exits 1 on two counts
 
-`json_v_parse_str` forwards to `bayan_json_v_parse_buf` because samay 1.0.1 still calls the
-unprefixed bayan name that bayan 1.3.0 removed, leaving the symbol undefined at link time. It sits
-in `error.cyr` rather than beside the samay consumer in `cron.cyr` because cyrius auto-prepends
-every active `[deps.*]` module into *every* compilation unit, and `error.cyr` is the one module
-every unit includes. **Retire it the moment samay ≥ 1.0.2 lands** with the call updated — past that
-point it shadows a real definition instead of supplying a missing one. samay's latest tag is 1.0.1
-with no release since 2026-07-21, so this is a watch item, not a blocker.
-
-### Open cleanliness item — `cyrius audit` exits 1 on 43 undocumented public fns
-
-Every other audit stage is clean at 3.0.18 — `fmt` ok, `lint` ok, tests 2188/0, bench 1/0 — and
-`rc = 1` comes solely from the docs stage counting **43 undocumented public fns** across `src/`.
+At 3.0.23 on cyrius 6.6.20, `fmt` is clean and tests are 2188/0, and `rc = 1` comes from two
+stages, either of which sets it alone: **147 lint warnings** (the next item) and **492
+undocumented public fns** across the audit's scope (`src tests benches`). Both counts are `rc = 1`
+at any value above zero (`_audit_sweep` in cyrius's `cbt/commands.cyr`). The audit's closing
+`=== 1 passed, 0 failed ===` is the benchmark file and says nothing about either.
 It is not a CI gate (`.github/workflows/ci.yml` runs deps/build/test, not `cyrius audit`), but it
-does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until the count is
-zero. Pre-existing and unchanged by the 3.0.17 / 3.0.18 release work.
+does mean the dev-loop cleanliness check cannot be read as a simple pass/fail until both are
+zero. Compare the two counts instead of the exit code.
 
-### Open cleanliness item — 163 line-length warnings in `tests/`
+### Open cleanliness item — 147 line-length warnings in `tests/`
 
 `src/` is fmt-clean and lint-clean at zero warnings. The **test** files are not:
-`registry.tcyr` 69 · `stiva.tcyr` 53 · `mgmt.tcyr` 15 · `runpath.tcyr` 13 · `store.tcyr` 11 ·
-`stiva.bcyr` 2 — all of them `> 120 bytes`, almost entirely long assertion messages.
+`registry.tcyr` 65 · `stiva.tcyr` 47 · `mgmt.tcyr` 13 · `runpath.tcyr` 11 · `store.tcyr` 9 ·
+`stiva.bcyr` 2 — all of them over 120 characters, almost entirely long assertion messages.
 
-It is recorded here rather than swept because the fix is 163 hand-verified line splits under a
+It is recorded here rather than swept because the fix is 147 hand-verified line splits under a
 formatter rule that is easy to get wrong: **`cyrius fmt --check` requires a continuation line to
 sit at the *same* indent as the statement it continues, not one level deeper.** (That rule is
 also what made `src/build.cyr` and `tests/registry.tcyr` fail `fmt --check` for several releases
-— fixed in this line.) Note the linter counts **bytes, not display columns**, so a line of
-box-drawing characters can trip it while looking short.
+— fixed in this line.) cyrlint counts characters at 6.6.20 where 6.6.10 counted bytes: a comment
+of 100 box-drawing characters warns under 6.6.10's and not under 6.6.20's, which is why this count
+fell from 163 with no test line changing to fix it.
 
 ---
 
@@ -285,19 +279,27 @@ concurrency, not parallelism, and real OS threads (`thread_create`/`thread_join`
 **cyrius 6.4.78 — the pin in force the day the claim was typed.** The allocator has been
 thread-safe since 6.0.64. A 9-way digest-correct parallel pull was measured (15.0 s vs 22.5 s).
 
-⚠ **The real prerequisite is one the old entry never mentioned, and it is a dependency defect.**
-The first concurrent TLS handshake in a cold process fails deterministically and poisons the
-process — bisected to ~35 unguarded lazy-init flags in sigil (`_p256_init`, `_onc_init`, and
-`_sha_ni_init`, which publishes its pointer before filling it). A single main-thread handshake
-before fan-out makes the identical binary go 9/9.
+⚠ **The prerequisite the old entry never mentioned was a dependency defect, and it has been fixed
+upstream. Re-measure before relying on that.** At the pin this was measured, the first concurrent
+TLS handshake in a cold process failed deterministically and poisoned the process, bisected to
+~35 unguarded lazy-init flags in sigil (`_p256_init`, `_onc_init`, `_sha_ni_init`). A single
+main-thread handshake before fan-out made the identical binary go 9/9.
 
-Work: a main-thread TLS warm-up covering **every handshake shape the pull touches** (including
-`auth.docker.io`, which `registry_resolve_manifest` does not pre-warm), a mutex on the token
-cache (`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl`
-scratch), then a fixed 4-worker pool with layer order taken from the descriptor list.
+sigil 3.13.6 builds those tables under `_sigil_once_*` and states that a main-thread warm-up is now
+optional. That reached stiva at v3.0.23, because `lib/sigil.cyr` is the toolchain's fold: 137
+`_sigil_once_*` references in the 6.6.20 fold, 0 in the 6.6.10 one. `_sha_ni_init` keeps its old
+shape, assigning its pointer before filling the table, but its first run is inside
+`sha_ni_available`'s CAS-serialized probe. All of that is from reading the code. **The cold 9-way
+pull has not been re-run at this pin**, and stiva has no threads yet, so nothing in stiva has
+exercised it.
+
+Work: re-run the cold 9-way pull first. Keep a main-thread TLS warm-up covering **every handshake
+shape the pull touches** (including `auth.docker.io`, which `registry_resolve_manifest` does not
+pre-warm) unless that run goes 9/9 without one. Then a mutex on the token cache
+(`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl` scratch), and a
+fixed 4-worker pool with layer order taken from the descriptor list.
 ⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn — that is the
-struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.6.10.
-File the sigil issue in the same sweep; until it lands the warm-up is load-bearing.
+struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.6.20.
 
 ### 9. Wire `RuntimeSpec.mounts` — NEW, and it gates more than it looks
 

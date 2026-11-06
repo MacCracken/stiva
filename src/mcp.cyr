@@ -282,7 +282,7 @@ fn tool_list() {
 # Read a string param → fresh cstr, or 0 if absent/non-string
 # (rust: params.get(key).and_then(|v| v.as_str())).
 fn _mcp_param_str(params, key) {
-    var v = json_v_obj_get(params, key);
+    var v = bayan_json_v_obj_get_by_cstr(params, key);
     if (json_v_is_str(v) == 0) { return 0; }
     return str_cstr(json_v_str(v));
 }

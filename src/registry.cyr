@@ -158,9 +158,9 @@ var _REG_MAX_DESCRIPTOR_SIZE = 68719476736;
 #[must_use]
 fn descriptor_from_jv(v) {
     if (v == 0) { return 0; }
-    var mtf = json_v_obj_get(v, "mediaType");
+    var mtf = bayan_json_v_obj_get_by_cstr(v, "mediaType");
     if (json_v_is_str(mtf) == 0) { return 0; }
-    var dgf = json_v_obj_get(v, "digest");
+    var dgf = bayan_json_v_obj_get_by_cstr(v, "digest");
     if (json_v_is_str(dgf) == 0) { return 0; }
     # The digest becomes a filesystem path (_img_blob_path) and a URL path
     # segment (_reg_blob_url), and it arrives from a remote registry. Reject
@@ -168,7 +168,7 @@ fn descriptor_from_jv(v) {
     # parse boundary, so no malformed digest can reach either. See
     # digest_is_valid in image.cyr for what this prevents.
     if (digest_is_valid(str_cstr(json_v_str(dgf))) == 0) { return 0; }
-    var szf = json_v_obj_get(v, "size");
+    var szf = bayan_json_v_obj_get_by_cstr(v, "size");
     if (json_v_is_int(szf) == 0) { return 0; }
     var size = json_v_int(szf);
     # A negative or absurd size would otherwise disable the download ceiling in
@@ -178,7 +178,7 @@ fn descriptor_from_jv(v) {
     if (size < 0) { return 0; }
     if (size > _REG_MAX_DESCRIPTOR_SIZE) { return 0; }
     var d = descriptor_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(dgf)), size);
-    var uf = json_v_obj_get(v, "urls");
+    var uf = bayan_json_v_obj_get_by_cstr(v, "urls");
     if (json_v_is_arr(uf) == 1) {
         var dd: Descriptor = d;
         var urls = vec_new();
@@ -272,10 +272,10 @@ fn oci_manifest_to_jv(m) {
 #[must_use]
 fn oci_manifest_from_jv(v) {
     if (v == 0) { return 0; }
-    var cfg = descriptor_from_jv(json_v_obj_get(v, "config"));
+    var cfg = descriptor_from_jv(bayan_json_v_obj_get_by_cstr(v, "config"));
     if (cfg == 0) { return 0; }
     var layers = vec_new();
-    var lf = json_v_obj_get(v, "layers");
+    var lf = bayan_json_v_obj_get_by_cstr(v, "layers");
     if (json_v_is_arr(lf) == 1) {
         var n = json_v_arr_len(lf);
         var i = 0;
@@ -297,13 +297,13 @@ fn oci_manifest_from_jv(v) {
     # Guard the tag like every sibling field does. bayan's json_v_int returns 0
     # for any non-INT tag, so an unguarded read silently turns a registry-sent
     # `"schemaVersion": "2"` into 0 — and this parses attacker-controlled bytes.
-    var svf = json_v_obj_get(v, "schemaVersion");
+    var svf = bayan_json_v_obj_get_by_cstr(v, "schemaVersion");
     if (json_v_is_int(svf) == 1) { mm.schema_version = json_v_int(svf); }
-    var mtf = json_v_obj_get(v, "mediaType");
+    var mtf = bayan_json_v_obj_get_by_cstr(v, "mediaType");
     if (json_v_is_str(mtf) == 1) { mm.media_type = str_cstr(json_v_str(mtf)); }
-    var atf = json_v_obj_get(v, "artifactType");
+    var atf = bayan_json_v_obj_get_by_cstr(v, "artifactType");
     if (json_v_is_str(atf) == 1) { mm.artifact_type = str_cstr(json_v_str(atf)); }
-    var sf = json_v_obj_get(v, "subject");
+    var sf = bayan_json_v_obj_get_by_cstr(v, "subject");
     if (json_v_is_obj(sf) == 1) { mm.subject = descriptor_from_jv(sf); }
     return m;
 }
@@ -406,15 +406,15 @@ fn oci_index_new(media_type, manifests) {
 #[must_use]
 fn platform_from_jv(v) {
     if (json_v_is_obj(v) == 0) { return 0; }
-    var af = json_v_obj_get(v, "architecture");
-    var of = json_v_obj_get(v, "os");
+    var af = bayan_json_v_obj_get_by_cstr(v, "architecture");
+    var of = bayan_json_v_obj_get_by_cstr(v, "os");
     if (json_v_is_str(af) == 0) { return 0; }
     if (json_v_is_str(of) == 0) { return 0; }
     var variant = 0;
-    var vf = json_v_obj_get(v, "variant");
+    var vf = bayan_json_v_obj_get_by_cstr(v, "variant");
     if (json_v_is_str(vf) == 1) { variant = str_cstr(json_v_str(vf)); }
     var osver = 0;
-    var ovf = json_v_obj_get(v, "os.version");
+    var ovf = bayan_json_v_obj_get_by_cstr(v, "os.version");
     if (json_v_is_str(ovf) == 1) { osver = str_cstr(json_v_str(ovf)); }
     return platform_new(str_cstr(json_v_str(af)), str_cstr(json_v_str(of)), variant, osver);
 }
@@ -424,14 +424,14 @@ fn platform_from_jv(v) {
 #[must_use]
 fn platform_manifest_from_jv(v) {
     if (json_v_is_obj(v) == 0) { return 0; }
-    var mtf = json_v_obj_get(v, "mediaType");
-    var df = json_v_obj_get(v, "digest");
-    var sf = json_v_obj_get(v, "size");
+    var mtf = bayan_json_v_obj_get_by_cstr(v, "mediaType");
+    var df = bayan_json_v_obj_get_by_cstr(v, "digest");
+    var sf = bayan_json_v_obj_get_by_cstr(v, "size");
     if (json_v_is_str(mtf) == 0) { return 0; }
     if (json_v_is_str(df) == 0) { return 0; }
     if (json_v_is_int(sf) == 0) { return 0; }
     return platform_manifest_new(str_cstr(json_v_str(mtf)), str_cstr(json_v_str(df)),
-      json_v_int(sf), platform_from_jv(json_v_obj_get(v, "platform")));
+      json_v_int(sf), platform_from_jv(bayan_json_v_obj_get_by_cstr(v, "platform")));
 }
 
 # A manifest list / image index (rust-old: registry.rs:111-118).
@@ -446,7 +446,7 @@ fn platform_manifest_from_jv(v) {
 fn oci_index_from_jv(v) {
     if (json_v_is_obj(v) == 0) { return 0; }
     var manifests = vec_new();
-    var mf = json_v_obj_get(v, "manifests");
+    var mf = bayan_json_v_obj_get_by_cstr(v, "manifests");
     if (json_v_is_arr(mf) == 1) {
         var n = json_v_arr_len(mf);
         var i = 0;
@@ -457,11 +457,11 @@ fn oci_index_from_jv(v) {
         }
     }
     var mt = 0;
-    var mtf = json_v_obj_get(v, "mediaType");
+    var mtf = bayan_json_v_obj_get_by_cstr(v, "mediaType");
     if (json_v_is_str(mtf) == 1) { mt = str_cstr(json_v_str(mtf)); }
     var idx = oci_index_new(mt, manifests);
     var ii: OciIndex = idx;
-    var svf = json_v_obj_get(v, "schemaVersion");
+    var svf = bayan_json_v_obj_get_by_cstr(v, "schemaVersion");
     if (json_v_is_int(svf) == 1) { ii.schema_version = json_v_int(svf); }
     return idx;
 }
@@ -473,7 +473,7 @@ fn oci_index_from_jv(v) {
 #[must_use]
 fn _reg_body_is_index(v) {
     if (json_v_is_obj(v) == 0) { return 0; }
-    if (json_v_is_arr(json_v_obj_get(v, "manifests")) == 1) { return 1; }
+    if (json_v_is_arr(bayan_json_v_obj_get_by_cstr(v, "manifests")) == 1) { return 1; }
     return 0;
 }
 
@@ -851,7 +851,7 @@ fn credential_store_to_jv(store) {
 # valid-but-empty `{"registries":{}}` yields a fresh (non-zero) empty store.
 fn credential_store_from_jv(v) {
     if (v == 0) { return 0; }
-    var regs = json_v_obj_get(v, "registries");
+    var regs = bayan_json_v_obj_get_by_cstr(v, "registries");
     if (json_v_is_obj(regs) == 0) { return 0; }
     var store = map_new();
     var n = json_v_obj_len(regs);
@@ -860,9 +860,9 @@ fn credential_store_from_jv(v) {
         var key = str_cstr(json_v_obj_key(regs, i));
         var cv = json_v_obj_val(regs, i);
         if (json_v_is_obj(cv) == 0) { return 0; }
-        var uf = json_v_obj_get(cv, "username");
+        var uf = bayan_json_v_obj_get_by_cstr(cv, "username");
         if (json_v_is_str(uf) == 0) { return 0; }
-        var pf = json_v_obj_get(cv, "password");
+        var pf = bayan_json_v_obj_get_by_cstr(cv, "password");
         if (json_v_is_str(pf) == 0) { return 0; }
         map_set(store, key, registry_credential_new(str_cstr(json_v_str(uf)), str_cstr(json_v_str(pf))));
         i = i + 1;
@@ -2032,7 +2032,7 @@ fn _reg_str_array_field(body, blen, key) {
     var v = bayan_json_v_parse_buf(body, blen);
     if (v == 0) { return 0; }
     var out = vec_new();
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (json_v_is_arr(f) == 0) { return out; }
     var n = json_v_arr_len(f);
     var i = 0;
@@ -2132,7 +2132,7 @@ fn registry_referrers(client, ref, digest) {
     var v = bayan_json_v_parse_buf(body, blen);
     if (v == 0) { return _reg_fail(STIVA_ERR_REGISTRY, "failed to parse referrers", st); }
     var out = vec_new();
-    var f = json_v_obj_get(v, "manifests");
+    var f = bayan_json_v_obj_get_by_cstr(v, "manifests");
     if (json_v_is_arr(f) == 0) { return out; }
     var n = json_v_arr_len(f);
     var i = 0;
@@ -2426,9 +2426,9 @@ fn _reg_basic_auth_header(username, password) {
 fn _reg_token_from_body(body, body_len) {
     var v = bayan_json_v_parse_buf(body, body_len);
     if (v == 0) { return 0; }
-    var t = json_v_obj_get(v, "token");
+    var t = bayan_json_v_obj_get_by_cstr(v, "token");
     if (json_v_is_str(t) == 1) { return str_cstr(json_v_str(t)); }
-    var a = json_v_obj_get(v, "access_token");
+    var a = bayan_json_v_obj_get_by_cstr(v, "access_token");
     if (json_v_is_str(a) == 1) { return str_cstr(json_v_str(a)); }
     return 0;
 }

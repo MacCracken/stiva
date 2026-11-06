@@ -565,15 +565,15 @@ fn _ct_scan_policy_from_jv(v) {
     if (v == 0) { return 0; }
     if (json_v_is_obj(v) == 0) { return 0; }
     var p = ext_policy_default();
-    var e = json_v_obj_get(v, "enabled");
+    var e = bayan_json_v_obj_get_by_cstr(v, "enabled");
     if (e != 0) { ExternalizationPolicy_set_enabled(p, json_v_int(e)); }
-    var m = json_v_obj_get(v, "max_artifact_size_bytes");
+    var m = bayan_json_v_obj_get_by_cstr(v, "max_artifact_size_bytes");
     if (m != 0) { ExternalizationPolicy_set_max_artifact_size_bytes(p, json_v_int(m)); }
-    var b = json_v_obj_get(v, "block_threshold");
+    var b = bayan_json_v_obj_get_by_cstr(v, "block_threshold");
     if (b != 0) { ExternalizationPolicy_set_block_threshold(p, json_v_int(b)); }
-    var q = json_v_obj_get(v, "quarantine_threshold");
+    var q = bayan_json_v_obj_get_by_cstr(v, "quarantine_threshold");
     if (q != 0) { ExternalizationPolicy_set_quarantine_threshold(p, json_v_int(q)); }
-    var r = json_v_obj_get(v, "redact_secrets");
+    var r = bayan_json_v_obj_get_by_cstr(v, "redact_secrets");
     if (r != 0) { ExternalizationPolicy_set_redact_secrets(p, json_v_int(r)); }
     return p;
 }
@@ -630,7 +630,7 @@ fn container_to_jv(container) {
 
 # Read a JSON string field as a fresh cstr, or 0 if absent/null/non-string.
 fn _ct_jv_str(v, key) {
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (f == 0) { return 0; }
     if (json_v_is_str(f) == 0) { return 0; }
     return str_cstr(json_v_str(f));
@@ -638,7 +638,7 @@ fn _ct_jv_str(v, key) {
 
 # Read a JSON int field, or `dflt` if absent/null.
 fn _ct_jv_int_or(v, key, dflt) {
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (f == 0) { return dflt; }
     if (json_v_is_null(f) == 1) { return dflt; }
     return json_v_int(f);
@@ -646,7 +646,7 @@ fn _ct_jv_int_or(v, key, dflt) {
 
 # Read a JSON bool field as 1/0 (0 if absent).
 fn _ct_jv_bool(v, key) {
-    var f = json_v_obj_get(v, key);
+    var f = bayan_json_v_obj_get_by_cstr(v, key);
     if (f == 0) { return 0; }
     if (json_v_is_bool(f) == 1) { return json_v_bool(f); }
     return 0;
@@ -655,7 +655,7 @@ fn _ct_jv_bool(v, key) {
 # Read a JSON string array as a vec of cstr (empty vec if absent).
 fn _ct_jv_vec_str(v, key) {
     var out = vec_new();
-    var a = json_v_obj_get(v, key);
+    var a = bayan_json_v_obj_get_by_cstr(v, key);
     if (a == 0) { return out; }
     if (json_v_is_arr(a) == 0) { return out; }
     var n = json_v_arr_len(a);
@@ -670,7 +670,7 @@ fn _ct_jv_vec_str(v, key) {
 
 # Read a JSON object as a hashmap (cstr keys), or 0 when absent/empty.
 fn _ct_jv_map(v, key) {
-    var o = json_v_obj_get(v, key);
+    var o = bayan_json_v_obj_get_by_cstr(v, key);
     if (o == 0) { return 0; }
     if (json_v_is_obj(o) == 0) { return 0; }
     var n = json_v_obj_len(o);
@@ -707,7 +707,7 @@ fn _container_config_from_jv(v) {
     c.stop_grace_ms = _ct_jv_int_or(v, "stop_grace_ms", default_stop_grace_ms());
     c.rootless = _ct_jv_bool(v, "rootless");
     c.secrets = 0;                                       # roadmap v3.1.0 item 1
-    c.scan_policy = _ct_scan_policy_from_jv(json_v_obj_get(v, "scan_policy"));
+    c.scan_policy = _ct_scan_policy_from_jv(bayan_json_v_obj_get_by_cstr(v, "scan_policy"));
     c.timeout_ms = _ct_jv_int_or(v, "timeout_ms", 0);
     c.backend = _ct_jv_str(v, "backend");
     c.min_isolation_score = _ct_jv_int_or(v, "min_isolation_score", 0 - 1);
@@ -739,7 +739,7 @@ fn container_from_jv(v) {
     var pid = _ct_jv_int_or(v, "pid", 0 - 1);
     var created_at = _ct_jv_int_or(v, "created_at", 0);
     var started_at = _ct_jv_int_or(v, "started_at", 0 - 1);
-    var config = _container_config_from_jv(json_v_obj_get(v, "config"));
+    var config = _container_config_from_jv(bayan_json_v_obj_get_by_cstr(v, "config"));
     var exit_code = _ct_jv_int_or(v, "exit_code", 0 - 1);
     var rec = container_new(id, name, image_id, image_ref, state, pid, created_at, started_at, config, exit_code);
     # Records written before start_ticks existed decode as 0, which
@@ -926,10 +926,10 @@ fn parse_bundle(bundle_path) {
 
     var config = container_config_default();
     var c: ContainerConfig = config;
-    var process = json_v_obj_get(root, "process");
+    var process = bayan_json_v_obj_get_by_cstr(root, "process");
 
     # process.args → command (Vec<String>).
-    var args = json_v_obj_get(process, "args");
+    var args = bayan_json_v_obj_get_by_cstr(process, "args");
     if (json_v_is_arr(args) == 1) {
         var cmd = vec_new();
         var na = json_v_arr_len(args);
@@ -943,7 +943,7 @@ fn parse_bundle(bundle_path) {
     }
 
     # process.env → env (HashMap), each "KEY=VALUE" split on the first '='.
-    var env = json_v_obj_get(process, "env");
+    var env = bayan_json_v_obj_get_by_cstr(process, "env");
     if (json_v_is_arr(env) == 1) {
         var m = map_new();
         var ne = json_v_arr_len(env);
@@ -967,23 +967,23 @@ fn parse_bundle(bundle_path) {
     # process.user.uid != 0 → rootless. Rust reads uid via serde_json as_u64,
     # which is None for negatives/floats — so only a positive integer counts
     # (uid > 0 ⇔ as_u64 succeeded AND != 0).
-    var uidv = json_v_obj_get(json_v_obj_get(process, "user"), "uid");
+    var uidv = bayan_json_v_obj_get_by_cstr(bayan_json_v_obj_get_by_cstr(process, "user"), "uid");
     if (json_v_is_int(uidv) == 1) {
         if (json_v_int(uidv) > 0) { c.rootless = 1; }
     }
 
     # hostname → domainname (OCI "hostname" maps to stiva's domainname).
-    var hn = json_v_obj_get(root, "hostname");
+    var hn = bayan_json_v_obj_get_by_cstr(root, "hostname");
     if (json_v_is_str(hn) == 1) { c.domainname = str_cstr(json_v_str(hn)); }
 
     # linux.resources.memory.limit → memory_limit. Guard >= 0 to match as_u64
     # (a negative limit is ignored by Rust, leaving the default 0).
-    var res = json_v_obj_get(json_v_obj_get(root, "linux"), "resources");
-    var mem = json_v_obj_get(json_v_obj_get(res, "memory"), "limit");
+    var res = bayan_json_v_obj_get_by_cstr(bayan_json_v_obj_get_by_cstr(root, "linux"), "resources");
+    var mem = bayan_json_v_obj_get_by_cstr(bayan_json_v_obj_get_by_cstr(res, "memory"), "limit");
     if (json_v_is_int(mem) == 1 && json_v_int(mem) >= 0) { c.memory_limit = json_v_int(mem); }
 
     # linux.resources.pids.limit → max_pids (same as_u64 >= 0 guard).
-    var pids = json_v_obj_get(json_v_obj_get(res, "pids"), "limit");
+    var pids = bayan_json_v_obj_get_by_cstr(bayan_json_v_obj_get_by_cstr(res, "pids"), "limit");
     if (json_v_is_int(pids) == 1 && json_v_int(pids) >= 0) { c.max_pids = json_v_int(pids); }
 
     # OCI runtime containers are always daemon-style.

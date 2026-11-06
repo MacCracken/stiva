@@ -16,7 +16,7 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.6.10** (see `cyrius.cyml`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.6.20** (see `cyrius.cyml`).
 - Nothing else. AGNOS dependencies are resolved **by git tag** from
   `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote`, `agnodrm`,
   `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
@@ -62,8 +62,10 @@ parity oracle; do not edit it.
   last-def-wins, so prefixes keep them unique); `0` for null/None, `-1` sentinels for
   `Option<int>`; preserve exact error-display strings from the oracle.
 
-The **25** benign cross-bundle "duplicate fn (last definition wins)" warnings from the
-vendored AGNOS bundles are expected — they are shared agnos error helpers each bundle vendors.
+The **3** cross-bundle "duplicate fn (last definition wins)" warnings (`result_print_err`,
+`is_syscall_err` and `wrap_syscall`, in both sigil and agnodrm) are expected. Since cyrius 6.6.20
+every call binds the last definition, so a new duplicate whose bodies differ changes what runs:
+compare the bodies before calling it benign.
 
 ### Three traps specific to this codebase
 
@@ -76,7 +78,7 @@ vendored AGNOS bundles are expected — they are shared agnos error helpers each
   but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
   what catches this.
 - **The cycc struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and has
-  not been re-verified at the 6.6.10 pin — assume live.** A typed
+  not been re-verified at the 6.6.20 pin — assume live.** A typed
   `var x: T = p; x.field` can read garbage **silently**, and it varies per function *and* per
   compilation unit. The raw-offset accessors in hot paths (`_img_id`, `_layer_digest`,
   `load64(p + N)`, …) are deliberate workarounds — do not "clean them up". When a test needs
