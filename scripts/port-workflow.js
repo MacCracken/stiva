@@ -56,13 +56,13 @@ const PLAYBOOK = `You are porting one module of the "stiva" OCI container runtim
 ## Cross-module coupling rule
 This module may reference types from other stiva modules not yet ported (e.g. container's Container/ContainerState/ContainerConfig, image's types). Port everything that is self-contained or depends only on already-ported modules (error.cyr is ported). For any function/type that needs a NOT-YET-PORTED module's types, DO NOT invent them — put them in a clearly commented \`# ── DEFERRED (land with src/<module>.cyr) ──\` block at the bottom listing the Rust signatures, exactly like src/oci.cyr does. Report those in the "deferred" field.
 
-## AGNOS dependency bundles (kavach / majra / nein / bote / agnodrm)
+## AGNOS dependency bundles (kavach / majra / nein / bote / sigil)
 If the Rust oracle uses an AGNOS crate (\`kavach::\`, \`majra::\`, \`nein::\`, \`bote::\`, \`agnosys::\`), the crate is ALREADY ported to Cyrius and vendored as a flat bundle in ${REPO}/lib/ — **read the bundle to find the Cyrius equivalent, don't invent or defer the whole thing**:
 - kavach → \`${REPO}/lib/kavach.cyr\` (sandbox_create/exec/spawn/destroy, backend_parse, SandboxPolicy/SandboxConfig fields, credential/secret, scoring). \`grep -E "^fn |^struct |^enum " lib/kavach.cyr\`.
 - majra → \`${REPO}/lib/majra.cyr\` (queue, heartbeat FSM, pub/sub).
 - nein → \`${REPO}/lib/nein.cyr\` (nftables rules, NAT, port mapping).
 - bote → \`${REPO}/lib/bote-core.cyr\` (JSON-RPC 2.0, tool registry, structured output).
-- agnodrm → \`${REPO}/lib/agnodrm.cyr\` (LUKS + dm-verity; the agnosys→agnodrm rename).
+- agnosys → \`${REPO}/lib/sigil.cyr\` (LUKS + dm-verity moved there at agnodrm 1.4.4; stiva no longer depends on agnodrm).
 Map each Rust AGNOS call to its Cyrius bundle fn (names are usually close: \`kavach::Sandbox::create\` → \`sandbox_create\`). These bundles are i64/handle-based (pointers + accessor fns), not Rust objects — adapt accordingly. ONLY defer an AGNOS-backed path when the Cyrius bundle genuinely lacks the surface (note which symbol is missing) OR when it needs infra the ported base lacks (async runtime, tar/gzip/zstd, full HTTP/TLS) — deferrals for missing codecs/async are legitimate and match the storage/registry precedent.
 
 ## Your deliverable for module "<MOD>"

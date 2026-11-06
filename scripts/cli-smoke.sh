@@ -407,6 +407,49 @@ assert_contains "a run step is refused with a reason" "not executed" "$out"
 out="$(run images)"
 assert_absent "and no image is indexed for it" "local/smokerun:v1" "$out"
 
+# A repeated label or port once reached the config blob as a duplicate JSON key, which
+# bayan 1.11.1 refuses whole: the build still printed an id, and only a read of the
+# image failed. So the decisive check is deriving from it, which reads that blob.
+cat > "$WORK/Stivafile.dup" <<'STIVAFILE'
+[image]
+base = "local/smokebase:v1"
+name = "smokedup"
+tag = "v1"
+
+[[steps]]
+type = "copy"
+source = "payload"
+destination = "/payload"
+
+[[steps]]
+type = "label"
+key = "maintainer"
+value = "first"
+
+[[steps]]
+type = "label"
+key = "maintainer"
+value = "second"
+
+[config]
+expose = [8080, 8080]
+STIVAFILE
+cat > "$WORK/Stivafile.child" <<'STIVAFILE'
+[image]
+base = "local/smokedup:v1"
+name = "smokechild"
+tag = "v1"
+
+[[steps]]
+type = "copy"
+source = "payload"
+destination = "/child"
+STIVAFILE
+out="$(run build -f "$WORK/Stivafile.dup" -c "$WORK/bctx")"
+assert_contains "a repeated label and port still build" "sha256:" "$out"
+out="$(run build -f "$WORK/Stivafile.child" -c "$WORK/bctx")"
+assert_contains "and the image they built can be derived from" "sha256:" "$out"
+
 group "exec"
 # Usage/validation cases run everywhere. The live-exec cases need nsenter AND a
 # detached container, so they are gated — but the gate is NOT silent: a skip is

@@ -6,8 +6,8 @@
 
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
-- **Toolchain**: Cyrius, pin **6.7.9** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.1.0
+- **Toolchain**: Cyrius, pin **6.7.18** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
+- **Version**: SemVer, currently 3.1.1
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -21,9 +21,9 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 34 live** — only `checkpoint` and
 `restore` print "not yet wired" (they need CRIU, scheduled for v3.1).
 
-**2188 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 299 · convert 116; run via `cyrius test tests/`), **87** CLI smoke
-assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.9**.
+**2193 tests** across the `.tcyr` files (stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 304 · convert 116; run via `cyrius test tests/`), **89** CLI smoke
+assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
 image-layout + transfer surface (v3.0.1–v3.0.4) · §G output scanning + `convert compose`
@@ -65,7 +65,7 @@ surface, `cron.cyr`, whiteouts and `diff` are **net-new**, so the OCI **image-sp
 rust-old) is their oracle.
 
 > ⚠️ **cycc struct-id miscompile — last verified live at 6.4.78; NOT re-verified at the
-> current 6.7.9 pin. Assume live.** The suite is green at 6.7.9 with the workarounds in
+> current 6.7.18 pin. Assume live.** The suite is green at 6.7.18 with the workarounds in
 > place, which this bug has already demonstrated is not evidence of anything. The struct-id
 > **20/21 ↔ SIMD f64v2/f64v4 sentinel collision** makes typed field access
 > (`var x: T = p; x.field`) read
@@ -98,6 +98,7 @@ rust-old) is their oracle.
   | Resolve deps | `cyrius deps` |
   | Vendor stdlib subset into `lib/` | `cyrius lib sync` (run after changing `[deps].stdlib`) |
   | Build | `cyrius build src/main.cyr build/stiva` |
+  | Release build | `cyrius build --dce src/main.cyr build/stiva` (what `release.yml` ships; `cyrius test` reads only `CYRIUS_DCE=1`, not `--dce` or `[build] dce`) |
   | Run tests | `cyrius test tests/stiva.tcyr` |
   | Bench | `cyrius bench tests/stiva.bcyr` |
   | Format / lint | `cyrius fmt <file> --check` · `cyrius lint <file>` (per-file) |
@@ -111,22 +112,21 @@ rust-old) is their oracle.
   is the agent-orchestrated porting harness. Canonical Cyrius exemplars to copy:
   `src/error.cyr`, `src/oci.cyr`.
 - **AGNOS deps** are consumed as Cyrius `dist/*.cyr` bundles (kavach/majra/nein/
-  bote/agnodrm), wired in `cyrius.cyml` `[deps.*]` as their consuming modules land.
+  bote-core), wired in `cyrius.cyml` `[deps.*]` as their consuming modules land.
 
 ## Stack
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.0** |
-| majra | Job queue, heartbeat FSM, pub/sub — pin **2.12.0** |
-| nein | nftables firewall, NAT, port mapping — pin **1.8.0** |
-| bote | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.4.10** |
-| agnodrm | LUKS + dm-verity (the `encrypted` module) — pin **1.7.0** |
-| cmdit | CLI parsing, verb introspection, shell completions — pin **1.4.0** |
-| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.2.0** |
-| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.4.2** |
-| sakshi · libro | Structured logging · docs tooling — pins **2.5.8** / **2.11.0** |
-| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.11** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.2** |
+| majra | Job queue, heartbeat FSM, pub/sub — pin **2.13.0** |
+| nein | nftables firewall, NAT, port mapping — pin **1.9.1** |
+| bote-core | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.8.15** |
+| cmdit | CLI parsing, verb introspection, shell completions — pin **1.5.0** |
+| samay | Cron expression parsing + scheduling (the `cron` module) — pin **1.5.1** |
+| ai-hwaccel | Accelerator inventory + placement profiles (`accel` feature, **on by default**) — pin **2.5.6** |
+| sakshi · libro | Structured logging · docs tooling — pins **2.5.10** / **2.11.3** |
+| sigil | Full crypto bundle (SHA-256/HMAC for image digests + the AGNOS bundles' crypto) — pin **3.13.15** |
 
 All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cyml`
 `[deps.*]` **by git tag**.
@@ -151,6 +151,12 @@ All AGNOS deps are consumed as Cyrius `dist/*.cyr` bundles, wired in `cyrius.cym
 > basename. That mismatch is what broke 3.0.17's CI (nein shipped `bote-core` as a leaf; see
 > the CHANGELOG). If a dep bump ever reintroduces `dep X requires 'Y' but it is not in the
 > cyrius stdlib`, the fix is upstream in X's manifest, not in stiva's `[deps].stdlib`.
+
+> ⚠️ **A name a transitive manifest declares is not yours until you claim it.** nein declares
+> `[deps.bote-core]`. stiva's section used to be `[deps.bote]`, so on 3.1.1's first resolve
+> `lib/bote-core.cyr` was nein's 3.8.9 while this manifest said 3.8.15, and the build and suite
+> stayed green. Name a section for its module basename. `cyrius deps` prints a `not used` note for
+> the pin it passes over; the byte-identity check in the re-pin rule below is what caught this one.
 
 > ⚠️ **A default build always builds the tag (cyrius 6.7.6+).** A `path` beside `git` / `tag` is
 > used only in local mode. To develop a dep alongside stiva, uncomment its `path` line and run
@@ -313,7 +319,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2188 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2193 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -348,8 +354,8 @@ docs/ (when earned):
 
 ## Testing
 
-**2188 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 299 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
+**2193 Cyrius tests** across `tests/*.tcyr` (stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 304 · convert 116), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
 
@@ -359,7 +365,12 @@ across a library boundary, which neither suite tested. `env` shipped broken thro
 tests for exactly this reason. When a value crosses into kavach, assert on what the payload
 observes — see **Blocks and claims** above.
 
-`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**87** assertions
+⚠ **`json_v_obj_set` appends; it never replaces.** Since bayan 1.11.1 one duplicate key refuses the
+whole document, and several callers read that 0 as an empty store (`container.cyr` "starting
+fresh", `cron.cyr` "treating the schedule as empty"). A writer whose keys come from data must
+iterate a hashmap or de-duplicate first, as `_il_kv_obj` does, and its test must parse what it wrote.
+
+`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**89** assertions
 against the built binary) — the `.tcyr` files cannot include `main.cyr`.
 
 ```bash

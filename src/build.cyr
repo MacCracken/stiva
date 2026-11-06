@@ -414,7 +414,7 @@ fn _bld_val_cstr(v) {
 # so a missing `#[serde(default)]` vec field becomes `vec_new()`.
 fn _bld_str_vec(pairs, key) {
     var out = vec_new();
-    var arr = bayan_toml_get_array(pairs, key);
+    var arr = bayan_toml_get_array_by_cstr(pairs, key);
     if (arr == 0) { return out; }
     var i = 0;
     var n = vec_len(arr);
@@ -430,7 +430,7 @@ fn _bld_str_vec(pairs, key) {
 # the key is absent.
 fn _bld_int_vec(pairs, key) {
     var out = vec_new();
-    var arr = bayan_toml_get_array(pairs, key);
+    var arr = bayan_toml_get_array_by_cstr(pairs, key);
     if (arr == 0) { return out; }
     var i = 0;
     var n = vec_len(arr);
@@ -446,7 +446,7 @@ fn _bld_int_vec(pairs, key) {
 # BuildStep* for a recognized tag, or 0 for an unknown/missing tag (rust-old:
 # serde rejects an unknown variant → parse error; the caller drops the spec).
 fn _bld_step_from_pairs(pairs) {
-    var ty = bayan_toml_get(pairs, "type");
+    var ty = bayan_toml_get_by_cstr(pairs, "type");
     if (ty == 0) { return 0; }
     if (str_eq_cstr(ty, "run") == 1) {
         return build_step_run(_bld_str_vec(pairs, "command"));
@@ -462,32 +462,32 @@ fn _bld_step_from_pairs(pairs) {
     # non-Option fields, so a missing one is a deserialization error. This is
     # that check, written out.
     if (str_eq_cstr(ty, "copy") == 1) {
-        var src = _bld_val_cstr(bayan_toml_get(pairs, "source"));
-        var dst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        var src = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "source"));
+        var dst = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "destination"));
         if (src == 0 || dst == 0) { return 0; }
         return build_step_copy(src, dst);
     }
     if (str_eq_cstr(ty, "env") == 1) {
-        var ek = _bld_val_cstr(bayan_toml_get(pairs, "key"));
-        var ev = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        var ek = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "key"));
+        var ev = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "value"));
         if (ek == 0 || ev == 0) { return 0; }
         return build_step_env(ek, ev);
     }
     if (str_eq_cstr(ty, "workdir") == 1) {
-        var wp = _bld_val_cstr(bayan_toml_get(pairs, "path"));
+        var wp = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "path"));
         if (wp == 0) { return 0; }
         return build_step_workdir(wp);
     }
     if (str_eq_cstr(ty, "label") == 1) {
-        var lk = _bld_val_cstr(bayan_toml_get(pairs, "key"));
-        var lv = _bld_val_cstr(bayan_toml_get(pairs, "value"));
+        var lk = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "key"));
+        var lv = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "value"));
         if (lk == 0 || lv == 0) { return 0; }
         return build_step_label(lk, lv);
     }
     if (str_eq_cstr(ty, "from_stage") == 1) {
-        var fstage = _bld_val_cstr(bayan_toml_get(pairs, "stage"));
-        var fsrc = _bld_val_cstr(bayan_toml_get(pairs, "source"));
-        var fdst = _bld_val_cstr(bayan_toml_get(pairs, "destination"));
+        var fstage = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "stage"));
+        var fsrc = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "source"));
+        var fdst = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "destination"));
         if (fstage == 0 || fsrc == 0 || fdst == 0) { return 0; }
         return build_step_from_stage(fstage, fsrc, fdst);
     }
@@ -503,20 +503,20 @@ fn parse_build_spec(toml_str) {
     var sections = bayan_toml_parse(str_from(toml_str));
 
     # ── [image] → ImageDef (required) ─────────────────
-    var image_secs = bayan_toml_get_sections(sections, "image");
+    var image_secs = bayan_toml_get_sections_by_cstr(sections, "image");
     if (vec_len(image_secs) == 0) { return 0; }     # missing field `image`
     var image_pairs = bayan_toml_section_pairs(vec_get(image_secs, 0));
-    var base = _bld_val_cstr(bayan_toml_get(image_pairs, "base"));
-    var name = _bld_val_cstr(bayan_toml_get(image_pairs, "name"));
+    var base = _bld_val_cstr(bayan_toml_get_by_cstr(image_pairs, "base"));
+    var name = _bld_val_cstr(bayan_toml_get_by_cstr(image_pairs, "name"));
     if (base == 0) { return 0; }                    # missing field `base`
     if (name == 0) { return 0; }                    # missing field `name`
-    var tag = _bld_val_cstr(bayan_toml_get(image_pairs, "tag"));
+    var tag = _bld_val_cstr(bayan_toml_get_by_cstr(image_pairs, "tag"));
     if (tag == 0) { tag = default_tag(); }          # serde default = "latest"
     var image = image_def_new(base, name, tag);
 
     # ── [[steps]] → Vec<BuildStep> (serde default = empty) ────
     var steps = vec_new();
-    var step_secs = bayan_toml_get_sections(sections, "steps");
+    var step_secs = bayan_toml_get_sections_by_cstr(sections, "steps");
     var si = 0;
     var sn = vec_len(step_secs);
     while (si < sn) {
@@ -527,7 +527,7 @@ fn parse_build_spec(toml_str) {
     }
 
     # ── [config] → BuildConfig (serde default) ────────
-    var config_secs = bayan_toml_get_sections(sections, "config");
+    var config_secs = bayan_toml_get_sections_by_cstr(sections, "config");
     var config = 0;
     if (vec_len(config_secs) == 0) {
         config = build_config_default();
@@ -535,8 +535,8 @@ fn parse_build_spec(toml_str) {
         var cp = bayan_toml_section_pairs(vec_get(config_secs, 0));
         var entrypoint = _bld_str_vec(cp, "entrypoint");
         var expose = _bld_int_vec(cp, "expose");
-        var user = _bld_val_cstr(bayan_toml_get(cp, "user"));
-        var workdir = _bld_val_cstr(bayan_toml_get(cp, "workdir"));
+        var user = _bld_val_cstr(bayan_toml_get_by_cstr(cp, "user"));
+        var workdir = _bld_val_cstr(bayan_toml_get_by_cstr(cp, "workdir"));
         config = build_config_new(entrypoint, expose, user, workdir);
     }
 

@@ -162,3 +162,14 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Test the dead-code-eliminated shape release.yml ships
+        # release.yml builds with --dce, which is this gate's only job to cover:
+        # `cyrius test` reads neither --dce nor `[build] dce`, only the environment.
+        # Test binaries compact as the release does. The .tcyr files cannot include
+        # src/main.cyr, so the CLI's own entry is built and run here as well.
+        run: |
+          CYRIUS_DCE=1 cyrius test
+          cyrius build --dce src/main.cyr build/${{ github.event.repository.name }}-dce
+          build/${{ github.event.repository.name }}-dce --version
+          build/${{ github.event.repository.name }}-dce --help > /dev/null

@@ -5,7 +5,7 @@ description = "Stiva — OCI container runtime: image management, container life
 license = "GPL-3.0-or-later"
 repository = "https://github.com/MacCracken/stiva"
 language = "cyrius"
-cyrius = "6.7.9"
+cyrius = "6.7.18"
 
 [build]
 entry = "src/main.cyr"
@@ -58,7 +58,7 @@ modules = [
 
 # ── Dependencies ─────────────────────────────────────────────────
 # Stdlib is OPT-IN. This UNION covers stiva's own modules + every AGNOS dep
-# bundle's `dist/*.deps` sidecar (kavach/majra/nein/bote/agnodrm) + their
+# bundle's `dist/*.deps` sidecar (kavach/majra/nein/bote-core) + their
 # transitive git deps (sigil/libro/sakshi). Validated by an isolated probe
 # build under cc 6.4.14. `sigil` (full) provides SHA-256/HMAC for image digests
 # AND the AGNOS bundles' crypto — the à-la-carte sha256 chain was retired here
@@ -76,13 +76,11 @@ stdlib = [
 
 # ── AGNOS first-party deps (Cyrius dist bundles) ─────────────────
 # Declared before the deps that reference their symbols (single-pass forward-
-# ref resolution): sakshi ← libro ← majra ← bote; nein needs bote-core; kavach
-# + agnodrm sit on sigil (via [deps].stdlib). Three cross-bundle "duplicate fn
-# (last definition wins)" warnings are expected: `result_print_err`,
-# `is_syscall_err` and `wrap_syscall`, in both sigil and agnodrm. Since cyrius
-# 6.6.20 EVERY call binds the last definition, so a duplicate whose bodies differ
-# changes what runs. Compare the bodies if this list ever grows; the CHANGELOG
-# entry for 3.0.23 has the check for these three.
+# ref resolution): sakshi ← libro ← majra ← bote-core; nein needs bote-core; kavach
+# sits on sigil (via [deps].stdlib). A build prints no "duplicate fn (last
+# definition wins)" warnings: the three it used to print went with agnodrm in
+# 3.1.1. Keep it that way. Since cyrius 6.6.20 EVERY call binds the last
+# definition, so a duplicate whose bodies differ changes what runs.
 
 # ── sigil: claim the name before libro's transitive thin selection ──
 # stiva takes the FULL sigil bundle. `sigil` is also in `[deps].stdlib`, but
@@ -108,7 +106,7 @@ stdlib = [
 # bundle lands. Same remedy nein 1.6.3 documents for the identical collision.
 #
 # ⚠ Declared FIRST, ahead of every dep that pulls sigil transitively (libro,
-# kavach, agnodrm) — the claim only wins if it is resolved first.
+# kavach, nein) — the claim only wins if it is resolved first.
 # ⚠ This tag does NOT choose what compiles. `sigil` is also a `[deps].stdlib`
 # leaf, so `lib/sigil.cyr` is the pinned toolchain snapshot's fold (`cyrius deps`
 # prints `kept (stdlib snapshot)`). The same goes for sakshi. A sigil fix reaches
@@ -122,44 +120,50 @@ stdlib = [
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 # path = "../sigil"   # see "Local dep development" above
-tag = "3.13.11"
+tag = "3.13.15"
 modules = ["dist/sigil.cyr"]
 
 # Structured tracing (libro's transitive).
 [deps.sakshi]
 git = "https://github.com/MacCracken/sakshi.git"
 # path = "../sakshi"   # see "Local dep development" above
-tag = "2.5.8"
+tag = "2.5.10"
 modules = ["dist/sakshi.cyr"]
 
 # Audit-chain crypto tools (bote's + nein's transitive).
 [deps.libro]
 git = "https://github.com/MacCracken/libro.git"
 # path = "../libro"   # see "Local dep development" above
-tag = "2.11.0"
+tag = "2.11.3"
 modules = ["dist/libro.cyr"]
 
 # Job queue, heartbeat FSM, pub/sub — fleet / health / ansamblu / container.
 [deps.majra]
 git = "https://github.com/MacCracken/majra.git"
 # path = "../majra"   # see "Local dep development" above
-tag = "2.12.0"
+tag = "2.13.0"
 modules = ["dist/majra.cyr"]
 
 # MCP core (JSON-RPC 2.0, tool registry, structured output) — mcp. `bote-core`
 # is the subset nein also needs; the full MCP surface for mcp.cyr is pulled from
 # the same core (extend to dist/bote.cyr if mcp needs tools beyond core).
-[deps.bote]
+#
+# ⚠ The section is named for the MODULE (bote-core), not the repo (bote), because
+# nein declares `[deps.bote-core]` itself. Under `[deps.bote]` that name stayed
+# unclaimed, so nein's pin won: at 3.8.15 here and 3.8.9 there, lib/bote-core.cyr
+# was 3.8.9 while this file said 3.8.15. Same remedy as `[deps.sigil]` above, and
+# `cyrius distlib` needs the same spelling (see the sidecar note in CLAUDE.md).
+[deps.bote-core]
 git = "https://github.com/MacCracken/bote.git"
 # path = "../bote"   # see "Local dep development" above
-tag = "3.4.10"
+tag = "3.8.15"
 modules = ["dist/bote-core.cyr"]
 
 # nftables firewall, NAT, port mapping — network/nat + network/manager.
 [deps.nein]
 git = "https://github.com/MacCracken/nein.git"
 # path = "../nein"   # see "Local dep development" above
-tag = "1.8.0"
+tag = "1.9.1"
 modules = ["dist/nein.cyr"]
 
 # Sandbox isolation — runtime + container (Sandbox, SandboxPolicy/Config,
@@ -167,7 +171,7 @@ modules = ["dist/nein.cyr"]
 [deps.kavach]
 git = "https://github.com/MacCracken/kavach.git"
 # path = "../kavach"   # see "Local dep development" above
-tag = "3.14.0"
+tag = "3.14.2"
 modules = ["dist/kavach.cyr"]
 
 # ── samay + ai-hwaccel — declared, pinned, and DEFAULT-OFF ────────
@@ -187,8 +191,10 @@ modules = ["dist/kavach.cyr"]
 # objection (~279 KB reaching every consumer of dist/stiva.cyr) is real but not
 # material for a container runtime.
 #
-# They stay declared `optional` so the feature can still be switched off by a
-# consumer that genuinely wants neither.
+# ⚠ They are declared `optional`, but the feature cannot be switched off:
+# src/cron.cyr and src/fleet.cyr use both bundles with no gate, so a build with
+# `default = []` or `--no-default-features` fails to compile (measured at 3.1.0 and
+# 3.1.1). The roadmap's open cleanliness items have the fix.
 [features]
 default = ["accel"]
 accel = ["samay", "ai-hwaccel"]
@@ -197,7 +203,7 @@ accel = ["samay", "ai-hwaccel"]
 [deps.samay]
 git = "https://github.com/MacCracken/samay.git"
 # path = "../samay"   # see "Local dep development" above
-tag = "1.2.0"
+tag = "1.5.1"
 modules = ["dist/samay.cyr"]
 optional = true
 
@@ -209,7 +215,7 @@ optional = true
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 # path = "../ai-hwaccel"   # see "Local dep development" above
-tag = "2.4.2"
+tag = "2.5.6"
 modules = ["dist/ai-hwaccel.cyr"]
 optional = true
 
@@ -228,13 +234,6 @@ optional = true
 #
 # When the dep change is ready, tag and release it, then bump the `tag` here.
 
-# LUKS + dm-verity — encrypted.
-[deps.agnodrm]
-git = "https://github.com/MacCracken/agnodrm.git"
-# path = "../agnodrm"   # see "Local dep development" above
-tag = "1.7.0"
-modules = ["dist/agnodrm.cyr"]
-
 # CLI / argument parsing (getopt-long + verb dispatch) — src/main.cyr registers
 # stiva's 35 subcommands as cmdit verbs instead of hand-rolling argv parsing.
 # 1.2.0 adds the verb-table accessors + cmdit_completions that `stiva
@@ -243,5 +242,5 @@ modules = ["dist/agnodrm.cyr"]
 [deps.cmdit]
 git = "https://github.com/MacCracken/cmdit.git"
 # path = "../cmdit"   # see "Local dep development" above
-tag = "1.4.0"
+tag = "1.5.0"
 modules = ["dist/cmdit.cyr"]

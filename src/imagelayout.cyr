@@ -39,30 +39,51 @@ fn _il_str_arr(v) {
 
 # Alternating [k,v,k,v,...] vec<cstr> → JTAG_OBJ, or 0 when empty. Insertion
 # order is preserved (deterministic bytes). A dangling final key is ignored.
+#
+# A repeated key takes its LAST value at its FIRST position, as the oracle's HashMap
+# and Docker's LABEL do. json_v_obj_set appends without looking, and since bayan 1.11.1
+# one duplicate key refuses the whole document, so writing the pair twice builds an
+# image whose config stiva cannot read back. Unrepeated input keeps its exact bytes.
 #[must_use]
 fn _il_kv_obj(v) {
     if (v == 0) { return 0; }
     var n = vec_len(v);
     if (n < 2) { return 0; }
-    var o = json_v_obj_new();
+    var last = map_new();
     var i = 0;
     while (i + 1 < n) {
-        json_v_obj_set(o, str_from(vec_get(v, i)), json_v_str_new(str_from(vec_get(v, i + 1))));
+        map_set(last, vec_get(v, i), vec_get(v, i + 1));
+        i = i + 2;
+    }
+    var o = json_v_obj_new();
+    i = 0;
+    while (i + 1 < n) {
+        var k = vec_get(v, i);
+        if (map_has(last, k) == 1) {
+            json_v_obj_set(o, str_from(k), json_v_str_new(str_from(map_get(last, k))));
+            map_delete(last, k);
+        }
         i = i + 2;
     }
     return o;
 }
 
-# vec<cstr> port keys ("8080/tcp") → {"8080/tcp":{}} JTAG_OBJ, or 0 when empty.
+# vec<cstr> port keys ("8080/tcp") → {"8080/tcp":{}} JTAG_OBJ, or 0 when empty. A
+# repeated port is one key, for the reason on _il_kv_obj.
 #[must_use]
 fn _il_ports_obj(v) {
     if (v == 0) { return 0; }
     var n = vec_len(v);
     if (n == 0) { return 0; }
+    var seen = map_new();
     var o = json_v_obj_new();
     var i = 0;
     while (i < n) {
-        json_v_obj_set(o, str_from(vec_get(v, i)), json_v_obj_new());
+        var k = vec_get(v, i);
+        if (map_has(seen, k) == 0) {
+            map_set(seen, k, 1);
+            json_v_obj_set(o, str_from(k), json_v_obj_new());
+        }
         i = i + 1;
     }
     return o;

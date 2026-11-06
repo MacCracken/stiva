@@ -53,6 +53,35 @@ fn test_oci_config_object_fields() {
     return 0;
 }
 
+# bayan 1.11.1 refuses a document with a duplicate key, so a config that writes one is a
+# config stiva cannot read back. Asserted through the parser, because the bytes alone
+# looked fine: every assertion on the old writer's output would still have passed.
+fn test_oci_config_object_repeated_keys() {
+    test_group("oci_config_object_repeated_keys");
+    var ports = vec_new();
+    vec_push(ports, "8080/tcp");
+    vec_push(ports, "443/tcp");
+    vec_push(ports, "8080/tcp");
+    var labels = vec_new();
+    vec_push(labels, "a");
+    vec_push(labels, "first");
+    vec_push(labels, "b");
+    vec_push(labels, "other");
+    vec_push(labels, "a");
+    vec_push(labels, "second");
+    var o = oci_config_object_jv(0, 0, 0, 0, 0, ports, labels);
+    var j = str_cstr(json_v_build(o));
+    var v = bayan_json_v_parse_buf(j, strlen(j));
+    assert_eq(v != 0, 1, "a repeated key still parses");
+    if (v == 0) { return 0; }
+    var l = bayan_json_v_obj_get_by_cstr(v, "Labels");
+    assert_eq(json_v_obj_len(l), 2, "a repeated label is one key");
+    assert_streq(str_cstr(json_v_str(bayan_json_v_obj_get_by_cstr(l, "a"))), "second", "the last value wins");
+    assert_eq(json_v_obj_len(bayan_json_v_obj_get_by_cstr(v, "ExposedPorts")), 2, "a repeated port is one key");
+    assert_eq(strstr(j, "\"a\":\"second\",\"b\":\"other\"") >= 0, 1, "a repeated key keeps its first position");
+    return 0;
+}
+
 fn test_oci_config_build_shape() {
     test_group("oci_config_build_shape");
     var diffs = vec_new();
@@ -1625,6 +1654,7 @@ fn test_whiteout_is_per_layer_not_global() {
 fn main() {
     test_oci_config_object_minimal();
     test_oci_config_object_fields();
+    test_oci_config_object_repeated_keys();
     test_oci_config_build_shape();
     test_il_oci_layout_version();
     test_il_parse_full_ref();

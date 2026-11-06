@@ -1,27 +1,27 @@
 # Benchmarks
 
-Latest: **2026-11-06T06:19:17Z** — commit `584dcc7`
+Latest: **2026-11-06T07:52:12Z** — commit `2ed9283`
 
-Tracking: `3808225` (baseline) → `d1d5079` (mid) → `584dcc7` (current)
+Tracking: `3808225` (baseline) → `d1d5079` (mid) → `2ed9283` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`d1d5079`) | Current (`584dcc7`) |
+| Benchmark | Baseline (`3808225`) | Mid (`d1d5079`) | Current (`2ed9283`) |
 |-----------|------|------|------|
-| `noop` | 2.00 ns | 2.00 ns | 3.00 ns +50% |
-| `oci_config_build+serialize` | 7.203 µs | 6.840 µs **-5%** | 5.987 µs **-17%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.096 µs **-5%** | 13.308 µs **-16%** |
-| `compose_yaml_to_toml` | — | 28.742 µs | 25.916 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.318 ms | 2.740 ms |
-| `flatten_layers_2x60_files_4kib` | — | 1.382 ms | 1.546 ms |
-| `event_json_build` | — | 5.955 µs | 5.402 µs |
-| `event_log_append` | — | 7.803 µs | 8.182 µs |
-| `event_ts_parse` | — | 1.583 µs | 1.356 µs |
-| `gzip_compress_2mib` | — | — | 38.289 ms |
-| `gzip_decompress_2mib` | — | — | 9.380 ms |
-| `unpack_layer_gz_20_files_4kib` | — | — | 1.019 ms |
-| `build_copy_layer_20_files_4kib` | — | — | 2.683 ms |
-| `exec_capture2_trivial_child` | — | — | 2.060 ms |
+| `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
+| `oci_config_build+serialize` | 7.203 µs | 6.840 µs **-5%** | 5.869 µs **-19%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.096 µs **-5%** | 13.217 µs **-16%** |
+| `compose_yaml_to_toml` | — | 28.742 µs | 25.914 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.318 ms | 1.386 ms |
+| `flatten_layers_2x60_files_4kib` | — | 1.382 ms | 1.530 ms |
+| `event_json_build` | — | 5.955 µs | 5.385 µs |
+| `event_log_append` | — | 7.803 µs | 8.014 µs |
+| `event_ts_parse` | — | 1.583 µs | 2.416 µs |
+| `gzip_compress_2mib` | — | — | 35.772 ms |
+| `gzip_decompress_2mib` | — | — | 6.860 ms |
+| `unpack_layer_gz_20_files_4kib` | — | — | 835.449 µs |
+| `build_copy_layer_20_files_4kib` | — | — | 2.568 ms |
+| `exec_capture2_trivial_child` | — | — | 2.095 ms |
 
 ---
 

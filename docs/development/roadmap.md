@@ -14,7 +14,7 @@ in the same change.
 
 ---
 
-## Where stiva is — v3.1.0
+## Where stiva is — v3.1.1
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
@@ -23,14 +23,14 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
 | CLI | **34 of 36 verbs live** (`cron` is new); only `checkpoint` and `restore` are unwired (v3.1.0 item 3) |
 | Image | pull · push · build · import · export · save · load · tag · rmi · gc · prune, over a valid OCI image layout |
 | Container | run · run -d · exec · diff · ps · stop · kill · restart · rename · pause · unpause · logs · logs -f · events · wait · top · cp · stats · inspect |
-| Tests | 2188 across `tests/*.tcyr` · 87 CLI smoke assertions · 14 benchmarks |
+| Tests | 2193 across `tests/*.tcyr` · 89 CLI smoke assertions · 14 benchmarks |
 | Deps | pinned in [`cyrius.cyml`](../../cyrius.cyml) (`[package].cyrius` and the `[deps.*]` tags); [`state.md`](state.md) lists them and CI checks that list against the manifest. Not restated here. |
 
 **Four facts that constrain everything below**, all verified by execution rather than by reading:
 
 - **The cycc struct-id 20/21 ↔ SIMD-sentinel miscompile was last verified live at 6.4.78;
-  it has not been re-verified at any later pin, including the cyrius 6.7.9 pin in force at
-  v3.1.0, so assume live.** A typed
+  it has not been re-verified at any later pin, including the cyrius 6.7.18 pin in force at
+  v3.1.1, so assume live.** A typed
   `var x: T = p; x.field` can silently read garbage — not crash — and it is per-function AND
   per-compilation-unit. The raw-offset accessors (`_img_id` / `_img_layers` /
   `_img_manifest_digest` / `_layer_digest`) are deliberate workarounds. Retiring them needs a probe
@@ -95,19 +95,48 @@ section lists only what 6.6.5 itself changes.
 *(v3.0.17 and v3.0.18 shipped; per this file's first rule their narrative lives in the CHANGELOG,
 not here. What follows is only what is still open.)*
 
-### Open — sigil's 2026-10-22 audit fixes need cyrius 6.7.18
+### Open — `stiva run` loses argument boundaries
 
-sigil 3.13.14 fixes CYRIUS-2026-0042 (X.509 nameConstraints were never read) and CYRIUS-2026-0040
-(ChaCha20-Poly1305 accepted a forged record when two threads shared a crypto lane). Neither is in
-this pin, and no dep tag can bring them, because `lib/sigil.cyr` is the toolchain's fold. Run at
-6.7.9 with `sigil` out of `[deps].stdlib` and `[deps.sigil]` at 3.13.15: `lib/sigil.cyr` stays
-3.13.11, with 0 `name_constraints` references. The check also needs cyrius's native verifier to
-call it: 0 references in `lib/tls_native*.cyr` at 6.7.9, 4 at 6.7.18. Native TLS is the default,
-so 0042 is on stiva's HTTPS registry path. 0040 needs threads, which `src/` does not create.
+`spawn_container` and `exec_container` (`src/runtime.cyr:961`, `:984`) join `spec.command` with spaces,
+as the oracle's `command.join(" ")` did, because `sandbox_exec` and `sandbox_spawn` take one string.
+kavach's `_split_command` then splits that string on spaces and tabs, so an argument holding either
+does not survive. Run against a real Alpine image on 3.1.0 and 3.1.1:
+`run IMG -- /bin/sh -c 'echo one; echo two'` prints an empty line, and
+`run IMG -- /bin/echo 'a  b'` prints `a b`. `run -d` shares the defect. `stiva exec` does not: it goes
+through nsenter with real argv. The argv is intact from the CLI through `state.json` to the spec, and is
+lost only at this call.
+
+The fix needs kavach 3.14.3, which adds `sandbox_exec_argv` and `sandbox_spawn_argv`. That release is
+prepared in the sibling checkout and **not tagged yet**, and an undefined fn is a hard error, so stiva's
+side cannot land first. Once the tag exists:
+
+1. Move `[deps.kavach]` to 3.14.3, then `rm -rf lib cyrius.lock && cyrius deps`, and update the pin in
+   `CLAUDE.md` and `docs/development/state.md`.
+2. In both functions, call the `_argv` form when `sp.command` has two or more elements. ⚠ **One element
+   stays the string form.** `run IMG "/bin/sleeper now"` relies on that split, `scripts/cli-smoke.sh` uses
+   it, and kavach refuses an argv[0] holding a space because its guard reads the first word as the program.
+3. Assert on what the payload observes: a static `argvp` in the smoke fixture that prints each argument
+   it received, on `run` and `run -d`, and that one quoted string is still split.
+
+Measured on a scratch copy against that kavach: 2197 tests and 92 smoke assertions, also under `--dce`;
+putting the old call back fails both. A real Alpine image runs `sh -c 'echo one; echo two'` on both paths.
+
+Still refused after it, by kavach's policy and by name: `$(...)` and `| sh` inside an argument (the
+runtime guard), and a newline in an argument on `run -d`.
+
+### Open cleanliness item — `accel` cannot be switched off
+
+`cyrius.cyml` declares `samay` and `ai-hwaccel` optional, and `[features]` lets a consumer drop
+`accel`, but `src/cron.cyr` (`CRON_SKIP`) and `src/fleet.cyr` (`REQ_NONE`) use both bundles with no
+gate. A build with `default = []` or `cyrius test --no-default-features` fails to compile, at 3.1.0
+on cyrius 6.7.9 and at 3.1.1 on 6.7.18. Nothing in CI builds that way, so nothing shows it.
+
+Either gate both modules on the feature, or drop `optional` and the `[features]` block and say the
+two deps are required.
 
 ### Open cleanliness item — `cyrius audit` exits 1 on two counts
 
-At 3.1.0 on cyrius 6.7.9, `fmt` is clean and tests are 2188/0, and `rc = 1` comes from two
+At 3.1.1 on cyrius 6.7.18, `fmt` is clean and tests are 2193/0, and `rc = 1` comes from two
 stages, either of which sets it alone: **147 lint warnings** (the next item) and **492
 undocumented public fns** across the audit's scope (`src tests benches`). Both counts are `rc = 1`
 at any value above zero (`_audit_sweep` in cyrius's `cbt/commands.cyr`). The audit's closing
@@ -134,7 +163,7 @@ fell from 163 with no test line changing to fix it.
 
 ## v3.1.0 — secrets, interactivity, and mobility
 
-> The 3.1.0 release itself is the move to cyrius 6.7.9 and carries **none** of the items below.
+> The 3.1.0 and 3.1.1 releases are the moves to cyrius 6.7.9 and 6.7.18, and carry **none** of the items below.
 > They stay open and keep these numbers, because `src/` and the docs cite them as "v3.1.0 item N".
 
 > ⛔ **REWRITTEN 2026-08-21 after an adversarial re-audit. The previous version of this section
@@ -312,7 +341,7 @@ pre-warm) unless that run goes 9/9 without one. Then a mutex on the token cache
 (`src/registry.cyr:2377`), digest dedup (two workers otherwise race the same `.dl` scratch), and a
 fixed 4-worker pool with layer order taken from the descriptor list.
 ⛔ Do not move `var ld: Descriptor = vec_get(descs, i)` into a worker fn — that is the
-struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.7.9.
+struct-id 20/21 shape and it is unverified at every pin since 6.4.78, including 6.7.18.
 
 ### 9. Wire `RuntimeSpec.mounts` — NEW, and it gates more than it looks
 

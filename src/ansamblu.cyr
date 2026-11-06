@@ -661,7 +661,7 @@ fn _ans_header_names(toml_str, prefix) {
 # Pairs of the section named `full` (exact), or 0 when absent (bayan dropped it
 # because it had no key=values).
 fn _ans_section_pairs(sections, full) {
-    var secs = bayan_toml_get_sections(sections, full);
+    var secs = bayan_toml_get_sections_by_cstr(sections, full);
     if (vec_len(secs) == 0) { return 0; }
     return bayan_toml_section_pairs(vec_get(secs, 0));
 }
@@ -684,17 +684,17 @@ fn parse_ansamblu(toml_str) {
         var svc_name = _ans_prefixed_name(bayan_toml_section_name(sec), "services.");
         if (svc_name != 0) {
             var pairs = bayan_toml_section_pairs(sec);
-            var image = _bld_val_cstr(bayan_toml_get(pairs, "image"));
+            var image = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "image"));
             if (image == 0) { return 0; }                    # ServiceDef requires `image`
-            var env = _ans_inline_table(_bld_val_cstr(bayan_toml_get(pairs, "env")));
+            var env = _ans_inline_table(_bld_val_cstr(bayan_toml_get_by_cstr(pairs, "env")));
             if (env == 0 - 1) { return 0; }                  # non-string env value (serde: HashMap<String,String>)
             var svc = service_def_new(image, _bld_str_vec(pairs, "command"), env,
               _bld_str_vec(pairs, "ports"), _bld_str_vec(pairs, "volumes"),
               _bld_str_vec(pairs, "depends_on"));
             var ss: ServiceDef = svc;
-            var rep = bayan_toml_get(pairs, "replicas");
+            var rep = bayan_toml_get_by_cstr(pairs, "replicas");
             if (rep != 0) { ss.replicas = atoi(str_cstr(rep)); }
-            var rp = _bld_val_cstr(bayan_toml_get(pairs, "restart"));
+            var rp = _bld_val_cstr(bayan_toml_get_by_cstr(pairs, "restart"));
             if (rp != 0) {
                 # Rust accepts only the UNIT variants as a bare string; the
                 # struct variant "on-failure" (needs a map) and any unknown value
@@ -721,14 +721,14 @@ fn parse_ansamblu(toml_str) {
             if (svc2 == 0) { return 0; }
             var hp = bayan_toml_section_pairs(sec2);
             # HealthCheck.command has no serde default → it is required.
-            if (bayan_toml_get(hp, "command") == 0) { return 0; }
+            if (bayan_toml_get_by_cstr(hp, "command") == 0) { return 0; }
             var hc = health_check_new(_bld_str_vec(hp, "command"));
             var hh: HealthCheck = hc;
-            var iv = bayan_toml_get(hp, "interval_secs");
+            var iv = bayan_toml_get_by_cstr(hp, "interval_secs");
             if (iv != 0) { hh.interval_secs = atoi(str_cstr(iv)); }
-            var tv = bayan_toml_get(hp, "timeout_secs");
+            var tv = bayan_toml_get_by_cstr(hp, "timeout_secs");
             if (tv != 0) { hh.timeout_secs = atoi(str_cstr(tv)); }
-            var rv = bayan_toml_get(hp, "retries");
+            var rv = bayan_toml_get_by_cstr(hp, "retries");
             if (rv != 0) { hh.retries = atoi(str_cstr(rv)); }
             var svs: ServiceDef = svc2;
             svs.health_check = hc;
@@ -750,8 +750,8 @@ fn parse_ansamblu(toml_str) {
         var nd = network_def_default();
         var ndd: NetworkDef = nd;
         if (np != 0) {
-            ndd.driver = _bld_val_cstr(bayan_toml_get(np, "driver"));
-            ndd.subnet = _bld_val_cstr(bayan_toml_get(np, "subnet"));
+            ndd.driver = _bld_val_cstr(bayan_toml_get_by_cstr(np, "driver"));
+            ndd.subnet = _bld_val_cstr(bayan_toml_get_by_cstr(np, "subnet"));
         }
         map_set(networks, nname, nd);
         i = i + 1;
@@ -766,7 +766,7 @@ fn parse_ansamblu(toml_str) {
         var vname = vec_get(vol_names, i);
         var vp = _ans_section_pairs(sections, _ans_cat("volumes.", vname));
         var vd = volume_def_default();
-        if (vp != 0) { store64(vd, _bld_val_cstr(bayan_toml_get(vp, "driver"))); }  # single-field
+        if (vp != 0) { store64(vd, _bld_val_cstr(bayan_toml_get_by_cstr(vp, "driver"))); }  # single-field
         map_set(volumes, vname, vd);
         i = i + 1;
     }

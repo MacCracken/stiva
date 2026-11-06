@@ -16,9 +16,9 @@ parity oracle; do not edit it.
 
 ## Prerequisites
 
-- The **Cyrius toolchain** (`cyrius`), pinned to **6.7.9** (see `cyrius.cyml`).
+- The **Cyrius toolchain** (`cyrius`), pinned to **6.7.18** (see `cyrius.cyml`).
 - Nothing else. AGNOS dependencies are resolved **by git tag** from
-  `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote`, `agnodrm`,
+  `[deps.*]` in `cyrius.cyml` — `kavach`, `majra`, `nein`, `bote-core`,
   `cmdit`, `samay`, `ai-hwaccel`, `sakshi`, `libro` — so `cyrius deps` works on a
   clean machine with no sibling checkouts.
 
@@ -62,8 +62,7 @@ parity oracle; do not edit it.
   last-def-wins, so prefixes keep them unique); `0` for null/None, `-1` sentinels for
   `Option<int>`; preserve exact error-display strings from the oracle.
 
-The **3** cross-bundle "duplicate fn (last definition wins)" warnings (`result_print_err`,
-`is_syscall_err` and `wrap_syscall`, in both sigil and agnodrm) are expected. Since cyrius 6.6.20
+A build prints no cross-bundle "duplicate fn (last definition wins)" warnings. Since cyrius 6.6.20
 every call binds the last definition, so a new duplicate whose bodies differ changes what runs:
 compare the bodies before calling it benign.
 
@@ -78,7 +77,7 @@ compare the bodies before calling it benign.
   but the **end** of `src/main.cyr` silently renumbers every verb after it. `cli-smoke.sh` is
   what catches this.
 - **The cycc struct-id ↔ SIMD-sentinel miscompile was last verified live at 6.4.78 and has
-  not been re-verified at the 6.7.9 pin — assume live.** A typed
+  not been re-verified at the 6.7.18 pin — assume live.** A typed
   `var x: T = p; x.field` can read garbage **silently**, and it varies per function *and* per
   compilation unit. The raw-offset accessors in hot paths (`_img_id`, `_layer_digest`,
   `load64(p + N)`, …) are deliberate workarounds — do not "clean them up". When a test needs
@@ -127,7 +126,7 @@ program entry (includes + CLI dispatch). `cyrius.cyml` `[lib].modules` drives
 | `agent` | Daimon agent registration |
 | `mcp` | 9 MCP tool defs + live dispatch over the `Stiva` facade |
 | `convert` | Dockerfile **and** docker-compose YAML → Stivafile TOML |
-| `encrypted` | LUKS + dm-verity (agnodrm) |
+| `encrypted` | LUKS + dm-verity (deferred; sigil holds both) |
 | `intents` | Intent value type + serde (the NL `parse_intent` → agnoshi) |
 | `error` | Error types |
 
@@ -136,7 +135,6 @@ Dependencies on sibling AGNOS projects (Cyrius `dist/*.cyr` bundles):
 - **majra** — DAG scheduling, heartbeat health tracking, pub/sub events
 - **nein** — nftables firewall rules, NAT, port mapping
 - **bote** — MCP core service (tool registry, structured output)
-- **agnodrm** — LUKS + dm-verity for the `encrypted` module
 - **cmdit** — CLI parsing, verb introspection, shell completions
 - **samay** — cron expression parsing + scheduling for the `cron` module
 - **ai-hwaccel** — accelerator inventory + placement profiles (the `accel` feature, on by default)

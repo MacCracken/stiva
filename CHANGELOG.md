@@ -5,6 +5,143 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-11-06 — cyrius 6.7.18, every dep at its newest tag, agnodrm retired
+
+Toolchain **6.7.9 → 6.7.18**, every dep to its newest tag, and `[deps.agnodrm]` removed. This is the
+release that reaches sigil's 2026-10-22 audit fixes, which 3.1.0 recorded as out of reach at its pin.
+It carries one source fix: the new bayan turned a parity bug in `build` into an image stiva could
+not read back.
+
+⚠ **Consumers: `dist/stiva.cyr` now needs cyrius ≥ 6.7.17.** It calls `bayan_toml_get_by_cstr` and
+its siblings, which bayan 1.11.0 added: 0 definitions in 6.7.16's `lib/bayan.cyr`, 1 in 6.7.17's.
+
+| Dep | 3.1.0 | 3.1.1 | Dep | 3.1.0 | 3.1.1 |
+|---|---|---|---|---|---|
+| sigil | 3.13.11 | **3.13.15** | kavach | 3.14.0 | **3.14.2** |
+| sakshi | 2.5.8 | **2.5.10** | samay | 1.2.0 | **1.5.1** |
+| libro | 2.11.0 | **2.11.3** | ai-hwaccel | 2.4.2 | **2.5.6** |
+| majra | 2.12.0 | **2.13.0** | cmdit | 1.4.0 | **1.5.0** |
+| bote-core | 3.4.10 | **3.8.15** | nein | 1.8.0 | **1.9.1** |
+| agnodrm | 1.7.0 | **removed** | | | |
+
+Transitive: patra 1.16.0 → 1.16.6, bayan 1.5.13 → 1.11.1, both the toolchain's folds. sigil and
+sakshi are folds too, and at 6.7.18 the folds are the newest tags, so the pin rule and "latest"
+agree for every dep this time.
+
+### Fixed — a repeated label or port built an image stiva could not read
+
+bayan 1.11.1 refuses a JSON document with a duplicate key, whole. `json_v_obj_set` appends without
+looking, and `_il_kv_obj` (Labels) and `_il_ports_obj` (ExposedPorts) iterate plain vecs, so two
+`label` steps with one key, or `expose = [8080, 8080]`, wrote the key twice. `stiva build` still
+exited 0 and printed an id; deriving from that image then failed with `base image config has no
+usable rootfs.diff_ids`. All 2188 tests stayed green, because none repeats a key.
+
+The oracle never had this: `rust-old/src/build.rs` inserts both into a `HashMap`, so the last value
+won. The port's vecs lost that, and bayan 1.5.13 hid it by answering the first of two keys. A
+repeated key now takes its last value at its first position, and a config without repeats keeps its
+exact bytes. The new tests read back what was written: a parse in `tests/store.tcyr` (5 assertions)
+and a derive in `scripts/cli-smoke.sh` (2). Putting the old writer back fails both.
+
+The other data-keyed writers iterate a hashmap (`_ct_map_to_jv`, the credential store, `stiva_core`),
+so they cannot repeat a key. A scan of everything a full smoke run writes found 0 duplicate keys in
+27 documents across 16 files.
+
+### Removed — `[deps.agnodrm]`
+
+agnodrm has held neither LUKS nor dm-verity since its 1.4.4 decomposition: both moved to sigil. No
+file here named any of its 138 public fns or 35 types, because the LUKS and verity work is still
+deferred. Removing it costs nothing at runtime and takes 158,568 B off a default build (19,304 B
+under `CYRIUS_DCE=1`, measured at 6.7.18 with 1.8.0 put back in a scratch copy). The three `duplicate
+fn` warnings for `is_syscall_err`, `result_print_err` and `wrap_syscall` went with it, and a build
+now prints none. `src/encrypted.cyr`'s deferred plan names sigil's calls, read from 3.13.15, and
+nothing else in that module changed.
+
+### Security — what the pin brings
+
+- **CYRIUS-2026-0042:** X.509 nameConstraints are now parsed and enforced, in sigil 3.13.15 and in
+  native TLS's verifier. Native TLS is the default, so this closes the gap on stiva's HTTPS registry
+  path. Read from `lib/`, and real pulls from ghcr.io and Docker Hub still verify. stiva has no test
+  of its own that a constrained chain is refused; the upstream audit's `nc_probe` covers that.
+- **CYRIUS-2026-0040:** fixed in sigil 3.13.14. It needs threads, which `src/` does not create.
+
+### Changed
+
+- **`[deps.bote]` is now `[deps.bote-core]`.** nein declares that name itself, so under the repo name
+  it stayed unclaimed and nein's 3.8.9 landed while this manifest said 3.8.15, with a green build.
+  `CYRIUS_LOCAL=bote-core` is the local-mode spelling now. CLAUDE.md records the rule.
+- **Release binaries are built with `--dce`.** `release.yml` sets it and development builds do not
+  change. A default build grew to 6,100,128 B from 5,150,216 B, mostly unreachable code (2,973,148 B).
+  `--dce` removes that, for **3,126,432 B**: half a default build, and 39 % below 3.1.0's release
+  binary. At 6.7.9 the same flag declined to compact and saved nothing. It adds about 5 % to build time,
+  and benchmarks stay within 2.5 %. `ci.yml`, which gates the release, now runs the suite under
+  `CYRIUS_DCE=1` and builds and runs the `--dce` CLI, so a release never ships a shape CI has not built.
+- **33 deprecated bayan calls moved to their typed names** in `src/build.cyr` and `src/ansamblu.cyr`:
+  `bayan_toml_get`, `_get_sections` and `_get_array` to `*_by_cstr`. The old names forward to the new
+  ones, so the answers are the same.
+- **`stiva completions`** (cmdit 1.5.0): bash keeps filenames with spaces whole, and fish completes
+  files after a subcommand.
+- **`stiva info`** no longer prints a stray `[INFO] detect:` line in the middle of `Accelerators:`.
+- **Tests:** 2188 → 2193, smoke 87 → 89.
+
+### Checked — what could have changed without an error
+
+- **Language, 6.7.10 – 6.7.18.** The changes that alter compiled meaning are about `Str` values,
+  dereferences, narrow types, struct values and redeclared globals. `src/` has 0 of each.
+- **Stdlib.** stiva calls 163 stdlib fns directly: 0 gone, 27 bodies changed, and on Linux none
+  changes behaviour. The rest are Windows, cx or macOS arms, and rewrites such as `+=`.
+- **Dep APIs.** Of 125 dep fns stiva or its tests call: 0 removed, 0 signatures changed.
+- **`http_get`'s new 30 s deadline** cannot cut a large layer pull: the registry client is on
+  `sandhi_*` with its own `total_ms`.
+- **nein 1.9.1's stricter names** do not reach stiva. The table prefix is the constant `nein`, not an
+  id, and a `firewall_validate` failure was already warn-only.
+- **bayan's other refusals.** stiva decodes no base64, and every `bayan_json_v_parse_buf` site
+  already handled the 0 a malformed document gives.
+
+### Known / not fixed
+
+- **An image built with a repeated label or port by 3.1.0 or earlier stays unreadable**, because its
+  config blob is content-addressed. Deriving from it fails with the `diff_ids` message. Rebuild it.
+- **`event_ts_parse` is 73 % slower**, 1.36 → 2.34 µs, stable over four runs. The bench is one JSON
+  parse, so this is bayan's stricter parser, though it was not isolated further. About 1 µs per event
+  line that `stiva events` reads.
+- **nein 1.9.1 pins bote-core 3.8.9**, and stiva compiles it against 3.8.15, so that pairing is
+  tested by stiva's suite and not by nein's.
+- **`stiva run` loses argument boundaries**, so `run IMG -- /bin/sh -c 'echo one; echo two'` does not
+  run what it says. Found while testing the `--dce` binary. It is not new and not DCE: 3.1.0 does the
+  same, and the oracle joined the command with spaces too. `run -d` shares it and `stiva exec` does not.
+  The fix needs kavach 3.14.3, which is not tagged yet. The roadmap has the steps.
+- **The `accel` feature cannot be switched off**, though `cyrius.cyml` said it could. `src/cron.cyr`
+  and `src/fleet.cyr` use samay and ai-hwaccel with no gate, so a build without it fails to compile.
+  This is not new: a clean export of 3.1.0 fails the same way. The manifest comment is corrected and
+  the fix is on the roadmap.
+
+### Benchmarks
+
+`compose_400_reverse_sorted_keys` −49.4 % (bayan's YAML key check is no longer quadratic),
+`gzip_decompress_2mib` −26.9 %, `unpack_layer_gz_20_files_4kib` −18.0 %, `gzip_compress_2mib` −6.6 %.
+`event_ts_parse` +78 % in the recorded run (see Known). The other eight moved −4.3 % to +1.7 %, ignoring
+`noop`.
+
+### Verified
+
+- `cyrius test tests/`: exit 0, 0 `FAIL` lines, **2193** assertions (stiva 667 · registry 421 · runpath
+  359 · mgmt 326 · store 304 · convert 116). Smoke **89/89**. `cyrius test --features accel`: exit 0.
+- **CI's own steps, replayed** in a clean copy of the tracked files: all pass, with 27 pin statements
+  (agnodrm's two are gone) and 10 dep bundles matching their tags. `cyrius deps --locked` and `--verify`
+  pass (94 files), and the lock is byte-identical from empty: 12 commit rows, one version each.
+- **Real pulls** of `ghcr.io/linuxcontainers/alpine:latest` and `docker.io/library/alpine:3.20` give the
+  same digests on the 3.1.0 and 3.1.1 binaries.
+- **CLI output:** 71 of 75 captures match 3.1.0. The other four are the completions and `info` changes
+  above.
+- **The `--dce` binary against a default build:** 75 of 75 CLI captures identical, smoke 89/89, `save`
+  output byte-identical, and a real Alpine image gives the same results through pull, run, `run -d`,
+  ps, exec, top, stats, stop, rmi, load and run. `CYRIUS_DCE=1 cyrius test tests/`: exit 0, 2193. Test
+  binaries compact as the release does (`convert.tcyr`: 5,738,224 → 2,428,656 B), and `--dce` output is
+  byte-identical run to run.
+- `fmt` is clean and `src/` lints at 0. `cyrius audit` stays `rc = 1` on the same two counts, 147 lint
+  warnings in `tests/` and 492 undocumented public fns.
+- **aarch64** compiles, to 7,029,472 B, and was not run. Nothing here ran on GitHub's runners.
+
 ## [3.1.0] — 2026-11-05 — cyrius 6.7.9, the 6.7 language line
 
 Toolchain **6.6.20 → 6.7.9**, and every dep with it. **`src/` needed no change** beyond the version

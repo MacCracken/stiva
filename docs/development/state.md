@@ -5,12 +5,12 @@
 
 ## Version
 
-**3.1.0** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.1.1** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -23,8 +23,8 @@
 
 ## Tests
 
-**2188** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 359 ·
-mgmt 326 · store 299 · convert 116 — plus **87** CLI smoke assertions
+**2193** assertions across 6 `tests/*.tcyr` files — stiva 667 · registry 421 · runpath 359 ·
+mgmt 326 · store 304 · convert 116 — plus **89** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
 and **14** benchmarks.
 
@@ -39,19 +39,18 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.13.11 | kavach | 3.14.0 |
-| sakshi | 2.5.8 | samay | 1.2.0 (optional) |
-| libro | 2.11.0 | ai-hwaccel | 2.4.2 (optional, on by default) |
-| majra | 2.12.0 | agnodrm | 1.7.0 |
-| bote | 3.4.10 | cmdit | 1.4.0 |
-| nein | 1.8.0 | | |
+| sigil | 3.13.15 | kavach | 3.14.2 |
+| sakshi | 2.5.10 | samay | 1.5.1 (optional) |
+| libro | 2.11.3 | ai-hwaccel | 2.5.6 (optional, on by default) |
+| majra | 2.13.0 | cmdit | 1.5.0 |
+| bote-core | 3.8.15 | nein | 1.9.1 |
 
 `sigil` is declared **first** and deliberately — it claims the name before libro's transitive
 thin sub-bundle selection, which would otherwise collide with the full bundle and break the
-build outright. Each tag is that dep's newest whose own `cyrius` pin is ≤ 6.7.9, except `sigil`
-and `sakshi`: they compile from the toolchain snapshot's folds, so they are pinned to the versions
-6.7.9 folds, the same bytes as the tags above, though newer tags exist on this pin. `ai-hwaccel`
-stays at 2.4.2 because no release targets 6.7.9; 2.5.0 moves to 6.7.18.
+build outright. `bote-core` is named for its module for the same reason: nein declares that name
+itself, at an older tag. Each tag is that dep's newest, and each is built on a `cyrius` pin ≤ 6.7.18.
+`sigil` and `sakshi` compile from the toolchain snapshot's folds, which at 6.7.18 are the same bytes
+as the tags above.
 
 ## Consumers
 
