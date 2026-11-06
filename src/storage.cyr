@@ -502,6 +502,96 @@ fn _stor_lkind(path) {
     return _stor_st_mode(_stor_sb) & 61440;
 }
 
+# Push the components of `path` onto `pending` so the first is popped first.
+fn _stor_push_components(pending, path) {
+    var parts = vec_new();
+    var n = strlen(path);
+    var i = 0;
+    while (i < n) {
+        while (i < n && load8(path + i) == 47) { i = i + 1; }
+        var start = i;
+        while (i < n && load8(path + i) != 47) { i = i + 1; }
+        if (i > start) { vec_push(parts, _stor_slice(path, start, i)); }
+    }
+    var j = vec_len(parts);
+    while (j > 0) {
+        j = j - 1;
+        vec_push(pending, vec_get(parts, j));
+    }
+    return 0;
+}
+
+# The most symlinks one lookup follows, as the kernel's own limit is.
+var _STOR_MAX_LINKS = 40;
+
+# The most components one lookup walks. Links are bounded above, and each can name
+# thousands of components, so a chain of them needs a bound of its own.
+var _STOR_MAX_WALK = 1024;
+
+# 1 when `path`, as the container will see it, is a regular file someone may execute.
+#
+# A rootfs is the container's, so a name in it is resolved the way the container's
+# kernel would resolve it and never by the host's. `/bin` is a link to `usr/bin` on
+# most images, and busybox's `/bin/sleep` is a link to `/bin/busybox`: read by the
+# host, an absolute target names the HOST's file. So every component is taken with
+# lstat, and a link is walked against `rootfs`. A `..` stops at the root, as in a
+# chroot. Each prefix walked so far holds no link, so the lstat cannot be redirected,
+# and this only reads metadata, before any payload has run.
+#
+# ⛔ The image chooses how much work this does, and `alloc` never frees. The walked
+# path lives in one buffer, a link's target in another, and the walk is bounded. An
+# allocation per hop cost 58 KB per byte of a crafted PATH: 2.3 GiB for 40 KB.
+fn _stor_rootfs_is_program(rootfs, path) {
+    var pending = vec_new();
+    _stor_push_components(pending, path);
+    var rlen = strlen(rootfs);
+    var full = alloc(rlen + 4098);
+    memcpy(full, rootfs, rlen);
+    store8(full + rlen, 0);
+    var cur = rlen;                         # where the walked part of `full` ends
+    var tgt = alloc(4097);
+    var hops = 0;
+    var steps = 0;
+    while (vec_len(pending) > 0) {
+        steps = steps + 1;
+        if (steps > _STOR_MAX_WALK) { return 0; }
+        var comp = vec_pop(pending);
+        if (streq(comp, ".") == 1) { continue; }
+        if (streq(comp, "..") == 1) {
+            while (cur > rlen) {
+                cur = cur - 1;
+                if (load8(full + cur) == 47) { break; }
+            }
+            store8(full + cur, 0);
+            continue;
+        }
+        var clen = strlen(comp);
+        if (cur - rlen + 1 + clen > 4096) { return 0; }     # PATH_MAX
+        store8(full + cur, 47);
+        memcpy(full + cur + 1, comp, clen);
+        store8(full + cur + 1 + clen, 0);
+        var kind = _stor_lkind(full);
+        if (kind < 0) { return 0; }
+        if (kind == 40960) {
+            hops = hops + 1;
+            if (hops > _STOR_MAX_LINKS) { return 0; }
+            var tn = sys_readlink(full, tgt, 4096);
+            if (tn <= 0) { return 0; }
+            store8(tgt + tn, 0);
+            # The link is no part of the walked path, and its target replaces it.
+            if (load8(tgt) == 47) { cur = rlen; }
+            store8(full + cur, 0);
+            _stor_push_components(pending, tgt);
+            continue;
+        }
+        cur = cur + 1 + clen;
+    }
+    if (cur == rlen) { return 0; }
+    if (_stor_lkind(full) != 32768) { return 0; }
+    if ((_stor_st_mode(_stor_sb) & 73) == 0) { return 0; }
+    return 1;
+}
+
 # ── walking a tree that may be hostile ──
 # A container's rootfs is the container's: a path checked by name can be a symlink by the time it
 # is opened, and that symlink resolves on the HOST. So anything that touches one goes down from a

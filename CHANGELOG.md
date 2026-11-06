@@ -5,6 +5,185 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-11-06 — a container runs what its image says
+
+An image's config used to be stored and ignored: `stiva run` needed a command, spelled as an absolute
+path, and got an empty environment. It now runs what the image says, by the OCI image spec's rule. A
+derived image keeps its base, what you type for an image means one thing to every verb, and output
+scanning warns where it used to withhold a run's output. Moves kavach 3.14.4 → 3.14.5, which bounds an
+OCI container's capabilities and masks `/proc`.
+
+### Added
+
+- **`run` applies an image's config.** `Entrypoint`, `Cmd`, `Env` and `WorkingDir` fill what the caller
+  leaves unset, at `container_manager_create`, so `run`, `ansamblu`, `cron` and the facade all have it.
+  Each case below was read from a payload, on the default path, `--backend process`, `--backend oci`
+  and `run -d`, from a Docker-shaped image loaded back from a rewritten archive.
+  - What runs is the image spec's rule: Entrypoint, then the caller's arguments or else Cmd, and with
+    no Entrypoint the first of those is the program. An argument replaces Cmd and never Entrypoint.
+  - The image's `Env`, with the caller's over it.
+  - A `WorkingDir` that does not exist is made, without following a link in the rootfs. runc would make
+    it, and the process backend refused a missing one.
+  - A config that cannot be read refuses the container, and `build` refuses it as a base. A container
+    started without the Env its image declares fails somewhere that points nowhere near the cause.
+- **A bare program name works on every backend.** A `PATH` variable alone would not have done it: runc
+  searches `PATH`, but kavach's process backend, which every `run -d` takes, calls `execve` on what it
+  is given, so `run -d img sleep 1` exited 127. stiva resolves the name on the container's `PATH`
+  inside the rootfs. A link is walked against the rootfs and never read on the host: `/bin` is usually
+  a link to `usr/bin`, busybox's `/bin/sleep` to `/bin/busybox`, and an absolute target on the host
+  names the host's file. With no `PATH` from the image or the caller, Docker's default applies.
+- **`stiva inspect` takes an image**, when nothing is a container of that name, and prints its config.
+
+### Changed
+
+- **What you type for an image means one thing.** `run`, `rmi`, `tag`, `save`, `push`, `inspect` and a
+  Stivafile's `base` all go through `image_resolve`, where there were four loops that disagreed on
+  first match and last. In order: an id or a stored reference as typed, `repo@sha256:…`, the reference
+  the parser makes of it, and with no registry typed the same name in the local store. So `alpine` is
+  the Hub's image when you have it, a local build of that name is `local/alpine`, and nothing is
+  ambiguous.
+- **A foreground run's output scan warns and redacts, and does not block.** kavach's default quarantines
+  at HIGH, and `code_scan` rates the text `/bin/sh` HIGH wherever it appears, so a payload printing a shell
+  path, or `/bin/show`, failed with its output withheld and its exit status lost. Real images running
+  their own entrypoints made that likely. A run now warns on stderr, by category and never by the text
+  that matched, and keeps its exit status. A WARN verdict is where the gate redacts, so a recognised
+  secret still does not get out. Measured under kavach 3.14.5, on stdout and in the stored log:
+
+  | Output holds | 3.1.3 | 3.2.0 |
+  |---|---|---|
+  | a shell path | run fails, output withheld | printed, warned |
+  | AWS or GitHub key, JWT, private key, connection string, SSN | run fails, output withheld | `[REDACTED:…]`, warned |
+  | a card number or IBAN | run fails, output withheld | ⚠ printed, warned |
+  | an internal IP | printed, not warned | printed, warned |
+  | a Slack token, `password=…` | printed | ⚠ printed: not detected |
+
+  `logs --scan` keeps kavach's default, since asking for a scan is asking for a verdict, and `run -d` and
+  `exec` are still not scanned.
+- **A derived image keeps its base.** `build` wrote a config from the Stivafile alone, so building on
+  an image lost its environment, entrypoint, user, working directory, ports and labels, and claimed
+  this host's architecture. It now inherits all of them. A step's `env` overrides a base's key in place,
+  `[config].workdir` beats a `workdir` step beats the base's, and a Stivafile `entrypoint` resets the
+  base's `Cmd`, Docker's rule, since a Cmd written for one program would be passed to another.
+
+### Fixed
+
+- **`rmi` of one name deleted the image under all its names.** It went by id, so `rmi b:v2` also removed
+  `local/a:v1`, and swept the blobs. Not on the roadmap: a smoke test found it. `rmi <name>` now removes
+  that name and says `Untagged:`, the image goes with its last name, and `rmi <id>` still removes it
+  outright.
+- **A container's `scan_policy` never reached a foreground run.** It was stored and persisted, and a
+  comment said it was threaded through `sandbox_exec_set_ext_policy`, which nothing called. `exec_container`
+  is its first caller, so a policy written to refuse a run now does.
+- **`tag` wrote `local/x:1` as `docker.io/local/x:1`.** The parser read this store's own `local` registry
+  as a Hub user, so what `tag` printed did not resolve.
+- **`cli-smoke.sh` skipped its zsh check silently** on a host with no zsh, which is why the first CI run
+  reported 107 where a local run reported 108. It is a counted skip now, and so is bash's.
+
+### Security
+
+Applying an image's config makes an image input to more of stiva, so its config and its rootfs are
+treated as hostile. An independent review broke a draft of this release in each of these ways, and each
+was reproduced before it was fixed:
+
+- **A crafted `PATH` could exhaust the host's memory.** `alloc` never frees, and the lookup allocated per
+  link per entry: with a link to itself and a `PATH` of nothing else, 588 MiB for 10 KB and 2.3 GiB for
+  40 KB. A lookup now reuses its buffers and is bounded in links, components and `PATH` entries (the
+  first 64 are searched), and the same image peaks at 13 MiB whatever its size.
+- **An image could not pass for another by name.** A name shaped like an id or a pin won over the image
+  that really has it, so an archive named `sha256:<id>` answered `inspect <id>`, and one named
+  `app@sha256:<digest>` answered `run` of that pin. An id now means an id before any name is looked at,
+  a digest never matches a name, and `load` treats such a name as no name.
+- **A refused image leaves nothing behind.** Every refusal now comes before a layer is unpacked. It came
+  after the overlay was mounted, so as root a hostile image left a mount and a directory no record could
+  reach. Run in a mount namespace: no containers, no mounts. A failed `prepare_layers` also left its
+  directory, which predates this release.
+- **`WorkingDir` is capped at 1024 bytes.** Each component is a directory at two bytes of config, and the
+  walk uses `openat`, so `PATH_MAX` never stopped it: 30,000 were made, and `rm` could not reach them.
+- **Nothing an image says reaches a terminal or log raw.** A `User`, a command or an architecture holding
+  an escape sequence or a newline went to stderr as it was, which could forge a log line. They are
+  printed with control bytes as `?`, and cut at 200 bytes.
+- **A `PATH` entry holding a blank is passed over.** One element is a command line, so `/a b/prog` ran
+  `/a` with the argument `b/prog`.
+- **`local` is not a host.** Reading it as a registry meant `pull local/foo` went looking for one. `pull`
+  and `push` refuse it, and a Stivafile `base` naming a missing `local/x` says it is not found.
+- `rmi`'s report no longer goes through a name lookup, which another image's name could answer.
+- A foreign-architecture image now logs a warning. It is not refused, since binfmt may run it.
+
+### ⚠ Behaviour changes
+
+- **`run IMG CMD` on an image with an Entrypoint passes `CMD` to it**, as Docker does. There is no
+  `--entrypoint` yet, so `run nginx /bin/sh` hands `/bin/sh` to nginx's entrypoint script.
+- **A bare program name reaches the payload as a full path**: `run IMG sleep 1` gives `argv[0]` =
+  `/usr/bin/sleep` on every backend, where runc would have kept `sleep`.
+- **A payload on the OCI backend no longer sees `TERM=xterm`.** It came from kavach's fallback when
+  stiva passed no environment, and stiva now always passes one, as Docker does with no `-t`.
+- **From kavach 3.14.5, an OCI container holds 12 capabilities** and `/proc` is masked. A payload that
+  needs a raw socket, such as `ping`, reads EPERM. `--cap-add` is on the roadmap for v3.2.2.
+- **`rmi <name>` no longer removes other names**, as above.
+- **A foreground run that printed something flagged now succeeds.** A script relying on it failing, to
+  catch a leak, should set a `scan_policy`. A card number that used to stop a run now prints with a warning.
+
+### Not done
+
+- ⛔ **An image's `User` is read, recorded and not applied.** It needs a `process.user` from kavach, and
+  a pin cannot move ahead of a tag, so it is v3.2.2. Until then such an image runs as root, and a
+  warning says so. This is the largest security gap left.
+- **`run -d` and the process backend have no capability bound**, which kavach 3.14.5 gives the OCI path
+  alone. Measured: all 41, in a user namespace, on the host's PID namespace. `exec` likewise.
+- ⚠ **Redaction stops at what kavach knows.** A card number or IBAN is flagged and printed, and a Slack
+  token or `password=…` is not detected. In the roadmap's upstream section.
+
+### Tests
+
+- **`runpath.tcyr` 659 → 902**, for 2892 in all, on x86-64 and on aarch64 under qemu. A rootfs is tested as
+  hostile: a link only the host could satisfy, `..` past the root, a link loop, the kernel's 40 links
+  exactly, and a `WorkingDir` that would write through a link. A memory test asserts the heap is not
+  spent as well as how much was used, because `alloc` answers 0 past its ceiling, and a difference
+  read off that looked small.
+- **`cli-smoke.sh` 108 → 164.** "references", "image config" and "output gate" groups read what a payload
+  was handed and what reached each stream, from images shaped as Docker writes them, through `save`, a
+  rewrite and `load`. CI runs them on both binaries. Against a 3.1.3 build, the groups fail. A credential
+  comes from the image's `Env` there, so "on neither stream" can be asserted: an argument would be in
+  the log line naming the command.
+- **Three fuzz targets, 18 → 21:** `image_config`, `image_resolve` and `rootfs_path`, the last over a
+  rootfs of links. `image_config_parse` was split out of `image_config_read` for it.
+- **80 mutations, judged against a no-op control: 79 caught.** The survivor is equivalent: `rmi` takes
+  the first entry of a name and id, and the index cannot hold two. The pass found six tests that could
+  not fail, and each was rewritten until its mutant was caught: among them that memory test, one whose
+  source image did not exist so it stopped before the guard, and one that a real heap overrun passed,
+  which now reads fresh memory for what ran off the buffer. It also found a line that could not matter,
+  which is gone.
+
+### Verified
+
+- **Real images from a real registry**, pulled anonymously: `hello-world` printed its greeting with no
+  command given on both backends, `alpine` and `busybox` ran bare names on both, and `/bin/ls` being a
+  link to `/bin/busybox` resolved. `run -d alpine echo` worked, which used to exit 127. A pin, `run
+  hello-world@sha256:…`, resolved. A Stivafile on `alpine:3.19` kept its `Cmd` and took its step's `Env`.
+- Replayed `ci.yml` in a clean copy: every step passes, smoke on both binaries at 164 and none skipped.
+  The step's `sudo sysctl` was left out, since it is for the runner. `cyrius audit` exits 0.
+- 2892 tests on x86-64 with and without DCE, and all six suites on aarch64 under qemu. An architecture
+  check there caught a test that had passed by coincidence: its base said `amd64`, and it expected the
+  host's. It now expects the base's.
+- 21 fuzz targets, plain and `--poison`, and a `STIVA_FUZZ_ROUNDS=200 --poison` soak, with no crash.
+- The re-pin: two lock rows change, and `lib/kavach.cyr` is byte-identical to `3.14.5:dist/kavach.cyr`.
+- A crafted `PATH` measured before and after, and a failed create in a real mount namespace: no container
+  left and no mount.
+- Not run: crun, runsc, a run as root, a real aarch64 container, and an image that needs a network.
+
+### Performance
+
+On a quiet machine, every one of the 14 existing benchmarks is flat against the last comparable row: the
+widest are `compose_yaml_to_toml` at -3.1 % and `exec_capture2_trivial_child` at +1.8 %, and `noop` is 2 → 3 ns
+of rounding. The 3.1.3 row was recorded under load, as its entry says, so it is not the one to compare with.
+
+A real foreground `stiva run`, 16 interleaved runs a side pinned to one CPU: 49.9 ms (46–174) on 3.1.3, 50.5 ms
+(45–167) here. The ranges overlap, which reads as no measured change.
+
+Two benchmarks are new, for what every `run` now does first: `image_config_parse` at 10.8 µs on a config shaped
+like nginx's, and `image_resolve_short_name_300` at 248 µs, the worst case, a short name found in the local
+store against 300 images.
+
 ## [3.1.3] — 2026-11-06 — the default path is confined, and CI checks it
 
 The default foreground path now has a seccomp filter and NO_NEW_PRIVS. The fix is kavach's, so this is

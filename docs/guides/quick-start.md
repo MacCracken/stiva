@@ -45,9 +45,13 @@ Detached:
 stiva run -d docker.io/library/alpine:3.19 /bin/sleep 3600   # prints the container id and returns
 ```
 
-⚠ Three things worth knowing. References are matched exactly, so use the name `stiva images`
-prints. An image's `Entrypoint`, `Cmd` and `Env` are not used yet, so give a command, by its absolute
-path: a payload gets no `PATH` (roadmap v3.2.0).
+A container runs what its image says, so `stiva run alpine:3.19` needs no command, and an argument
+replaces the image's `Cmd`, not its `Entrypoint`. A name resolves in one way everywhere: `alpine:3.19`
+is `docker.io/library/alpine:3.19` when you have it, and otherwise `local/alpine:3.19`.
+
+⚠ An image's `User` is not applied yet, so every container runs as root (roadmap v3.2.2). A foreground
+container's output is scanned: what the scan flags is printed with a warning on stderr, and a
+credential it knows is replaced with `[REDACTED:…]` (see `docs/guides/security.md`).
 
 The complete set of flags `run` accepts is `--name`, `--backend`, `-w/--workdir` and
 `-d/--detach`, and they come before the image.

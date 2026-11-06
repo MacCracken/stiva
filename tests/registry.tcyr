@@ -2322,7 +2322,9 @@ fn _test_bld_config_has_platform_and_fields() {
     var cv = _bld_t_config_jv(store, img);
     assert(cv != 0, "config blob parses");
     if (cv == 0) { return 0; }
-    assert_eq(streq(_il_jv_str_field(cv, "architecture"), host_arch()), 1, "architecture present");
+    # The base's, whatever this host is: a derived image is for what its layers are for.
+    var base_arch = image_config_arch(image_config_read(store, image_store_find(store, "local/base:v1")));
+    assert_eq(streq(_il_jv_str_field(cv, "architecture"), base_arch), 1, "architecture present");
     assert_eq(streq(_il_jv_str_field(cv, "os"), "linux"), 1, "os present");
 
     var co = bayan_json_v_obj_get_by_cstr(cv, "config");

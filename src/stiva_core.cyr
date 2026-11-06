@@ -162,16 +162,7 @@ fn _stiva_audit_result(code) {
 # struct-id 20/21 class (a struct-field read segfaults in some units).
 #[must_use]
 fn _stiva_find_image(images, ref) {
-    if (images == 0) { return 0; }
-    var n = vec_len(images);
-    var i = 0;
-    while (i < n) {
-        var im = vec_get(images, i);
-        if (streq(image_ref_full_ref(_image_reference(im)), ref) == 1) { return im; }
-        if (streq(_img_id(im), ref) == 1) { return im; }
-        i = i + 1;
-    }
-    return 0;
+    return image_resolve(images, ref);
 }
 
 # Create and start a container from a local image (rust-old: run, lib.rs:198).

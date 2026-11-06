@@ -10,7 +10,7 @@ Last reviewed: 2026-11-06 (v3.1.2)
 >
 > ⚠ As of v3.1.2 those cases are: **CRIU** (not ported at all), **MCP `handle_run`**, the entire
 > **bridge/NAT/DNS network stack**, **`RuntimeSpec.mounts`**, **`RuntimeSpec.namespaces`**,
-> **`process.user`**, and **the image's own config**. When you add a row here, grep for a READER
+> and **`process.user`**. When you add a row here, grep for a READER
 > before writing "Implemented": assembling a value and delivering it are separate steps.
 
 ---
@@ -22,13 +22,15 @@ Last reviewed: 2026-11-06 (v3.1.2)
 - **Status**: partial
 - **Implemented**:
   - Container lifecycle (create, start, stop, kill, delete)
-  - Process execution with args, and `env` from the container's config through kavach's
-    `config_env`. ⛔ The **image's** `Env` is not applied (roadmap v3.2.0).
+  - Process execution with args, and `env` from the image's `Env` with the container's config over
+    it, through kavach's `config_env`, with Docker's default `PATH` when neither names one. A bare
+    program name resolves on that `PATH` inside the rootfs, on every backend.
   - Cgroups v2 resource limits (**memory, PIDs, CPU**) through the kavach policy, though no CLI flag
     sets one (roadmap v3.2.2)
   - Seccomp filters and `NO_NEW_PRIVS` on `run`, on both backends, and on `run -d`. ⛔ `exec` gets
-    `NO_NEW_PRIVS` alone, and the OCI backend's spec keeps every capability but CAP_SYS_ADMIN and
-    sets no `maskedPaths` or `readonlyPaths`. See SECURITY.md.
+    `NO_NEW_PRIVS` alone. The OCI backend's spec also bounds the payload to 12 capabilities and sets
+    `maskedPaths` and `readonlyPaths`; the process backend and `run -d` have no such bound. See
+    SECURITY.md.
   - Signal forwarding
   - FD cleanup before exec (CVE-2024-21626 mitigation)
 - **Gaps**:
@@ -50,16 +52,19 @@ Last reviewed: 2026-11-06 (v3.1.2)
 
 ### OCI Image Specification v1.1.0
 
-- **Status**: conformant for storage and transfer. ⛔ **An image's config is stored, not applied.**
+- **Status**: conformant for storage and transfer, and an image's config is applied, but for `User`.
 - **Implemented**:
   - Image manifest v2 schema 2
   - Manifest list / image index (multi-arch)
   - Content-addressable blob storage (SHA-256)
   - Layer media types: gzip and zstd (`tar+gzip`, `tar+zstd`)
   - Platform selection (OS, architecture, variant)
-  - Image config (env, cmd, entrypoint, user, workdir, labels), assembled on build and stored on
-    pull. Nothing reads it when a container starts: `Entrypoint`, `Cmd`, `Env`, `WorkingDir` and
-    `User` are ignored (roadmap v3.2.0).
+  - Image config (env, cmd, entrypoint, user, workdir, labels), assembled on build, inherited from a
+    base, and stored on pull. `container_manager_create` applies `Entrypoint`, `Cmd`, `Env` and
+    `WorkingDir` as defaults, by the rule in config.md: Entrypoint, then the caller's arguments or
+    else Cmd. A `WorkingDir` that does not exist is made, up to 1024 bytes. A config that cannot be
+    read refuses the container. ⛔ `User` is read and recorded, and not applied: the container runs as
+    root, with a warning (roadmap v3.2.2). `architecture` is read and warned about, not enforced.
   - Whiteouts (`.wh.<name>` / `.wh..wh..opq`) — applied at layer **MERGE** time, on the
     `flatten_layers` path only, which is the unprivileged fallback taken when the overlayfs mount
     fails. They cannot be applied at unpack, since a marker names a file in a *lower* layer.

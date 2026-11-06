@@ -8,9 +8,17 @@ Stiva provides a `stiva` binary. Every command below is **registered** (visible 
 - **v3.4 (planned)** — registered but prints a clear "not yet wired" message. Only `checkpoint` and
   `restore` are in this state: they need CRIU, which is not ported (roadmap v3.4.1).
 
-⚠ References are matched exactly. An image pulled as `alpine:3.19` is stored as
-`docker.io/library/alpine:3.19`, and that is what `run`, `rmi`, `save` and `push` need (roadmap
-v3.2.0).
+**What you may type for an image** is the same for `run`, `rmi`, `tag`, `save`, `push`, `inspect` and
+a Stivafile's `base`. In order:
+
+1. an image id
+2. a reference exactly as `stiva images` prints it
+3. `repo@sha256:…`, for an image pulled by digest
+4. the reference the name parses to: `alpine:3.19` is `docker.io/library/alpine:3.19`
+5. with no registry typed, the same name in the local store: `bb:v2` is `local/bb:v2`
+
+So `alpine` means the Hub's image when you have it, and a local build of that name is `local/alpine`.
+`local` is this store, so `pull` and `push` refuse it.
 
 ## Global Options
 
@@ -27,7 +35,7 @@ v3.2.0).
 | `stiva import <FILE> [NAME] [TAG]` | **Live** | Import a rootfs tar as a local OCI image — config + manifest blobs + `index.json` entry (name→`imported`, tag→`latest` if omitted) |
 | `stiva images` | **Live** | List local images |
 | `stiva tag <SOURCE> <TARGET>` | **Live** | Tag a local image with a new reference |
-| `stiva rmi <IMAGE>` | **Live** | Remove a local image (by ID or tag) |
+| `stiva rmi <IMAGE>` | **Live** | Remove one name of a local image, and the image with its last name. An ID removes the image and all its names |
 | `stiva pull <IMAGE>` | **Live** | Pull from a registry. Resolves multi-arch indexes to this platform, streams each layer straight to disk, and verifies every digest before the blob becomes visible. Prints the image ID |
 | `stiva push <IMAGE> [TARGET]` | **Live** | Push a local image to a registry. Uploads the config, then every layer, then the manifest — a manifest is only valid once everything it references is present. `TARGET` re-tags on the way out; omitted, it pushes to the image's own reference |
 | `stiva build [-f FILE] [-c CONTEXT]` | **Live** | Build an OCI image from a `Stivafile`. Resolves the base locally first (then the registry), builds one gzip layer per `copy` step, and writes a full OCI config + manifest + `index.json` entry. Prints the image ID. `run` and `from_stage` steps are refused — see below |
@@ -36,7 +44,7 @@ v3.2.0).
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot). Flags come before the image, because everything after it goes to the payload. The image's own `Entrypoint` and `Cmd` are not used, so give a command (roadmap v3.2.0) |
+| `stiva run [--name N] [--backend B] [-w DIR] <IMAGE> [CMD...]` | **Live** | Run a container (synchronous, one-shot). Flags come before the image, because everything after it goes to the payload. With no `CMD` it runs what the image says. A `CMD` replaces the image's `Cmd`, not its `Entrypoint`. A bare program name is found on the container's `PATH` inside the image, and the payload gets the image's `Env` and `WorkingDir`. The image's `User` is not applied yet (roadmap v3.2.2) |
 | `stiva ps [-a]` | **Live** | List **running** containers; `-a`/`--all` includes stopped ones |
 | `stiva stop <ID>` | **Live** | Stop a container (SIGTERM → SIGKILL) |
 | `stiva rm <ID>` | **Live** | Remove a stopped container |
@@ -241,6 +249,11 @@ entrypoint = ["/app/start.sh"]
 expose = [8080]
 user = "nobody"
 ```
+
+An image keeps what its base says: `Env`, `Entrypoint`, `Cmd`, `User`, `WorkingDir`, `ExposedPorts`,
+`Labels` and the platform. A Stivafile's values go over them. An `env` step replaces a base's key
+where it stands, and an `entrypoint` of its own drops the base's `Cmd`, which was written for the
+program it replaces. `[config].workdir` beats a `workdir` step, which beats the base's.
 
 ### Step Types
 

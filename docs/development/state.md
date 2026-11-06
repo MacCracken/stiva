@@ -5,7 +5,7 @@
 
 ## Version
 
-**3.1.3** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
+**3.2.0** — the Rust → Cyrius port is **COMPLETE**. 18622 lines of Rust preserved at
 `rust-old/` as the frozen parity oracle (do not edit).
 
 ## Toolchain
@@ -23,10 +23,10 @@
 
 ## Tests
 
-**2649** assertions across 6 `tests/*.tcyr` files — stiva 667 · runpath 659 · registry 444 ·
-store 387 · mgmt 354 · convert 138 — plus **108** CLI smoke assertions
+**2892** assertions across 6 `tests/*.tcyr` files — stiva 667 · runpath 902 · registry 444 ·
+store 387 · mgmt 354 · convert 138 — plus **164** CLI smoke assertions
 (`./scripts/cli-smoke.sh`, which covers `src/main.cyr`; the `.tcyr` files cannot include it)
-**18** fuzz targets (`tests/stiva.fcyr`) and **14** benchmarks.
+**21** fuzz targets (`tests/stiva.fcyr`) and **16** benchmarks.
 
 ⚠ Counting note: `cyrius test tests/` prints a trailing `6 passed, 0 failed`, which is the
 **file** tally, not six extra assertions. Adding it to the per-file sum overstates the count
@@ -39,7 +39,7 @@ named). Git-pinned AGNOS bundles, in declaration order:
 
 | Dep | Pin | Dep | Pin |
 |---|---|---|---|
-| sigil | 3.13.15 | kavach | 3.14.4 |
+| sigil | 3.13.15 | kavach | 3.14.5 |
 | sakshi | 2.5.10 | samay | 1.5.1 |
 | libro | 2.11.3 | ai-hwaccel | 2.5.6 |
 | majra | 2.13.0 | cmdit | 1.5.0 |
@@ -62,9 +62,10 @@ inside a stiva container: `getenv` reads `/proc/self/environ` and nothing mounts
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). v3.2 is making one container correct: honouring the image's config,
-manageable lifecycle, and mounts, user and secrets. Its **Recording a block** convention says what it
+See [`roadmap.md`](roadmap.md). v3.2 is making one container correct: manageable lifecycle, then
+mounts, user and secrets. Its **Recording a block** convention says what it
 takes to call anything blocked in this tree.
 
-⛔ The largest open security gap is upstream: on the default path, the OCI backend, a container keeps
-every capability but CAP_SYS_ADMIN, and `/proc` is unmasked. See SECURITY.md.
+⛔ The largest open security gap: every container runs as root, an image's `User` included (roadmap
+v3.2.2). `run -d` and the process backend also hold every capability, in a user namespace. See
+SECURITY.md.

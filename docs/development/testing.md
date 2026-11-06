@@ -28,9 +28,9 @@ A crash or a hang in `cyrius fuzz` fails the run and leaves its input at
 
 ⚠ Tests use fixed `/tmp` paths, so two runs at once interfere, on one architecture or across two.
 
-**2649 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `runpath.tcyr` (659),
+**2892 tests** across `tests/*.tcyr`: `stiva.tcyr` (667), `runpath.tcyr` (902),
 `registry.tcyr` (444), `store.tcyr` (387), `mgmt.tcyr` (354), `convert.tcyr` (138).
-Plus **108** CLI smoke assertions, **18** fuzz targets and **14** benchmarks.
+Plus **164** CLI smoke assertions, **21** fuzz targets and **16** benchmarks.
 
 > These are **assertions**, not test functions — `lib/assert.cyr` increments a
 > global counter per `assert*()` call and `assert_summary()` prints it.
@@ -97,7 +97,7 @@ Run one group by grepping its `test_group("...")` label, or run everything with
 
 A `.tcyr` file cannot include `main.cyr` — it has its own entry point. CLI coverage
 therefore lives in `./scripts/cli-smoke.sh`, which drives the **built binary** and
-asserts on its stdout, stderr and exit code (108 assertions). Anything that only
+asserts on its stdout, stderr and exit code (164 assertions). Anything that only
 exists in `main.cyr` — flag registration, verb dispatch, usage strings, exit codes —
 is covered there or not at all. CI runs it against the default binary and the `--dce`
 one `release.yml` ships.

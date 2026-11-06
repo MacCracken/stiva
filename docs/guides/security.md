@@ -35,9 +35,9 @@ kavach applies a seccomp-bpf filter to restrict the syscalls available inside a 
 with either backend and on `run -d`, and every path sets NO_NEW_PRIVS. It is a deny list: a payload
 calling `mount`, `unshare`, `ptrace` and the like is killed, and the container exits 159.
 
-⛔ `exec` installs no filter. And on the OCI backend, the default wherever runc is installed, a
-container keeps every capability but CAP_SYS_ADMIN and `/proc` is unmasked, which a syscall filter
-does not cover. SECURITY.md has the table and what that means when stiva runs as root.
+⛔ `exec` installs no filter. The OCI backend, the default wherever runc is installed, also bounds a
+container to 12 capabilities and masks `/proc`. `run -d` and the process backend do not: they hold
+every capability in a user namespace, on the host's PID namespace. SECURITY.md has the table.
 
 The policy is part of the `SandboxPolicy` passed to kavach, and it is reflected in the security
 score, which describes the policy and not the path a container took.
@@ -81,14 +81,29 @@ of which are load-bearing yet:
 kavach's externalization gate scans container output for leaked secrets, PII, and
 sensitive data. It applies in two places, and the distinction matters:
 
-**Automatically, on the foreground `stiva run` path only.** kavach's `sandbox_exec`
-gate-applies **its own default policy** — one stiva never chose (block=CRITICAL,
-quarantine=HIGH) — so a foreground run whose output trips BLOCK/QUARANTINE fails with
-`externalization blocked` and persists no output. It needs no flag and cannot be configured
-from stiva.
+**Automatically, on the foreground `stiva run` path only.** A foreground run warns and does not
+block: a container's output belongs to whoever ran it, and blocking cost a payload its output and its
+exit status for printing the text `/bin/sh`. What the scan flags is reported on stderr, by category and
+never by the text that matched, and the run keeps its exit status:
+
+```
+[WARN] output scan: 1 finding(s), worst critical: cloud_credential
+```
+
+What it does with a finding depends on the finding. Measured against kavach 3.14.5:
+
+| Output holds | What happens |
+|---|---|
+| AWS or GitHub key, JWT, private key, connection string, SSN | replaced with `[REDACTED:<category>]`, in the output and the stored log |
+| A card number or IBAN, an internal IP, a shell path | ⚠ printed as it is, with a warning |
+| A Slack token, `password=…` | ⚠ not detected, so printed with no warning |
+
+A container whose config carries a `scan_policy` is held to that policy instead, so a caller that wants
+a run refused can have it. Nothing on the CLI sets one yet (roadmap v3.2.2).
 
 ⚠ It does **not** cover `stiva run -d` or `stiva exec`, which take different paths
-(`sandbox_spawn` and stiva's own `nsenter` respectively) and are ungated.
+(`sandbox_spawn` and stiva's own `nsenter` respectively) and are ungated. A detached container's log
+holds what it wrote, unredacted.
 
 **On demand, when reading back a log.** `stiva logs --scan` routes the stored log
 body through the gate before printing it:
@@ -97,9 +112,11 @@ body through the gate before printing it:
 stiva logs <ID> --scan
 ```
 
-A `PASS` prints normally, and so does a `WARN`: every secret pattern is `HIGH` or `CRITICAL`, so no
-secret reaches `WARN` to be redacted. A `QUARANTINE` or `BLOCK` prints nothing and exits non-zero
-with `stiva: sandbox error: output scan: block`.
+This is stricter than a foreground run, on purpose: asking for a scan means asking for a verdict. It
+uses kavach's default policy, so a `PASS` prints normally and so does a `WARN`, and a `QUARANTINE` or
+`BLOCK` prints nothing and exits non-zero with `stiva: sandbox error: output scan: block`. Under this
+policy every secret pattern is `HIGH` or `CRITICAL`, so a secret refuses the read and is not redacted,
+and a log holding the text `/bin/sh` refuses too.
 
 It is **opt-in** because scanning changes what `logs` prints, which should never
 happen behind an operator's back. The per-container `scan_policy` the Rust original gated
@@ -118,8 +135,9 @@ The gate runs three scanner categories:
 2. **Code** -- source code patterns that should not appear in output
 3. **Data** -- PII patterns. ⚠ Email addresses and phone numbers pass at this policy.
 
-Severity maps to verdict through the policy's thresholds: `CRITICAL` → `BLOCK`,
-`HIGH` → `QUARANTINE`, anything above `INFO` → `WARN`.
+Severity maps to verdict through the policy's thresholds. Under kavach's default: `CRITICAL` → `BLOCK`,
+`HIGH` → `QUARANTINE`, anything above `INFO` → `WARN`. A foreground run sets both thresholds above any
+severity, so all of it is `WARN`, which is the verdict the gate redacts at.
 
 ## Security Scoring
 

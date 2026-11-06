@@ -2,7 +2,7 @@ commit	ccdcd9c035e205c1373b3c0d2c5878004da6edbc	ai-hwaccel	https://github.com/Ma
 commit	965298dfaa16587ac1835e1ced8482184bd864a6	bayan	https://github.com/MacCracken/bayan.git	1.11.1
 commit	1503109df263d74006ae16f76a4c4209b680a49d	bote-core	https://github.com/MacCracken/bote.git	3.8.15
 commit	7671a28c2c7979faf354293b134d3839e664a887	cmdit	https://github.com/MacCracken/cmdit.git	1.5.0
-commit	448ef3683a2e4b4c6905ab668498ba8f5e076a34	kavach	https://github.com/MacCracken/kavach.git	3.14.4
+commit	093489d2f52c13974dc62d0e988e376f89884481	kavach	https://github.com/MacCracken/kavach.git	3.14.5
 commit	f4a31a450a112587d6fcc46a946e1b6061878e6f	libro	https://github.com/MacCracken/libro.git	2.11.3
 commit	40b827f275c452f592e0735b19b0cb47448c2794	majra	https://github.com/MacCracken/majra.git	2.13.0
 commit	aab55de52140a5c68964efa66bf485e30720d35f	nein	https://github.com/MacCracken/nein.git	1.9.1
@@ -44,7 +44,7 @@ d0c40dfccf051ca0b141c31633570b3fa08d82b71729d237bbb519c287d2e5bb  lib/fdlopen.cy
 04b5c84bc8dee67eaa39c7eda98d5e0585d8099953604b851e9cf3236b43be86  lib/hashmap.cyr
 7ed650c49b548d1a1895a2c4a3f08bbe0378248131464b1952e8744821a10ecd  lib/hashseed.cyr
 e532c082ce75b0f18dc8e3c07462300b428e432aa19e6a5fcc2b0b6b174be45d  lib/io.cyr
-52e86db3cc5b4209316006d823ffa8211e1c6aef0ce24ebe3e66e7f3b9b62161  lib/kavach.cyr
+8bbe6b3ad347ac1e0e7829db7cef2a7480d1e2ef28f3981aa4d1d9fc5f859c53  lib/kavach.cyr
 f38092748e5a9197f7a526e54801fd15fab70d2a04d1c23f4f71003f564fb3d6  lib/keccak.cyr
 57d0fb6111127ee0305b6525ca90a790e001c1e7f705b3a9a72ed2db96a3c341  lib/libro.cyr
 df88b5cf68aa94ddd132cf9a71dc23dcdc325bf418cd5d8c9ec99af9c600358e  lib/majra.cyr

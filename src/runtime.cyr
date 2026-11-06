@@ -995,9 +995,9 @@ fn build_sandbox(spec) {
     # READER rather than trusting the setter.
     if (sp.workdir != 0) { config_workdir(cfg, sp.workdir); }
     # secret injection still needs a SandboxConfig setter kavach does not expose
-    # — roadmap v3.2.2. scan_policy is threaded via
+    # — roadmap v3.2.2. scan_policy reaches the gate in `exec_container`, through
     # `sandbox_exec_set_ext_policy`, NOT `config_externalization`, which kavach
-    # stores and never reads.
+    # stores and never reads. Through 3.1.3 this comment said so and nothing did.
 
     var sb = sandbox_create(cfg);
     if (sb == 0) {
@@ -1054,6 +1054,71 @@ fn _rt_is_command_line(command) {
     return 0;
 }
 
+# The gate's policy for a foreground run: nothing blocks, everything flagged warns.
+#
+# A container's stdout belongs to whoever ran it. kavach's default quarantines at HIGH,
+# and `code_scan` rates the text `/bin/sh` HIGH wherever it appears, so a payload
+# printing a shell path, or `/bin/show`, failed with its output withheld and its exit
+# status lost. Thresholds above any severity make every finding a WARN verdict, and a
+# WARN is where the gate redacts secrets, so a credential is still not released.
+#
+# ⚠ Redaction covers `secrets_redact_n`'s patterns and no more. Measured against kavach
+# 3.14.5: AWS and GitHub keys, JWTs, private keys, connection strings and SSNs are
+# replaced, and a card number or IBAN is printed with a warning, where it used to block.
+#[must_use]
+fn _rt_warn_policy() {
+    var p = ext_policy_default();
+    ExternalizationPolicy_set_block_threshold(p, Severity.CRITICAL + 1);
+    ExternalizationPolicy_set_quarantine_threshold(p, Severity.CRITICAL + 1);
+    return p;
+}
+
+# The policy for a foreground run: the container's own, which blocks if it was written
+# to, or `_rt_warn_policy`.
+#[must_use]
+fn _rt_foreground_policy(own) {
+    if (own != 0) { return own; }
+    return _rt_warn_policy();
+}
+
+# What a warning says of `scan`: the count, the worst severity and the categories, or
+# 0 when the gate passed the output with nothing to say. ⛔ Never a finding's
+# `evidence`, which holds the text that matched: printing it would put the secret just
+# redacted from stdout on stderr. A category comes from kavach's own tables.
+#[must_use]
+fn _rt_scan_warning(scan) {
+    if (scan == 0) { return 0; }
+    if (ScanResult_verdict(scan) != ScanVerdict.WARN) { return 0; }
+    var fs = ScanResult_findings(scan);
+    var n = vec_len(fs);
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "output scan: ");
+    str_builder_add_cstr(sb, _rt_int_to_cstr(n));
+    str_builder_add_cstr(sb, " finding(s), worst ");
+    str_builder_add_cstr(sb, severity_name(ScanResult_worst_severity(scan)));
+    var seen = map_new();
+    var shown = 0;
+    var i = 0;
+    while (i < n && shown < 6) {
+        var cat = ScanFinding_category(vec_get(fs, i));
+        if (map_has(seen, cat) == 0) {
+            map_set(seen, cat, 1);
+            if (shown == 0) { str_builder_add_cstr(sb, ": "); } else { str_builder_add_cstr(sb, ", "); }
+            str_builder_add_cstr(sb, _img_printable(cat));
+            shown = shown + 1;
+        }
+        i = i + 1;
+    }
+    return str_cstr(str_builder_build(sb));
+}
+
+# Say what the gate found in the output of the run that just finished.
+fn _rt_warn_scan(scan) {
+    var m = _rt_scan_warning(scan);
+    if (m != 0) { sakshi_warn(m, strlen(m)); }
+    return 0;
+}
+
 # ── One-shot exec (rust-old: exec_container) ──────────────────────
 # Build a sandbox, run the joined command in it (blocking), tear it down, and
 # map the kavach ExecResult → a stiva ContainerExecResult. Returns the result
@@ -1076,7 +1141,7 @@ fn _rt_is_command_line(command) {
 fn spawn_container(spec, log_path) {
     var sp: RuntimeSpec = spec;
     var command = _rt_join(sp.command, " ");
-    var lm = _rt_cat2("spawning detached container via kavach: ", command);
+    var lm = _rt_cat2("spawning detached container via kavach: ", _img_printable(command));
     sakshi_info(lm, strlen(lm));
 
     var sb = build_sandbox(spec);
@@ -1107,19 +1172,21 @@ fn spawn_container(spec, log_path) {
 fn exec_container(spec) {
     var sp: RuntimeSpec = spec;
     var command = _rt_join(sp.command, " ");
-    var lm = _rt_cat2("executing one-shot container via kavach: ", command);
+    var lm = _rt_cat2("executing one-shot container via kavach: ", _img_printable(command));
     sakshi_info(lm, strlen(lm));
 
     var sb = build_sandbox(spec);
     if (sb == 0) { return 0; }   # error already printed by build_sandbox
 
     _stor_cloexec_fds();
+    sandbox_exec_set_ext_policy(_rt_foreground_policy(sp.scan_policy));
     var r = 0;
     if (_rt_is_command_line(sp.command) == 1) {
         r = sandbox_exec(sb, command);
     } else {
         r = sandbox_exec_argv(sb, sp.command);
     }
+    _rt_warn_scan(sandbox_exec_last_scan_result());
     if (r == 0) {
         sakshi_error("sandbox execution failed", strlen("sandbox execution failed"));
         stiva_err_print(STIVA_ERR_SANDBOX, "sandbox execution failed");

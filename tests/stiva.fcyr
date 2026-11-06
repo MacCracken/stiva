@@ -227,12 +227,57 @@ fn _fz_name(t) {
     if (t == 15) { return "gzip"; }
     if (t == 16) { return "zstd"; }
     if (t == 17) { return "index"; }
+    if (t == 18) { return "image_config"; }
+    if (t == 19) { return "image_resolve"; }
+    if (t == 20) { return "rootfs_path"; }
     return 0;
+}
+
+# A config shaped as Docker writes one, with every field an image can set.
+fn _fz_config_seed() {
+    return "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"User\":\"nobody\",\"ExposedPorts\":{\"80/tcp\":{}},\"Env\":[\"PATH=/bin\",\"A=b=c\"],\"Entrypoint\":[\"/e\",\"-x\"],\"Cmd\":null,\"WorkingDir\":\"/w\",\"Labels\":{\"k\":\"v\"}},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[]}}";  #skip-lint
+}
+
+# The images `image_resolve` chooses among, one of each kind of name.
+fn _fz_images() {
+    var out = vec_new();
+    var a = image_new("sha256:aa", image_ref_new("docker.io", "library/nginx", "1.2", 0), 0, vec_new(), 0);
+    _img_set_manifest_digest(a, "sha256:1234");
+    vec_push(out, a);
+    vec_push(out, image_new("sha256:bb", image_ref_new("local", "app", "v1", 0), 0, vec_new(), 0));
+    vec_push(out, image_new("sha256:cc", image_ref_new("", "sha256", "aa", 0), 0, vec_new(), 0));
+    vec_push(out, image_new("sha256:dd", image_ref_new("ghcr.io", "a/b", "latest", 0), 0, vec_new(), 0));
+    return out;
+}
+
+# A rootfs of what a hostile image is made of: a program, links up, out and in a
+# circle. Made once per child, since a batch only reads it.
+var _fz_rf = 0;
+
+fn _fz_rootfs() {
+    if (_fz_rf != 0) { return _fz_rf; }
+    var r = _stor_join(_fz_root, "pathroot");
+    _stor_remove_dir_all(r);
+    _stor_mkdir_p(_stor_join(r, "usr/bin"));
+    _stor_mkdir_p(_stor_join(r, "data"));
+    file_write_all(_stor_join(r, "usr/bin/tool"), "x", 1);
+    sys_chmod(_stor_join(r, "usr/bin/tool"), 493);
+    sys_symlink("usr/bin", _stor_join(r, "bin"));
+    sys_symlink("/usr/bin/tool", _stor_join(r, "link"));
+    sys_symlink("../..", _stor_join(r, "data/up"));
+    sys_symlink("/", _stor_join(r, "data/self"));
+    sys_symlink("/l", _stor_join(r, "l"));
+    sys_symlink("/etc/passwd", _stor_join(r, "data/host"));
+    _fz_rf = r;
+    return r;
 }
 
 # The valid input target `t` starts from. Writes its length through `out_len`.
 fn _fz_seed(t, out_len) {
     var s = "";
+    if (t == 18) { s = _fz_config_seed(); }
+    if (t == 19) { s = "docker.io/library/nginx:1.2@sha256:1234"; }
+    if (t == 20) { s = "/usr/local/sbin:/bin/../data/up/self/usr/bin:/link/tool"; }
     if (t == 0) { s = "ghcr.io:443/org/app:v1@sha256:0123456789abcdef"; }
     if (t == 1) { s = "127.0.0.1:8080:80/tcp"; }
     if (t == 2) { s = "8080:80/udp"; }
@@ -303,6 +348,13 @@ fn _fz_call(t, b, n) {
     if (t == 8) { compose_yaml_to_toml(b); }
     if (t == 9) { parse_build_spec(b); }
     if (t == 10) { parse_ansamblu(b); }
+    if (t == 18) { image_config_parse(b, n); }
+    if (t == 19) { image_resolve(_fz_images(), b); }
+    if (t == 20) {
+        var fr = _fz_rootfs();
+        _stor_rootfs_is_program(fr, b);
+        _cm_find_program(fr, b, "tool");
+    }
     if (t == 11) {
         var v = bayan_json_v_parse_buf(b, n);
         if (v != 0) {

@@ -387,6 +387,39 @@ fn main(): i64 {
     }
     bench_batch_stop(bex, 200);
     bench_report(bex);
+
+    # ── v3.2.0: what every `stiva run` now does before it starts anything ──
+    # The config blob of a real image, as Docker writes one.
+    var cfgjs = "{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"User\":\"\",\"ExposedPorts\":{\"80/tcp\":{}},\"Env\":[\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\"NGINX_VERSION=1.25.4\",\"PKG_RELEASE=1\"],\"Entrypoint\":[\"/docker-entrypoint.sh\"],\"Cmd\":[\"nginx\",\"-g\",\"daemon off;\"],\"WorkingDir\":\"\",\"Labels\":{\"maintainer\":\"x\"}},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[]}}";  #skip-lint
+    var cfgjl = strlen(cfgjs);
+    var bic = bench_new("image_config_parse");
+    bench_batch_start(bic);
+    var bici = 0;
+    while (bici < 2000) {
+        image_config_parse(cfgjs, cfgjl);
+        bici = bici + 1;
+    }
+    bench_batch_stop(bic, 2000);
+    bench_report(bic);
+
+    # The worst case: a short name found in the local store, past every other tier,
+    # against 300 images, the size `prune` once took 10 s over.
+    var rimgs = vec_new();
+    var rn = 0;
+    while (rn < 300) {
+        var rname = _img_cat2("app", _rt_int_to_cstr(rn));
+        vec_push(rimgs, image_new(_img_cat2("sha256:", rname), image_ref_new("local", rname, "v1", 0), 0, 0, 0));
+        rn = rn + 1;
+    }
+    var bir = bench_new("image_resolve_short_name_300");
+    bench_batch_start(bir);
+    var biri = 0;
+    while (biri < 500) {
+        image_resolve(rimgs, "app299:v1");
+        biri = biri + 1;
+    }
+    bench_batch_stop(bir, 500);
+    bench_report(bir);
     sys_unlink("/tmp/stiva-bench-exec.err");
     sys_unlink(ex_stub);
     return 0;

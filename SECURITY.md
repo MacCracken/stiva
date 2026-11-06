@@ -60,17 +60,30 @@ row. The first row has held since kavach 3.14.4; through 3.14.3 a payload on the
 The `basic` profile is kavach's exec filter, a deny list and not an allowlist. A payload calling
 `mount`, `unshare`, `ptrace`, `init_module`, `bpf` and the like is killed, and the container exits 159.
 
-⛔ **The default path still keeps almost every capability, and `/proc` is unmasked.** A payload reads
-`CapEff: 0000003fffdfffff`, every capability but CAP_SYS_ADMIN, and `/proc` is neither masked nor
-read-only. Rootless, those capabilities are held in a user namespace that owns nothing on the host.
-Run as root they should be real capabilities on the host, and the filter does not help there: it
-filters syscalls, not files, so a write to `/proc/sys` is an ordinary `open` and `write`. That is
-reasoned from the spec; no run as root was made. Run stiva rootless where you can. See the roadmap's
-upstream section.
+**What else each path holds, measured from a payload under kavach 3.14.5:**
+
+| Path | Capabilities | `/proc` |
+|------|--------------|---------|
+| `stiva run`, OCI backend | 12, `CapEff: 00000000a00405fb`: kavach's default, Docker's set less CAP_NET_RAW and CAP_MKNOD | masked, and `/proc/sys` read-only |
+| `stiva run`, process backend | ⛔ all of them, in a user namespace | none mounted |
+| `stiva run -d` | ⛔ all of them, in a user namespace | none mounted |
+| `stiva exec` | ⛔ all of them, in a user namespace | none mounted |
+
+The default foreground path is the bounded one. **`run -d` and the process backend are not**: their
+capabilities are held in a user namespace that owns nothing on the host, and they share the host's
+PID namespace. Prefer the OCI backend where that matters, and run stiva rootless where you can.
+
+**Output scanning warns; it does not stop a foreground run.** A secret kavach recognises is replaced
+with `[REDACTED:…]` in the output and the stored log, and anything else flagged is printed with a
+warning on stderr. ⚠ That includes a card number or an IBAN, which the gate flags and cannot redact, and
+it misses some credentials outright, such as Slack tokens and `password=…`. Do not treat it as a
+guarantee that a secret cannot leave a container. `run -d` and `exec` are not scanned at all. A
+container's own `scan_policy` is honoured, so a caller can make a run refuse. `docs/guides/security.md`
+has what each kind of finding does.
 
 ⚠ **On the OCI path the filter is only as complete as runc's libseccomp**, which skips a syscall name
 it does not know, silently. Under libseccomp 2.6.0 that is `open_tree_attr`, which reads EPERM for want
-of CAP_SYS_ADMIN instead, the reason kavach drops that capability. An older libseccomp may skip more.
+of CAP_SYS_ADMIN instead. An older libseccomp may skip more.
 
 ⛔ **Other things that are not there yet:**
 
@@ -79,7 +92,9 @@ of CAP_SYS_ADMIN instead, the reason kavach drops that capability. An older libs
 - **Landlock is not applied** on any path. stiva builds from `policy_basic()`, which carries no
   Landlock rules, and nothing calls `policy_landlock_add`. Filesystem confinement comes from the
   rootfs entry and the mount namespace.
-- **Every container runs as root.** `user` is recorded and never applied (roadmap v3.2.2).
+- **Every container runs as root, and an image's `User` is not applied.** `user` is recorded and never
+  applied (roadmap v3.2.2), so an image built to run as `nobody` runs as root here, with a warning in
+  the log. This is the largest gap left.
 - **Containers get no secrets**, and **no bind mounts**: `RuntimeSpec.mounts` is write-only (roadmap
   v3.2.2).
 - **Containers have no network of their own** apart from rootless slirp4netns or pasta on `run -d`.

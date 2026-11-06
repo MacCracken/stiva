@@ -1,27 +1,29 @@
 # Benchmarks
 
-Latest: **2026-11-06T19:31:23Z** — commit `ae7c298`
+Latest: **2026-11-06T21:01:58Z** — commit `c5a8bee`
 
-Tracking: `3808225` (baseline) → `8b70d84` (mid) → `ae7c298` (current)
+Tracking: `3808225` (baseline) → `8b70d84` (mid) → `c5a8bee` (current)
 
 ## stiva
 
-| Benchmark | Baseline (`3808225`) | Mid (`8b70d84`) | Current (`ae7c298`) |
+| Benchmark | Baseline (`3808225`) | Mid (`8b70d84`) | Current (`c5a8bee`) |
 |-----------|------|------|------|
 | `noop` | 2.00 ns | 2.00 ns | 2.00 ns |
-| `oci_config_build+serialize` | 7.203 µs | 7.747 µs +8% | 6.022 µs **-16%** |
-| `oci_manifest_to_jv+serialize` | 15.825 µs | 16.803 µs +6% | 13.394 µs **-15%** |
-| `compose_yaml_to_toml` | — | 30.960 µs | 27.113 µs |
-| `compose_400_reverse_sorted_keys` | — | 1.473 ms | 1.469 ms |
-| `flatten_layers_2x60_files_4kib` | — | 1.552 ms | 1.575 ms |
-| `event_json_build` | — | 6.468 µs | 5.338 µs |
-| `event_log_append` | — | 8.472 µs | 7.860 µs |
-| `event_ts_parse` | — | 1.758 µs | 339.0 ns |
-| `gzip_compress_2mib` | — | — | 36.853 ms |
-| `gzip_decompress_2mib` | — | — | 6.837 ms |
-| `unpack_layer_gz_20_files_4kib` | — | — | 1.131 ms |
-| `build_copy_layer_20_files_4kib` | — | — | 2.590 ms |
-| `exec_capture2_trivial_child` | — | — | 1.716 ms |
+| `oci_config_build+serialize` | 7.203 µs | 7.252 µs | 5.584 µs **-22%** |
+| `oci_manifest_to_jv+serialize` | 15.825 µs | 15.969 µs | 12.596 µs **-20%** |
+| `compose_yaml_to_toml` | — | 30.217 µs | 29.095 µs |
+| `compose_400_reverse_sorted_keys` | — | 1.414 ms | 1.372 ms |
+| `flatten_layers_2x60_files_4kib` | — | 1.508 ms | 1.478 ms |
+| `event_json_build` | — | 6.198 µs | 5.197 µs |
+| `event_log_append` | — | 8.306 µs | 7.783 µs |
+| `event_ts_parse` | — | 1.680 µs | 285.0 ns |
+| `gzip_compress_2mib` | — | 41.391 ms | 33.725 ms |
+| `gzip_decompress_2mib` | — | 9.732 ms | 6.428 ms |
+| `unpack_layer_gz_20_files_4kib` | — | — | 1.050 ms |
+| `build_copy_layer_20_files_4kib` | — | — | 2.422 ms |
+| `exec_capture2_trivial_child` | — | — | 1.740 ms |
+| `image_config_parse` | — | — | 10.843 µs |
+| `image_resolve_short_name_300` | — | — | 248.413 µs |
 
 ---
 

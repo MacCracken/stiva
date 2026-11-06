@@ -7,7 +7,7 @@
 - **Type**: Crate with library + CLI binary (`stiva`)
 - **License**: GPL-3.0-or-later
 - **Toolchain**: Cyrius, pin **6.7.18** (the Rust oracle at `rust-old/` targeted MSRV 1.89)
-- **Version**: SemVer, currently 3.1.3
+- **Version**: SemVer, currently 3.2.0
 - **Genesis repo**: [agnosticos](https://github.com/MacCracken/agnosticos)
 - **Philosophy**: [AGNOS Philosophy & Intention](https://github.com/MacCracken/agnosticos/blob/main/docs/philosophy.md)
 - **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md)
@@ -21,9 +21,9 @@ All 16 Rust modules → **27** Cyrius `src/*.cyr` domain modules (incl. the net-
 (entry + CLI). The CLI registers **36 verbs, 33 live**: `checkpoint` and `restore` print
 "not yet wired" (they need CRIU, roadmap v3.4.1), and `restart` cannot succeed (v3.2.1).
 
-**2649 tests** across the `.tcyr` files (stiva 667 · runpath 659 · registry 444 ·
-store 387 · mgmt 354 · convert 138; run via `cyrius test tests/`), **108** CLI smoke
-assertions (`./scripts/cli-smoke.sh`), 14 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
+**2892 tests** across the `.tcyr` files (stiva 667 · runpath 902 · registry 444 ·
+store 387 · mgmt 354 · convert 138; run via `cyrius test tests/`), **164** CLI smoke
+assertions (`./scripts/cli-smoke.sh`), 16 benchmarks, `dist/stiva.cyr` built, pin **6.7.18**.
 
 **Every roadmap group A–K is complete.** In release order: group A = the OCI
 image-layout + transfer surface (v3.0.1–v3.0.4) · §G output scanning + `convert compose`
@@ -117,7 +117,7 @@ rust-old) is their oracle.
 
 | Crate | Role |
 |-------|------|
-| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.4** |
+| kavach | Sandbox isolation (seccomp, Landlock, namespaces, gVisor, Firecracker, WASM) — pin **3.14.5** |
 | majra | Job queue, heartbeat FSM, pub/sub — pin **2.13.0** |
 | nein | nftables firewall, NAT, port mapping — pin **1.9.1** |
 | bote-core | MCP core service (JSON-RPC 2.0, tool registry, structured output) — pin **3.8.15** |
@@ -197,7 +197,7 @@ daimon (container management), sutra (fleet deployment)
 | Module | Purpose |
 |--------|---------|
 | `image` | Substrate: image reference parsing, `Image`/`Layer`/`ImageRef` structs, content-addressable **blob store** + sha256 digests, integrity verify (the store/index/import layer moved to `imagelayout`) |
-| `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store (load/add/remove/gc/import/tag), and `oci-archive` + `docker-archive` `save`/`load` |
+| `imagelayout` | **Net-new (v3.0.1–v3.0.4):** OCI image-layout (`oci-layout` + `index.json` + blobs), config/manifest assembly, the index.json-backed store (load/add/remove/gc/import/tag), and `oci-archive` + `docker-archive` `save`/`load`; **`image_resolve`**, the one rule for what a user may type for an image; **`image_config_read`**, what an image says about running it |
 | `container` | Container lifecycle, state persistence, lifecycle events (majra pub/sub **+ the rotated `{root}/events.jsonl` log behind `stiva events`**), restart, rename, update |
 | `runtime` | OCI spec, kavach integration, cgroups (CPU/mem/PID/IO), CRIU (checkpoint/pre-dump/lazy), exec, signals, export/import, copy |
 | `network/` | Bridge, NAT, DNS, IP pools (IPv4+IPv6), port mapping, network policy, container DNS registry, **rootless networking** (slirp4netns/pasta spawn + port forwarding) — 7 files |
@@ -237,11 +237,14 @@ Stiva uses these kavach features — keep them wired:
 - **SandboxConfig** — hostname, domainname (UTS namespace, OCI v1.2.0)
 - **CredentialProxy / SecretRef** — secret injection via env var / file
 - **StrengthScore / score_backend** — security scoring in inspect/info
-- **ExternalizationGate** — output scanning for secrets/PII in exec/logs
+- **ExternalizationGate** — output scanning for secrets/PII. A foreground `run` goes through
+  `sandbox_exec_set_ext_policy` with `_rt_warn_policy`: findings warn and secrets redact, and a
+  container's own `scan_policy` stands. `logs --scan` keeps the blocking default. `run -d` is not scanned
 - **User namespaces** — rootless containers (UID/GID mapping)
 - **NO_NEW_PRIVS** — on every path. The OCI backend, the default foreground path, gets it and the
-  seccomp filter from kavach's `oci_generate_spec` since 3.14.4, with CAP_SYS_ADMIN dropped under the
-  filter. ⛔ `exec` has no filter, and an OCI container keeps every other capability (`SECURITY.md`)
+  seccomp filter from kavach's `oci_generate_spec` since 3.14.4, and a bounded capability set and a
+  masked `/proc` since 3.14.5. ⛔ `exec` has no filter, and `run -d` and the process backend hold every
+  capability in a user namespace (`SECURITY.md`)
 - **FD cleanup** — `_stor_cloexec_fds` marks every fd above stderr close-on-exec before a payload
   starts (CVE-2024-21626 mitigation). kavach's own sweep stops at 1024
 
@@ -323,7 +326,7 @@ exist yet", copied verbatim, false since 2026-04. Port the behaviour; re-derive 
 ### Key Principles
 
 - **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** 2649 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
+- **Tests + benchmarks are the way.** 2892 Cyrius tests across `tests/*.tcyr`. Keep adding — mirror the rust-old `#[cfg(test)]` cases (group A is net-new, so its tests match the OCI spec + real round-trips).
 - **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
 - **No magic.** Every operation is measurable, auditable, traceable.
 - **`#[non_exhaustive]`** on all public enums.
@@ -358,7 +361,7 @@ docs/ (when earned):
 
 ## Testing
 
-**2649 Cyrius tests** across `tests/*.tcyr` (stiva 667 · runpath 659 · registry 444 ·
+**2892 Cyrius tests** across `tests/*.tcyr` (stiva 667 · runpath 902 · registry 444 ·
 store 387 · mgmt 354 · convert 138), each mirroring the matching rust-old `#[cfg(test)]`
 cases where one exists. The suite is split across files because a monolith hits the cycc
 identifier-dedup cap — split by **include set**, not by test count.
@@ -372,12 +375,18 @@ observes — see **Blocks and claims** above.
 ⚠ **A test's `/tmp` paths are fixed**, so two `cyrius test` runs at once interfere. Do not run a suite
 while a mutation pass runs in a copy of the tree.
 
+⚠ **An image is untrusted input, and `alloc` never frees.** Its config and rootfs choose how much work
+stiva does, so a loop over either needs a bound, and allocating in one is how a 40 KB `PATH` once cost
+2.3 GiB. A link in a rootfs resolves against the rootfs and never the host (`_stor_rootfs_is_program`).
+Refuse an image before unpacking it, so it leaves nothing for `rm` to find. Anything an image says goes
+through `_img_printable` before it reaches a log or a terminal. See the 3.2.0 CHANGELOG.
+
 ⚠ **`json_v_obj_set` appends; it never replaces.** Since bayan 1.11.1 one duplicate key refuses the
 whole document, and several callers read that 0 as an empty store (`container.cyr` "starting
 fresh", `cron.cyr` "treating the schedule as empty"). A writer whose keys come from data must
 iterate a hashmap or de-duplicate first, as `_il_kv_obj` does, and its test must parse what it wrote.
 
-`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**108** assertions
+`src/main.cyr` is covered separately by `./scripts/cli-smoke.sh` (**164** assertions
 against the built binary, run in CI on the default and `--dce` binaries) — the `.tcyr` files
 cannot include `main.cyr`.
 

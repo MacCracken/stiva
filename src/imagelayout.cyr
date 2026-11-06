@@ -117,6 +117,150 @@ fn oci_config_object_jv(env, cmd, entrypoint, workdir, user, exposed_ports, labe
     return o;
 }
 
+# ── What an image says about running it ──
+#
+# The `config` object of an image's config blob, plus the platform it was built for.
+# Raw offsets and no `struct`: a new struct moves the ids after it, and an id landing
+# on 20/21 reads garbage silently (docs/architecture/001-cycc-struct-id-miscompile.md).
+#   entrypoint@0 cmd@8 env@16 exposed@40 : vec<cstr>, never 0
+#   labels@48                            : alternating [k,v] vec<cstr>, never 0
+#   workdir@24 user@32 arch@56 os@64     : cstr, or 0 when unset
+fn image_config_new() {
+    var c = alloc(72);
+    store64(c, vec_new());
+    store64(c + 8, vec_new());
+    store64(c + 16, vec_new());
+    store64(c + 24, 0);
+    store64(c + 32, 0);
+    store64(c + 40, vec_new());
+    store64(c + 48, vec_new());
+    store64(c + 56, 0);
+    store64(c + 64, 0);
+    return c;
+}
+
+# The image's Entrypoint: a vec<cstr>, empty when unset.
+fn image_config_entrypoint(c) { return load64(c); }
+# The image's Cmd: a vec<cstr>, empty when unset.
+fn image_config_cmd(c) { return load64(c + 8); }
+# The image's Env: a vec of "KEY=value" cstrs, empty when unset.
+fn image_config_env(c) { return load64(c + 16); }
+# The image's WorkingDir, or 0.
+fn image_config_workdir(c) { return load64(c + 24); }
+# The image's User, or 0.
+fn image_config_user(c) { return load64(c + 32); }
+# The image's ExposedPorts as "port/proto" cstrs.
+fn image_config_exposed(c) { return load64(c + 40); }
+# The image's Labels as an alternating [k,v] vec.
+fn image_config_labels(c) { return load64(c + 48); }
+# The architecture the image was built for, or 0.
+fn image_config_arch(c) { return load64(c + 56); }
+# The OS the image was built for, or 0.
+fn image_config_os(c) { return load64(c + 64); }
+
+# Append the strings of array `key` in `o` to `out`. Returns 1, or 0 for a value that
+# is neither an array of strings nor absent. JSON null is absent: Docker writes it.
+#[must_use]
+fn _il_cfg_strs(o, key, out) {
+    var a = bayan_json_v_obj_get_by_cstr(o, key);
+    if (a == 0) { return 1; }
+    if (json_v_is_null(a) == 1) { return 1; }
+    if (json_v_is_arr(a) == 0) { return 0; }
+    var n = json_v_arr_len(a);
+    var i = 0;
+    while (i < n) {
+        var e = json_v_arr_get(a, i);
+        if (json_v_is_str(e) == 0) { return 0; }
+        vec_push(out, str_cstr(json_v_str(e)));
+        i = i + 1;
+    }
+    return 1;
+}
+
+# String `key` of `o`: its cstr, 0 when absent, null or empty, -1 when it is not a
+# string. Empty means unset: Docker writes `"User": ""`.
+#[must_use]
+fn _il_cfg_str(o, key) {
+    var v = bayan_json_v_obj_get_by_cstr(o, key);
+    if (v == 0) { return 0; }
+    if (json_v_is_null(v) == 1) { return 0; }
+    if (json_v_is_str(v) == 0) { return 0 - 1; }
+    var s = str_cstr(json_v_str(v));
+    if (load8(s) == 0) { return 0; }
+    return s;
+}
+
+# Parse the `len` bytes of a config blob at `buf`. Returns an image config, or 0 when
+# they cannot be trusted: not JSON, or a field of the wrong type. With no `config`
+# object, an image says nothing, and every field is unset.
+fn image_config_parse(buf, len) {
+    var c = image_config_new();
+    var v = bayan_json_v_parse_buf(buf, len);
+    if (v == 0) { return 0; }
+    if (json_v_is_obj(v) == 0) { return 0; }
+    var arch = _il_cfg_str(v, "architecture");
+    var os = _il_cfg_str(v, "os");
+    if (arch == 0 - 1 || os == 0 - 1) { return 0; }
+    store64(c + 56, arch);
+    store64(c + 64, os);
+    var o = bayan_json_v_obj_get_by_cstr(v, "config");
+    if (o == 0) { return c; }
+    if (json_v_is_null(o) == 1) { return c; }
+    if (json_v_is_obj(o) == 0) { return 0; }
+    if (_il_cfg_strs(o, "Entrypoint", image_config_entrypoint(c)) == 0) { return 0; }
+    if (_il_cfg_strs(o, "Cmd", image_config_cmd(c)) == 0) { return 0; }
+    if (_il_cfg_strs(o, "Env", image_config_env(c)) == 0) { return 0; }
+    var wd = _il_cfg_str(o, "WorkingDir");
+    var user = _il_cfg_str(o, "User");
+    if (wd == 0 - 1 || user == 0 - 1) { return 0; }
+    store64(c + 24, wd);
+    store64(c + 32, user);
+    var ports = bayan_json_v_obj_get_by_cstr(o, "ExposedPorts");
+    if (ports != 0) {
+        if (json_v_is_obj(ports) == 1) {
+            var pn = json_v_obj_len(ports);
+            var pi = 0;
+            while (pi < pn) {
+                vec_push(image_config_exposed(c), str_cstr(bayan_json_v_obj_key(ports, pi)));
+                pi = pi + 1;
+            }
+        }
+    }
+    var labels = bayan_json_v_obj_get_by_cstr(o, "Labels");
+    if (labels != 0) {
+        if (json_v_is_obj(labels) == 1) {
+            var ln = json_v_obj_len(labels);
+            var li = 0;
+            while (li < ln) {
+                var lv = bayan_json_v_obj_val(labels, li);
+                if (json_v_is_str(lv) == 1) {
+                    vec_push(image_config_labels(c), str_cstr(bayan_json_v_obj_key(labels, li)));
+                    vec_push(image_config_labels(c), str_cstr(json_v_str(lv)));
+                }
+                li = li + 1;
+            }
+        }
+    }
+    return c;
+}
+
+# Read what `image` says about running it. Returns an image config, or 0 when its
+# config blob exists and cannot be trusted (`image_config_parse`).
+#
+# No blob is an image that says nothing. Unreadable is different: a container started
+# without the Env and Entrypoint its image declares would fail in some way that points
+# nowhere near the cause, so create refuses it.
+fn image_config_read(store, image) {
+    if (store == 0 || image == 0) { return image_config_new(); }
+    var path = _img_blob_path(image_store_root(store), _img_id(image));
+    if (path == 0) { return image_config_new(); }
+    if (file_exists(path) == 0) { return image_config_new(); }
+    var lc = alloc(8);
+    var buf = _img_read_file(path, lc);
+    if (buf == 0) { return 0; }
+    return image_config_parse(buf, load64(lc));
+}
+
 # Build a full OCI image config value (application/vnd.oci.image.config.v1+json).
 #   architecture / os : required cstrs
 #   created_str       : RFC3339 cstr, or 0 to omit "created" (0 → reproducible)
@@ -301,11 +445,13 @@ fn _il_desc_ref_name(desc) {
     var name = _il_jv_str_field(ann, _il_ref_name_key());
     if (name == 0) { return 0; }
     # An archive names itself, so this is untrusted. A reference has no spaces or control bytes,
-    # and treating a name that does as no name keeps the image and loses only the lie.
+    # and treating a name that does as no name keeps the image and loses only the lie. An `@` or
+    # a name shaped like an id is the same lie told to `image_resolve`.
+    if (strstr(name, "sha256:") == 0) { return 0; }
     var i = 0;
     while (load8(name + i) != 0) {
         var c = load8(name + i);
-        if (c <= 32 || c == 127) { return 0; }
+        if (c <= 32 || c == 127 || c == 64) { return 0; }
         i = i + 1;
     }
     return name;
@@ -623,6 +769,41 @@ fn image_store_remove_set(store, ids) {
     return 1;
 }
 
+# Remove one name of an image, the entry `found`. A name is a pointer: its image goes only
+# with its last name, when the sweep finds nothing refers to its blobs. Through 3.1.3 `rmi`
+# went by id alone, so `rmi b:v2` also deleted the image under every other name it had.
+# Returns 1, -1 when `found` is not in the index, or 0 when the index cannot be rewritten.
+fn image_store_remove_ref(store, found) {
+    var root = image_store_root(store);
+    var images = image_store_load_index(store);
+    # A rewrite from a partial load would drop what did not load, for good.
+    if (_il_index_is_complete(store, images) == 0) { return 0; }
+    var name = image_ref_full_ref(_image_reference(found));
+    var kept = vec_new();
+    var dropped = 0;
+    var i = 0;
+    while (i < vec_len(images)) {
+        var im = vec_get(images, i);
+        var same = 0;
+        if (dropped == 0 && streq(_img_id(im), _img_id(found)) == 1) {
+            same = streq(image_ref_full_ref(_image_reference(im)), name);
+        }
+        if (same == 1) { dropped = 1; } else { vec_push(kept, im); }
+        i = i + 1;
+    }
+    if (dropped == 0) { return 0 - 1; }
+    _il_sweep_blobs(root, _il_referenced_digests(kept));
+    if (_il_index_rewrite(store, kept) == 0) { return 0; }
+    return 1;
+}
+
+# 1 when some name in the index still holds the image `id`.
+#[must_use]
+fn image_store_has_id(store, id) {
+    if (_il_find_id(image_store_load_index(store), id) != 0) { return 1; }
+    return 0;
+}
+
 # Garbage-collect unreferenced blobs (rust-old: gc). Referenced set = every
 # indexed image's config id + manifest digest + layer digests. Returns the count
 # of blobs removed. index.json is unchanged (only orphan blobs are dropped).
@@ -720,18 +901,7 @@ fn image_import(store, tar_path, name, tag) {
 # config/layer blobs are shared — same manifest_digest), and re-indexes. Returns
 # 1, 0 (source not found), -2 (new ref unparseable), -3 (index save failure).
 fn image_store_tag(store, source, new_ref) {
-    var images = image_store_load_index(store);
-    var found = 0;
-    var n = vec_len(images);
-    var i = 0;
-    while (i < n) {
-        var im = vec_get(images, i);
-        var ii: Image = im;
-        if (streq(ii.id, source) == 1 || streq(image_ref_full_ref(ii.reference), source) == 1) {
-            found = im;
-        }
-        i = i + 1;
-    }
+    var found = image_store_find(store, source);
     if (found == 0) { return 0; }
     var parsed = image_ref_parse(new_ref);
     if (parsed == 0) { return 0 - 2; }
@@ -768,17 +938,7 @@ fn _il_blob_tar_entry(store, digest) {
 # image's descriptor), and its manifest/config/layer blobs. Returns 1 on
 # success, 0 (image not found), -1 (a missing blob or write failure).
 fn image_store_save_archive(store, ref_or_id, out_path) {
-    var images = image_store_load_index(store);
-    var found = 0;
-    var n = vec_len(images);
-    var i = 0;
-    while (i < n) {
-        var im = vec_get(images, i);
-        if (streq(_img_id(im), ref_or_id) == 1 || streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) {
-            found = im;
-        }
-        i = i + 1;
-    }
+    var found = image_store_find(store, ref_or_id);
     if (found == 0) { return 0; }
 
     var entries = vec_new();
@@ -1095,6 +1255,10 @@ fn _il_pull_blob(client, store, ref, digest, size) {
 #    the safe default; a flag to opt in belongs with the CLI work in Inc-10.
 fn image_store_pull(client, store, ref) {
     if (client == 0 || store == 0 || ref == 0) { return 0; }
+    if (_il_ref_is_local(ref) == 1) {
+        stiva_err_print(STIVA_ERR_INVALID_REFERENCE, "`local` is this store, not a registry to pull from");
+        return 0;
+    }
     sakshi_info("pulling image", strlen("pulling image"));
 
     # 1. Resolve (transparently handles a multi-arch index).
@@ -1218,27 +1382,136 @@ fn _il_push_blob(client, store, target, digest) {
     return registry_push_blob(client, target, digest, buf, n);
 }
 
-# Resolve a local image by config-digest ID or by full reference, the dual key
-# every image-taking verb uses (rust-old: lib.rs:316-320). Returns Image*, or 0.
-#
-# FIRST match wins, matching the oracle's `.find()` and the two other resolvers
-# in this tree (_stiva_find_image, _cli_find_image). It matters now that the
-# digest-aware index dedup lets two pinned images share a full_ref: a last-wins
-# resolver here would make `push <ref>` upload a different image than
-# `run <ref>` starts, with nothing to signal the divergence.
+# An image whose id is exactly `id`, or 0.
 #[must_use]
-fn image_store_find(store, ref_or_id) {
-    if (store == 0 || ref_or_id == 0) { return 0; }
-    var images = image_store_load_index(store);
+fn _il_find_id(images, id) {
     var n = vec_len(images);
     var i = 0;
     while (i < n) {
         var im = vec_get(images, i);
-        if (streq(_img_id(im), ref_or_id) == 1) { return im; }
-        if (streq(image_ref_full_ref(_image_reference(im)), ref_or_id) == 1) { return im; }
+        if (streq(_img_id(im), id) == 1) { return im; }
         i = i + 1;
     }
     return 0;
+}
+
+# An image stored under the reference `name`, or 0. FIRST match wins, as the oracle's
+# `.find()` did. It matters now that the digest-aware index dedup lets two pinned
+# images share a full_ref: a resolver taking the last would make `push <ref>` upload
+# a different image than `run <ref>` starts, with nothing to signal the divergence.
+#[must_use]
+fn _il_find_name(images, name) {
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        if (streq(image_ref_full_ref(_image_reference(im)), name) == 1) { return im; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when `ref` names this store's own `local` registry, which is no host to dial.
+#[must_use]
+fn _il_ref_is_local(ref) {
+    var rr: ImageRef = ref;
+    return streq(rr.registry, "local");
+}
+
+# The reference `typed` would be in the local store, or 0: `bb:v2` is local/bb:v2.
+# 0 when `typed` names a registry, since then it is not asking about this store.
+#[must_use]
+fn _il_local_ref(typed) {
+    if (_il_names_registry(typed) == 1) { return 0; }
+    return image_ref_parse(_img_cat2("local/", typed));
+}
+
+# Whether `typed` spells out a registry, as opposed to being given docker.io by the
+# parser. The same test image_ref_parse makes of the first component.
+#[must_use]
+fn _il_names_registry(typed) {
+    var slash = _img_find(typed, 47);
+    if (slash < 0) { return 0; }
+    var first = _img_slice(typed, 0, slash);
+    if (_img_contains(first, 46) == 1 || _img_contains(first, 58) == 1) { return 1; }
+    if (streq(first, "local") == 1) { return 1; }
+    return 0;
+}
+
+# The image `ref` pins by manifest digest, or 0. `run repo@sha256:…` after a pull by
+# digest: the index keeps the manifest digest, and a tag is no part of the match.
+#[must_use]
+fn _il_find_pinned(images, ref) {
+    var rr: ImageRef = ref;
+    var n = vec_len(images);
+    var i = 0;
+    while (i < n) {
+        var im = vec_get(images, i);
+        var md = _img_manifest_digest(im);
+        if (md != 0) {
+            if (streq(md, rr.digest) == 1) {
+                var ir: ImageRef = _image_reference(im);
+                if (streq(ir.registry, rr.registry) == 1 && streq(ir.repository, rr.repository) == 1) {
+                    return im;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# What a user may type for an image, resolved one way for every verb that takes one
+# (rust-old: lib.rs:316-320, which matched an id or a full reference alone). Through
+# 3.1.3 there were four such loops, and an image `tag` had just named did not resolve
+# as written. In order:
+#
+#   1. an id, over every image, before any name is looked at
+#   2. a stored reference, exactly as typed
+#   3. `repo@sha256:…`: the image with that manifest digest, and never a name
+#   4. the reference the parser makes of it: alpine:3.19 is docker.io/library/alpine:3.19
+#   5. with no registry typed, the same name in this store: bb:v2 is local/bb:v2
+#
+# 4 before 5 is what keeps a name meaning one thing: `alpine` is the Hub's image when
+# it is present, and a local build of that name is reached by `local/alpine`. Nothing
+# is ambiguous, so no verb needs an answer for it. And 1 and 3 are what a pin means:
+# an archive names itself, so a name shaped like an id or a digest must not win over
+# the image that really has it. Returns Image*, or 0.
+#[must_use]
+fn image_resolve(images, typed) {
+    if (images == 0 || typed == 0) { return 0; }
+    var im = _il_find_id(images, typed);
+    if (im != 0) { return im; }
+    if (_img_contains(typed, 64) == 0) {
+        im = _il_find_name(images, typed);
+        if (im != 0) { return im; }
+    }
+    var ref = image_ref_parse(typed);
+    if (ref == 0) { return 0; }
+    var rr: ImageRef = ref;
+    var bare = typed;
+    if (rr.digest != 0) {
+        im = _il_find_pinned(images, ref);
+        if (im != 0) { return im; }
+        bare = _img_slice(typed, 0, _img_find(typed, 64));
+        var lpin = _il_local_ref(bare);
+        if (lpin == 0) { return 0; }
+        var lp: ImageRef = lpin;
+        lp.digest = rr.digest;
+        return _il_find_pinned(images, lpin);
+    }
+    im = _il_find_name(images, image_ref_full_ref(ref));
+    if (im != 0) { return im; }
+    var lref = _il_local_ref(bare);
+    if (lref == 0) { return 0; }
+    return _il_find_name(images, image_ref_full_ref(lref));
+}
+
+# `image_resolve` over this store's index. Returns Image*, or 0.
+#[must_use]
+fn image_store_find(store, ref_or_id) {
+    if (store == 0 || ref_or_id == 0) { return 0; }
+    return image_resolve(image_store_load_index(store), ref_or_id);
 }
 
 # Push the local image `ref_or_id` to `target`. Returns 1 on success, 0 on
@@ -1250,6 +1523,13 @@ fn image_store_find(store, ref_or_id) {
 # manifest as served rather than re-serializing it.
 fn image_store_push(client, store, ref_or_id, target) {
     if (client == 0 || store == 0 || target == 0 || ref_or_id == 0) { return 0; }
+    var named = image_ref_parse(target);
+    if (named != 0) {
+        if (_il_ref_is_local(named) == 1) {
+            stiva_err_print(STIVA_ERR_INVALID_REFERENCE, "`local` is this store, not a registry to push to");
+            return 0;
+        }
+    }
 
     var found = image_store_find(store, ref_or_id);
     if (found == 0) {

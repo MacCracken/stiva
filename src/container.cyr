@@ -1595,6 +1595,27 @@ fn container_manager_create(mgr, image, config) {
         stiva_err_print(STIVA_ERR_INVALID_STATE, _container_cat2("invalid container name: ", name));
         return 0;
     }
+    # Everything that can refuse an image does it here, before a layer is unpacked or
+    # an overlay mounted: a hostile image must not be able to leave any of that behind.
+    var icfg = image_config_read(mm.image_store, image);
+    if (icfg == 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE,
+          _container_cat2("cannot read the config of image ", _img_id(image)));
+        return 0;
+    }
+    var why = _cm_image_refusal(config, icfg);
+    if (why != 0) {
+        stiva_err_print(STIVA_ERR_INVALID_STATE, _img_printable(why));
+        return 0;
+    }
+    var arch = image_config_arch(icfg);
+    if (arch != 0) {
+        if (streq(arch, host_arch()) == 0) {
+            var am = _container_cat2("image is for ", _container_cat2(_img_printable(arch),
+                ", and it runs only where the host can execute that"));
+            sakshi_warn(am, strlen(am));
+        }
+    }
 
     _img_private_dir(_container_cat2(mm.root, "/containers"));
     var croot = _cm_container_dir(mm.root, id);
@@ -1602,6 +1623,7 @@ fn container_manager_create(mgr, image, config) {
 
     var layer_dirs = prepare_layers(mm.image_store, _img_layers(image));
     if (layer_dirs == 0) {
+        _stor_remove_dir_all(croot);
         stiva_err_print(STIVA_ERR_LAYER_UNPACK, _img_id(image));
         return 0;
     }
@@ -1633,9 +1655,10 @@ fn container_manager_create(mgr, image, config) {
         }
     }
 
+    var effective = _cm_effective_config(config, icfg, rootfs);
     var full_ref = image_ref_full_ref(_image_reference(image));
     var rec = container_new(id, name, _img_id(image), full_ref,
-      CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, config, 0 - 1);
+      CONTAINER_STATE_CREATED, 0 - 1, clock_now_ms(), 0 - 1, effective, 0 - 1);
     var spec = generate_spec(rec, rootfs);
     if (spec == 0) {
         # Reclaim the container directory. Everything expensive has already
@@ -1644,6 +1667,7 @@ fn container_manager_create(mgr, image, config) {
         # persisted on this path, so nothing could ever reach that directory
         # again: not `rm`, not `prune`, not `gc`. It would leak one image copy
         # per failed create, forever.
+        if (overlay != 0) { teardown_overlay(overlay); }
         _stor_remove_dir_all(croot);
         return 0;                       # detail printed by generate_spec
     }
@@ -1654,6 +1678,219 @@ fn container_manager_create(mgr, image, config) {
     container_manager_publish_event(mgr, _cm_event_json("created", id, "image", full_ref));
     _cm_persist(mgr);
     return rec;
+}
+
+# Docker's default, for a container whose config and image name no PATH.
+var _CM_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+# The most PATH entries searched for a program. An image chooses its PATH, and each
+# entry is a walk of the rootfs. A real one has a dozen.
+var _CM_MAX_PATH_DIRS = 64;
+
+# The longest WorkingDir made for an image. Every component is a directory, at two
+# bytes of config each, and past PATH_MAX `rm`'s path-based walk could not reach them.
+var _CM_MAX_WORKDIR = 1024;
+
+# What runs, by the OCI image spec's rule (config.md): Entrypoint, then the caller's
+# arguments or else Cmd, and with no Entrypoint the first of those is the program.
+# A caller's arguments replace Cmd and never Entrypoint. There is no `--entrypoint`
+# yet, so `run IMG /bin/sh` on an image with an Entrypoint hands it `/bin/sh` as an
+# argument, as Docker does. Returns a vec, or 0 when nothing says what to run.
+#[must_use]
+fn _cm_image_command(args, icfg) {
+    var ep = image_config_entrypoint(icfg);
+    var cmd = image_config_cmd(icfg);
+    var have_args = 0;
+    if (args != 0) {
+        if (vec_len(args) > 0) { have_args = 1; }
+    }
+    var tail = cmd;
+    if (have_args == 1) { tail = args; }
+    if (vec_len(ep) == 0) {
+        if (vec_len(tail) == 0) { return 0; }
+        return tail;
+    }
+    var out = vec_new();
+    var i = 0;
+    while (i < vec_len(ep)) {
+        vec_push(out, vec_get(ep, i));
+        i = i + 1;
+    }
+    i = 0;
+    while (i < vec_len(tail)) {
+        vec_push(out, vec_get(tail, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+# 1 when `s` holds a space or a tab.
+#[must_use]
+fn _cm_has_blank(s) {
+    if (_img_contains(s, 32) == 1) { return 1; }
+    if (_img_contains(s, 9) == 1) { return 1; }
+    return 0;
+}
+
+# The environment a container gets: the image's, with the caller's over it, and a
+# default PATH if neither names one. An image entry with no `=` names no value and
+# is dropped. Returns a fresh map.
+#[must_use]
+fn _cm_merged_env(env, icfg) {
+    var out = map_new();
+    var ie = image_config_env(icfg);
+    var i = 0;
+    while (i < vec_len(ie)) {
+        var e = vec_get(ie, i);
+        var eq = _img_find(e, 61);
+        if (eq > 0) { map_set(out, _img_slice(e, 0, eq), _img_slice(e, eq + 1, strlen(e))); }
+        i = i + 1;
+    }
+    if (env != 0) {
+        var keys = map_keys(env);
+        var k = 0;
+        while (k < vec_len(keys)) {
+            var key = vec_get(keys, k);
+            map_set(out, key, map_get(env, key));
+            k = k + 1;
+        }
+    }
+    if (map_has(out, "PATH") == 0) { map_set(out, "PATH", _CM_DEFAULT_PATH); }
+    return out;
+}
+
+# The in-container path of program `name` on `path_value`, or 0.
+#[must_use]
+fn _cm_find_program(rootfs, path_value, name) {
+    var n = strlen(path_value);
+    var start = 0;
+    var dirs = 0;
+    while (start <= n) {
+        var end = start;
+        while (end < n && load8(path_value + end) != 58) { end = end + 1; }
+        # An empty or relative entry means the working directory, which is not a
+        # thing to search for a container's program. A blank is no part of a program
+        # kavach can run: one element is split on it, so `/a b/x` would run `/a`.
+        if (end > start && load8(path_value + start) == 47) {
+            dirs = dirs + 1;
+            if (dirs > _CM_MAX_PATH_DIRS) { return 0; }
+            var dir = _img_slice(path_value, start, end);
+            if (_cm_has_blank(dir) == 0) {
+                var cand = _img_cat3(dir, "/", name);
+                if (_stor_rootfs_is_program(rootfs, cand) == 1) { return cand; }
+            }
+        }
+        start = end + 1;
+    }
+    return 0;
+}
+
+# `command` with a bare program name replaced by where PATH finds it in the rootfs.
+#
+# PATH alone does not do this. runc searches it, but kavach's process backend, which
+# every `run -d` takes, calls execve on what it is given, so `run -d img sleep 1`
+# exited 127 with PATH set. Resolving here gives every backend one answer. A program
+# not found is left as typed, so the failure is the runtime's own. One element is a
+# command line (`_rt_is_command_line`), so only its first word is the program.
+#[must_use]
+fn _cm_resolve_command(command, env, rootfs) {
+    if (command == 0) { return 0; }
+    if (vec_len(command) == 0) { return command; }
+    var first = vec_get(command, 0);
+    var end = strlen(first);
+    if (vec_len(command) == 1) {
+        var i = 0;
+        while (i < end) {
+            var ch = load8(first + i);
+            if (ch == 32 || ch == 9) { end = i; }
+            i = i + 1;
+        }
+    }
+    var prog = _img_slice(first, 0, end);
+    if (load8(prog) == 0) { return command; }
+    if (_img_contains(prog, 47) == 1) { return command; }
+    var found = _cm_find_program(rootfs, map_get(env, "PATH"), prog);
+    if (found == 0) { return command; }
+    var out = vec_new();
+    vec_push(out, _img_cat2(found, _img_slice(first, end, strlen(first))));
+    var j = 1;
+    while (j < vec_len(command)) {
+        vec_push(out, vec_get(command, j));
+        j = j + 1;
+    }
+    return out;
+}
+
+# Make `workdir` in the rootfs, without following a link in it. Docker makes an
+# image's WORKDIR, and runc would, but the process backend refuses a missing one.
+fn _cm_make_workdir(rootfs, workdir) {
+    var leaf = alloc(8);
+    store64(leaf, 0);
+    var dfd = _stor_walk_to_parent(rootfs, workdir, 1, leaf);
+    if (dfd < 0) { return 0; }
+    var name = load64(leaf);
+    if (streq(name, ".") == 0) { sys_mkdirat(dfd, name, 493); }
+    sys_close(dfd);
+    return 0;
+}
+
+# Why `config` cannot run an image saying `icfg`, or 0.
+#
+# One element is a command line, split on blanks. A caller typed one on purpose. An
+# image wrote an exact argv, and a program name holding a blank is not one kavach can
+# run, so that is a refusal and not a silent split.
+#[must_use]
+fn _cm_image_refusal(config, icfg) {
+    var cfg: ContainerConfig = config;
+    var cmdv = _cm_image_command(cfg.command, icfg);
+    var from_caller = 0;
+    if (cfg.command != 0 && vec_len(image_config_entrypoint(icfg)) == 0) {
+        if (vec_len(cfg.command) > 0) { from_caller = 1; }
+    }
+    if (cmdv != 0 && from_caller == 0) {
+        if (vec_len(cmdv) == 1) {
+            if (_cm_has_blank(vec_get(cmdv, 0)) == 1) {
+                return _container_cat2("image command is one word with a blank in it: ", vec_get(cmdv, 0));
+            }
+        }
+    }
+    var wd = image_config_workdir(icfg);
+    if (cfg.workdir == 0 && wd != 0) {
+        if (strlen(wd) > _CM_MAX_WORKDIR) { return "image WorkingDir is too long"; }
+    }
+    return 0;
+}
+
+# The config a container really runs with: `config`, with what the image says filling
+# what it leaves unset. A copy, because a caller reuses its config: a replica created
+# from a config this had written the command into would run the Entrypoint twice.
+#
+# ⛔ `user` is recorded here and not applied: nothing reads RuntimeSpec.user yet
+# (roadmap v3.2.2), so an image asking for a user runs as root, and says so.
+fn _cm_effective_config(config, icfg, rootfs) {
+    var p = alloc(200);
+    memcpy(p, config, 200);
+    var eff: ContainerConfig = p;
+    var cfg: ContainerConfig = config;
+
+    var cmdv = _cm_image_command(cfg.command, icfg);
+    eff.env = _cm_merged_env(cfg.env, icfg);
+    eff.command = _cm_resolve_command(cmdv, eff.env, rootfs);
+
+    var wd = image_config_workdir(icfg);
+    if (cfg.workdir == 0 && wd != 0) {
+        if (load8(wd) != 47) { wd = _container_cat2("/", wd); }
+        eff.workdir = wd;
+        _cm_make_workdir(rootfs, wd);
+    }
+    var user = image_config_user(icfg);
+    if (cfg.user == 0 && user != 0) {
+        eff.user = user;
+        var m = _container_cat2("image asks for user ",
+          _container_cat2(_img_printable(user), "; this container runs as root"));
+        sakshi_warn(m, strlen(m));
+    }
+    return p;
 }
 
 # Write a container's one-shot output to its log file (rust-old: write_log,

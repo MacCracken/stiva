@@ -13,7 +13,6 @@ symbol, not as a reason to wait.
 | Release | Theme |
 |---|---|
 | [Upstream](#upstream-work-that-stiva-needs) | Asks of kavach, sandhi, sakshi and sankoch |
-| [v3.2.0](#v320--containers-honour-their-image) | A container runs what its image says |
 | [v3.2.1](#v321--containers-you-can-manage) | Lifecycle: ps, stop, restart, wait, per-container cgroups |
 | [v3.2.2](#v322--configuring-a-container) | Mounts, user, secrets, the `run` flags |
 | [v3.3.0](#v330--registries-and-the-store) | Private registries, parallel pulls, store integrity |
@@ -26,7 +25,7 @@ symbol, not as a reason to wait.
 
 ---
 
-## Where stiva is — v3.1.2
+## Where stiva is — v3.2.0
 
 A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle at `rust-old/`.
 
@@ -47,11 +46,10 @@ A working single-node OCI runtime in Cyrius, ported from the frozen Rust oracle 
   [`docs/architecture/001-cycc-struct-id-miscompile.md`](../architecture/001-cycc-struct-id-miscompile.md).
 - **Only x86_64 is built and tested in CI.** aarch64 builds and its suite is run by hand under
   qemu; see v3.5.0.
-- **A container keeps every capability but CAP_SYS_ADMIN, and `/proc` is unmasked**, on the default
-  path. See the first [upstream item](#kavach). Every container also runs as root (v3.2.2), so when
-  stiva itself runs as root those should be real capabilities on the host, and the seccomp filter
-  does not cover a write to `/proc/sys`. This is the largest security gap in stiva. `exec` has
-  NO_NEW_PRIVS and no filter (v3.2.2).
+- **Every container runs as root, an image's `User` included** (v3.2.2). This is the largest security
+  gap in stiva. The OCI backend bounds a payload to 12 capabilities and masks `/proc`, but `run -d`
+  and the process backend hold every capability in a user namespace, on the host's PID namespace,
+  and `exec` has NO_NEW_PRIVS and no filter (v3.2.2).
 - **Three `RuntimeSpec` fields are still write-only.** `mounts` and `user` are v3.2.2 and
   `namespaces` is v3.4.1. `env` and `workdir` were the other two, and each needed a kavach change
   first because the setter stiva wanted was decorative: a green call to a setter nothing reads is
@@ -68,12 +66,13 @@ depend on them say what to do in the meantime.
 
 ### kavach
 
-- **Capabilities and `/proc` on the OCI backend.** `oci_generate_spec` drops only CAP_SYS_ADMIN, and
-  only under a filter, and writes no `maskedPaths` or `readonlyPaths`. A foreground `stiva run` takes
-  this backend whenever runc is present. Filed as kavach's
-  `docs/development/issues/2026-11-06-oci-spec-keeps-every-capability.md`. A bounded set is a policy
-  decision, and it decides what images can do, so check what `build` and the v3.2 items need first.
-  Until then SECURITY.md says so plainly.
+- **`process.user`, for v3.2.2.** `oci_generate_spec` writes none, and a rootless spec maps one id to
+  container root, so an image's `User` has nowhere to go. It needs a setter that reaches the payload
+  on the OCI and process paths.
+- **What the externalization gate can redact.** A foreground `run` warns and redacts (`_rt_warn_policy`),
+  and redaction is `secrets_redact_n`'s patterns alone. `pii_financial` is rated CRITICAL and not
+  redacted, so a card number or IBAN prints with a warning. Slack tokens and `password=` are not
+  detected at all. `code_scan` matches `/bin/sh` as a substring, so `/bin/show` warns too.
 - **`SPAWN_MAX_FD`.** Its fd sweep stops at 1024. stiva marks every descriptor close-on-exec before
   it reaches kavach (`_stor_cloexec_fds`), so this is defence in depth and not a live hole.
 - **Landlock is never applied** to a sandbox, on any path. Either apply it or remove it from what
@@ -96,24 +95,6 @@ depend on them say what to do in the meantime.
   it through the private `_deflate_dec_set_out_max`. A public setter retires that reach.
 
 ---
-
-## v3.2.0 — containers honour their image
-
-A pulled image should run. Today `stiva run` needs an explicit command, and what the image's
-config says is parsed and dropped.
-
-- **Entrypoint, Cmd, Env, WorkingDir, User.** Read them from the image config and apply them as
-  defaults. `cc.config` carries none of them. `env` already reaches the payload through
-  `config_env`, so image env needs only the merge. ⛔ Test what the payload observes, not what the
-  spec carries.
-- **A default `PATH`.** With no image env the environment is empty, so `run -d img sleep 1` cannot
-  find `sleep`. Docker's default is the precedent.
-- **A derived image keeps its base.** `build_image` writes a config that drops the base's
-  environment, entrypoint, user and architecture (`_bld_` config assembly, see `build_image`), so
-  building on an image loses what it says.
-- **Short references resolve.** `stiva tag` prints `local/bb:v2`, which does not resolve as written,
-  and `run repo@sha256:…` fails after a pull by digest. One rule for what a user may type, used by
-  `run`, `rmi`, `tag`, `save`, `push` and `inspect`.
 
 ## v3.2.1 — containers you can manage
 
@@ -150,7 +131,7 @@ config says is parsed and dropped.
 
 ### The `run` flags
 
-`-e`, `-v`, `-p`, `--user`, `--restart` and `--rm` are unknown flags today, and nothing on the CLI
+`-e`, `-v`, `-p`, `--user`, `--cap-add`, `--restart` and `--rm` are unknown flags today, and nothing on the CLI
 sets a limit, `timeout_ms`, `rootless`, `seccomp_profile` or `log_max_*`, though the config carries
 them all. Register verbs last, because ids are registration-ordered, and give each flag an
 end-to-end test against what the payload observes.
@@ -185,8 +166,8 @@ it: `config_workdir` was decorative until kavach 3.12.2.
    `container_manager_exec` through `scan_output`.
    ⛔ Call `sandbox_exec_set_ext_policy`, **not** `config_externalization`, which is decorative:
    `SandboxConfig_externalization` has no readers in the bundle.
-   ⚠ Foreground `stiva run` output is already scanned under kavach's default policy
-   (block=CRITICAL), which stiva never chose. Verify that by execution before relying on it.
+   `exec_container` already calls it, and a foreground `stiva run` warns and redacts by default
+   (`_rt_warn_policy`), so `--scan-policy` is how a caller asks for a run to be refused.
 2. **Secrets.** `SecretRef`, `CredentialProxy`, `credential_proxy_env_vars` and
    `credential_inject_files` all exist in kavach, and `config_env` is the env channel. What remains
    is a `SandboxConfig.secrets` field or routing the proxy's env vars through `config_env`. **Decide

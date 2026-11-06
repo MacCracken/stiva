@@ -214,7 +214,11 @@ fn image_ref_parse(reference) {
     if (first_slash >= 0) {
         var first = _img_slice(ref_wo_tag, 0, first_slash);
         var rest = _img_slice(ref_wo_tag, first_slash + 1, strlen(ref_wo_tag));
-        if (_img_contains(first, 46) == 1 || _img_contains(first, 58) == 1) {
+        # `local` is this store's own registry: what `build` and `import` name their
+        # images. Read as a Hub user it made `tag x local/y:1` store docker.io/local/y:1,
+        # which `local/y:1` then did not find.
+        if (_img_contains(first, 46) == 1 || _img_contains(first, 58) == 1
+            || streq(first, "local") == 1) {
             registry = first;
             repository = rest;
         } else {
@@ -237,6 +241,25 @@ fn image_ref_parse(reference) {
     rr.tag = tag;
     rr.digest = digest;
     return r;
+}
+
+# `s` for a log line or an error: at most 200 bytes, with control bytes as `?`. A
+# name, command or user can come from an image, and the operator's terminal and log
+# are not the image's to write escape sequences or forged lines to.
+#[must_use]
+fn _img_printable(s) {
+    var n = strlen(s);
+    if (n > 200) { n = 200; }
+    var out = alloc(n + 1);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        if (c < 32 || c == 127) { c = 63; }
+        store8(out + i, c);
+        i = i + 1;
+    }
+    store8(out + n, 0);
+    return out;
 }
 
 # Full reference string "{registry}/{repository}:{tag}" (rust-old: full_ref).

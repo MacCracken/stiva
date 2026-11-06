@@ -2394,6 +2394,858 @@ fn _test_cron_strip_task_suffix() {
 }
 
 # Runs every case in runpath.tcyr, and returns the failure count as the exit status.
+# ── v3.2.0: what a user may type for an image ──
+
+fn _rp_img(reg, repo, tag, id) {
+    return image_new(id, image_ref_new(reg, repo, tag, 0), 0, vec_new(), 0);
+}
+
+fn _test_rp_resolve_forms() {
+    test_group("rp_resolve_forms");
+    var bb = _rp_img("local", "bb", "v2", "sha256:aa");
+    var hub = _rp_img("docker.io", "library/alpine", "3.19", "sha256:bb");
+    var user = _rp_img("docker.io", "acme/tool", "1", "sha256:cc");
+    var reg = _rp_img("ghcr.io", "acme/app", "latest", "sha256:dd");
+    var images = vec_new();
+    vec_push(images, bb);
+    vec_push(images, hub);
+    vec_push(images, user);
+    vec_push(images, reg);
+    assert_eq(image_resolve(images, "sha256:aa"), bb, "an id");
+    assert_eq(image_resolve(images, "local/bb:v2"), bb, "a stored reference, as printed");
+    assert_eq(image_resolve(images, "bb:v2"), bb, "a bare name finds the local store");
+    assert_eq(image_resolve(images, "alpine:3.19"), hub, "a bare name finds the Hub's");
+    assert_eq(image_resolve(images, "docker.io/library/alpine:3.19"), hub, "its full form");
+    assert_eq(image_resolve(images, "acme/tool:1"), user, "a Hub user's image");
+    assert_eq(image_resolve(images, "ghcr.io/acme/app"), reg, "a registry, with the default tag");
+    assert_eq(image_resolve(images, "bb:v3"), 0, "another tag is another image");
+    assert_eq(image_resolve(images, "bb"), 0, "and so is the default one");
+    assert_eq(image_resolve(images, "ghcr.io/bb:v2"), 0, "a named registry never falls back to local");
+    assert_eq(image_resolve(images, "docker.io/bb:v2"), 0, "not even docker.io");
+    # Reached only with an entry that fallback would land on.
+    var odd = vec_new();
+    vec_push(odd, _rp_img("local", "ghcr.io/x", "v1", "sha256:ab"));
+    assert_eq(image_resolve(odd, "ghcr.io/x:v1"), 0, "a typed registry is never read as a local name");
+    assert_eq(image_resolve(odd, "local/ghcr.io/x:v1") != 0, 1, "which is reached by saying local");
+    assert_eq(image_resolve(images, "sha256:ee"), 0, "an unknown id");
+    assert_eq(image_resolve(images, ""), 0, "nothing");
+    assert_eq(image_resolve(0, "bb:v2"), 0, "no images");
+    assert_eq(image_resolve(images, 0), 0, "no name");
+    return 0;
+}
+
+# A name means one thing: the parser's reading wins, and a local build of the same
+# name is reached by saying so. First match stays first, as the pinned index needs.
+fn _test_rp_resolve_precedence() {
+    test_group("rp_resolve_precedence");
+    var loc = _rp_img("local", "alpine", "3.19", "sha256:11");
+    var hub = _rp_img("docker.io", "library/alpine", "3.19", "sha256:22");
+    var images = vec_new();
+    vec_push(images, loc);
+    vec_push(images, hub);
+    assert_eq(image_resolve(images, "alpine:3.19"), hub, "the Hub's wins, wherever it is listed");
+    assert_eq(image_resolve(images, "local/alpine:3.19"), loc, "the local one by its name");
+    var one = vec_new();
+    vec_push(one, loc);
+    assert_eq(image_resolve(one, "alpine:3.19"), loc, "and by the short name when it is the only one");
+    var a = _rp_img("docker.io", "library/x", "1", "sha256:33");
+    var b = _rp_img("docker.io", "library/x", "1", "sha256:44");
+    var dup = vec_new();
+    vec_push(dup, a);
+    vec_push(dup, b);
+    assert_eq(image_resolve(dup, "x:1"), a, "two pinned images under one name: the first");
+    return 0;
+}
+
+fn _test_rp_resolve_pinned() {
+    test_group("rp_resolve_pinned");
+    var ng = _rp_img("docker.io", "library/nginx", "latest", "sha256:ee");
+    _img_set_manifest_digest(ng, "sha256:1234");
+    var lp = _rp_img("local", "app", "v1", "sha256:ff");
+    _img_set_manifest_digest(lp, "sha256:7777");
+    var images = vec_new();
+    vec_push(images, ng);
+    vec_push(images, lp);
+    assert_eq(image_resolve(images, "nginx@sha256:1234"), ng, "repo@digest after a pull by digest");
+    assert_eq(image_resolve(images, "docker.io/library/nginx@sha256:1234"), ng, "in full");
+    assert_eq(image_resolve(images, "nginx:9.9@sha256:1234"), ng, "a tag is no part of the match");
+    assert_eq(image_resolve(images, "nginx@sha256:9999"), 0, "another digest");
+    assert_eq(image_resolve(images, "other@sha256:1234"), 0, "another repository");
+    assert_eq(image_resolve(images, "app@sha256:7777"), lp, "a local image by digest");
+    assert_eq(image_resolve(images, "local/app@sha256:7777"), lp, "and in full");
+    assert_eq(image_resolve(images, "docker.io/library/app@sha256:7777"), 0, "a named registry stays named");
+    return 0;
+}
+
+# `local` was read as a Hub user, so this store's own names did not parse back.
+fn _test_rp_local_is_a_registry() {
+    test_group("rp_local_is_a_registry");
+    assert_eq(streq(image_ref_full_ref(image_ref_parse("local/cc:v3")), "local/cc:v3"), 1, "kept");
+    assert_eq(streq(image_ref_full_ref(image_ref_parse("local/a/b:1")), "local/a/b:1"), 1, "nested");
+    assert_eq(streq(image_ref_full_ref(image_ref_parse("localish/cc:v3")),
+        "docker.io/localish/cc:v3"), 1, "a Hub user with a similar name is not");
+    assert_eq(streq(image_ref_full_ref(image_ref_parse("local:v3")),
+        "docker.io/library/local:v3"), 1, "nor is an image called local");
+    return 0;
+}
+
+# What `tag` names resolves as written, for every verb that goes through the store.
+fn _test_rp_tag_resolves_as_printed() {
+    test_group("rp_tag_resolves_as_printed");
+    var root = "/tmp/stiva-rp-tag";
+    _stor_remove_dir_all(root);
+    _stor_mkdir_p(root);
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    _stor_write_tar(entries, _stor_cat2(root, "/b.tar"));
+    var store = image_store_new(_stor_cat2(root, "/store"));
+    var img = image_import(store, _stor_cat2(root, "/b.tar"), "app", "v1");
+    assert(img != 0, "imported");
+    if (img == 0) { return 0; }
+    var id = _img_id(img);
+    assert_eq(image_store_tag(store, "app:v1", "local/two:v2"), 1, "tagged from a short source");
+    assert(image_store_find(store, "local/two:v2") != 0, "local/two:v2 resolves as printed");
+    assert_eq(streq(_img_id(image_store_find(store, "two:v2")), id), 1, "and by its short name");
+    assert_eq(image_store_tag(store, "two:v2", "three:v3"), 1, "a bare target");
+    assert_eq(streq(_img_id(image_store_find(store, "three:v3")), id), 1, "which resolves too");
+    assert_eq(image_store_tag(store, "missing:v1", "x:y"), 0, "an unknown source");
+    assert_eq(image_store_save_archive(store, "two:v2", _stor_cat2(root, "/out.tar")), 1,
+      "save takes the short form");
+    _stor_remove_dir_all(root);
+    return 0;
+}
+
+# A name is a pointer. Removing one must not take the image from its other names.
+fn _test_rp_rmi_one_name() {
+    test_group("rp_rmi_one_name");
+    var root = "/tmp/stiva-rp-rmi";
+    _stor_remove_dir_all(root);
+    _stor_mkdir_p(root);
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    _stor_write_tar(entries, _stor_cat2(root, "/b.tar"));
+    var store = image_store_new(_stor_cat2(root, "/store"));
+    var img = image_import(store, _stor_cat2(root, "/b.tar"), "app", "v1");
+    assert(img != 0, "imported");
+    if (img == 0) { return 0; }
+    var id = _img_id(img);
+    image_store_tag(store, "app:v1", "local/two:v2");
+    assert_eq(vec_len(image_store_load_index(store)), 2, "two names");
+    assert_eq(image_store_remove_ref(store, image_store_find(store, "two:v2")), 1, "one removed");
+    assert_eq(image_store_find(store, "two:v2"), 0, "gone");
+    assert(image_store_find(store, "app:v1") != 0, "the other name stays");
+    assert_eq(image_store_has_blob(store, id), 1, "with its config");
+    assert_eq(vec_len(_img_layers(image_store_find(store, "app:v1"))), 1, "and its layer");
+    var layer = vec_get(_img_layers(image_store_find(store, "app:v1")), 0);
+    var ld = _layer_digest(layer);
+    assert_eq(image_store_has_blob(store, ld), 1, "whose blob survives the sweep");
+
+    var last = image_store_find(store, "app:v1");
+    assert_eq(image_store_remove_ref(store, last), 1, "the last name");
+    assert_eq(vec_len(image_store_load_index(store)), 0, "the index is empty");
+    assert_eq(image_store_has_blob(store, id), 0, "and the image goes with it");
+    assert_eq(image_store_has_blob(store, ld), 0, "layer too");
+    assert_eq(image_store_remove_ref(store, last), 0 - 1, "a name no longer there");
+    _stor_remove_dir_all(root);
+    return 0;
+}
+
+# ── v3.2.0: what an image says about running it ──
+
+fn _rp_cfg_image(store, json) {
+    var d = sha256_digest(json, strlen(json));
+    image_store_store_blob(store, d, json, strlen(json));
+    return _rp_img("local", "cfg", "v1", d);
+}
+
+fn _test_rp_image_config_reads() {
+    test_group("rp_image_config_reads");
+    var root = "/tmp/stiva-rp-cfg";
+    _stor_remove_dir_all(root);
+    var store = image_store_new(root);
+    var c = image_config_read(store, _rp_cfg_image(store,
+        "{\"architecture\":\"arm64\",\"os\":\"linux\",\"config\":{\"Entrypoint\":[\"/e\",\"-x\"],\"Cmd\":[\"a\",\"b\"],\"Env\":[\"A=1\",\"B=2=3\"],\"WorkingDir\":\"/w\",\"User\":\"nobody\",\"ExposedPorts\":{\"80/tcp\":{}},\"Labels\":{\"k\":\"v\"}}}"));  #skip-lint
+    assert(c != 0, "a config reads");
+    if (c == 0) { return 0; }
+    assert_eq(vec_len(image_config_entrypoint(c)), 2, "Entrypoint");
+    assert_eq(streq(vec_get(image_config_entrypoint(c), 1), "-x"), 1, "in order");
+    assert_eq(vec_len(image_config_cmd(c)), 2, "Cmd");
+    assert_eq(streq(vec_get(image_config_env(c), 1), "B=2=3"), 1, "Env, whole");
+    assert_eq(streq(image_config_workdir(c), "/w"), 1, "WorkingDir");
+    assert_eq(streq(image_config_user(c), "nobody"), 1, "User");
+    assert_eq(streq(vec_get(image_config_exposed(c), 0), "80/tcp"), 1, "ExposedPorts");
+    assert_eq(streq(vec_get(image_config_labels(c), 1), "v"), 1, "Labels");
+    assert_eq(streq(image_config_arch(c), "arm64"), 1, "architecture");
+    assert_eq(streq(image_config_os(c), "linux"), 1, "os");
+
+    # What Docker writes for an unset field.
+    var n = image_config_read(store, _rp_cfg_image(store,
+        "{\"config\":{\"Entrypoint\":null,\"Cmd\":null,\"Env\":null,\"WorkingDir\":\"\",\"User\":\"\",\"Labels\":null,\"ExposedPorts\":null}}"));  #skip-lint
+    assert(n != 0, "null and empty are unset, not corrupt");
+    if (n != 0) {
+        assert_eq(vec_len(image_config_cmd(n)), 0, "no Cmd");
+        assert_eq(image_config_workdir(n), 0, "no WorkingDir");
+        assert_eq(image_config_user(n), 0, "no User");
+    }
+    var none = image_config_read(store, _rp_cfg_image(store, "{\"architecture\":\"amd64\"}"));
+    assert(none != 0, "no config object says nothing");
+    var nul = image_config_read(store, _rp_cfg_image(store, "{\"config\":null}"));
+    assert(nul != 0, "and neither does a null one");
+    var miss = image_config_read(store, _rp_img("local", "x", "v1", "not-a-digest"));
+    assert(miss != 0, "an image with no blob says nothing");
+    if (miss != 0) { assert_eq(vec_len(image_config_env(miss)), 0, "so no Env"); }
+
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "not json")), 0, "not JSON");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "[1]")), 0, "not an object");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"config\":5}")), 0, "config is a number");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"config\":{\"Cmd\":\"/bin/x\"}}")), 0,
+      "Cmd is a string");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"config\":{\"Env\":[1]}}")), 0,
+      "Env holds a number");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"config\":{\"User\":5}}")), 0,
+      "User is a number");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"architecture\":5}")), 0,
+      "architecture is a number");
+    assert_eq(image_config_read(store, _rp_cfg_image(store, "{\"config\":{},\"config\":{}}")), 0,
+      "a key twice");
+    _stor_remove_dir_all(root);
+    return 0;
+}
+
+fn _rp_vec(a, b, c) {
+    var v = vec_new();
+    if (a != 0) { vec_push(v, a); }
+    if (b != 0) { vec_push(v, b); }
+    if (c != 0) { vec_push(v, c); }
+    return v;
+}
+
+fn _rp_icfg(ep, cmd) {
+    var c = image_config_new();
+    store64(c, ep);
+    store64(c + 8, cmd);
+    return c;
+}
+
+fn _rp_vec_is(v, joined) {
+    if (v == 0) { return 0; }
+    return streq(_rt_join(v, " "), joined);
+}
+
+# The image spec's rule, on what is left to run.
+fn _test_rp_image_command() {
+    test_group("rp_image_command");
+    var ep = _rp_vec("/e", "-x", 0);
+    var cmd = _rp_vec("a", "b", 0);
+    var args = _rp_vec("c", 0, 0);
+    assert_eq(_rp_vec_is(_cm_image_command(0, _rp_icfg(ep, cmd)), "/e -x a b"), 1, "Entrypoint + Cmd");
+    assert_eq(_rp_vec_is(_cm_image_command(args, _rp_icfg(ep, cmd)), "/e -x c"), 1,
+      "arguments replace Cmd and keep Entrypoint");
+    assert_eq(_rp_vec_is(_cm_image_command(vec_new(), _rp_icfg(ep, cmd)), "/e -x a b"), 1,
+      "no arguments is the same as none given");
+    assert_eq(_rp_vec_is(_cm_image_command(0, _rp_icfg(ep, vec_new())), "/e -x"), 1, "Entrypoint alone");
+    assert_eq(_rp_vec_is(_cm_image_command(0, _rp_icfg(vec_new(), cmd)), "a b"), 1,
+      "with no Entrypoint, Cmd is the program");
+    assert_eq(_rp_vec_is(_cm_image_command(args, _rp_icfg(vec_new(), cmd)), "c"), 1, "arguments replace it");
+    assert_eq(_cm_image_command(0, _rp_icfg(vec_new(), vec_new())), 0, "nothing says what to run");
+    assert_eq(vec_len(ep), 2, "the image's own list is left alone");
+    return 0;
+}
+
+fn _test_rp_merged_env() {
+    test_group("rp_merged_env");
+    var ic = image_config_new();
+    vec_push(image_config_env(ic), "FOO=image");
+    vec_push(image_config_env(ic), "KEEP=x=y");
+    vec_push(image_config_env(ic), "EMPTY=");
+    vec_push(image_config_env(ic), "NOVALUE");
+    vec_push(image_config_env(ic), "=nokey");
+    vec_push(image_config_env(ic), "DUP=first");
+    vec_push(image_config_env(ic), "DUP=second");
+    var mine = map_new();
+    map_set(mine, "FOO", "caller");
+    map_set(mine, "NEW", "caller");
+    var e = _cm_merged_env(mine, ic);
+    assert_eq(streq(map_get(e, "FOO"), "caller"), 1, "the caller's wins");
+    assert_eq(streq(map_get(e, "NEW"), "caller"), 1, "and is kept");
+    assert_eq(streq(map_get(e, "KEEP"), "x=y"), 1, "the first = splits");
+    assert_eq(map_has(e, "EMPTY"), 1, "an empty value is a value");
+    assert_eq(streq(map_get(e, "EMPTY"), ""), 1, "and empty");
+    assert_eq(map_has(e, "NOVALUE"), 0, "an entry with no = is dropped");
+    assert_eq(map_has(e, ""), 0, "and one with no name");
+    assert_eq(streq(map_get(e, "DUP"), "second"), 1, "the last of a repeat");
+    assert_eq(strstr(map_get(e, "PATH"), "/usr/bin") >= 0, 1, "a default PATH");
+    assert_eq(map_has(mine, "PATH"), 0, "the caller's map is left alone");
+    var own = image_config_new();
+    vec_push(image_config_env(own), "PATH=/opt");
+    assert_eq(streq(map_get(_cm_merged_env(0, own), "PATH"), "/opt"), 1, "the image's PATH stands");
+    var cp = map_new();
+    map_set(cp, "PATH", "/mine");
+    assert_eq(streq(map_get(_cm_merged_env(cp, own), "PATH"), "/mine"), 1, "and the caller's over that");
+    return 0;
+}
+
+fn _rp_touch(path, mode) {
+    file_write_all(path, "x", 1);
+    sys_chmod(path, mode);
+    return 0;
+}
+
+# A rootfs is hostile. A link in it resolves against it, never the host: if this read
+# the host's filesystem, an image could answer questions about it, and every test
+# below holding a real host path is a test that it does not.
+fn _test_rp_rootfs_program() {
+    test_group("rp_rootfs_program");
+    var r = "/tmp/stiva-rp-root";
+    _stor_remove_dir_all(r);
+    _stor_mkdir_p(_stor_cat2(r, "/usr/bin"));
+    _stor_mkdir_p(_stor_cat2(r, "/data"));
+    _rp_touch(_stor_cat2(r, "/usr/bin/real"), 493);
+    _rp_touch(_stor_cat2(r, "/usr/bin/plain"), 420);
+    _rp_touch(_stor_cat2(r, "/usr/bin/owneronly"), 448);
+    sys_symlink("usr/bin", _stor_cat2(r, "/bin"));
+    sys_symlink("/usr/bin/real", _stor_cat2(r, "/usr/bin/abs"));
+    sys_symlink("real", _stor_cat2(r, "/usr/bin/rel"));
+    sys_symlink("../bin/real", _stor_cat2(r, "/usr/bin/updown"));
+    sys_symlink("/bin/sh", _stor_cat2(r, "/usr/bin/hostonly"));
+    sys_symlink("/usr/bin/env", _stor_cat2(r, "/data/hostenv"));
+    sys_symlink("../../../../../../../../usr/bin/env", _stor_cat2(r, "/data/climb"));
+    sys_symlink("../../../../../../../../usr/bin/real", _stor_cat2(r, "/data/climbin"));
+    sys_symlink("loop2", _stor_cat2(r, "/data/loop1"));
+    sys_symlink("loop1", _stor_cat2(r, "/data/loop2"));
+    sys_symlink("/usr/bin", _stor_cat2(r, "/data/dirlink"));
+
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/real"), 1, "a program");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/owneronly"), 1, "owner-execute counts");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/plain"), 0, "no execute bit");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/missing"), 0, "nothing there");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin"), 0, "a directory");
+    assert_eq(_stor_rootfs_is_program(r, "/"), 0, "the root");
+    assert_eq(_stor_rootfs_is_program(r, "/bin/real"), 1, "through a directory link");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/abs"), 1, "an absolute link stays inside");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/rel"), 1, "a relative link");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/updown"), 1, "a link up and back down");
+    assert_eq(_stor_rootfs_is_program(r, "/data/dirlink/real"), 1, "an absolute directory link");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/hostonly"), 0, "a target only the HOST has");
+    assert_eq(_stor_rootfs_is_program(r, "/data/hostenv"), 0, "another");
+    assert_eq(_stor_rootfs_is_program(r, "/data/climb"), 0, "`..` cannot climb out of the rootfs");
+    assert_eq(_stor_rootfs_is_program(r, "/data/climbin"), 1, "it stops at the root, as in a chroot");
+    assert_eq(_stor_rootfs_is_program(r, "/data/loop1"), 0, "a link loop ends");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/real/x"), 0, "a file is not a directory");
+    assert_eq(_stor_rootfs_is_program(r, "/data/../usr/bin/real"), 1, "`..` in the path");
+    assert_eq(_stor_rootfs_is_program(r, "/../../../usr/bin/env"), 0, "and at the root");
+    _stor_remove_dir_all(r);
+    return 0;
+}
+
+fn _test_rp_resolve_command() {
+    test_group("rp_resolve_command");
+    var r = "/tmp/stiva-rp-cmd";
+    _stor_remove_dir_all(r);
+    _stor_mkdir_p(_stor_cat2(r, "/usr/bin"));
+    _stor_mkdir_p(_stor_cat2(r, "/opt"));
+    _rp_touch(_stor_cat2(r, "/usr/bin/tool"), 493);
+    _rp_touch(_stor_cat2(r, "/opt/tool"), 493);
+    _rp_touch(_stor_cat2(r, "/usr/bin/only"), 493);
+    var env = map_new();
+    map_set(env, "PATH", "/none:/opt:/usr/bin");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("tool", "a", 0), env, r), "/opt/tool a"), 1,
+      "the first PATH entry that has it");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("only", 0, 0), env, r), "/usr/bin/only"), 1,
+      "a later entry");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("tool a  b", 0, 0), env, r), "/opt/tool a  b"), 1,
+      "one element is a command line, and only its first word is the program");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("/usr/bin/tool", "x", 0), env, r), "/usr/bin/tool x"),
+      1, "a path is left as written");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("./tool", 0, 0), env, r), "./tool"), 1, "so is a relative one");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("missing", "x", 0), env, r), "missing x"), 1,
+      "not found stays as typed, so the failure is the runtime's own");
+    assert_eq(_cm_resolve_command(0, env, r), 0, "no command");
+    var rel = map_new();
+    map_set(rel, "PATH", ":usr/bin::/usr/bin");
+    assert_eq(_rp_vec_is(_cm_resolve_command(_rp_vec("only", 0, 0), rel, r), "/usr/bin/only"), 1,
+      "empty and relative entries are skipped");
+    var input = _rp_vec("tool", 0, 0);
+    _cm_resolve_command(input, env, r);
+    assert_eq(streq(vec_get(input, 0), "tool"), 1, "the caller's list is left alone");
+    _stor_remove_dir_all(r);
+    return 0;
+}
+
+fn _test_rp_effective_config() {
+    test_group("rp_effective_config");
+    var r = "/tmp/stiva-rp-eff";
+    _stor_remove_dir_all(r);
+    _stor_mkdir_p(_stor_cat2(r, "/usr/bin"));
+    _rp_touch(_stor_cat2(r, "/usr/bin/entry"), 493);
+    var ic = image_config_new();
+    vec_push(image_config_entrypoint(ic), "entry");
+    vec_push(image_config_cmd(ic), "default");
+    vec_push(image_config_env(ic), "FOO=image");
+    store64(ic + 24, "/made/here");
+    store64(ic + 32, "nobody");
+
+    var cfg = container_config_default();
+    var cc: ContainerConfig = cfg;
+    cc.command = _rp_vec("mine", 0, 0);
+    var e = _cm_effective_config(cfg, ic, r);
+    assert(e != 0, "an effective config");
+    if (e == 0) { return 0; }
+    var ee: ContainerConfig = e;
+    assert_eq(_rp_vec_is(ee.command, "/usr/bin/entry mine"), 1, "Entrypoint, then the caller's arguments");
+    assert_eq(streq(map_get(ee.env, "FOO"), "image"), 1, "the image's Env");
+    assert_eq(streq(ee.workdir, "/made/here"), 1, "the image's WorkingDir");
+    assert_eq(_stor_lkind(_stor_cat2(r, "/made/here")), 16384, "which now exists");
+    assert_eq(streq(ee.user, "nobody"), 1, "the image's User, recorded");
+
+    # Twice from one config: a replica, or a retry.
+    assert(cfg != e, "a copy");
+    assert_eq(_rp_vec_is(cc.command, "mine"), 1, "the caller's command is untouched");
+    assert_eq(cc.env, 0, "and its env");
+    assert_eq(cc.workdir, 0, "and its workdir");
+    assert_eq(cc.user, 0, "and its user");
+    var e2: ContainerConfig = _cm_effective_config(cfg, ic, r);
+    assert_eq(_rp_vec_is(e2.command, "/usr/bin/entry mine"), 1, "a second create is the same");
+
+    var own = container_config_default();
+    var oc: ContainerConfig = own;
+    oc.workdir = "/mine";
+    oc.user = "root";
+    var o: ContainerConfig = _cm_effective_config(own, ic, r);
+    assert_eq(streq(o.workdir, "/mine"), 1, "the caller's workdir wins");
+    assert_eq(streq(o.user, "root"), 1, "and its user");
+    assert_eq(_stor_lkind(_stor_cat2(r, "/mine")), 0 - 1, "and an image's WORKDIR rule does not apply");
+
+    var relic = image_config_new();
+    store64(relic + 24, "rel/dir");
+    var rl: ContainerConfig = _cm_effective_config(container_config_default(), relic, r);
+    assert_eq(streq(rl.workdir, "/rel/dir"), 1, "a relative WorkingDir is made absolute");
+
+    # A link in the rootfs must not steer the mkdir out of it.
+    sys_symlink("/tmp", _stor_cat2(r, "/out"));
+    var esc = image_config_new();
+    store64(esc + 24, "/out/stiva-rp-escaped/x");
+    sys_rmdir("/tmp/stiva-rp-escaped");
+    _cm_effective_config(container_config_default(), esc, r);
+    assert_eq(_stor_lkind("/tmp/stiva-rp-escaped"), 0 - 1, "WorkingDir does not write through a link");
+
+    var bad = image_config_new();
+    vec_push(image_config_cmd(bad), "/bin/two words");
+    assert(_cm_image_refusal(container_config_default(), bad) != 0,
+      "an image's one-word command cannot hold a blank");
+    var typed = container_config_default();
+    var tc: ContainerConfig = typed;
+    tc.command = _rp_vec("/bin/two words", 0, 0);
+    assert_eq(_cm_image_refusal(typed, bad), 0, "a caller's one string is a command line");
+    var entry = image_config_new();
+    vec_push(image_config_entrypoint(entry), "/bin/two words");
+    assert(_cm_image_refusal(container_config_default(), entry) != 0, "so is an Entrypoint");
+    assert_eq(_cm_image_refusal(container_config_default(), image_config_new()), 0, "a plain image");
+
+    # Refused by length, before a directory is made for it.
+    var deep = alloc(4001);
+    var di = 0;
+    while (di < 2000) {
+        store8(deep + di * 2, 47);
+        store8(deep + di * 2 + 1, 97);
+        di = di + 1;
+    }
+    store8(deep + 4000, 0);
+    var dc = image_config_new();
+    store64(dc + 24, deep);
+    assert(_cm_image_refusal(container_config_default(), dc) != 0, "a WorkingDir too deep to make");
+    var ownwd = container_config_default();
+    var owc: ContainerConfig = ownwd;
+    owc.workdir = "/mine";
+    assert_eq(_cm_image_refusal(ownwd, dc), 0, "not when the caller's stands in for it");
+
+    var blank: ContainerConfig = _cm_effective_config(container_config_default(), image_config_new(), r);
+    assert_eq(blank.command, 0, "an image that says nothing leaves the default to generate_spec");
+    assert_eq(strstr(map_get(blank.env, "PATH"), "/bin") >= 0, 1, "and still gets a PATH");
+    _stor_remove_dir_all(r);
+    return 0;
+}
+
+# Index an image with config `js` and `layers`, with the manifest the index needs.
+fn _rp_index_image(store, ref, js, layers) {
+    var d = sha256_digest(js, strlen(js));
+    image_store_store_blob(store, d, js, strlen(js));
+    var descs = vec_new();
+    var i = 0;
+    while (i < vec_len(layers)) {
+        var lay: Layer = vec_get(layers, i);
+        vec_push(descs, descriptor_new(lay.media_type, lay.digest, lay.size_bytes));
+        i = i + 1;
+    }
+    var man = oci_manifest_new(descriptor_new(media_oci_config(), d, strlen(js)), descs);
+    var mm: OciManifest = man;
+    mm.media_type = media_oci_manifest();
+    var ms = json_v_build(oci_manifest_to_jv(man));
+    var md = sha256_digest(str_data(ms), str_len(ms));
+    image_store_store_blob(store, md, str_data(ms), str_len(ms));
+    var out = image_new(d, ref, 0, layers, 0);
+    _img_set_manifest_digest(out, md);
+    image_store_add_to_index(store, out);
+    return out;
+}
+
+fn _rp_build_base(store, ctx, cfgjson) {
+    # A base with a real layer, whose config says what `cfgjson` says.
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    _stor_write_tar(entries, _stor_cat2(ctx, "/b.tar"));
+    var im = image_import(store, _stor_cat2(ctx, "/b.tar"), "base", "v1");
+    if (im == 0) { return 0; }
+    var ids = _il_config_diff_ids(store, im);
+    var pb = str_builder_new();
+    str_builder_add_cstr(pb, "{\"architecture\":\"riscv64\",\"os\":\"plan9\",\"config\":");
+    str_builder_add_cstr(pb, cfgjson);
+    str_builder_add_cstr(pb, ",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[\"");
+    str_builder_add_cstr(pb, vec_get(ids, 0));
+    str_builder_add_cstr(pb, "\"]}}");
+    return _rp_index_image(store, image_ref_new("local", "based", "v1", 0),
+      str_cstr(str_builder_build(pb)), _img_layers(im));
+}
+
+# A derived image keeps what its base says, and the Stivafile's say wins.
+fn _test_rp_build_keeps_its_base() {
+    test_group("rp_build_keeps_its_base");
+    var ctx = "/tmp/stiva-rp-derive";
+    _stor_remove_dir_all(ctx);
+    _stor_mkdir_p(ctx);
+    var store = image_store_new(_stor_cat2(ctx, "/store"));
+    var base = _rp_build_base(store, ctx,
+      "{\"Entrypoint\":[\"/entry\"],\"Cmd\":[\"serve\"],\"Env\":[\"FOO=base\",\"KEEP=base\"],\"WorkingDir\":\"/srv\",\"User\":\"app\",\"ExposedPorts\":{\"80/tcp\":{},\"9000/udp\":{}},\"Labels\":{\"a\":\"base\",\"b\":\"base\"}}");  #skip-lint
+    assert(base != 0, "a base");
+    if (base == 0) { return 0; }
+    var spec = "[image]\nbase = \"local/based:v1\"\nname = \"kid\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"env\"\nkey = \"FOO\"\nvalue = \"step\"\n\n[[steps]]\ntype = \"env\"\nkey = \"NEW\"\nvalue = \"step\"\n\n[[steps]]\ntype = \"label\"\nkey = \"a\"\nvalue = \"step\"\n\n[config]\nexpose = [80, 443]\n";  #skip-lint
+    var img = build_image(parse_build_spec(spec), store, 0, ctx);
+    assert(img != 0, "built on it");
+    if (img == 0) { return 0; }
+    var c = image_config_read(store, img);
+    assert(c != 0, "what it wrote parses: no key twice");
+    if (c == 0) { return 0; }
+    assert_eq(_rp_vec_is(image_config_entrypoint(c), "/entry"), 1, "Entrypoint kept");
+    assert_eq(_rp_vec_is(image_config_cmd(c), "serve"), 1, "Cmd kept");
+    assert_eq(streq(image_config_workdir(c), "/srv"), 1, "WorkingDir kept");
+    assert_eq(streq(image_config_user(c), "app"), 1, "User kept");
+    assert_eq(streq(image_config_arch(c), "riscv64"), 1, "the base's architecture, not this host's");
+    assert_eq(streq(image_config_os(c), "plan9"), 1, "and its os");
+    assert_eq(_rp_vec_is(image_config_env(c), "FOO=step KEEP=base NEW=step"), 1,
+      "Env: a step overrides in place, a new key goes last, no key twice");
+    assert_eq(vec_len(image_config_exposed(c)), 3, "ExposedPorts: the union, one key each");
+    assert_eq(vec_len(image_config_labels(c)), 4, "Labels: two keys");
+
+    # A new Entrypoint resets a Cmd written for the old one.
+    var own = "[image]\nbase = \"local/based:v1\"\nname = \"own\"\ntag = \"v1\"\n\n[config]\nentrypoint = [\"/mine\"]\nuser = \"me\"\nworkdir = \"/mine\"\n";  #skip-lint
+    var oi = build_image(parse_build_spec(own), store, 0, ctx);
+    assert(oi != 0, "built with its own config");
+    if (oi == 0) { return 0; }
+    var oc = image_config_read(store, oi);
+    assert_eq(_rp_vec_is(image_config_entrypoint(oc), "/mine"), 1, "its Entrypoint");
+    assert_eq(vec_len(image_config_cmd(oc)), 0, "and no Cmd of the base's");
+    assert_eq(streq(image_config_user(oc), "me"), 1, "its User");
+    assert_eq(streq(image_config_workdir(oc), "/mine"), 1, "its WorkingDir");
+
+    # A derived image of a derived image.
+    var grand = "[image]\nbase = \"local/kid:v1\"\nname = \"grand\"\ntag = \"v1\"\n";
+    var gi = build_image(parse_build_spec(grand), store, 0, ctx);
+    assert(gi != 0, "built on the derived image");
+    if (gi != 0) {
+        var gc = image_config_read(store, gi);
+        assert_eq(_rp_vec_is(image_config_env(gc), "FOO=step KEEP=base NEW=step"), 1, "still all there");
+    }
+
+    # A step's workdir still beats the base's, and the [config] one beats both.
+    var sw = "[image]\nbase = \"local/based:v1\"\nname = \"sw\"\ntag = \"v1\"\n\n[[steps]]\ntype = \"workdir\"\npath = \"/step\"\n";  #skip-lint
+    var si = build_image(parse_build_spec(sw), store, 0, ctx);
+    assert(si != 0, "built with a workdir step");
+    if (si != 0) {
+        assert_eq(streq(image_config_workdir(image_config_read(store, si)), "/step"), 1, "the step's");
+    }
+    _stor_remove_dir_all(ctx);
+    return 0;
+}
+
+fn _test_rp_build_refuses_a_corrupt_base() {
+    test_group("rp_build_refuses_a_corrupt_base");
+    var ctx = "/tmp/stiva-rp-badbase";
+    _stor_remove_dir_all(ctx);
+    _stor_mkdir_p(ctx);
+    var store = image_store_new(_stor_cat2(ctx, "/store"));
+    _rp_index_image(store, image_ref_new("local", "bad", "v1", 0), "{\"config\":{\"Env\":\"not a list\"}}",
+      vec_new());
+    var spec = "[image]\nbase = \"local/bad:v1\"\nname = \"kid\"\ntag = \"v1\"\n";
+    assert_eq(build_image(parse_build_spec(spec), store, 0, ctx), 0, "refused");
+    assert_eq(image_store_find(store, "local/kid:v1"), 0, "and nothing was added");
+    _stor_remove_dir_all(ctx);
+    return 0;
+}
+
+# What an archive calls itself is untrusted, and a name must not pass for a pin.
+fn _test_rp_resolve_cannot_be_spoofed() {
+    test_group("rp_resolve_cannot_be_spoofed");
+    var genuine = _rp_img("docker.io", "library/app", "v1", "sha256:aaaa");
+    _img_set_manifest_digest(genuine, "sha256:bbbb");
+    var hostile = _rp_img("", "sha256", "aaaa", "sha256:cccc");
+    var images = vec_new();
+    vec_push(images, hostile);
+    vec_push(images, genuine);
+    assert_eq(streq(image_ref_full_ref(_image_reference(hostile)), "sha256:aaaa"), 1, "named like the id");
+    assert_eq(image_resolve(images, "sha256:aaaa"), genuine, "an id means the image with that id");
+    var pinned = vec_new();
+    vec_push(pinned, _rp_img("", "app@sha256", "bbbb", "sha256:dddd"));
+    vec_push(pinned, genuine);
+    assert_eq(streq(image_ref_full_ref(_image_reference(vec_get(pinned, 0))), "app@sha256:bbbb"), 1,
+      "named like the pin");
+    assert_eq(image_resolve(pinned, "app@sha256:bbbb"), genuine, "a digest means that manifest");
+
+    # And such a name does not survive `load` to be tried.
+    var obj = json_v_obj_new();
+    var ann = json_v_obj_new();
+    json_v_obj_set(obj, str_from("annotations"), ann);
+    json_v_obj_set(ann, str_from(_il_ref_name_key()), json_v_str_new(str_from("ghcr.io/x/app@sha256:bbbb")));
+    assert_eq(_il_desc_ref_name(obj), 0, "an `@` in an archive's name");
+    var o2 = json_v_obj_new();
+    var a2 = json_v_obj_new();
+    json_v_obj_set(o2, str_from("annotations"), a2);
+    json_v_obj_set(a2, str_from(_il_ref_name_key()), json_v_str_new(str_from("sha256:aaaa")));
+    assert_eq(_il_desc_ref_name(o2), 0, "an id-shaped name");
+    var o3 = json_v_obj_new();
+    var a3 = json_v_obj_new();
+    json_v_obj_set(o3, str_from("annotations"), a3);
+    json_v_obj_set(a3, str_from(_il_ref_name_key()), json_v_str_new(str_from("local/fine:v1")));
+    assert(_il_desc_ref_name(o3) != 0, "a plain name still passes");
+    return 0;
+}
+
+# A crafted PATH or link chain costs a bounded amount, whatever it is: `alloc` never
+# frees, and this once took 2.3 GiB for 40 KB of PATH.
+fn _test_rp_lookup_is_bounded() {
+    test_group("rp_lookup_is_bounded");
+    var r = "/tmp/stiva-rp-bomb";
+    _stor_remove_dir_all(r);
+    _stor_mkdir_p(_stor_cat2(r, "/usr/bin"));
+    _rp_touch(_stor_cat2(r, "/usr/bin/real"), 493);
+    sys_symlink("/l", _stor_cat2(r, "/l"));
+    # A 300 KB PATH of nothing but the self-link.
+    var n = 100000;
+    var pv = alloc(n * 3 + 1);
+    var i = 0;
+    while (i < n) {
+        memcpy(pv + i * 3, "/l:", 3);
+        i = i + 1;
+    }
+    store8(pv + n * 3 - 1, 0);
+    var before = alloc(8);
+    assert_eq(_cm_find_program(r, pv, "real"), 0, "nothing found");
+    var after = alloc(8);
+    # alloc answers 0 past its ceiling, which would make a difference read as small.
+    assert(after != 0, "and the heap is not spent");
+    assert(after - before < 4194304, "it cost under 4 MiB");
+
+    # The cap, at its edge: entry 64 is searched and entry 65 is not.
+    var sb = str_builder_new();
+    var k = 0;
+    while (k < 63) {
+        str_builder_add_cstr(sb, "/none:");
+        k = k + 1;
+    }
+    var edge = str_cstr(str_builder_build(sb));
+    assert(_cm_find_program(r, _rt_cat2(edge, "/usr/bin"), "real") != 0, "the last entry searched");
+    assert_eq(_cm_find_program(r, _rt_cat2(edge, "/none:/usr/bin"), "real"), 0, "and one past it");
+
+    assert_eq(_cm_find_program(r, "/a b:/usr/bin", "real") != 0, 1, "a blank entry is passed over");
+    _stor_mkdir_p(_stor_cat2(r, "/a b"));
+    _rp_touch(_stor_cat2(r, "/a b/spaced"), 493);
+    assert_eq(_cm_find_program(r, "/a b", "spaced"), 0, "and never yields a program");
+
+    # A link naming more components than a walk allows.
+    var many = alloc(6001);
+    var m = 0;
+    while (m < 3000) {
+        memcpy(many + m * 2, "./", 2);
+        m = m + 1;
+    }
+    store8(many + 6000, 0);
+    # With a program at the end, so only the bound can answer no.
+    assert_eq(_stor_rootfs_is_program(r, _rt_cat2(many, "usr/bin/real")), 0, "a walk is bounded by components");
+    assert_eq(_stor_rootfs_is_program(r, "./././usr/bin/real"), 1, "a short one is walked");
+
+    # The kernel's limit on links: 40 is followed, and 41 is ELOOP.
+    var c = 0;
+    while (c < 41) {
+        var nm = _rt_cat2("/usr/bin/c", _rt_int_to_cstr(c));
+        var to = _rt_cat2("c", _rt_int_to_cstr(c + 1));
+        if (c == 40) { to = "real"; }
+        sys_symlink(to, _stor_cat2(r, nm));
+        c = c + 1;
+    }
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/c1"), 1, "40 links");
+    assert_eq(_stor_rootfs_is_program(r, "/usr/bin/c0"), 0, "and 41 is too many");
+
+    # A name past PATH_MAX is refused before it is copied. The walk's buffer sits on
+    # top of the heap, so what an overrun writes is what the next alloc is handed.
+    var longn = alloc(20002);
+    memset(longn, 97, 20000);
+    store8(longn, 47);
+    store8(longn + 20000, 0);
+    assert_eq(_stor_rootfs_is_program(r, longn), 0, "a name past PATH_MAX");
+    var fresh = alloc(32768);
+    var dirty = 0;
+    var fi = 0;
+    while (fi < 32768) {
+        if (load8(fresh + fi) == 97) { dirty = 1; }
+        fi = fi + 1;
+    }
+    assert_eq(dirty, 0, "and it did not run off the buffer");
+    _stor_remove_dir_all(r);
+    return 0;
+}
+
+fn _rp_exec_result(out) {
+    var r = exec_result_new();
+    ExecResult_set_stdout(r, out);
+    ExecResult_set_stderr(r, "");
+    return r;
+}
+
+# A foreground run warns where the gate would have blocked, and keeps what it redacts.
+fn _test_rp_foreground_gate_warns() {
+    test_group("rp_foreground_gate_warns");
+    var p = _rt_warn_policy();
+    assert_eq(determine_verdict(Severity.CRITICAL, p), ScanVerdict.WARN, "critical warns");
+    assert_eq(determine_verdict(Severity.HIGH, p), ScanVerdict.WARN, "high warns");
+    assert_eq(determine_verdict(Severity.LOW, p), ScanVerdict.WARN, "low warns");
+    assert_eq(determine_verdict(Severity.INFO, p), ScanVerdict.PASS, "info passes");
+    assert_eq(ExternalizationPolicy_enabled(p), 1, "the scan stays on");
+    assert_eq(ExternalizationPolicy_redact_secrets(p), 1, "and so does redaction");
+    var def = ext_policy_default();
+    assert_eq(determine_verdict(Severity.HIGH, def), ScanVerdict.QUARANTINE,
+      "the default is untouched, so `logs --scan` still refuses");
+    assert_eq(determine_verdict(Severity.CRITICAL, def), ScanVerdict.BLOCK, "and blocks");
+
+    assert_eq(_rt_foreground_policy(def), def, "a container's own policy stands");
+    assert(_rt_foreground_policy(0) != 0, "and with none, this one");
+    assert_eq(ExternalizationPolicy_quarantine_threshold(_rt_foreground_policy(0)),
+      ExternalizationPolicy_quarantine_threshold(p), "the warning one");
+
+    # What the gate does with it, through kavach's own scanners.
+    var shell = _rp_exec_result("started /bin/sh here");
+    var ss = gate_apply(shell, p);
+    assert_eq(ScanResult_verdict(ss), ScanVerdict.WARN, "a shell path warns");
+    assert_eq(streq(ExecResult_stdout(shell), "started /bin/sh here"), 1, "and is printed as it was");
+    var sm = _rt_scan_warning(ss);
+    assert(sm != 0, "with something to say");
+    assert_eq(strstr(sm, "worst high") >= 0, 1, "its severity");
+    assert_eq(strstr(sm, "command_injection") >= 0, 1, "and its category");
+
+    var key = "AKIAIOSFODNN7EXAMPLE";
+    var cred = _rp_exec_result("token AKIAIOSFODNN7EXAMPLE end");
+    var cs = gate_apply(cred, p);
+    assert_eq(ScanResult_verdict(cs), ScanVerdict.WARN, "a credential warns");
+    assert_eq(strstr(ExecResult_stdout(cred), key) >= 0, 0, "and is not released");
+    assert_eq(strstr(ExecResult_stdout(cred), "[REDACTED:") >= 0, 1, "it is redacted");
+    assert_eq(strstr(ExecResult_stdout(cred), "token") >= 0, 1, "and the rest is kept");
+    var cm = _rt_scan_warning(cs);
+    assert_eq(strstr(cm, "cloud_credential") >= 0, 1, "named");
+    # The finding holds what matched, which is why the warning must not print it.
+    assert_eq(strstr(ScanFinding_evidence(vec_get(ScanResult_findings(cs), 0)), "AKIA") >= 0, 1,
+      "the finding carries the evidence");
+    assert_eq(strstr(cm, "AKIA"), 0 - 1, "and the warning does not");
+
+    assert_eq(_rt_scan_warning(gate_apply(_rp_exec_result("hello"), p)), 0, "clean output says nothing");
+    assert_eq(_rt_scan_warning(0), 0, "no scan says nothing");
+    var blocked = scan_result_new();
+    ScanResult_set_verdict(blocked, ScanVerdict.QUARANTINE);
+    assert_eq(_rt_scan_warning(blocked), 0, "and a refusal has its own error");
+
+    # A payload choosing its categories cannot fill the line: they are kavach's, and capped.
+    var many = scan_result_new();
+    ScanResult_set_verdict(many, ScanVerdict.WARN);
+    var i = 0;
+    while (i < 10) {
+        scan_result_push(many, finding_new("code", Severity.LOW, _rt_cat2("cat", _rt_int_to_cstr(i)), "m", "e"));
+        scan_result_push(many, finding_new("code", Severity.LOW, _rt_cat2("cat", _rt_int_to_cstr(i)), "m", "e"));
+        i = i + 1;
+    }
+    var mm = _rt_scan_warning(many);
+    assert_eq(strstr(mm, "20 finding(s)") >= 0, 1, "every finding is counted");
+    assert_eq(strstr(mm, "cat5") >= 0, 1, "six categories");
+    assert_eq(strstr(mm, "cat6"), 0 - 1, "and no more");
+    assert_eq(strstr(_rt_cat2(mm, " "), "cat0, cat0"), 0 - 1, "each once");
+    return 0;
+}
+
+# A create that fails owes nothing to `rm`: no record exists to find it by.
+fn _test_rp_failed_create_leaves_nothing() {
+    test_group("rp_failed_create_leaves_nothing");
+    var root = "/tmp/stiva-rp-failcreate";
+    _stor_remove_dir_all(root);
+    _stor_mkdir_p(root);
+    var store = image_store_new(_stor_cat2(root, "/store"));
+    var mgr = container_manager_new(root, store);
+    var layers = vec_new();
+    vec_push(layers, layer_new(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000", 1, media_oci_layer()));
+    var img = image_new("sha256:ab", image_ref_new("local", "gone", "v1", 0), 0, layers, 0);
+    assert_eq(container_manager_create(mgr, img, _rp_noop_cfg("gone")), 0, "a layer that is not there");
+    var dfd = file_open(_stor_cat2(root, "/containers"), O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    assert(dfd >= 0, "the directory for containers exists");
+    if (dfd >= 0) {
+        assert_eq(vec_len(_stor_dir_names(dfd)), 0, "and holds nothing");
+        sys_close(dfd);
+    }
+    _stor_remove_dir_all(root);
+    return 0;
+}
+
+fn _test_rp_printable() {
+    test_group("rp_printable");
+    assert_eq(streq(_img_printable("plain text"), "plain text"), 1, "text passes");
+    assert_eq(streq(_img_printable("a\nb"), "a?b"), 1, "a newline cannot forge a log line");
+    assert_eq(streq(_img_printable("a\x1b[2Jb"), "a?[2Jb"), 1, "nor an escape reach the terminal");
+    var big = alloc(5001);
+    memset(big, 120, 5000);
+    store8(big + 5000, 0);
+    assert_eq(strlen(_img_printable(big)), 200, "and a long value is cut");
+    return 0;
+}
+
+# `local` is no host to dial. Both refuse before touching the client they are given.
+fn _test_rp_local_is_not_dialled() {
+    test_group("rp_local_is_not_dialled");
+    var root = "/tmp/stiva-rp-dial";
+    _stor_remove_dir_all(root);
+    _stor_mkdir_p(root);
+    var entries = vec_new();
+    vec_push(entries, _tar_entry_new("etc/os-release", 48, 420, 0, 0, 5, "base\n"));
+    _stor_write_tar(entries, _stor_cat2(root, "/b.tar"));
+    var store = image_store_new(_stor_cat2(root, "/store"));
+    var img = image_import(store, _stor_cat2(root, "/b.tar"), "app", "v1");
+    assert(img != 0, "imported");
+    if (img == 0) { return 0; }
+    assert_eq(image_store_pull(1, store, image_ref_parse("local/foo:v1")), 0, "pull");
+    # An image that exists, so nothing but the guard stops this reaching the client.
+    assert_eq(image_store_push(1, store, "app:v1", "local/foo:v1"), 0, "push");
+    assert_eq(image_store_has_id(store, _img_id(img)), 1, "an image in the index");
+    assert_eq(image_store_has_id(store, "sha256:none"), 0, "and one that is not");
+    _stor_remove_dir_all(root);
+    return 0;
+}
+
+# `_bld_merge_env` keeps order and refuses nothing.
+fn _test_rp_merge_env() {
+    test_group("rp_merge_env");
+    assert_eq(_rp_vec_is(_bld_merge_env(_rp_vec("A=1", "B=2", 0), _rp_vec("B=3", "C=4", 0)), "A=1 B=3 C=4"), 1,
+      "override in place, new last");
+    assert_eq(_rp_vec_is(_bld_merge_env(vec_new(), _rp_vec("A=1", "A=2", 0)), "A=2"), 1, "a step twice");
+    assert_eq(_rp_vec_is(_bld_merge_env(_rp_vec("A=1", "A=2", 0), vec_new()), "A=2"), 1, "a base twice");
+    assert_eq(vec_len(_bld_merge_env(vec_new(), vec_new())), 0, "nothing");
+    return 0;
+}
+
+# Every group in this file, in order.
 fn main() {
     alloc_init();
     _test_container_log_tail();
@@ -2449,6 +3301,27 @@ fn main() {
     _test_rp_prefix_cannot_wrap();
     _test_rp_dns_names_and_servers();
     _test_rp_port_protocols();
+    _test_rp_resolve_forms();
+    _test_rp_resolve_precedence();
+    _test_rp_resolve_pinned();
+    _test_rp_local_is_a_registry();
+    _test_rp_tag_resolves_as_printed();
+    _test_rp_rmi_one_name();
+    _test_rp_image_config_reads();
+    _test_rp_image_command();
+    _test_rp_merged_env();
+    _test_rp_rootfs_program();
+    _test_rp_resolve_command();
+    _test_rp_effective_config();
+    _test_rp_build_keeps_its_base();
+    _test_rp_build_refuses_a_corrupt_base();
+    _test_rp_merge_env();
+    _test_rp_resolve_cannot_be_spoofed();
+    _test_rp_lookup_is_bounded();
+    _test_rp_foreground_gate_warns();
+    _test_rp_failed_create_leaves_nothing();
+    _test_rp_printable();
+    _test_rp_local_is_not_dialled();
     _test_rp_state_file_is_private();
     _test_rp_cron_unreadable_store_is_left_alone();
     _test_rp_cron_clock_steps_fire_nothing_twice();
